@@ -80,6 +80,11 @@ func (m *outputGuardModel) ProviderCandidates() []llm.ResolvedCandidateHandle {
 	return llm.ProviderCandidatesFromModel(m.inner)
 }
 
+func (m *outputGuardModel) CandidateSelectionSource() llm.CandidateSelectionSource {
+	source, _ := llm.CandidateSelectionSourceFromModel(m.inner)
+	return source
+}
+
 // RunProviderOperation forwards the Core-owned schedule through outer model
 // decorators so a breaker can admit the whole operation once. Core applies
 // this guard to the completed candidate after each provider dispatch joins.
@@ -331,6 +336,11 @@ func (m *telemetryModel) Stream(ctx context.Context, msgs []llm.Message, opts ..
 
 func (m *telemetryModel) ProviderCandidates() []llm.ResolvedCandidateHandle {
 	return llm.ProviderCandidatesFromModel(m.inner)
+}
+
+func (m *telemetryModel) CandidateSelectionSource() llm.CandidateSelectionSource {
+	source, _ := llm.CandidateSelectionSourceFromModel(m.inner)
+	return source
 }
 
 // newModelWrapper creates a core.ModelWrapper that applies ProductionModelWrapper

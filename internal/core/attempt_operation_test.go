@@ -23,6 +23,11 @@ func (m attemptGuardedModel) ProviderCandidates() []llm.ResolvedCandidateHandle 
 	return llm.ProviderCandidatesFromModel(m.BaseChatModel)
 }
 
+func (m attemptGuardedModel) CandidateSelectionSource() llm.CandidateSelectionSource {
+	source, _ := llm.CandidateSelectionSourceFromModel(m.BaseChatModel)
+	return source
+}
+
 func (attemptGuardedModel) MaxCandidateBytes() int { return llm.GuardedStreamMaxBytes }
 
 func (attemptGuardedModel) CheckCandidate(context.Context, string) (*CandidateOutputResult, error) {
@@ -108,6 +113,7 @@ func TestLoopOwnsResolvedProviderDispatchAndFinish(t *testing.T) {
 		WithMaxIterations(1),
 		WithProviderAttemptRecorder(recorder.record),
 	)
+	loop.SetMidTurnCompaction(nil, nil, compaction.NewHeuristicTokenEstimator(), 50000)
 	_, err = loop.Run(context.Background(), Submission{Content: "hello"})
 	require.NoError(t, err)
 	require.Equal(t, 1, requests, "one Core operation must cross exactly one HTTP dispatch fence")
@@ -162,6 +168,7 @@ func TestLoopCapsActualDispatchesAcrossRetryMiddleware(t *testing.T) {
 			return retry.WrapModel(base)
 		}),
 	)
+	loop.SetMidTurnCompaction(nil, nil, compaction.NewHeuristicTokenEstimator(), 50000)
 	_, err = loop.Run(context.Background(), Submission{Content: "hello"})
 	require.Error(t, err)
 	terminal, finished := llm.FinishedProviderAttemptFromError(err)
@@ -223,6 +230,7 @@ func TestLoopOwnsRetryPolicyDecisionForActiveOperation(t *testing.T) {
 			return retry.WrapModel(base)
 		}),
 	)
+	loop.SetMidTurnCompaction(nil, nil, compaction.NewHeuristicTokenEstimator(), 50000)
 
 	_, err = loop.Run(context.Background(), Submission{Content: "retry policy owner"})
 	require.Error(t, err)
@@ -268,6 +276,7 @@ func TestLoopRetryStreamIncrementalEventsCarryRunAndTranscriptCoordinates(t *tes
 		WithMaxIterations(1),
 		WithProviderRetryPolicy(policy),
 	)
+	loop.SetMidTurnCompaction(nil, nil, compaction.NewHeuristicTokenEstimator(), 50000)
 	stream := &collectingEventStream{}
 	result, err := loop.RunCanonical(withRunID(context.Background(), "run-retry-coordinate"), Submission{Content: "retry this stream"}, stream)
 	require.NoError(t, err)
@@ -351,6 +360,7 @@ func TestLoopModelCyclerUsesCoreAuthorityForSelectedAndPrimaryDispatches(t *test
 		WithMaxIterations(1),
 		WithProviderAttemptRecorder(recorder.record),
 	)
+	loop.SetMidTurnCompaction(compaction.NewMidTurnCompact(), nil, compaction.NewHeuristicTokenEstimator(), 8000)
 
 	_, err = loop.Run(context.Background(), Submission{Content: "cycle"})
 	require.NoError(t, err)
@@ -419,6 +429,7 @@ func TestLoopFailoverUsesCoreAuthorityAndSharesOperation(t *testing.T) {
 		WithMaxIterations(1),
 		WithProviderAttemptRecorder(recorder.record),
 	)
+	loop.SetMidTurnCompaction(nil, nil, compaction.NewHeuristicTokenEstimator(), 50000)
 
 	result, err := loop.RunCanonical(context.Background(), Submission{Content: "use failover"})
 	require.NoError(t, err)
@@ -447,7 +458,14 @@ func TestLoopOwnsTypedOverflowRecoveryAfterCompactionAndBeforeCandidateDispatch(
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		requestBodies = append(requestBodies, request.Messages[len(request.Messages)-1].Content)
+		var body strings.Builder
+		for _, message := range request.Messages {
+			body.WriteString(message.Role)
+			body.WriteByte(':')
+			body.WriteString(message.Content)
+			body.WriteByte('\n')
+		}
+		requestBodies = append(requestBodies, body.String())
 		if len(requestBodies) == 1 {
 			http.Error(w, "context_length_exceeded", http.StatusBadRequest)
 			return
@@ -494,18 +512,25 @@ func TestLoopOwnsTypedOverflowRecoveryAfterCompactionAndBeforeCandidateDispatch(
 		require.Equal(t, llm.FailureOverflow, results[0].Failure)
 		duplicateRecoveryDenied = owner.BeginOverflowRecovery(ctx, results[0].AttemptID) != nil
 	}}
-	loop.SetMidTurnCompaction(nil, compactor, compaction.NewHeuristicTokenEstimator(), 3)
-
 	input := strings.Repeat("long request context ", 300)
+	estimator := compaction.NewHeuristicTokenEstimator()
+	require.Less(t, compaction.EstimateTokens(messagesToTurnItems([]llm.Message{{Role: llm.RoleUser, Content: input}}), estimator), 35000,
+		"the existing overflow scenario must fit the explicit local preflight ceiling before the server returns overflow")
+	loop.SetMidTurnCompaction(nil, compactor, estimator, 50000)
+
 	events := &collectingEventStream{}
-	result, err := loop.RunCanonical(context.Background(), Submission{Content: input}, events)
+	result, err := loop.RunCanonical(context.Background(), Submission{
+		Content: input,
+		History: []AgentMessage{{Role: string(llm.RoleUser), Content: "prior context to compact"}},
+	}, events)
 	require.NoError(t, err)
 	require.NotEmpty(t, result.Transcript)
 	require.Equal(t, "recovered", result.Transcript[len(result.Transcript)-1].Message.Content)
 	require.True(t, duplicateRecoveryDenied, "the one-recovery bit must be consumed before compaction begins")
 	require.Len(t, requestBodies, 2, "the wrapper must not retry; Core may dispatch only after compaction")
-	require.Equal(t, input, requestBodies[0])
-	require.NotEqual(t, input, requestBodies[1], "the recovery dispatch must use the compacted request")
+	require.Contains(t, requestBodies[0], input)
+	require.Contains(t, requestBodies[1], input, "the exact current submission must survive recovery compaction")
+	require.NotEqual(t, requestBodies[0], requestBodies[1], "the recovery dispatch must use the compacted request")
 
 	results := recorder.snapshot()
 	require.Len(t, results, 2)
@@ -587,9 +612,13 @@ func TestLoopSharesDispatchBudgetAcrossRetryFailoverAndOverflow(t *testing.T) {
 		WithProviderAttemptRecorder(recorder.record),
 		WithProviderRetryPolicy(policy),
 	)
-	loop.SetMidTurnCompaction(nil, compactor, compaction.NewHeuristicTokenEstimator(), 3)
+	input := strings.Repeat("long request context ", 300)
+	estimator := compaction.NewHeuristicTokenEstimator()
+	require.Less(t, compaction.EstimateTokens(messagesToTurnItems([]llm.Message{{Role: llm.RoleUser, Content: input}}), estimator), 35000,
+		"the retry/failover scenario must fit the explicit local preflight ceiling before the server returns overflow")
+	loop.SetMidTurnCompaction(nil, compactor, estimator, 50000)
 
-	_, err = loop.Run(context.Background(), Submission{Content: strings.Repeat("long request context ", 300)})
+	_, err = loop.Run(context.Background(), Submission{Content: input})
 	require.Error(t, err)
 	require.Equal(t, []string{"shared-budget-primary", "shared-budget-primary", "shared-budget-fallback"}, requestModels,
 		"retry, candidate switch, and overflow must share one three-dispatch operation")

@@ -64,11 +64,12 @@ type ModelEntry struct {
 // ModelCycler implements model rotation across multiple providers. It is
 // safe for concurrent use.
 type ModelCycler struct {
-	config         ModelCyclerConfig
-	registry       *ProviderRegistry
-	resolvedModels []ResolvedModel
-	counter        atomic.Int64
-	mu             sync.Mutex
+	config            ModelCyclerConfig
+	registry          *ProviderRegistry
+	resolvedModels    []ResolvedModel
+	counter           atomic.Int64
+	mu                sync.Mutex
+	selectionRevision uint64
 	// sessions maps sessionID -> model index when SessionAffinity is enabled.
 	sessions map[string]int
 	// maxSessions bounds the sessions map to prevent unbounded memory growth.
@@ -127,23 +128,31 @@ func (c *ModelCycler) WrapModel(next BaseChatModel) BaseChatModel {
 // and a model with a matching TaskType tag exists, that model is preferred
 // regardless of strategy or session affinity.
 func (c *ModelCycler) selectModel(sessionID string, taskType TaskType) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	index, changed := c.selectModelLocked(sessionID, taskType)
+	if changed {
+		c.selectionRevision++
+	}
+	return index
+}
+
+func (c *ModelCycler) selectModelLocked(sessionID string, taskType TaskType) (int, bool) {
 	n := len(c.config.Models)
 	if n == 0 {
-		return 0
+		return 0, false
 	}
 	// Prefer a model explicitly tagged for the requested task type.
 	if taskType != "" && taskType != TaskTypeChat {
 		for i, m := range c.config.Models {
 			if m.TaskType == taskType {
-				return i
+				return i, false
 			}
 		}
 	}
 	if c.config.SessionAffinity && sessionID != "" {
-		c.mu.Lock()
-		defer c.mu.Unlock()
 		if idx, ok := c.sessions[sessionID]; ok && idx < n {
-			return idx
+			return idx, false
 		}
 		idx := c.selectByStrategy()
 		// Evict oldest entries when the sessions map exceeds the bound.
@@ -154,9 +163,150 @@ func (c *ModelCycler) selectModel(sessionID string, taskType TaskType) int {
 			}
 		}
 		c.sessions[sessionID] = idx
-		return idx
+		return idx, true
 	}
-	return c.selectByStrategy()
+	return c.selectByStrategy(), c.config.Strategy == StrategyRoundRobin || (c.config.Strategy == StrategyWeighted && c.totalWeight() <= 0)
+}
+
+func (c *ModelCycler) peekModel(sessionID string, taskType TaskType) (int, *modelCyclerSelectionLease, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := len(c.config.Models)
+	if n == 0 {
+		return 0, nil, errors.New("llm: model cycler has no candidates")
+	}
+	index, advance, installSession, err := c.peekModelIndexLocked(sessionID, taskType)
+	if err != nil {
+		return 0, nil, err
+	}
+	resolved := c.resolvedModels
+	if index < 0 || index >= len(resolved) || resolved[index].CandidateHandle() == nil {
+		return 0, nil, errors.New("llm: selected resolver candidate is unavailable")
+	}
+	return index, &modelCyclerSelectionLease{
+		cycler:         c,
+		revision:       c.selectionRevision,
+		candidateID:    resolved[index].CandidateHandle().CandidateID(),
+		index:          index,
+		sessionID:      sessionID,
+		advanceCounter: advance,
+		installSession: installSession,
+	}, nil
+}
+
+func (c *ModelCycler) peekModelIndexLocked(sessionID string, taskType TaskType) (index int, advanceCounter, installSession bool, err error) {
+	for candidateIndex, entry := range c.config.Models {
+		if taskType != "" && taskType != TaskTypeChat && entry.TaskType == taskType {
+			return candidateIndex, false, false, nil
+		}
+	}
+	if c.config.SessionAffinity && sessionID != "" {
+		if candidateIndex, ok := c.sessions[sessionID]; ok && candidateIndex < len(c.config.Models) {
+			return candidateIndex, false, false, nil
+		}
+		index, advanceCounter, err = c.peekStrategyLocked()
+		return index, advanceCounter, true, err
+	}
+	index, advanceCounter, err = c.peekStrategyLocked()
+	return index, advanceCounter, false, err
+}
+
+func (c *ModelCycler) peekStrategyLocked() (int, bool, error) {
+	n := len(c.config.Models)
+	if n == 0 {
+		return 0, false, errors.New("llm: model cycler has no candidates")
+	}
+	switch c.config.Strategy {
+	case StrategyWeighted:
+		total := c.totalWeight()
+		if total <= 0 {
+			return int(c.counter.Load()) % n, true, nil
+		}
+		r := rand.IntN(total)
+		cumulative := 0
+		for index, model := range c.config.Models {
+			if model.Weight > 0 {
+				cumulative += model.Weight
+			}
+			if r < cumulative {
+				return index, false, nil
+			}
+		}
+		return n - 1, false, nil
+	case StrategyCostPriority:
+		best := 0
+		for index := 1; index < n; index++ {
+			if c.config.Models[index].Weight > c.config.Models[best].Weight {
+				best = index
+			}
+		}
+		return best, false, nil
+	default:
+		return int(c.counter.Load()) % n, true, nil
+	}
+}
+
+func (c *ModelCycler) totalWeight() int {
+	total := 0
+	for _, model := range c.config.Models {
+		if model.Weight > 0 {
+			total += model.Weight
+		}
+	}
+	return total
+}
+
+type modelCyclerSelectionLease struct {
+	cycler         *ModelCycler
+	revision       uint64
+	candidateID    CandidateID
+	index          int
+	sessionID      string
+	advanceCounter bool
+	installSession bool
+	state          atomic.Uint32
+}
+
+func (l *modelCyclerSelectionLease) CandidateID() CandidateID {
+	if l == nil {
+		return ""
+	}
+	return l.candidateID
+}
+
+func (l *modelCyclerSelectionLease) candidateSelectionLease() {}
+
+func (l *modelCyclerSelectionLease) Commit() error {
+	if l == nil || l.cycler == nil || l.candidateID == "" || !l.state.CompareAndSwap(0, 1) {
+		return ErrStaleSelectionLease
+	}
+	c := l.cycler
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.selectionRevision != l.revision || l.index < 0 || l.index >= len(c.resolvedModels) || c.resolvedModels[l.index].CandidateHandle() == nil || c.resolvedModels[l.index].CandidateHandle().CandidateID() != l.candidateID {
+		l.state.Store(2)
+		return ErrStaleSelectionLease
+	}
+	changed := false
+	if l.advanceCounter {
+		c.counter.Add(1)
+		changed = true
+	}
+	if l.installSession && c.config.SessionAffinity && l.sessionID != "" {
+		if len(c.sessions) >= c.maxSessions {
+			for key := range c.sessions {
+				delete(c.sessions, key)
+				break
+			}
+		}
+		c.sessions[l.sessionID] = l.index
+		changed = true
+	}
+	if changed {
+		c.selectionRevision++
+	}
+	l.state.Store(2)
+	return nil
 }
 
 // selectByStrategy dispatches to the strategy-specific selection method.
@@ -252,6 +402,30 @@ func (m *cycledModel) ProviderCandidates() []ResolvedCandidateHandle {
 		}
 	}
 	return dedupeProviderCandidates(candidates)
+}
+
+// PeekCandidate exposes the selected resolver candidate without advancing the
+// cycler counter or installing session affinity. Its lease is committed only
+// from the Loop operation's candidate authorization path.
+func (m *cycledModel) PeekCandidate(ctx context.Context) (CandidateProposal, error) {
+	if m == nil || m.cycler == nil || len(m.cycler.resolvedModels) == 0 {
+		return CandidateProposal{}, ErrGuardedCandidateUnavailable
+	}
+	authority, ok := OperationDispatchAuthorityFromContext(ctx)
+	if !ok {
+		return CandidateProposal{}, ErrOperationAuthorityRequired
+	}
+	index, lease, err := m.cycler.peekModel(sessionIDFromContext(ctx), TaskTypeFromContext(ctx))
+	if err != nil {
+		return CandidateProposal{}, err
+	}
+	return CandidateProposal{
+		OperationID:    authority.ID(),
+		Candidate:      m.cycler.resolvedModels[index].CandidateHandle(),
+		Reason:         CandidateCyclerSelected,
+		Antecedent:     CandidateAntecedent{Kind: AntecedentInitial},
+		SelectionLease: lease,
+	}, nil
 }
 
 // buildSelectedModel resolves the model at idx via the registry. It returns an
@@ -434,12 +608,15 @@ func (m *cycledModel) generateResolved(ctx context.Context, msgs []Message, opts
 	if proposal, ok := CandidateProposalFromContext(ctx); ok {
 		return m.generateProposedCandidate(ctx, proposal, msgs, opts...)
 	}
-	index := m.cycler.selectModel(sessionIDFromContext(ctx), TaskTypeFromContext(ctx))
+	index, lease, err := m.cycler.peekModel(sessionIDFromContext(ctx), TaskTypeFromContext(ctx))
+	if err != nil {
+		return nil, err
+	}
 	if index < 0 || index >= len(m.cycler.resolvedModels) {
 		return nil, errors.New("llm: selected resolver candidate is unavailable")
 	}
 	selected := m.cycler.resolvedModels[index]
-	ctx, err := withCyclerSelectedProposal(ctx, selected.CandidateHandle())
+	ctx, err = withCyclerSelectedProposal(ctx, selected.CandidateHandle(), lease)
 	if err != nil {
 		return nil, err
 	}
@@ -504,12 +681,15 @@ func (m *cycledModel) streamResolved(ctx context.Context, msgs []Message, opts .
 	if proposal, ok := CandidateProposalFromContext(ctx); ok {
 		return m.streamProposedCandidate(ctx, proposal, msgs, opts...)
 	}
-	index := m.cycler.selectModel(sessionIDFromContext(ctx), TaskTypeFromContext(ctx))
+	index, lease, err := m.cycler.peekModel(sessionIDFromContext(ctx), TaskTypeFromContext(ctx))
+	if err != nil {
+		return nil, err
+	}
 	if index < 0 || index >= len(m.cycler.resolvedModels) {
 		return nil, errors.New("llm: selected resolver candidate is unavailable")
 	}
 	selected := m.cycler.resolvedModels[index]
-	ctx, err := withCyclerSelectedProposal(ctx, selected.CandidateHandle())
+	ctx, err = withCyclerSelectedProposal(ctx, selected.CandidateHandle(), lease)
 	if err != nil {
 		return nil, err
 	}
@@ -593,19 +773,20 @@ func singleProviderCandidate(model BaseChatModel) ResolvedCandidateHandle {
 	return candidates[0]
 }
 
-func withCyclerSelectedProposal(ctx context.Context, candidate ResolvedCandidateHandle) (context.Context, error) {
+func withCyclerSelectedProposal(ctx context.Context, candidate ResolvedCandidateHandle, lease CandidateSelectionLease) (context.Context, error) {
 	authority, ok := OperationDispatchAuthorityFromContext(ctx)
 	if !ok {
 		return nil, ErrOperationAuthorityRequired
 	}
-	if candidate == nil {
+	if candidate == nil || lease == nil || lease.CandidateID() != candidate.CandidateID() {
 		return nil, ErrDispatchPermitRequired
 	}
 	return WithCandidateProposal(ctx, CandidateProposal{
-		OperationID: authority.ID(),
-		Candidate:   candidate,
-		Reason:      CandidateCyclerSelected,
-		Antecedent:  CandidateAntecedent{Kind: AntecedentInitial},
+		OperationID:    authority.ID(),
+		Candidate:      candidate,
+		Reason:         CandidateCyclerSelected,
+		Antecedent:     CandidateAntecedent{Kind: AntecedentInitial},
+		SelectionLease: lease,
 	}), nil
 }
 

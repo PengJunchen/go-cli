@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 )
@@ -142,6 +143,7 @@ func TestLoopRetriesLiveHTTPClientTimeoutWithProductionRetryPolicy(t *testing.T)
 		core.WithMaxIterations(1),
 		core.WithProviderRetryPolicy(policy),
 	)
+	loop.SetMidTurnCompaction(nil, nil, compaction.NewHeuristicTokenEstimator(), 50000)
 	result, err := loop.RunCanonical(context.Background(), core.Submission{Content: "retry the transport timeout"})
 	require.NoError(t, err)
 	require.NotEmpty(t, result.Transcript)

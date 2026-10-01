@@ -123,6 +123,14 @@ func (a *providerOperationAuthority) AuthorizeCandidate(ctx context.Context, pro
 			a.actualAttempts != 0 || a.lastFinished != "" || len(a.setupFailures) != 0 {
 			return deny(llm.DeniedStalePrevious)
 		}
+		if proposal.Reason == llm.CandidateCyclerSelected {
+			lease := proposal.SelectionLease
+			if lease == nil || lease.CandidateID() != candidate.CandidateID() || lease.Commit() != nil {
+				return deny(llm.DeniedStaleSelectionLease)
+			}
+		} else if proposal.SelectionLease != nil {
+			return deny(llm.DeniedStaleSelectionLease)
+		}
 		a.authorized = candidate
 		a.authorizationOn = true
 		if a.initialCandidate == "" {
@@ -188,6 +196,13 @@ func (a *providerOperationAuthority) AuthorizeCandidate(ctx context.Context, pro
 	a.authorized = candidate
 	a.authorizationOn = true
 	return llm.DispatchDecision{Authorized: true}, nil
+}
+
+// ActualDispatchCount reports the number of calls that crossed BeginDispatch.
+func (a *providerOperationAuthority) ActualDispatchCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.actualAttempts
 }
 
 func (a *providerOperationAuthority) BeginOverflowRecovery(ctx context.Context, attemptID llm.ProviderAttemptID) error {

@@ -213,6 +213,9 @@ const (
 	DeniedRepeatedPreDispatchFailure
 	// DeniedOverflowRecoveryUsed means the operation already used overflow recovery.
 	DeniedOverflowRecoveryUsed
+	// DeniedStaleSelectionLease means a cycler selection changed after its
+	// metadata-only peek and must be re-peeked before dispatch.
+	DeniedStaleSelectionLease
 )
 
 // DispatchDenial is a typed policy rejection returned before provider dispatch.
@@ -301,16 +304,58 @@ func (p *DispatchPermit) ValidFor(authority OperationDispatchAuthority, candidat
 type ResolvedCandidateHandle interface {
 	CandidateID() CandidateID
 	Identity() AttemptIdentity
+	ModelSpec() ModelSpec
+	DefaultGenerationOptions() GenerationOptions
+	EstimateProtocolFraming([]Message, GenerationOptions) (int, error)
 	resolvedCandidateHandle()
+}
+
+// CandidateSelectionLease is a private, single-use cycler selection proposal.
+// Only llm-owned selectors can mint a lease; Loop commits it during candidate
+// authorization after all operation facts and attempt-budget checks pass.
+type CandidateSelectionLease interface {
+	CandidateID() CandidateID
+	Commit() error
+	candidateSelectionLease()
 }
 
 // CandidateProposal proposes one finite resolver-issued candidate to a Loop
 // operation authority.
 type CandidateProposal struct {
-	OperationID ProviderOperationID
-	Candidate   ResolvedCandidateHandle
-	Reason      CandidateReason
-	Antecedent  CandidateAntecedent
+	OperationID    ProviderOperationID
+	Candidate      ResolvedCandidateHandle
+	Reason         CandidateReason
+	Antecedent     CandidateAntecedent
+	SelectionLease CandidateSelectionLease
+}
+
+// CandidateSelectionSource can expose one resolver candidate and metadata
+// without building an adapter or mutating selection state.
+type CandidateSelectionSource interface {
+	PeekCandidate(context.Context) (CandidateProposal, error)
+}
+
+// CandidateSelectionSourceProvider lets transparent model wrappers expose an
+// inner resolver selector without pretending to implement selection itself.
+type CandidateSelectionSourceProvider interface {
+	CandidateSelectionSource() CandidateSelectionSource
+}
+
+// CandidateSelectionSourceFromModel finds a metadata-only selector through
+// the known transparent model-wrapper chain.
+func CandidateSelectionSourceFromModel(model BaseChatModel) (CandidateSelectionSource, bool) {
+	if model == nil {
+		return nil, false
+	}
+	if source, ok := model.(CandidateSelectionSource); ok && source != nil {
+		return source, true
+	}
+	provider, ok := model.(CandidateSelectionSourceProvider)
+	if !ok {
+		return nil, false
+	}
+	source := provider.CandidateSelectionSource()
+	return source, source != nil
 }
 
 // OperationDispatchAuthority is implemented by the Loop operation owner, which
@@ -332,6 +377,12 @@ type OperationDispatchAuthority interface {
 // authorization then requires the same finished overflow attempt.
 type OverflowRecoveryAuthority interface {
 	BeginOverflowRecovery(context.Context, ProviderAttemptID) error
+}
+
+// ActualDispatchCounter reports calls that crossed the Loop-owned BeginDispatch
+// fence, synchronized with the operation authority's attempt counter.
+type ActualDispatchCounter interface {
+	ActualDispatchCount() int
 }
 
 // RunOperationFactory creates independent main, continuation, or summary
@@ -472,6 +523,9 @@ var (
 	ErrDispatchPermitRequired = errors.New("llm: guarded provider dispatch requires a matching permit")
 	// ErrDispatchPermitDenied identifies a typed Loop policy denial.
 	ErrDispatchPermitDenied = errors.New("llm: provider dispatch was denied")
+	// ErrStaleSelectionLease means a cycler selection changed before Loop
+	// authorization could commit its metadata-only selection lease.
+	ErrStaleSelectionLease = errors.New("llm: candidate selection lease is stale")
 	// ErrInvalidDispatchDecision identifies a malformed authority response.
 	ErrInvalidDispatchDecision = errors.New("llm: operation authority returned an invalid dispatch decision")
 )
@@ -543,6 +597,11 @@ func (m *resolvedCandidateModel) Generate(ctx context.Context, messages []Messag
 }
 
 func (m *resolvedCandidateModel) Stream(ctx context.Context, messages []Message, opts ...Option) (<-chan MessageChunk, error) {
+	if plan, ok := PreparedRequestPlanFromContext(ctx); ok {
+		if err := plan.Consume(m.candidate, messages, opts...); err != nil {
+			return nil, err
+		}
+	}
 	return m.inner.Stream(ctx, messages, opts...)
 }
 
@@ -628,13 +687,40 @@ type guardedResolvedModelBuilder interface {
 type resolvedCandidateHandle struct {
 	id       CandidateID
 	identity AttemptIdentity
+	model    ModelSpec
 	provider ModelProvider
 	cfg      ModelConfig
 }
 
 func (c *resolvedCandidateHandle) CandidateID() CandidateID  { return c.id }
 func (c *resolvedCandidateHandle) Identity() AttemptIdentity { return c.identity }
-func (*resolvedCandidateHandle) resolvedCandidateHandle()    {}
+func (c *resolvedCandidateHandle) ModelSpec() ModelSpec      { return c.model }
+func (c *resolvedCandidateHandle) DefaultGenerationOptions() GenerationOptions {
+	if c == nil {
+		return GenerationOptions{}
+	}
+	options := GenerationOptions{}
+	if c.cfg.TemperatureSet || c.cfg.Temperature != 0 {
+		value := c.cfg.Temperature
+		options.Temperature = &value
+	}
+	if c.cfg.MaxTokensSet || c.cfg.MaxTokens != 0 {
+		value := c.cfg.MaxTokens
+		options.MaxTokens = &value
+	}
+	return options
+}
+func (c *resolvedCandidateHandle) EstimateProtocolFraming(messages []Message, options GenerationOptions) (int, error) {
+	if c == nil || c.provider == nil {
+		return 0, ErrRequestEnvelopeEstimatorUnavailable
+	}
+	estimator, ok := c.provider.(ProtocolEnvelopeEstimator)
+	if !ok {
+		return 0, ErrRequestEnvelopeEstimatorUnavailable
+	}
+	return estimator.EstimateProtocolFraming(messages, options)
+}
+func (*resolvedCandidateHandle) resolvedCandidateHandle() {}
 
 func (c *resolvedCandidateHandle) build(ctx context.Context) (BaseChatModel, func(), error) {
 	builder, ok := c.provider.(guardedResolvedModelBuilder)
@@ -769,6 +855,12 @@ func (*DispatchDeniedError) Error() string { return ErrDispatchPermitDenied.Erro
 
 // Unwrap supports errors.Is checks for a dispatch policy denial.
 func (*DispatchDeniedError) Unwrap() error { return ErrDispatchPermitDenied }
+
+// NoProviderDispatch reports whether this typed Loop denial means no provider
+// request crossed the operation dispatch fence. Cancellation remains separate.
+func (e *DispatchDeniedError) NoProviderDispatch() bool {
+	return e != nil && e.Code != DeniedCancelled
+}
 
 type providerTransportFailure struct{ cause error }
 

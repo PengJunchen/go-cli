@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/production"
@@ -556,6 +557,7 @@ func TestCoreOwnedRetryUsesOneCircuitBreakerAdmission(t *testing.T) {
 		core.WithMaxIterations(1),
 		core.WithProviderRetryPolicy(singleRetryPolicy{}),
 	)
+	loop.SetMidTurnCompaction(nil, nil, compaction.NewHeuristicTokenEstimator(), 50000)
 	result, err := loop.RunCanonical(context.Background(), core.Submission{Content: "retry inside one operation"})
 	require.NoError(t, err)
 	require.NotEmpty(t, result.Transcript)
@@ -566,6 +568,87 @@ func TestCoreOwnedRetryUsesOneCircuitBreakerAdmission(t *testing.T) {
 	require.Equal(t, 1, breaker.ticket.complete)
 	require.Equal(t, production.StreamSucceeded, breaker.ticket.outcome)
 	breaker.ticket.mu.Unlock()
+}
+
+func TestProviderFallbackIsRepreflightedAfterPrimaryDispatchFailure(t *testing.T) {
+	var primaryRequests atomic.Int32
+	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryRequests.Add(1)
+		http.Error(w, "temporary provider failure", http.StatusServiceUnavailable)
+	}))
+	defer primaryServer.Close()
+	var fallbackRequests atomic.Int32
+	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fallbackRequests.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"unexpected fallback dispatch\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer fallbackServer.Close()
+
+	registry := llm.NewProviderRegistry()
+	require.NoError(t, registry.Register(llm.NewEinoProvider(
+		llm.WithProviderName("bounded-primary"),
+		llm.WithModels([]llm.ModelInfo{{Name: "primary-model", InputTokenLimit: 50000}}),
+		llm.WithBaseURL(primaryServer.URL),
+		llm.WithHTTPClient(primaryServer.Client()),
+	)))
+	require.NoError(t, registry.Register(llm.NewEinoProvider(
+		llm.WithProviderName("bounded-fallback"),
+		llm.WithModels([]llm.ModelInfo{{Name: "tiny-fallback-model", InputTokenLimit: 16}}),
+		llm.WithBaseURL(fallbackServer.URL),
+		llm.WithHTTPClient(fallbackServer.Client()),
+	)))
+	resolver := registry.SnapshotResolver()
+	primaryResolved, err := resolver.ResolveModel(context.Background(), llm.ModelRequest{
+		ProviderID: "bounded-primary",
+		ModelID:    "primary-model",
+		Endpoint:   primaryServer.URL,
+	})
+	require.NoError(t, err)
+	primary, primaryCleanup, err := primaryResolved.Build(context.Background())
+	require.NoError(t, err)
+	defer primaryCleanup()
+	fallbackResolved, err := resolver.ResolveModel(context.Background(), llm.ModelRequest{
+		ProviderID: "bounded-fallback",
+		ModelID:    "tiny-fallback-model",
+		Endpoint:   fallbackServer.URL,
+	})
+	require.NoError(t, err)
+	fallback, fallbackCleanup, err := fallbackResolved.Build(context.Background())
+	require.NoError(t, err)
+	defer fallbackCleanup()
+
+	breaker := production.NewDefaultCircuitBreaker(production.CircuitBreakerConfig{FailureThreshold: 1})
+	chain := llm.NewStandardMiddlewareChain(
+		llm.NewFailoverModelMiddleware(llm.WithFallbackModels(fallback)),
+	)
+	wrapped := newModelWrapperWithChain(production.NewProductionModelWrapper(), chain, breaker, nil)(primary).(llm.BaseChatModel)
+	var recorded []llm.ProviderAttemptResult
+	loop := core.NewLoopAgent(
+		core.WithLLM(wrapped),
+		core.WithMaxIterations(1),
+		core.WithProviderAttemptRecorder(func(result llm.ProviderAttemptResult) error {
+			recorded = append(recorded, result)
+			return nil
+		}),
+	)
+	loop.SetMidTurnCompaction(nil, nil, compaction.NewHeuristicTokenEstimator(), 50000)
+
+	_, err = loop.RunCanonical(context.Background(), core.Submission{Content: "retry with tiny fallback"})
+	require.ErrorIs(t, err, core.ErrRequestEnvelopeRejected)
+	require.EqualValues(t, 1, primaryRequests.Load(), "the primary provider must receive one real dispatch")
+	require.Zero(t, fallbackRequests.Load(), "the known-small fallback must be rejected before dispatch")
+	attempt, finished := llm.FinishedProviderAttemptFromError(err)
+	require.True(t, finished, "the primary provider attempt must remain in the terminal error chain")
+	require.Equal(t, llm.FailureTransientProvider, attempt.Failure)
+	require.Equal(t, "bounded-primary", attempt.Identity.ProviderID)
+	require.Equal(t, "primary-model", attempt.Identity.ModelID)
+	require.Len(t, recorded, 1, "the attempt recorder must retain only the primary dispatch")
+	require.Equal(t, attempt.AttemptID, recorded[0].AttemptID)
+	require.Equal(t, attempt.Identity, recorded[0].Identity)
+	require.Equal(t, llm.FailureTransientProvider, recorded[0].Failure)
+	require.Equal(t, production.CircuitOpen, breaker.State(), "an operation with a real failed dispatch must settle as StreamFailed")
 }
 
 func TestCircuitBreakerModelKeepsRetrySetupInsideOneLogicalTicket(t *testing.T) {
@@ -673,6 +756,7 @@ func TestCircuitBreakerModelCoversModelCyclerSetupFallback(t *testing.T) {
 	wrapped := newModelWrapperWithChain(production.NewProductionModelWrapper(), chain, breaker, nil)(primaryModel).(llm.BaseChatModel)
 
 	loop := core.NewLoopAgent(core.WithLLM(wrapped), core.WithMaxIterations(1))
+	loop.SetMidTurnCompaction(compaction.NewMidTurnCompact(), nil, compaction.NewHeuristicTokenEstimator(), 8000)
 	result, err := loop.RunCanonical(context.Background(), core.Submission{Content: "recover from selected setup failure"})
 	require.NoError(t, err)
 	require.EqualValues(t, 1, selectedCalls.Load())
