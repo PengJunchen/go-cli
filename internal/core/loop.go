@@ -1783,8 +1783,8 @@ func (l *LoopAgent) generateWithContinuationAndCompactionState(
 			return nil, fmt.Errorf("core: complete-response guard must advertise the %d-byte candidate limit", guardedStreamMaxBytes)
 		}
 		ctx = llm.WithLoopOwnedContinuation(ctx)
-		sendAssistantGenerationLifecycleEvent(es, ctx, EventKindAssistantGenerationStarted)
-		defer sendAssistantGenerationLifecycleEvent(es, ctx, EventKindAssistantGenerationFinished)
+		sendAssistantGenerationLifecycleEvent(ctx, es, EventKindAssistantGenerationStarted)
+		defer sendAssistantGenerationLifecycleEvent(ctx, es, EventKindAssistantGenerationFinished)
 	}
 	mainCtx, operationActive, operationErr := providerOperationContext(ctx, model, llm.OperationMainRequest)
 	if operationErr != nil {
@@ -1947,7 +1947,7 @@ func (l *LoopAgent) generateWithContinuationAndCompactionState(
 	return resp, nil
 }
 
-func sendAssistantGenerationLifecycleEvent(es EventStream, ctx context.Context, kind string) {
+func sendAssistantGenerationLifecycleEvent(ctx context.Context, es EventStream, kind string) {
 	if es == nil {
 		return
 	}
