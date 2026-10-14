@@ -412,6 +412,10 @@ func (r *DefaultToolRegistry) registerTrustedScopedWorkspaceRead(ctx context.Con
 		}
 		return r.Register(ctx, def)
 	}
+	switch def.(type) {
+	case *GrepTool, *FindTool:
+		completionProof = completionScopedSearchJoined
+	}
 
 	scope := trustedWorkspaceReadScope(whitelist.paths)
 	if scope.Fingerprint() == ([32]byte{}) {

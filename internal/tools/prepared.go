@@ -982,11 +982,11 @@ func (p *preparedInvocation) commitAndInvoke(ctx context.Context) (*ToolResult, 
 		return nil, err
 	}
 	executeCtx := ctx
-	if p.completionProof == CompletionOwnedProcessGroupJoined {
+	if p.completionProof == CompletionOwnedProcessGroupJoined || p.completionProof == completionScopedSearchJoined {
 		executeCtx = withPreparedCompletionReporter(ctx, func(proof PreparedCompletionProof, done <-chan struct{}) {
 			p.completion.attach(proof, done)
 		})
-		done := p.completion.begin(CompletionOwnedProcessGroupJoined)
+		done := p.completion.begin(p.completionProof)
 		if done == nil {
 			return nil, ErrPreparedInvocationUnavailable
 		}
@@ -1136,11 +1136,11 @@ func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sin
 	if p.streamingSink == nil {
 		completionProof = ""
 	}
-	if completionProof == CompletionOwnedProcessGroupJoined {
+	if completionProof == CompletionOwnedProcessGroupJoined || completionProof == completionScopedSearchJoined {
 		executeCtx = withPreparedCompletionReporter(ctx, func(proof PreparedCompletionProof, done <-chan struct{}) {
 			p.completion.attach(proof, done)
 		})
-		done := p.completion.begin(CompletionOwnedProcessGroupJoined)
+		done := p.completion.begin(completionProof)
 		if done == nil {
 			return nil, ErrPreparedInvocationUnavailable
 		}

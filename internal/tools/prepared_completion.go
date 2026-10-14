@@ -20,6 +20,11 @@ const (
 	// CompletionOwnedProcessGroupJoined means the local process leader and
 	// output readers joined and the owned process group was positively absent.
 	CompletionOwnedProcessGroupJoined PreparedCompletionProof = "owned_process_group_joined"
+	// completionScopedSearchJoined is a prepared-dispatch mode for a trusted
+	// scoped search reader. Its final signal reports either the concrete
+	// synchronous fallback proof or the concrete owned-process-group proof;
+	// this mode value is never published as a completion proof.
+	completionScopedSearchJoined PreparedCompletionProof = "scoped_search_joined"
 )
 
 // PreparedCompletionSignal exposes one sealed PreparedInvocation's
@@ -63,6 +68,9 @@ type preparedCompletionState struct {
 	processDone        <-chan struct{}
 	processObserved    bool
 	processClosed      bool
+	inlineFallbackMode bool
+	inlineObserved     bool
+	inlineClosed       bool
 	pipelineReturned   bool
 	pipelineSuccessful bool
 	finalized          bool
@@ -117,7 +125,7 @@ func (s *preparedCompletionState) proofFromCompletedSnapshot(done <-chan struct{
 }
 
 func (s *preparedCompletionState) begin(proof PreparedCompletionProof) chan struct{} {
-	if s == nil || !validPreparedCompletionProof(proof) {
+	if s == nil || (!validPreparedCompletionProof(proof) && proof != completionScopedSearchJoined) {
 		return nil
 	}
 	s.mu.Lock()
@@ -128,8 +136,9 @@ func (s *preparedCompletionState) begin(proof PreparedCompletionProof) chan stru
 	done := make(chan struct{})
 	s.done = done
 	s.ownedDone = done
-	if proof == CompletionOwnedProcessGroupJoined {
+	if proof == CompletionOwnedProcessGroupJoined || proof == completionScopedSearchJoined {
 		s.processMode = true
+		s.inlineFallbackMode = proof == completionScopedSearchJoined
 	} else {
 		s.proof = proof
 	}
@@ -153,8 +162,8 @@ func (s *preparedCompletionState) finish(done chan struct{}, completed bool) {
 			s.proof = ""
 		}
 		var callbacks []func()
-		if !s.processObserved || s.processClosed {
-			callbacks = s.finishProcessLocked()
+		if (!s.processObserved && !s.inlineObserved) || (s.processObserved && s.processClosed) || (s.inlineObserved && s.inlineClosed) {
+			callbacks = s.finishResourceLocked()
 		}
 		s.mu.Unlock()
 		runPreparedCompletionCallbacks(callbacks)
@@ -202,6 +211,10 @@ func (s *preparedCompletionState) attach(proof PreparedCompletionProof, done <-c
 			s.mu.Unlock()
 			return false
 		}
+		if s.inlineObserved {
+			s.mu.Unlock()
+			return false
+		}
 		s.processObserved = true
 		s.processDone = done
 		select {
@@ -211,7 +224,7 @@ func (s *preparedCompletionState) attach(proof PreparedCompletionProof, done <-c
 		}
 		var callbacks []func()
 		if s.pipelineReturned && s.processClosed {
-			callbacks = s.finishProcessLocked()
+			callbacks = s.finishResourceLocked()
 		}
 		wait := !s.processClosed
 		s.mu.Unlock()
@@ -223,7 +236,40 @@ func (s *preparedCompletionState) attach(proof PreparedCompletionProof, done <-c
 				s.processClosed = true
 				var callbacks []func()
 				if s.pipelineReturned {
-					callbacks = s.finishProcessLocked()
+					callbacks = s.finishResourceLocked()
+				}
+				s.mu.Unlock()
+				runPreparedCompletionCallbacks(callbacks)
+			}()
+		}
+		return true
+	}
+	if proof == CompletionInlinePipelineJoined && s.processMode {
+		if s.ownedDone == nil || !s.inlineFallbackMode || s.inlineObserved || s.processObserved || s.finalized {
+			s.mu.Unlock()
+			return false
+		}
+		s.inlineObserved = true
+		select {
+		case <-done:
+			s.inlineClosed = true
+		default:
+		}
+		var callbacks []func()
+		if s.pipelineReturned && s.inlineClosed {
+			callbacks = s.finishResourceLocked()
+		}
+		wait := !s.inlineClosed
+		s.mu.Unlock()
+		runPreparedCompletionCallbacks(callbacks)
+		if wait {
+			go func() {
+				<-done
+				s.mu.Lock()
+				s.inlineClosed = true
+				var callbacks []func()
+				if s.pipelineReturned {
+					callbacks = s.finishResourceLocked()
 				}
 				s.mu.Unlock()
 				runPreparedCompletionCallbacks(callbacks)
@@ -242,14 +288,18 @@ func (s *preparedCompletionState) attach(proof PreparedCompletionProof, done <-c
 	return true
 }
 
-func (s *preparedCompletionState) finishProcessLocked() []func() {
+func (s *preparedCompletionState) finishResourceLocked() []func() {
 	if s.ownedDone == nil || !s.processMode || s.finalized {
 		return nil
 	}
-	if !s.proofInvalidated && s.pipelineSuccessful && s.processObserved && s.processClosed {
-		s.proof = CompletionOwnedProcessGroupJoined
-	} else {
-		s.proof = ""
+	s.proof = ""
+	if !s.proofInvalidated && s.pipelineSuccessful {
+		switch {
+		case s.processObserved && s.processClosed:
+			s.proof = CompletionOwnedProcessGroupJoined
+		case s.inlineFallbackMode && s.inlineObserved && s.inlineClosed:
+			s.proof = CompletionInlinePipelineJoined
+		}
 	}
 	s.finalized = true
 	close(s.ownedDone)
@@ -321,4 +371,10 @@ func reportPreparedLocalProcessCompletion(ctx context.Context, lifecycle managed
 		return
 	}
 	reportPreparedCompletion(ctx, CompletionOwnedProcessGroupJoined, done)
+}
+
+func reportPreparedNoProcessCompletion(ctx context.Context) {
+	done := make(chan struct{})
+	close(done)
+	reportPreparedCompletion(ctx, CompletionInlinePipelineJoined, done)
 }

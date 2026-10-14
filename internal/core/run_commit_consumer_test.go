@@ -239,6 +239,24 @@ func newPreparedConsumerReadRegistry(t *testing.T) *tools.MiddlewareToolRegistry
 	return newPreparedConsumerRegistry(t, "read")
 }
 
+func newPreparedConsumerScopedSearchRegistry(t *testing.T, root, name string) *tools.MiddlewareToolRegistry {
+	t.Helper()
+	ctx := context.Background()
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	deferred := tools.NewDeferredToolRegistryAdapter(base)
+	require.NoError(t, tools.RegisterDefaults(ctx, deferred,
+		tools.WithRegisteredBuiltinWhitelist([]string{name}),
+		tools.WithRegisteredPathWhitelist([]string{root}),
+		tools.WithRegisteredCanonicalWorkspaceRoot(root),
+	))
+	registry := tools.NewMiddlewareToolRegistry(deferred)
+	require.NoError(t, registry.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+	return registry
+}
+
 type panicPreparedInvocation struct{ tools.PreparedInvocation }
 
 func (panicPreparedInvocation) Dispatch(context.Context) (*tools.ToolResult, error) {
@@ -532,6 +550,89 @@ func TestRunCommitConsumerStopsAfterPreparedActionWithoutCompletionProof(t *test
 	require.NotNil(t, terminal)
 	require.Equal(t, RunOutcomeUnknown, terminal.Outcome)
 	require.Equal(t, 1, model.idx, "a nil completion proof keeps the dispatch marker unresolved and stops the provider")
+}
+
+func TestRunCommitConsumerResolvesScopedSearchAfterCompletionProof(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		toolName   string
+		helperMode bool
+	}{
+		{name: "grep pure-Go fallback", toolName: "grep"},
+		{name: "grep managed helper", toolName: "grep", helperMode: true},
+		{name: "find pure-Go fallback", toolName: "find"},
+		{name: "find managed helper", toolName: "find", helperMode: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := t.TempDir()
+			var args map[string]any
+			if testCase.toolName == "grep" {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "match.txt"), []byte("needle\n"), 0o600))
+				args = map[string]any{"pattern": "needle", "path": root}
+			} else {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "target.go"), []byte("package main\n"), 0o600))
+				args = map[string]any{"pattern": "target.go", "type": "f", "path": root}
+			}
+
+			if testCase.helperMode {
+				helperDir := t.TempDir()
+				name, script := runCommitSearchHelper(t, testCase.toolName)
+				require.NoError(t, os.WriteFile(filepath.Join(helperDir, name), []byte(script), 0o700))
+				t.Setenv("PATH", helperDir)
+			} else {
+				t.Setenv("PATH", t.TempDir())
+			}
+
+			sink := &consumerTestSink{}
+			model := &scriptedChatModel{seq: []*llm.Message{
+				{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "search-1", Name: testCase.toolName, Args: args}}},
+				{Role: llm.RoleAssistant, Content: "search completed"},
+			}}
+			agent := NewAgentImpl("durable-scoped-search", NewLoopAgent(
+				WithLLM(model),
+				WithTools(newPreparedConsumerScopedSearchRegistry(t, root, testCase.toolName)),
+			))
+			owner := newRunOwner(context.Background(), nil, RunClaim{ID: "run-consumer-scoped-search"}, nil)
+			owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "session-1", WorkspaceID: "workspace-1"})
+
+			_, runErr := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+				return agent.Run(ctx, Submission{Type: SubmissionUserMessage, Content: "search the workspace"})
+			})
+			require.NoError(t, runErr)
+			require.Equal(t, 2, model.idx, "the follow-up model call must wait for durable proof and resolution")
+			steps, batches, receipts, terminal := sink.snapshot()
+			require.Equal(t, []string{"input", "begin", "execution", "receipt", "resolution", "terminal"}, steps)
+			require.Len(t, batches, 1)
+			require.Len(t, receipts, 1)
+			require.NotNil(t, terminal)
+			require.Equal(t, RunOutcomeSuccess, terminal.Outcome)
+
+			executions := sink.executionSnapshot()
+			require.Len(t, executions, 1)
+			require.Equal(t, RunExecutionQuiescent, executions[0].ResourceState)
+			if testCase.helperMode {
+				require.Equal(t, tools.CompletionOwnedProcessGroupJoined, executions[0].CompletionProof)
+			} else {
+				require.Equal(t, tools.CompletionInlinePipelineJoined, executions[0].CompletionProof)
+			}
+			resolutions := sink.resolutionSnapshot()
+			require.Len(t, resolutions, 1)
+			require.Equal(t, ResolutionLocalResourcesStopped, resolutions[0].Evidence)
+		})
+	}
+}
+
+func runCommitSearchHelper(t *testing.T, toolName string) (string, string) {
+	t.Helper()
+	switch toolName {
+	case "grep":
+		return "rg", "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"match.txt\"},\"lines\":{\"text\":\"needle\\n\"},\"line_number\":1}}'\n"
+	case "find":
+		return "fd", "#!/bin/sh\nprintf 'target.go\\000'\n"
+	default:
+		t.Fatalf("unsupported search helper test fixture %q", toolName)
+		return "", ""
+	}
 }
 
 func TestRunCommitConsumerFailsClosedBeforeInitialOverBudgetProvider(t *testing.T) {

@@ -49,7 +49,7 @@ func TestRegisterDefaultsMintsScopedWorkspaceReadForConcreteReaders(t *testing.T
 				if name == "read" || name == "ls" {
 					assert.Equal(t, CompletionInlinePipelineJoined, snapshot.completionProof, name)
 				} else {
-					assert.Empty(t, snapshot.completionProof, name, "read effect cannot mint helper completion proof")
+					assert.Equal(t, completionScopedSearchJoined, snapshot.completionProof, name, "scoped search readers capture a mode whose final proof depends on their execution path")
 				}
 			}
 		})
