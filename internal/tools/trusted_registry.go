@@ -337,7 +337,7 @@ func (r *DefaultToolRegistry) registerTrustedLocalProcess(ctx context.Context, d
 		}
 		proof := PreparedCompletionProof("")
 		if supportsLocalProcessCompletion(tool) {
-			proof = CompletionOwnedProcessGroupJoined
+			proof = completionLocalProcessOrPrestartNoProcessJoined
 		}
 		return r.registerDefinitionWithCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), proof)
 	case *StreamingBashToolImpl:
@@ -346,7 +346,7 @@ func (r *DefaultToolRegistry) registerTrustedLocalProcess(ctx context.Context, d
 		}
 		proof := PreparedCompletionProof("")
 		if supportsLocalProcessCompletion(tool.BashTool) {
-			proof = CompletionOwnedProcessGroupJoined
+			proof = completionLocalProcessOrPrestartNoProcessJoined
 		}
 		return r.registerDefinitionWithCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), proof)
 	default:
