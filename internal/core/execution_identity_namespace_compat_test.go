@@ -25,7 +25,7 @@ func TestExecutionIdentityValidateRejectsUnsupportedPIDNamespaceTokens(t *testin
 		token    string
 	}{
 		{name: "namespace token on Darwin", platform: "darwin", token: "linux:" + "pidns:v1:dev:ino:init:start"},
-		{name: "unknown token version", platform: "linux", token: "linux:" + "pidns:v2:dev:ino:init:start"},
+		{name: "unknown token version", platform: "linux", token: "linux:" + "pidns:v2:dev:ino"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			identity := ExecutionIdentity{
@@ -41,5 +41,20 @@ func TestExecutionIdentityValidateRejectsUnsupportedPIDNamespaceTokens(t *testin
 				t.Fatalf("identity with unsupported PID namespace token was accepted: %#v", identity)
 			}
 		})
+	}
+}
+
+func TestExecutionIdentityValidateAcceptsCurrentPIDNamespaceToken(t *testing.T) {
+	identity := ExecutionIdentity{
+		Kind:              ExecutionIdentityProcessGroup,
+		Platform:          "linux",
+		HostGeneration:    "linux:boot",
+		PIDNamespaceToken: "linux:pidns:v1:dev:ino:init:start",
+		LeaderPID:         17,
+		ProcessStartToken: "leader-start",
+		ProcessGroupID:    17,
+	}
+	if err := identity.Validate(); err != nil {
+		t.Fatalf("identity with current namespace token was rejected: %v", err)
 	}
 }

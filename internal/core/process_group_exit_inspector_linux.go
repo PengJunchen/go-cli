@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -46,32 +47,75 @@ func currentLinuxHostGeneration() (string, error) {
 	}
 	bootID := strings.TrimSpace(string(data))
 	if bootID == "" {
-		return "", errors.New("Linux boot generation is empty")
+		return "", errors.New("linux boot generation is empty")
 	}
 	return "linux:" + bootID, nil
 }
 
 func currentLinuxPIDNamespaceToken() (string, error) {
-	currentNamespace, err := os.Stat("/proc/self/ns/pid")
+	return currentLinuxPIDNamespaceTokenWithProcRoot("/proc", os.Getpid())
+}
+
+func currentLinuxPIDNamespaceTokenWithProcRoot(procRoot string, currentPID int) (string, error) {
+	status, err := os.ReadFile(filepath.Join(procRoot, "self", "status"))
+	if err != nil {
+		return "", fmt.Errorf("inspect current PID namespace procfs view: %w", err)
+	}
+	if err := validateLinuxPIDNamespaceProcView(status, currentPID); err != nil {
+		return "", fmt.Errorf("inspect current PID namespace procfs view: %w", err)
+	}
+	currentNamespace, err := os.Stat(filepath.Join(procRoot, "self", "ns", "pid"))
 	if err != nil {
 		return "", fmt.Errorf("inspect current PID namespace: %w", err)
-	}
-	initNamespace, err := os.Stat("/proc/1/ns/pid")
-	if err != nil {
-		return "", fmt.Errorf("inspect PID namespace init: %w", err)
-	}
-	if !os.SameFile(currentNamespace, initNamespace) {
-		return "", errors.New("procfs view does not match the current PID namespace")
 	}
 	namespaceStat, ok := currentNamespace.Sys().(*syscall.Stat_t)
 	if !ok {
 		return "", errors.New("current PID namespace has an unsupported stat type")
 	}
-	initStartToken, _, err := readLinuxProcessStat(1)
+	initStartToken, _, err := readLinuxProcessStatFromProcRoot(procRoot, 1)
 	if err != nil {
 		return "", fmt.Errorf("inspect PID namespace init start token: %w", err)
 	}
 	return fmt.Sprintf("linux:pidns:v1:%x:%x:init:%s", uint64(namespaceStat.Dev), namespaceStat.Ino, initStartToken), nil
+}
+
+func validateLinuxPIDNamespaceProcView(status []byte, currentPID int) error {
+	if currentPID <= 0 {
+		return errors.New("current PID is invalid")
+	}
+	found := false
+	for _, line := range strings.Split(string(status), "\n") {
+		if !strings.HasPrefix(line, "NStgid:") {
+			continue
+		}
+		if found {
+			return errors.New("procfs NStgid is duplicated")
+		}
+		found = true
+		values := strings.Fields(strings.TrimPrefix(line, "NStgid:"))
+		if len(values) != 1 {
+			return errors.New("procfs NStgid must contain exactly one PID")
+		}
+		for _, digit := range values[0] {
+			if digit < '0' || digit > '9' {
+				return errors.New("procfs NStgid contains an invalid PID")
+			}
+		}
+		if len(values[0]) > 1 && values[0][0] == '0' {
+			return errors.New("procfs NStgid contains an invalid PID")
+		}
+		procPID, err := strconv.Atoi(values[0])
+		if err != nil || procPID <= 0 {
+			return errors.New("procfs NStgid contains an invalid PID")
+		}
+		if procPID != currentPID {
+			return errors.New("procfs NStgid does not match the current process")
+		}
+	}
+	if !found {
+		return errors.New("procfs NStgid is missing")
+	}
+	return nil
 }
 
 func inspectLinuxLeader(pid int) (string, int, string, error) {
@@ -86,10 +130,14 @@ func inspectLinuxLeader(pid int) (string, int, string, error) {
 }
 
 func readLinuxProcessStat(pid int) (string, int, error) {
+	return readLinuxProcessStatFromProcRoot("/proc", pid)
+}
+
+func readLinuxProcessStatFromProcRoot(procRoot string, pid int) (string, int, error) {
 	if pid <= 0 {
 		return "", 0, errors.New("process ID must be positive")
 	}
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return "", 0, err
 	}
@@ -243,7 +291,7 @@ func currentLinuxPIDMax() (int, error) {
 	}
 	pidMax, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil || pidMax <= 0 {
-		return 0, errors.New("Linux PID limit is invalid")
+		return 0, errors.New("linux PID limit is invalid")
 	}
 	return pidMax, nil
 }

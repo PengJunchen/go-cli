@@ -4,8 +4,10 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -400,8 +402,125 @@ func TestCurrentPIDNamespaceTokenIsStableAndNamespaced(t *testing.T) {
 	if first == "" || first != second {
 		t.Fatalf("namespace tokens = %q and %q; want a stable non-empty token", first, second)
 	}
-	if len(first) < len("linux:pidns:v1:") || first[:len("linux:pidns:v1:")] != "linux:pidns:v1:" {
+	if !strings.HasPrefix(first, "linux:pidns:v1:") {
 		t.Fatalf("namespace token %q lacks the Linux PID namespace prefix", first)
+	}
+}
+
+func TestCurrentPIDNamespaceTokenUsesCurrentProcViewWithoutStattingPID1Namespace(t *testing.T) {
+	procRoot := t.TempDir()
+	namespacePath := filepath.Join(procRoot, "self", "ns", "pid")
+	if err := os.MkdirAll(filepath.Dir(namespacePath), 0o700); err != nil {
+		t.Fatalf("create current namespace fixture: %v", err)
+	}
+	if err := os.WriteFile(namespacePath, []byte("namespace fixture"), 0o600); err != nil {
+		t.Fatalf("write current namespace fixture: %v", err)
+	}
+	currentPID := os.Getpid()
+	statusPath := filepath.Join(procRoot, "self", "status")
+	status := []byte(fmt.Sprintf("Name:\ttest\nNStgid:\t%d\nNSpid:\t%d\n", currentPID, currentPID))
+	if err := os.WriteFile(statusPath, status, 0o600); err != nil {
+		t.Fatalf("write current process status fixture: %v", err)
+	}
+	const initStartToken = "98765"
+	initStatPath := filepath.Join(procRoot, "1", "stat")
+	if err := os.MkdirAll(filepath.Dir(initStatPath), 0o700); err != nil {
+		t.Fatalf("create PID 1 stat fixture directory: %v", err)
+	}
+	statFields := make([]string, 20)
+	statFields[0] = "S"
+	statFields[1] = "1"
+	statFields[2] = "1"
+	for index := 3; index < 19; index++ {
+		statFields[index] = "0"
+	}
+	statFields[19] = initStartToken
+	initStat := []byte("1 (init) " + strings.Join(statFields, " "))
+	if err := os.WriteFile(initStatPath, initStat, 0o600); err != nil {
+		t.Fatalf("write PID 1 stat fixture: %v", err)
+	}
+
+	first, err := currentLinuxPIDNamespaceTokenWithProcRoot(procRoot, currentPID)
+	if err != nil {
+		t.Fatalf("first PID namespace token lookup: %v", err)
+	}
+	second, err := currentLinuxPIDNamespaceTokenWithProcRoot(procRoot, currentPID)
+	if err != nil {
+		t.Fatalf("second PID namespace token lookup: %v", err)
+	}
+	if first == "" || first != second {
+		t.Fatalf("namespace tokens = %q and %q; want a stable non-empty token", first, second)
+	}
+	if !strings.HasPrefix(first, "linux:pidns:v1:") {
+		t.Fatalf("namespace token %q has no v1 prefix", first)
+	}
+	namespaceInfo, err := os.Stat(namespacePath)
+	if err != nil {
+		t.Fatalf("stat namespace fixture: %v", err)
+	}
+	namespaceStat, ok := namespaceInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("namespace fixture has unexpected stat type %T", namespaceInfo.Sys())
+	}
+	want := fmt.Sprintf("linux:pidns:v1:%x:%x:init:linux:%s", uint64(namespaceStat.Dev), namespaceStat.Ino, initStartToken)
+	if first != want {
+		t.Fatalf("namespace token = %q, want %q", first, want)
+	}
+	if _, err := os.Stat(filepath.Join(procRoot, "1", "ns", "pid")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("PID 1 namespace fixture stat error = %v, want missing path", err)
+	}
+}
+
+func TestCurrentPIDNamespaceTokenFailsClosedWhenCurrentStatFails(t *testing.T) {
+	procRoot := t.TempDir()
+	currentPID := os.Getpid()
+	statusPath := filepath.Join(procRoot, "self", "status")
+	if err := os.MkdirAll(filepath.Dir(statusPath), 0o700); err != nil {
+		t.Fatalf("create current process status fixture directory: %v", err)
+	}
+	if err := os.WriteFile(statusPath, []byte(fmt.Sprintf("NStgid:\t%d\n", currentPID)), 0o600); err != nil {
+		t.Fatalf("write current process status fixture: %v", err)
+	}
+	if _, err := currentLinuxPIDNamespaceTokenWithProcRoot(procRoot, currentPID); err == nil {
+		t.Fatal("PID namespace lookup succeeded without the current namespace stat")
+	}
+}
+
+func TestCurrentPIDNamespaceTokenRejectsUnverifiedProcViews(t *testing.T) {
+	currentPID := os.Getpid()
+	for _, test := range []struct {
+		name   string
+		status string
+	}{
+		{name: "missing NStgid"},
+		{name: "duplicate NStgid", status: fmt.Sprintf("NStgid:\t%d\nNStgid:\t%d\n", currentPID, currentPID)},
+		{name: "multiple namespace levels", status: fmt.Sprintf("NStgid:\t1 %d\n", currentPID)},
+		{name: "different caller PID", status: fmt.Sprintf("NStgid:\t%d\n", currentPID+1)},
+		{name: "invalid caller PID", status: "NStgid:\tinvalid\n"},
+		{name: "positive sign", status: fmt.Sprintf("NStgid:\t+%d\n", currentPID)},
+		{name: "negative sign", status: "NStgid:\t-1\n"},
+		{name: "zero", status: "NStgid:\t0\n"},
+		{name: "leading zero", status: fmt.Sprintf("NStgid:\t0%d\n", currentPID)},
+		{name: "overflow", status: "NStgid:\t99999999999999999999999999999999999999\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			procRoot := t.TempDir()
+			namespacePath := filepath.Join(procRoot, "self", "ns", "pid")
+			if err := os.MkdirAll(filepath.Dir(namespacePath), 0o700); err != nil {
+				t.Fatalf("create current namespace fixture directory: %v", err)
+			}
+			if err := os.WriteFile(namespacePath, []byte("namespace fixture"), 0o600); err != nil {
+				t.Fatalf("write current namespace fixture: %v", err)
+			}
+			statusPath := filepath.Join(procRoot, "self", "status")
+			if err := os.WriteFile(statusPath, []byte(test.status), 0o600); err != nil {
+				t.Fatalf("write process status fixture: %v", err)
+			}
+			_, err := currentLinuxPIDNamespaceTokenWithProcRoot(procRoot, currentPID)
+			if err == nil || !strings.Contains(err.Error(), "NStgid") {
+				t.Fatalf("PID namespace lookup error = %v, want NStgid validation failure", err)
+			}
+		})
 	}
 }
 
