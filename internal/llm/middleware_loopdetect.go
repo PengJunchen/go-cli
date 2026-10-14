@@ -5,6 +5,10 @@ package llm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -93,13 +97,60 @@ type loopDetectModel struct {
 
 var _ BaseChatModel = (*loopDetectModel)(nil)
 
-// checkLoop records the response content and returns an error if it has now
-// appeared threshold times in a row. It is safe for concurrent use.
-func (m *loopDetectModel) checkLoop(content string) error {
+// responseFingerprint returns a bounded fingerprint of the assistant's
+// user-visible text and ordered tool actions. Provider-generated tool IDs are
+// excluded because they vary between otherwise identical responses.
+func responseFingerprint(content string, toolCalls []ToolCall) (string, error) {
+	if len(toolCalls) > GuardedStreamMaxToolCalls {
+		return "", fmt.Errorf("loopdetection: response exceeds %d tool calls", GuardedStreamMaxToolCalls)
+	}
+
+	h := sha256.New()
+	totalBytes := 0
+	writeField := func(value []byte) error {
+		next, ok := addBoundedStreamBytes(totalBytes, len(value))
+		if !ok {
+			return fmt.Errorf("loopdetection: response exceeds %d-byte candidate limit", GuardedStreamMaxBytes)
+		}
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(value)))
+		_, _ = h.Write(length[:])
+		_, _ = h.Write(value)
+		totalBytes = next
+		return nil
+	}
+
+	if err := writeField([]byte(content)); err != nil {
+		return "", err
+	}
+	var callCount [8]byte
+	binary.BigEndian.PutUint64(callCount[:], uint64(len(toolCalls)))
+	var countLength [8]byte
+	binary.BigEndian.PutUint64(countLength[:], uint64(len(callCount)))
+	_, _ = h.Write(countLength[:])
+	_, _ = h.Write(callCount[:])
+	for _, call := range toolCalls {
+		if err := writeField([]byte(call.Name)); err != nil {
+			return "", err
+		}
+		args, err := json.Marshal(call.Args)
+		if err != nil {
+			return "", fmt.Errorf("loopdetection: encode tool arguments for fingerprint: %w", err)
+		}
+		if err := writeField(args); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// checkLoop records the response fingerprint and returns an error if it has
+// now appeared threshold times in a row. It is safe for concurrent use.
+func (m *loopDetectModel) checkLoop(fingerprint string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	*m.recent = append(*m.recent, content)
+	*m.recent = append(*m.recent, fingerprint)
 	if len(*m.recent) > m.windowSize {
 		*m.recent = (*m.recent)[len(*m.recent)-m.windowSize:]
 	}
@@ -107,7 +158,7 @@ func (m *loopDetectModel) checkLoop(content string) error {
 	// Count the trailing run of responses identical to the latest one.
 	count := 1
 	for i := len(*m.recent) - 2; i >= 0; i-- {
-		if (*m.recent)[i] == content {
+		if (*m.recent)[i] == fingerprint {
 			count++
 		} else {
 			break
@@ -129,7 +180,11 @@ func (m *loopDetectModel) Generate(ctx context.Context, msgs []Message, opts ...
 	if err != nil {
 		return nil, err
 	}
-	if err := m.checkLoop(resp.Content); err != nil {
+	fingerprint, err := responseFingerprint(resp.Content, resp.ToolCalls)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.checkLoop(fingerprint); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -232,7 +287,12 @@ func (m *loopDetectModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 			return
 		}
 		// Post-hoc loop detection after all chunks have been forwarded.
-		if loopErr := m.checkLoop(acc.String()); loopErr != nil {
+		fingerprint, fingerprintErr := responseFingerprint(acc.String(), finalChunk.ToolCalls)
+		if fingerprintErr != nil {
+			fail(fingerprintErr, false)
+			return
+		}
+		if loopErr := m.checkLoop(fingerprint); loopErr != nil {
 			m.logger.Warn("loopdetection.stream.post_hoc",
 				"op", "loopdetection.stream.post_hoc",
 				"error", loopErr.Error(),
