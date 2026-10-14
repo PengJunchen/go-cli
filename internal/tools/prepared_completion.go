@@ -25,6 +25,12 @@ const (
 	// synchronous fallback proof or the concrete owned-process-group proof;
 	// this mode value is never published as a completion proof.
 	completionScopedSearchJoined PreparedCompletionProof = "scoped_search_joined"
+	// completionLocalProcessOrPrestartNoProcessJoined is a prepared-dispatch
+	// mode for a trusted local Bash tool. Its final signal reports either the
+	// concrete owned-process-group proof or an explicit synchronous attestation
+	// that Sandbox.Validate rejected the command before process start. The mode itself
+	// is never published as a completion proof.
+	completionLocalProcessOrPrestartNoProcessJoined PreparedCompletionProof = "local_process_or_prestart_no_process_joined"
 )
 
 // PreparedCompletionSignal exposes one sealed PreparedInvocation's
@@ -69,6 +75,7 @@ type preparedCompletionState struct {
 	processObserved    bool
 	processClosed      bool
 	inlineFallbackMode bool
+	inlinePrestartMode bool
 	inlineObserved     bool
 	inlineClosed       bool
 	pipelineReturned   bool
@@ -125,7 +132,7 @@ func (s *preparedCompletionState) proofFromCompletedSnapshot(done <-chan struct{
 }
 
 func (s *preparedCompletionState) begin(proof PreparedCompletionProof) chan struct{} {
-	if s == nil || (!validPreparedCompletionProof(proof) && proof != completionScopedSearchJoined) {
+	if s == nil || (!validPreparedCompletionProof(proof) && proof != completionScopedSearchJoined && proof != completionLocalProcessOrPrestartNoProcessJoined) {
 		return nil
 	}
 	s.mu.Lock()
@@ -136,9 +143,10 @@ func (s *preparedCompletionState) begin(proof PreparedCompletionProof) chan stru
 	done := make(chan struct{})
 	s.done = done
 	s.ownedDone = done
-	if proof == CompletionOwnedProcessGroupJoined || proof == completionScopedSearchJoined {
+	if proof == CompletionOwnedProcessGroupJoined || proof == completionScopedSearchJoined || proof == completionLocalProcessOrPrestartNoProcessJoined {
 		s.processMode = true
 		s.inlineFallbackMode = proof == completionScopedSearchJoined
+		s.inlinePrestartMode = proof == completionLocalProcessOrPrestartNoProcessJoined
 	} else {
 		s.proof = proof
 	}
@@ -245,7 +253,7 @@ func (s *preparedCompletionState) attach(proof PreparedCompletionProof, done <-c
 		return true
 	}
 	if proof == CompletionInlinePipelineJoined && s.processMode {
-		if s.ownedDone == nil || !s.inlineFallbackMode || s.inlineObserved || s.processObserved || s.finalized {
+		if s.ownedDone == nil || (!s.inlineFallbackMode && !s.inlinePrestartMode) || s.inlineObserved || s.processObserved || s.finalized {
 			s.mu.Unlock()
 			return false
 		}
@@ -297,7 +305,7 @@ func (s *preparedCompletionState) finishResourceLocked() []func() {
 		switch {
 		case s.processObserved && s.processClosed:
 			s.proof = CompletionOwnedProcessGroupJoined
-		case s.inlineFallbackMode && s.inlineObserved && s.inlineClosed:
+		case (s.inlineFallbackMode || s.inlinePrestartMode) && s.inlineObserved && s.inlineClosed:
 			s.proof = CompletionInlinePipelineJoined
 		}
 	}
