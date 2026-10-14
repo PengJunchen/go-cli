@@ -45,6 +45,20 @@ func awaitPTYState(t *testing.T, slave *os.File, original *xterm.State, wantOrig
 
 func assertPTYInputRemains(t *testing.T, slave *os.File, expected int) {
 	t.Helper()
+	// A master write can return before the line discipline delivers bytes to
+	// the slave queue. Observe delivery before checking that no reader steals
+	// them; a stolen byte also fails this bounded wait because we never rewrite it.
+	deliveryDeadline := time.Now().Add(2 * time.Second)
+	for {
+		pending, err := pendingPTYInputBytes(slave.Fd())
+		require.NoError(t, err)
+		require.LessOrEqual(t, pending, expected, "unexpected extra input reached the queue")
+		if pending == expected {
+			break
+		}
+		require.True(t, time.Now().Before(deliveryDeadline), "input never reached the next owner's queue")
+		time.Sleep(time.Millisecond)
+	}
 	deadline := time.Now().Add(150 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		pending, err := pendingPTYInputBytes(slave.Fd())
