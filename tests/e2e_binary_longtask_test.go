@@ -68,6 +68,16 @@ func testLongTaskBinary120Turns(t *testing.T, binary string) {
 	})
 	fixture := newLongTaskFixture(t, peer, true)
 	defer fixture.server.Close()
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		lines := strings.Split(fixture.readCLIlog(t), "\n")
+		if len(lines) > 80 {
+			lines = lines[len(lines)-80:]
+		}
+		t.Logf("failed 120-turn CLI log tail:\n%s", strings.Join(lines, "\n"))
+	})
 
 	var input strings.Builder
 	for turn := 1; turn <= longTaskTurns; turn++ {
@@ -91,7 +101,7 @@ func testLongTaskBinary120Turns(t *testing.T, binary string) {
 	require.NoError(t, ctx.Err(), "the 120-turn process must finish before its timeout")
 	require.NotContains(t, stderr.String(), "DATA RACE", "the nested race-enabled CLI must not report a race")
 	require.Contains(t, stdout.String(), "Session ended.")
-	require.Contains(t, stdout.String(), fmt.Sprintf("reply-%03d", longTaskTurns))
+	require.Contains(t, stdout.String(), fmt.Sprintf("reply-%03d", longTaskTurns), "CLI stderr: %s", stderr.String())
 
 	bodies := peer.requestBodies()
 	require.Len(t, bodies, longTaskTurns, "each user submission should make one actual provider request")

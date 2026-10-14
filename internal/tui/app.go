@@ -2003,7 +2003,12 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 			"span_id", ev.SpanID,
 			"latency_us", time.Since(start).Microseconds(),
 		)
-		return func() tea.Msg { return m.spinner.Tick() }
+		// Commands run asynchronously; capture the value receiver while locked
+		// so this scheduled tick cannot read a later spinner update.
+		m.mu.Lock()
+		tick := m.spinner.Tick
+		m.mu.Unlock()
+		return tick
 	}
 
 	if ct == ContentTypeToolResult {
