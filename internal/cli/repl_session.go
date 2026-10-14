@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/config"
@@ -43,6 +44,14 @@ func newEntryID() string {
 type REPLSession struct {
 	// cmd is the owning interactiveCmd, kept for handleSlashCommand.
 	cmd *interactiveCmd
+
+	// extraAssembleOptions supplies focused dependency overrides to REPL tests.
+	// The interactive command itself does not expose these as user flags.
+	extraAssembleOptions []AssembleOption
+
+	// unknownCancelRecovery is set only after an explicit TUI cancellation has
+	// joined a quiescent owner and its exact unknown terminal checkpoint.
+	unknownCancelRecovery *durableUnknownCancelRecovery
 
 	// I/O
 	out io.Writer
@@ -114,21 +123,22 @@ type REPLSession struct {
 	spanCtx context.Context
 
 	// Turn-level state (shared across executeTurn sub-methods)
-	line        string
-	turnSpan    tracing.TraceSpan
-	turnCtx     context.Context
-	cancelTurn  context.CancelFunc
-	interrupter *InterruptHandler
-	stream      *core.EventStreamImpl
-	turnResult  core.Result
-	turnErr     error
-	turnDone    chan struct{}
-	isTTY       bool
-	app         *tui.BubbleteaApp
-	eventSource *tui.OwnedAgentEventStream
-	uiCtx       context.Context
-	cancelUI    context.CancelFunc
-	appStarted  bool
+	line              string
+	turnSpan          tracing.TraceSpan
+	turnCtx           context.Context
+	cancelTurn        context.CancelFunc
+	interrupter       *InterruptHandler
+	stream            *core.EventStreamImpl
+	turnResult        core.Result
+	turnErr           error
+	turnDone          chan struct{}
+	uiCancelRequested atomic.Bool
+	isTTY             bool
+	app               *tui.BubbleteaApp
+	eventSource       *tui.OwnedAgentEventStream
+	uiCtx             context.Context
+	cancelUI          context.CancelFunc
+	appStarted        bool
 }
 
 const durableOwnerJoinWait = 2 * time.Second
@@ -330,6 +340,7 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 		WithAgentName("interactive"),
 		WithThinkingLevel(s.thinkingLevel),
 	}
+	assembleOpts = append(assembleOpts, s.extraAssembleOptions...)
 	if durableSession != nil {
 		assembleOpts = append(assembleOpts, withDurableCLISession(durableSession))
 	}
@@ -689,6 +700,10 @@ func (s *REPLSession) readInput() error {
 			if cmd.Name == "exit" {
 				break
 			}
+			if s.unknownCancelRecovery != nil && !allowedDuringUnknownCancellation(cmd) {
+				printUnknownCancellationFence(s.out)
+				continue
+			}
 			// Custom Markdown command handlers may return a pendingInput to
 			// inject a prompt template that the REPL loop processes as user
 			// input.
@@ -703,6 +718,10 @@ func (s *REPLSession) readInput() error {
 		if strings.EqualFold(line, exitCommand) {
 			s.logger.Info("cli_interactive_exit", "op", "cli.interactive.exit")
 			break
+		}
+		if s.unknownCancelRecovery != nil {
+			printUnknownCancellationFence(s.out)
+			continue
 		}
 
 		s.line = line
@@ -796,6 +815,12 @@ func (s *REPLSession) executeTurn() error {
 	s.cancelTurn()
 	s.interrupter.Stop()
 	s.stopTUI()
+	if s.unknownCancelRecovery != nil {
+		s.finishTurnSpan(context.Canceled)
+		fmt.Fprintln(s.out, "[interrupted] The run outcome remains unknown; this is not a rollback. External or workspace side effects may be partial.")              //nolint:errcheck
+		fmt.Fprintln(s.out, "The old run will not be retried. Use /session pending to inspect unresolved actions, then /session new to continue in a fresh session.") //nolint:errcheck
+		return nil
+	}
 
 	if err := s.finishTurnSpanAfterCompletion(interrupted); err != nil {
 		return err
@@ -973,6 +998,21 @@ func (s *REPLSession) applyDurableTurnRefresh(initial *session.PreparedSessionSn
 	} else if publication.State != core.DurablePublicationUnbound {
 		waitErr = errors.New("interactive: durable publication has no owner status handle")
 	}
+	if waitErr == nil && publication.State == core.DurablePublicationSynced {
+		recovery, ok, err := s.unknownCancellationRecovery(initial, status, publication)
+		if err != nil {
+			return err
+		}
+		if ok {
+			handler := s.durableSessionCommandHandler()
+			if handler == nil {
+				return errors.New("interactive: durable unknown cancellation recovery requires the /session command")
+			}
+			s.unknownCancelRecovery = recovery
+			handler.recoveryNewSession = s.startNewSessionAfterUnknownCancellation
+			return nil
+		}
+	}
 
 	var sourceSnapshot session.PreparedSessionSnapshot
 	var transcript tui.CanonicalTranscriptSnapshot
@@ -1069,9 +1109,156 @@ func (s *REPLSession) applyDurableSessionSnapshot(snapshot session.PreparedSessi
 	return nil
 }
 
+func (s *REPLSession) unknownCancellationRecovery(
+	initial *session.PreparedSessionSnapshot,
+	joined core.RunStatus,
+	publication core.DurablePublication,
+) (*durableUnknownCancelRecovery, bool, error) {
+	if initial == nil || s == nil || s.spanCtx == nil || s.turnCtx == nil ||
+		s.assembly == nil || s.assembly.durableSession == nil || s.assembly.durableSession.manager == nil {
+		return nil, false, nil
+	}
+	result := s.turnResult
+	guard, ok := s.assembly.runSlotGuard.(core.RunSlotWrapperRegistrar)
+	if !ok {
+		return nil, false, nil
+	}
+	_, runSlotActive := guard.ActiveRunStatus()
+	evidence := unknownCancellationOwnerEvidence{
+		explicitUICancel: s.uiCancelRequested.Load(),
+		parentContextErr: s.spanCtx.Err(), turnContextErr: s.turnCtx.Err(),
+		// applyDurableTurnRefresh only reaches this method after WaitForCompletion returns nil.
+		joinErr: nil, statusHandle: result.StatusHandle != nil,
+		resultRunID: result.RunID, initialSessionID: initial.SessionID,
+		joinedStatus: joined, publication: publication, runSlotActive: runSlotActive,
+	}
+	if !validUnknownCancellationOwnerEvidence(evidence) {
+		return nil, false, nil
+	}
+	snapshot, err := s.assembly.durableSession.snapshotSelected()
+	if err != nil {
+		return nil, false, fmt.Errorf("interactive: inspect unknown canceled durable run: %w", err)
+	}
+	if err := validateSamePreparedTranscript(*initial, snapshot); err != nil {
+		return nil, false, err
+	}
+	observation, err := ProjectRunObservation(s.spanCtx, snapshot, result.StatusHandle, result.RunID)
+	if err != nil {
+		return nil, false, fmt.Errorf("interactive: inspect unknown canceled run terminal: %w", err)
+	}
+	if observation.RunID != joined.RunID || observation.ExecutionState != core.RunExecutionQuiescent ||
+		observation.Outcome != core.RunOutcomeUnknown || observation.TerminalEntryID == "" ||
+		observation.TerminalOutcome != core.RunOutcomeUnknown {
+		return nil, false, nil
+	}
+	recovery := &durableUnknownCancelRecovery{
+		sessionID: initial.SessionID, activeBranchID: initial.ActiveBranchID, runID: result.RunID,
+		ownerGeneration: publication.OwnerGeneration, terminalEntryID: observation.TerminalEntryID,
+	}
+	if err := validateUnknownCancellationRecoverySelection(recovery, result.RunID, joined, publication, snapshot, observation); err != nil {
+		return nil, false, nil
+	}
+	return recovery, true, nil
+}
+
+func (s *REPLSession) durableSessionCommandHandler() *SessionHandler {
+	if s.slashReg == nil {
+		return nil
+	}
+	registered, ok := s.slashReg.Lookup("session")
+	if !ok {
+		return nil
+	}
+	handler, _ := registered.(*SessionHandler)
+	return handler
+}
+
+func (s *REPLSession) startNewSessionAfterUnknownCancellation(ctx context.Context) (string, error) {
+	recovery := s.unknownCancelRecovery
+	if recovery == nil || s.assembly == nil || s.assembly.durableSession == nil || s.assembly.durableSession.manager == nil {
+		return "", errors.New("/session new is available only after a quiescent unknown cancellation")
+	}
+	guard, ok := s.assembly.runSlotGuard.(core.RunSlotWrapperRegistrar)
+	if !ok {
+		return "", errors.New("cannot verify that the previous run slot is idle")
+	}
+	if _, active := guard.ActiveRunStatus(); active {
+		return "", errors.New("cannot start a new session while a run owner is active")
+	}
+	if s.turnResult.StatusHandle == nil || s.turnResult.RunID != recovery.runID {
+		return "", errors.New("the interrupted run no longer matches the saved recovery binding")
+	}
+	waiter, ok := s.turnResult.StatusHandle.(core.RunStatusWaiter)
+	if !ok {
+		return "", errors.New("cannot revalidate the joined owner publication for /session new")
+	}
+	waitCtx, cancel := context.WithTimeout(normalizeSessionContext(ctx), durableOwnerJoinWait)
+	status, publication, waitErr := waiter.WaitForCompletion(waitCtx)
+	cancel()
+	if waitErr != nil {
+		return "", fmt.Errorf("rejoin the interrupted run before starting a new session: %w", waitErr)
+	}
+	selected, err := s.assembly.durableSession.snapshotSelected()
+	if err != nil {
+		return "", fmt.Errorf("inspect the selected durable session before starting a new one: %w", err)
+	}
+	observation, err := ProjectRunObservation(ctx, selected, s.turnResult.StatusHandle, recovery.runID)
+	if err != nil {
+		return "", fmt.Errorf("revalidate the unknown terminal checkpoint before starting a new session: %w", err)
+	}
+	if err := validateUnknownCancellationRecoverySelection(recovery, s.turnResult.RunID, status, publication, selected, observation); err != nil {
+		return "", err
+	}
+	if err := s.assembly.durableSession.manager.prepareNew(ctx, "interactive after unknown cancellation"); err != nil {
+		return "", fmt.Errorf("prepare a new durable session after unknown cancellation: %w", err)
+	}
+	if _, active := guard.ActiveRunStatus(); active {
+		return "", errors.New("a run owner became active while starting a new session")
+	}
+	snapshot, err := s.assembly.durableSession.snapshotSelected()
+	if err != nil {
+		return "", fmt.Errorf("inspect the newly selected durable session: %w", err)
+	}
+	if snapshot.SessionID == recovery.sessionID || len(snapshot.PublishedView.Messages) != 0 {
+		return "", errors.New("new durable session did not select a fresh empty physical session")
+	}
+	tree, err := session.NewDefaultSessionTreeBuilder().BuildFromSnapshot(ctx, snapshot)
+	if err != nil {
+		return "", fmt.Errorf("build the new durable session tree: %w", err)
+	}
+	s.sessionTree = tree
+	s.sessionHandler = session.NewDurableReadOnlySessionSlashHandler(tree)
+	s.slashCtx.sessionHandler = s.sessionHandler
+	s.assembly.Agent.SetHistory(snapshot.PublishedView.Messages)
+	s.assembly.PhysicalSessionID = snapshot.SessionID
+	s.slashCtx.sessionID = snapshot.SessionID
+	s.entryCounter = len(s.assembly.Agent.Messages())
+	s.unknownCancelRecovery = nil
+	if handler := s.durableSessionCommandHandler(); handler != nil {
+		handler.recoveryNewSession = nil
+	}
+	return snapshot.SessionID, nil
+}
+
+func allowedDuringUnknownCancellation(command session.SlashCommand) bool {
+	switch command.Name {
+	case "help":
+		return true
+	case "session":
+		return len(command.Args) == 1 && (command.Args[0] == "pending" || command.Args[0] == "new")
+	default:
+		return false
+	}
+}
+
+func printUnknownCancellationFence(out io.Writer) {
+	fmt.Fprintln(out, "The interrupted run is unresolved; no new model request was sent. Use /session pending, /help, /session new, or exit.") //nolint:errcheck
+}
+
 // setupTurn creates the cancelable turn context, interrupt handler, and
 // event stream, and expands @-mentions in the user input.
 func (s *REPLSession) setupTurn() {
+	s.uiCancelRequested.Store(false)
 	s.turnSpan, s.turnCtx = tracing.SpanFromContext(s.spanCtx, spanInteractiveTurn, tracing.SpanKindInternal)
 	s.turnSpan.SetAttributes(
 		tracing.SensitiveAttribute("user_message", s.line),
@@ -1254,7 +1441,12 @@ func (s *REPLSession) buildCallbackOptions() []tui.AppOption {
 			}
 		}),
 		tui.WithCancelCallback(func() {
-			s.cancelTurn()
+			if s.turnCtx != nil && s.turnCtx.Err() == nil && s.spanCtx != nil && s.spanCtx.Err() == nil {
+				s.uiCancelRequested.Store(true)
+			}
+			if s.cancelTurn != nil {
+				s.cancelTurn()
+			}
 		}),
 		tui.WithPauseCallback(func() {
 			if s.assembly.LoopAgent != nil {
