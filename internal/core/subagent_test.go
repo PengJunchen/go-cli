@@ -89,9 +89,28 @@ func TestSubAgentRunExecutesIndependentRun(t *testing.T) {
 func TestSubAgentSendRecordsMessage(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	sub := newTestSubAgent("worker")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRunner := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseRunner()
+	runner := &heldInboxSubAgentRunner{started: started, release: release}
+	sub := mustSubAgent(NewDefaultSubAgent(
+		SubAgentConfig{Name: "worker"},
+		WithSubAgentRunner(func(SubAgentConfig) subAgentRunner { return runner }),
+	))
+
 	_, err := sub.Run(context.Background(), "go")
 	require.NoError(t, err)
+	defer func() {
+		releaseRunner()
+		_, _ = sub.Wait(context.Background())
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("sub-agent runner did not start")
+	}
 
 	require.NoError(t, sub.Send(context.Background(), "follow-up"))
 
@@ -104,6 +123,7 @@ func TestSubAgentSendRecordsMessage(t *testing.T) {
 		return received[0] == "follow-up"
 	}, time.Second, time.Millisecond*5)
 
+	releaseRunner()
 	_, werr := sub.Wait(context.Background())
 	require.NoError(t, werr)
 }
