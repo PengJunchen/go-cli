@@ -130,6 +130,15 @@ func (t *GrepTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	logger := tracing.NewTraceLogger(span, slog.Default())
 
 	start := time.Now()
+	var lifecycle managedLocalResult
+	var helperStarted bool
+	defer func() {
+		if helperStarted {
+			reportPreparedLocalProcessCompletion(ctx, lifecycle)
+			return
+		}
+		reportPreparedNoProcessCompletion(ctx)
+	}()
 
 	patternStr, ok := call.Args["pattern"].(string)
 	if !ok || strings.TrimSpace(patternStr) == "" {
@@ -163,9 +172,6 @@ func (t *GrepTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	}
 
 	ms, truncated, lifecycle, helperStarted, err := t.search(ctx, re, searchPath, glob)
-	if helperStarted {
-		reportPreparedLocalProcessCompletion(ctx, lifecycle)
-	}
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("grep.search_failed", "tool", "grep", "path", searchPath, "err", err)

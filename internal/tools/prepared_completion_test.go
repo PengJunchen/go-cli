@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,7 @@ func TestPreparedCompletionProofValuesAreStable(t *testing.T) {
 	assert.Equal(t, "inline_pipeline_joined", string(CompletionInlinePipelineJoined))
 	assert.Equal(t, "queued_job_joined", string(CompletionQueuedJobJoined))
 	assert.Equal(t, "owned_process_group_joined", string(CompletionOwnedProcessGroupJoined))
+	assert.False(t, validPreparedCompletionProof(completionScopedSearchJoined), "the hybrid registration mode must never be published as a final proof")
 }
 
 func TestTrustedAskUserControlProvidesInlineCompletionProof(t *testing.T) {
@@ -90,6 +92,125 @@ func TestPreparedCompletionForcedPipeCloseClosesLocalSignalWithoutProof(t *testi
 	default:
 		t.Fatal("the local execution pipeline has returned and must close its completion signal")
 	}
+}
+
+func TestPreparedCompletionScopedSearchRequiresOneConcreteAttestation(t *testing.T) {
+	t.Run("missing report remains unproven", func(t *testing.T) {
+		state := newPreparedCompletionState()
+		done := state.begin(completionScopedSearchJoined)
+		require.NotNil(t, done)
+		state.finish(done, true)
+		select {
+		case <-state.signal().Done():
+		default:
+			t.Fatal("the synchronous executor returned, so its local signal should close")
+		}
+		assert.Empty(t, state.signal().Proof(), "executor return without a path attestation cannot prove either mode")
+		assert.False(t, state.attach(CompletionInlinePipelineJoined, closedCompletionChannel()), "a late report cannot restore proof after finalization")
+	})
+
+	t.Run("hybrid registration mode cannot be reported as final proof", func(t *testing.T) {
+		state := newPreparedCompletionState()
+		done := state.begin(completionScopedSearchJoined)
+		require.NotNil(t, done)
+		ctx := withPreparedCompletionReporter(context.Background(), func(proof PreparedCompletionProof, reportedDone <-chan struct{}) {
+			state.attach(proof, reportedDone)
+		})
+		reportPreparedCompletion(ctx, completionScopedSearchJoined, closedCompletionChannel())
+		state.finish(done, true)
+		assert.Empty(t, state.signal().Proof(), "only concrete inline or owned-process reports may resolve a scoped search")
+	})
+
+	t.Run("pending inline attestation waits for its signal and executor", func(t *testing.T) {
+		state := newPreparedCompletionState()
+		done := state.begin(completionScopedSearchJoined)
+		require.NotNil(t, done)
+		inlineDone := make(chan struct{})
+		require.True(t, state.attach(CompletionInlinePipelineJoined, inlineDone))
+		state.finish(done, true)
+		select {
+		case <-state.signal().Done():
+			t.Fatal("the prepared completion closed while the reported synchronous path remained open")
+		default:
+		}
+		assert.Empty(t, state.signal().Proof())
+		close(inlineDone)
+		select {
+		case <-state.signal().Done():
+		case <-time.After(time.Second):
+			t.Fatal("the completion did not close after the reported inline path returned")
+		}
+		assert.Equal(t, CompletionInlinePipelineJoined, state.signal().Proof())
+	})
+
+	t.Run("pending helper attestation waits for its owned-group signal", func(t *testing.T) {
+		state := newPreparedCompletionState()
+		done := state.begin(completionScopedSearchJoined)
+		require.NotNil(t, done)
+		processDone := make(chan struct{})
+		require.True(t, state.attach(CompletionOwnedProcessGroupJoined, processDone))
+		state.finish(done, true)
+		select {
+		case <-state.signal().Done():
+			t.Fatal("the prepared completion closed while the owned process-group signal remained open")
+		default:
+		}
+		assert.Empty(t, state.signal().Proof())
+		close(processDone)
+		select {
+		case <-state.signal().Done():
+		case <-time.After(time.Second):
+			t.Fatal("the completion did not close after the owned process group joined")
+		}
+		assert.Equal(t, CompletionOwnedProcessGroupJoined, state.signal().Proof())
+	})
+
+	t.Run("owned helper report cannot be replaced by inline report", func(t *testing.T) {
+		state := newPreparedCompletionState()
+		done := state.begin(completionScopedSearchJoined)
+		require.NotNil(t, done)
+		processDone := closedCompletionChannel()
+		require.True(t, state.attach(CompletionOwnedProcessGroupJoined, processDone))
+		assert.False(t, state.attach(CompletionInlinePipelineJoined, closedCompletionChannel()), "an observed helper must finish only through its managed process-group signal")
+		assert.False(t, state.attach(CompletionOwnedProcessGroupJoined, closedCompletionChannel()), "duplicate process reports cannot overwrite the observed helper")
+		state.finish(done, true)
+		select {
+		case <-state.signal().Done():
+		default:
+			t.Fatal("closed helper and prepared executor must close the signal")
+		}
+		assert.Equal(t, CompletionOwnedProcessGroupJoined, state.signal().Proof())
+	})
+
+	t.Run("inline report cannot be replaced by helper report", func(t *testing.T) {
+		state := newPreparedCompletionState()
+		done := state.begin(completionScopedSearchJoined)
+		require.NotNil(t, done)
+		require.True(t, state.attach(CompletionInlinePipelineJoined, closedCompletionChannel()))
+		assert.False(t, state.attach(CompletionOwnedProcessGroupJoined, closedCompletionChannel()), "the reported no-process path cannot be upgraded after dispatch")
+		state.finish(done, true)
+		assert.Equal(t, CompletionInlinePipelineJoined, state.signal().Proof())
+	})
+
+	t.Run("failed executor invalidates either positive path", func(t *testing.T) {
+		state := newPreparedCompletionState()
+		done := state.begin(completionScopedSearchJoined)
+		require.NotNil(t, done)
+		require.True(t, state.attach(CompletionInlinePipelineJoined, closedCompletionChannel()))
+		state.finish(done, false)
+		select {
+		case <-state.signal().Done():
+		default:
+			t.Fatal("failed executor return must still close the local signal")
+		}
+		assert.Empty(t, state.signal().Proof(), "a panicked or otherwise unsuccessful prepared executor cannot retain proof")
+	})
+}
+
+func closedCompletionChannel() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
 }
 
 func TestPreparedCompletionInvalidationStaysStickyAfterLateQueueAttachment(t *testing.T) {
@@ -1032,4 +1153,98 @@ func TestPreparedCompletionCustomStreamingExecutorDoesNotInheritProof(t *testing
 	}
 	assert.Nil(t, invocation.CompletionSignal().Done(), "ordinary custom StreamingBashTool registration has no local process-group authority")
 	assert.Empty(t, invocation.CompletionSignal().Proof())
+}
+
+func TestPreparedScopedSearchReportsSynchronousFallbackCompletion(t *testing.T) {
+	ctx := context.Background()
+	for _, toolName := range []string{"grep", "find"} {
+		t.Run(toolName, func(t *testing.T) {
+			root := t.TempDir()
+			if toolName == "grep" {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "match.txt"), []byte("needle\n"), 0o600))
+			} else {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "target.go"), []byte("package main\n"), 0o600))
+			}
+
+			base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+			var reader ToolDefinition
+			var args map[string]any
+			if toolName == "grep" {
+				reader = NewGrepTool(WithGrepWorkdir(root), WithGrepPathWhitelist([]string{root}), WithForcePureGo(true))
+				args = map[string]any{"pattern": "needle", "path": root}
+			} else {
+				reader = NewFindTool(WithFindWorkdir(root), WithFindPathWhitelist([]string{root}), WithFindForceNode(true))
+				args = map[string]any{"pattern": "target.go", "type": "f", "path": root}
+			}
+			require.NoError(t, base.registerTrustedScopedWorkspaceRead(ctx, reader))
+			registry := NewMiddlewareToolRegistry(base)
+			configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+
+			invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: toolName, Args: args})
+			require.NoError(t, err)
+			result, err := invocation.Dispatch(ctx)
+			require.NoError(t, err)
+			require.NotEmpty(t, result.Output)
+
+			signal := invocation.CompletionSignal()
+			require.NotNil(t, signal.Done(), "the scoped pure-Go reader must report its synchronous no-process completion")
+			select {
+			case <-signal.Done():
+			default:
+				t.Fatal("completion signal must close only after the synchronous fallback returns")
+			}
+			assert.Equal(t, CompletionInlinePipelineJoined, signal.Proof())
+		})
+	}
+}
+
+func TestPreparedScopedSearchReportsObservedHelperCompletion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the managed process-group helper path is Unix-only")
+	}
+	ctx := context.Background()
+	for _, toolName := range []string{"grep", "find"} {
+		t.Run(toolName, func(t *testing.T) {
+			root := t.TempDir()
+			helperDir := t.TempDir()
+			var reader ToolDefinition
+			var args map[string]any
+			var helperName, helperScript string
+			if toolName == "grep" {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "match.txt"), []byte("needle\n"), 0o600))
+				helperName = "rg"
+				helperScript = "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"match.txt\"},\"lines\":{\"text\":\"needle\\n\"},\"line_number\":1}}'\n"
+				reader = NewGrepTool(WithGrepWorkdir(root), WithGrepPathWhitelist([]string{root}))
+				args = map[string]any{"pattern": "needle", "path": root}
+			} else {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "target.go"), []byte("package main\n"), 0o600))
+				helperName = "fd"
+				helperScript = "#!/bin/sh\nprintf 'target.go\\000'\n"
+				reader = NewFindTool(WithFindWorkdir(root), WithFindPathWhitelist([]string{root}))
+				args = map[string]any{"pattern": "target.go", "type": "f", "path": root}
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(helperDir, helperName), []byte(helperScript), 0o700))
+			t.Setenv("PATH", helperDir)
+
+			base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+			require.NoError(t, base.registerTrustedScopedWorkspaceRead(ctx, reader))
+			registry := NewMiddlewareToolRegistry(base)
+			configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+
+			invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: toolName, Args: args})
+			require.NoError(t, err)
+			result, err := invocation.Dispatch(ctx)
+			require.NoError(t, err)
+			require.NotEmpty(t, result.Output)
+
+			signal := invocation.CompletionSignal()
+			require.NotNil(t, signal.Done(), "the scoped helper reader must expose its observed join signal")
+			select {
+			case <-signal.Done():
+			default:
+				t.Fatal("completion signal must close after the managed helper and reader pipeline join")
+			}
+			assert.Equal(t, CompletionOwnedProcessGroupJoined, signal.Proof())
+		})
+	}
 }

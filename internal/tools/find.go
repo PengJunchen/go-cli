@@ -114,6 +114,15 @@ func (t *FindTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	defer span.End()
 
 	start := time.Now()
+	var lifecycle managedLocalResult
+	var helperStarted bool
+	defer func() {
+		if helperStarted {
+			reportPreparedLocalProcessCompletion(ctx, lifecycle)
+			return
+		}
+		reportPreparedNoProcessCompletion(ctx)
+	}()
 
 	searchPath := findDefaultPath
 	if v := getStringArg(call, "path"); strings.TrimSpace(v) != "" {
@@ -138,9 +147,6 @@ func (t *FindTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	}
 
 	captured, lifecycle, helperStarted, err := t.find(ctx, searchPath, pattern, kind, maxDepth)
-	if helperStarted {
-		reportPreparedLocalProcessCompletion(ctx, lifecycle)
-	}
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "path", Value: searchPath}, tracing.Attribute{Key: "pattern", Value: pattern}, tracing.Attribute{Key: "success", Value: false})
 		logger.Error("find.failed", "tool", "find", "path", searchPath, "pattern", pattern, "err", err)
