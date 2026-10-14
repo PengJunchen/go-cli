@@ -10,6 +10,16 @@ Live PTY validation is currently verified on macOS. The harness uses Unix PTY
 APIs and is intended to support Linux too, but Linux has not been runtime-tested
 here. Windows is not supported by this PTY harness.
 
+## Requirements
+
+- Go 1.24.2 or newer to build the CLI (omit Go only when using `--binary` with
+  an existing executable).
+- Git and RTK; the harness uses `rtk proxy git` for unformatted Git metadata.
+- Python 3.10 or newer (standard library only), with Unix PTY support.
+- Node.js 20 or newer and npm, to run the pinned Playwright and xterm.js
+  packages installed by `npm ci`.
+- Google Chrome, or Playwright's managed Chromium installation.
+
 ## Run
 
 Use Node.js 20 or newer. Install the pinned JavaScript dependencies once:
@@ -25,10 +35,11 @@ Temporary run data is created under Python's `tempfile.gettempdir()` by
 default. Select another existing scratch directory with
 `--scratch-root /path/to/scratch` when needed.
 
-The script uses `node` from `PATH`, then starts Playwright through the local
+The script uses `node` from `PATH` and resolves Playwright from the local
 `scripts/e2e_terminal/node_modules` installation. On macOS it uses the standard
 Google Chrome application path when present; otherwise Playwright uses its
-installed Chromium browser.
+installed Chromium browser. Set `E2E_CHROME_PATH` to use a different Chrome or
+Chromium executable.
 
 To use a bundled or separately installed runtime, provide its paths explicitly:
 

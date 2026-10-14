@@ -186,7 +186,7 @@ func testLongTaskPTYCancel(t *testing.T, binary string) {
 		if index == 0 {
 			return longTaskReply{toolCallID: "call-longtask-cancel", toolName: "bash", toolArgs: map[string]string{"command": commandText}}
 		}
-		return longTaskReply{content: "UNEXPECTED_PROVIDER_CONTINUATION"}
+		return longTaskReply{content: "CANCEL_FLOW_CONTINUED"}
 	})
 	fixture := newLongTaskFixture(t, peer, true)
 	defer fixture.server.Close()
@@ -214,11 +214,19 @@ func testLongTaskPTYCancel(t *testing.T, binary string) {
 	_, statErr := os.Stat(filepath.Join(fixture.workDir, effectFile))
 	require.ErrorIs(t, statErr, os.ErrNotExist, "cancel must prevent the delayed Bash side effect")
 	require.Len(t, peer.requestBodies(), 1, "cancellation must not ask the model to continue the cancelled task")
+	pty.write(t, "start a fresh turn after cancelling\r")
+	pty.capture.waitContains(t, "CANCEL_FLOW_CONTINUED", 20*time.Second)
+	pty.capture.waitOccurrences(t, "> ", 3, 10*time.Second)
+	bodies := peer.requestBodies()
+	require.Len(t, bodies, 2, "the prompt after cancellation should start a new provider turn")
+	continuedRequest, err := decodeLongTaskRequest(bodies[1])
+	require.NoError(t, err)
+	require.True(t, requestHasRoleContent(continuedRequest, "user", "start a fresh turn after cancelling"), "the explicit next prompt must be sent as a new user turn")
 	pty.write(t, "exit\r")
 	pty.waitSuccess(t, 20*time.Second)
 	require.NotContains(t, pty.capture.output(), "DATA RACE")
 
-	t.Logf("evidence: Escape returned [interrupted] in %s; delayed side-effect file remained absent after 5s; provider requests=1; race-enabled child clean",
+	t.Logf("evidence: Escape returned [interrupted] in %s; delayed side-effect file remained absent after 5s; no automatic follow-up request was sent; a later explicit prompt completed as a fresh turn; race-enabled child clean",
 		cancelLatency.Round(time.Millisecond))
 }
 

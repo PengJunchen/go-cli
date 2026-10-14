@@ -1086,7 +1086,7 @@ def create_run_workdir(scratch_root: Path) -> Path:
 
 def rtk_git_bytes(*args: str) -> bytes:
     result = subprocess.run(
-        ["rtk", "git", *args],
+        ["rtk", "proxy", "git", *args],
         cwd=REPO,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -1095,13 +1095,14 @@ def rtk_git_bytes(*args: str) -> bytes:
     return result.stdout if result.returncode == 0 else b""
 
 
+def rtk_git_paths(*args: str) -> list[str]:
+    output = rtk_git_bytes(*args).decode("utf-8", "surrogateescape")
+    return [relative for relative in output.split("\0") if relative]
+
+
 def source_delta_sha256() -> str:
-    paths = set(rtk_git_bytes("diff", "--name-only", "-z", "HEAD").decode("utf-8", "surrogateescape").split("\0"))
-    paths.update(
-        rtk_git_bytes("ls-files", "--others", "--exclude-standard", "-z")
-        .decode("utf-8", "surrogateescape")
-        .split("\0")
-    )
+    paths = set(rtk_git_paths("diff", "--name-only", "-z", "HEAD"))
+    paths.update(rtk_git_paths("ls-files", "--others", "--exclude-standard", "-z"))
     digest = hashlib.sha256()
     for relative in sorted(path for path in paths if path and not path.startswith("docs/qa/")):
         path = REPO / relative
@@ -1122,7 +1123,7 @@ def source_delta_sha256() -> str:
 def get_revision() -> dict[str, str]:
     def rtk_git(*args: str) -> str:
         result = subprocess.run(
-            ["rtk", "git", *args],
+            ["rtk", "proxy", "git", *args],
             cwd=REPO,
             text=True,
             stdout=subprocess.PIPE,
