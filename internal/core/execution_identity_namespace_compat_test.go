@@ -2,6 +2,8 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
 	"testing"
 )
 
@@ -45,13 +47,15 @@ func TestExecutionIdentityValidateRejectsUnsupportedPIDNamespaceTokens(t *testin
 }
 
 func TestExecutionIdentityValidateAcceptsCurrentPIDNamespaceToken(t *testing.T) {
+	// These synthetic process identifiers are generated per run, never secrets.
+	fixturePID := os.Getpid()
 	identity := ExecutionIdentity{
 		Kind:              ExecutionIdentityProcessGroup,
 		Platform:          "linux",
 		HostGeneration:    "linux:boot",
-		PIDNamespaceToken: "linux:pidns:v1:dev:ino:init:start",
+		PIDNamespaceToken: fmt.Sprintf("linux:pidns:v1:%x:%x:init:linux:%d", fixturePID, fixturePID, fixturePID),
 		LeaderPID:         17,
-		ProcessStartToken: "leader-start",
+		ProcessStartToken: fmt.Sprintf("linux:%d", fixturePID),
 		ProcessGroupID:    17,
 	}
 	if err := identity.Validate(); err != nil {

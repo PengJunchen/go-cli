@@ -452,6 +452,11 @@ func TestOwnedStdioCancelAndDisconnectShareOneJoin(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(string(wire), "tools/call"), "racing teardown must not replay a dispatched call")
 }
 
+// These are byte-limit tests, not latency tests. A 10 MiB response takes several
+// seconds with race and atomic coverage instrumentation even without contention.
+// Keep a bounded watchdog with headroom for the full repository CI workload.
+const stdioResponseBudgetWatchdog = 30 * time.Second
+
 func TestOwnedStdioResponseBudgetRejectsOversizedFramesAndJoinsChild(t *testing.T) {
 	for _, mode := range []string{"oversized-line", "oversized-fragment", "ignored-lines-over-budget"} {
 		t.Run(mode, func(t *testing.T) {
@@ -463,10 +468,7 @@ func TestOwnedStdioResponseBudgetRejectsOversizedFramesAndJoinsChild(t *testing.
 			require.NotNil(t, proc)
 			require.NotNil(t, owner)
 
-			// These fixtures encode and consume more than 10 MiB under race
-			// instrumentation. Match the exact-boundary test watchdog so
-			// scheduler load does not turn a byte-budget test into cancellation.
-			callCtx, cancelCall := context.WithTimeout(context.Background(), 5*time.Second)
+			callCtx, cancelCall := context.WithTimeout(context.Background(), stdioResponseBudgetWatchdog)
 			defer cancelCall()
 			_, callErr := adapter.CallTool(callCtx, "oversized", nil)
 			require.ErrorIs(t, callErr, errStdioResponseTooLarge, "the reader must actually exhaust its byte budget")
@@ -498,7 +500,7 @@ func TestOwnedStdioResponseBudgetAcceptsExactBoundary(t *testing.T) {
 	require.NoError(t, adapter.Connect(context.Background()))
 	waitForHelperFile(t, pidFile)
 
-	callCtx, cancelCall := context.WithTimeout(context.Background(), 5*time.Second)
+	callCtx, cancelCall := context.WithTimeout(context.Background(), stdioResponseBudgetWatchdog)
 	defer cancelCall()
 	result, err := adapter.CallTool(callCtx, "boundary", nil)
 	require.NoError(t, err, "a complete response at the byte limit should be accepted")
