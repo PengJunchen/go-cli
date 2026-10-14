@@ -51,9 +51,9 @@ type TurnItem struct {
 	ToolName     string `json:"tool_name,omitempty"`
 	ToolResult   string `json:"tool_result,omitempty"`
 	IsCompaction bool   `json:"is_compaction,omitempty"`
-	// EstimatedTokens holds a best-effort token estimate for this item, when a
-	// caller has already computed one. It is informational and never trusted by
-	// the compactors, which re-estimate via TokenEstimator.
+	// EstimatedTokens is a legacy best-effort per-item cache used by incremental
+	// compaction strategies. Fresh public estimates bypass it, and UnifiedCompactor
+	// clears it on defensive durable-history copies before routing.
 	EstimatedTokens int `json:"estimated_tokens,omitempty"`
 	// ContentBlocks holds typed content parts for multimodal messages
 	// (text + images). When non-nil, it takes precedence over Content.
@@ -149,40 +149,14 @@ type Summarizer interface {
 	Summarize(ctx context.Context, conversation string) (string, error)
 }
 
-// estimateTokens sums the estimated tokens of every item's content and tool
-// result. Estimator errors are ignored because production estimators are
-// best-effort by contract.
+// estimateTokens sums the provider-visible message terms for every item.
+// Estimator errors are ignored because production estimators are best-effort
+// by contract. The fresh estimate deliberately bypasses EstimatedTokens so a
+// prior strategy cache cannot hide changed content or tool arguments.
 func estimateTokens(items []TurnItem, estimator TokenEstimator) int {
 	total := 0
-	for _, it := range items {
-		if it.IsCompaction {
-			content := it.Content
-			if content == "" {
-				content = "[compacted]"
-			}
-			total += estimateLength(UntrustedSummaryContext(content), estimator)
-			continue
-		}
-		if it.Content != "" {
-			total += estimateLength(it.Content, estimator)
-		}
-		if it.ToolResult != "" {
-			total += estimateLength(it.ToolResult, estimator)
-		}
-		for _, block := range it.ContentBlocks {
-			switch block.Type {
-			case "text":
-				if block.Text != "" {
-					total += estimateLength(block.Text, estimator)
-				}
-			case "image_url":
-				total += 85
-			default:
-				if block.Text != "" {
-					total += estimateLength(block.Text, estimator)
-				}
-			}
-		}
+	for _, item := range items {
+		total = saturatingTokenAdd(total, estimateProviderVisibleItemTokens(item, estimator))
 	}
 	return total
 }
@@ -199,7 +173,7 @@ func mandatorySystemPromptTokens(items []TurnItem, estimator TokenEstimator) int
 		if item.Role != RoleSystem || item.IsCompaction {
 			continue
 		}
-		total += mandatorySystemPromptItemTokens(item, estimator)
+		total = saturatingTokenAdd(total, mandatorySystemPromptItemTokens(item, estimator))
 	}
 	return total
 }

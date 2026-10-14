@@ -19,7 +19,7 @@ func TestNonDurableContextCompactsBeforeFirstProviderCall(t *testing.T) {
 		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
 		compaction.NewUnifiedCompactor(),
 		budgetPreflightCharacterEstimator{},
-		11,
+		56,
 	)
 
 	events, err := loop.Run(context.Background(), Submission{
@@ -124,7 +124,7 @@ func TestNonDurableContextPreflightUsesFreshEstimateForEachRun(t *testing.T) {
 		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
 		compaction.NewUnifiedCompactor(),
 		budgetPreflightCharacterEstimator{},
-		10,
+		13,
 	)
 
 	_, err := loop.Run(context.Background(), Submission{Content: "ok"})
