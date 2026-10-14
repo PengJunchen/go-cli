@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
@@ -244,55 +245,86 @@ func TestE2E_Phase22_AskUserToolWorks(t *testing.T) {
 
 // --- AC-6: plan_mode blocks writes ---
 
-// TestE2E_Phase22_PlanModeBlocksWrites verifies that entering plan mode
-// activates ShouldBlockWrite for write/bash/edit tools, and exiting plan mode
-// restores normal behavior.
+// TestE2E_Phase22_PlanModeBlocksWrites verifies prepared dispatch against
+// captured Plan Mode capabilities: trusted controls can enter/exit Plan Mode,
+// while ordinary tools cannot gain read exemptions from familiar names.
 func TestE2E_Phase22_PlanModeBlocksWrites(t *testing.T) {
-	planCtrl := core.NewDefaultPlanModeController()
-	tr := tools.NewDefaultToolRegistry()
-	require.NoError(t, tr.Register(context.Background(), tools.NewEnterPlanModeTool(planCtrl)))
-	require.NoError(t, tr.Register(context.Background(), tools.NewExitPlanModeTool(planCtrl)))
+	ctx := context.Background()
+	queue := tools.NewDefaultFileMutationQueue()
+	t.Cleanup(func() { require.NoError(t, queue.(*tools.DefaultFileMutationQueue).Close()) })
+	base, registry, planCtrl := newPreparedApprovalRuntime(t, &approval.AllowAllClassifier{}, true, nil, queue)
+	registerPreparedPlanControls(t, base, planCtrl)
 
-	// Before plan mode, writes are allowed.
-	assert.False(t, planCtrl.ShouldBlockWrite("write"))
-	assert.False(t, planCtrl.ShouldBlockWrite("bash"))
-	assert.False(t, planCtrl.ShouldBlockWrite("edit"))
+	unknownTools := map[string]*recordingTool{}
+	for _, name := range []string{"read", "grep", "ls", "write", "edit", "bash"} {
+		tool := &recordingTool{name: name}
+		unknownTools[name] = tool
+		require.NoError(t, base.Register(ctx, tool))
+	}
 
-	// Enter plan mode.
-	enterTool, err := tr.Get(context.Background(), "enter_plan_mode")
+	writeCall := tools.ToolCall{
+		ID:   "write-before-plan",
+		Name: "write",
+		Args: map[string]any{"path": "/tmp/phase22-plan.txt", "content": "before"},
+	}
+	writeProxy, err := registry.Get(ctx, "write")
 	require.NoError(t, err)
-	enterResult, err := enterTool.Execute(context.Background(), tools.ToolCall{
+	_, err = writeProxy.Execute(ctx, writeCall)
+	require.NoError(t, err, "an explicit auto-approve mode should resolve Ask before entering Plan Mode")
+	assert.EqualValues(t, 1, unknownTools["write"].calls.Load())
+
+	enterTool, err := registry.Get(ctx, "enter_plan_mode")
+	require.NoError(t, err)
+	enterResult, err := enterTool.Execute(ctx, tools.ToolCall{
 		ID:   "tc-enter",
 		Name: "enter_plan_mode",
 		Args: map[string]any{"reason": "researching before changes"},
 	})
 	require.NoError(t, err)
 	assert.Contains(t, enterResult.Output, "plan mode activated")
-
-	// In plan mode, writes are blocked.
-	assert.True(t, planCtrl.ShouldBlockWrite("write"))
-	assert.True(t, planCtrl.ShouldBlockWrite("bash"))
-	assert.True(t, planCtrl.ShouldBlockWrite("edit"))
-	// Read-only tools are still allowed.
-	assert.False(t, planCtrl.ShouldBlockWrite("read"))
-	assert.False(t, planCtrl.ShouldBlockWrite("grep"))
 	assert.True(t, planCtrl.IsActive())
 
-	// Exit plan mode.
-	exitTool, err := tr.Get(context.Background(), "exit_plan_mode")
+	for _, name := range []string{"read", "grep", "ls", "write", "edit", "bash"} {
+		call := planModeFixtureCall(name)
+		toolProxy, getErr := registry.Get(ctx, name)
+		require.NoError(t, getErr)
+		callsBeforeDeny := unknownTools[name].calls.Load()
+		_, executeErr := toolProxy.Execute(ctx, call)
+		require.ErrorIs(t, executeErr, approval.ErrToolDenied,
+			"ordinary %q registration must remain unknown in Plan Mode", name)
+		assert.Equal(t, callsBeforeDeny, unknownTools[name].calls.Load(), "%q must be denied before its executor has side effects", name)
+	}
+	assert.EqualValues(t, 1, unknownTools["write"].calls.Load(), "denied Plan Mode call must not add a write execution")
+
+	exitTool, err := registry.Get(ctx, "exit_plan_mode")
 	require.NoError(t, err)
-	exitResult, err := exitTool.Execute(context.Background(), tools.ToolCall{
+	exitResult, err := exitTool.Execute(ctx, tools.ToolCall{
 		ID:   "tc-exit",
 		Name: "exit_plan_mode",
 		Args: map[string]any{"summary": "plan complete"},
 	})
 	require.NoError(t, err)
 	assert.Contains(t, exitResult.Output, "plan mode deactivated")
-
-	// After plan mode, writes are allowed again.
-	assert.False(t, planCtrl.ShouldBlockWrite("write"))
-	assert.False(t, planCtrl.ShouldBlockWrite("bash"))
 	assert.False(t, planCtrl.IsActive())
+
+	writeCall.ID = "write-after-plan"
+	_, err = writeProxy.Execute(ctx, writeCall)
+	require.NoError(t, err, "the same ordinary tool remains available after leaving Plan Mode")
+	assert.EqualValues(t, 2, unknownTools["write"].calls.Load())
+}
+
+func planModeFixtureCall(name string) tools.ToolCall {
+	args := map[string]any{}
+	switch name {
+	case "write":
+		args["path"] = "/tmp/phase22-plan-denied.txt"
+		args["content"] = "must not execute"
+	case "edit":
+		args["file_path"] = "/tmp/phase22-plan-denied.txt"
+		args["old_string"] = "before"
+		args["new_string"] = "after"
+	}
+	return tools.ToolCall{ID: "plan-denied-" + name, Name: name, Args: args}
 }
 
 // --- tool_search can find registered tools ---

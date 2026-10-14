@@ -128,6 +128,9 @@ func (d *DefaultSubagentDispatcher) forwardEvents(taskID string, evCh <-chan Age
 // running for the duration of the dispatch.
 func (d *DefaultSubagentDispatcher) Dispatch(ctx context.Context, task SubagentTask) (SubagentResult, error) {
 	start := time.Now()
+	if _, _, bound := RunCommitFromContext(ctx); bound {
+		return SubagentResult{TaskID: task.ID, Error: ErrRunCommitChildUnsupported, Duration: time.Since(start)}, ErrRunCommitChildUnsupported
+	}
 	slog.Debug("core.subagent_dispatcher.dispatch",
 		"task_id", task.ID,
 		"prompt_len", len(task.Prompt),
@@ -235,6 +238,9 @@ func (d *DefaultSubagentDispatcher) ListRunning() []SubagentTask {
 func (d *DefaultSubagentDispatcher) ParallelDispatch(ctx context.Context, tasks []SubagentTask) ([]SubagentResult, error) {
 	if len(tasks) == 0 {
 		return []SubagentResult{}, nil
+	}
+	if _, _, bound := RunCommitFromContext(ctx); bound {
+		return nil, ErrRunCommitChildUnsupported
 	}
 
 	// Create sub-agents sequentially for deterministic factory assignment.

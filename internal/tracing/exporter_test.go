@@ -3,8 +3,10 @@ package tracing
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 
@@ -100,7 +102,8 @@ func TestRedaction_MasksSensitiveAttributes(t *testing.T) {
 	// Sensitive attribute is masked.
 	secret := findAttr(data.Attributes, "secret")
 	require.NotNil(t, secret)
-	assert.Equal(t, "***REDACTED***", secret.Value)
+	assert.Contains(t, secret.Value, "***REDACTED***")
+	assert.Contains(t, secret.Value, "bytes=")
 	assert.True(t, secret.Sensitive)
 
 	// Non-sensitive attribute is not masked.
@@ -112,7 +115,84 @@ func TestRedaction_MasksSensitiveAttributes(t *testing.T) {
 	require.Len(t, data.Events, 1)
 	evToken := findAttr(data.Events[0].Attributes, "token")
 	require.NotNil(t, evToken)
-	assert.Equal(t, "***REDACTED***", evToken.Value)
+	assert.Contains(t, evToken.Value, "***REDACTED***")
+	assert.Contains(t, evToken.Value, "bytes=")
+}
+
+func TestRedaction_DefaultSensitiveKeysPreserveMetadata(t *testing.T) {
+	const prompt = "prompt-carrying-secret"
+	const toolArgs = `todo_write:{"content":"tool-argument-secret"}`
+	apiKey := generateID()
+	const planReason = "plan-mode-raw-reason"
+	const hookOutput = "hook-output-secret"
+	mock := &mockExporter{}
+	data := exportOne(t, mock, RedactionLevelRedact, func(span TraceSpan) {
+		span.SetAttributes(
+			Attribute{Key: "user_message", Value: prompt},
+			Attribute{Key: "cache_key", Value: toolArgs},
+			Attribute{Key: "tool_name", Value: "todo_write"},
+			Attribute{Key: "prompt_length", Value: len(prompt)},
+			Attribute{Key: "duration_ms", Value: 42},
+			Attribute{Key: "api_key", Value: apiKey},
+			Attribute{Key: "reason", Value: planReason},
+			Attribute{Key: "output", Value: hookOutput},
+			Attribute{Key: "command", Value: "hook command with private argument"},
+			Attribute{Key: "title", Value: "private PR title"},
+		)
+		span.AddEvent("tool.completed", Attribute{Key: "arguments", Value: toolArgs})
+	})
+
+	encoded, err := json.Marshal(data)
+	require.NoError(t, err)
+	serialized := string(encoded)
+	assert.False(t, strings.Contains(serialized, prompt), "trace exporter leaked prompt content")
+	assert.False(t, strings.Contains(serialized, toolArgs), "trace exporter leaked tool arguments")
+	assert.False(t, strings.Contains(serialized, apiKey), "trace exporter leaked API key")
+	assert.False(t, strings.Contains(serialized, planReason), "trace exporter leaked plan-mode reason")
+	assert.False(t, strings.Contains(serialized, hookOutput), "trace exporter leaked hook output")
+	assert.False(t, strings.Contains(serialized, "hook command with private argument"), "trace exporter leaked hook command")
+	assert.False(t, strings.Contains(serialized, "private PR title"), "trace exporter leaked PR title")
+	assert.True(t, strings.Contains(serialized, "bytes="), "trace exporter must retain redacted value lengths")
+	assert.True(t, strings.Contains(serialized, "todo_write"), "trace exporter must retain tool identity")
+	assert.True(t, strings.Contains(serialized, "prompt_length"), "trace exporter must retain prompt length metadata")
+	assert.True(t, strings.Contains(serialized, "duration_ms"), "trace exporter must retain timing metadata")
+	assert.True(t, strings.Contains(serialized, "tool.completed"), "trace exporter must retain event identity")
+}
+
+func TestRedactingExporterRedactsStatusMessageAndKeepsSafeMetadata(t *testing.T) {
+	const canary = "PROVIDER-ERROR-BODY-CANARY"
+	mock := &mockExporter{}
+	data := exportOne(t, mock, RedactionLevelRedact, func(span TraceSpan) {
+		span.SetAttributes(
+			Attribute{Key: "error_type", Value: "server"},
+			Attribute{Key: "http_status_code", Value: 400},
+		)
+		span.SetStatus(SpanStatusError, "server error from test provider: "+canary)
+	})
+
+	assert.Equal(t, SpanStatusError, data.Status, "redaction must preserve the failed status")
+	if strings.Contains(data.StatusMessage, canary) {
+		t.Fatal("redaction leaked provider response text in span status")
+	}
+	assert.Contains(t, data.StatusMessage, redactedValue)
+	assert.Contains(t, data.StatusMessage, "bytes=")
+	errorType := findAttr(data.Attributes, "error_type")
+	require.NotNil(t, errorType)
+	assert.Equal(t, "server", errorType.Value)
+	statusCode := findAttr(data.Attributes, "http_status_code")
+	require.NotNil(t, statusCode)
+	assert.Equal(t, 400, statusCode.Value)
+
+	full := exportOne(t, &mockExporter{}, RedactionLevelFull, func(span TraceSpan) {
+		span.SetStatus(SpanStatusError, canary)
+	})
+	assert.Equal(t, canary, full.StatusMessage, "explicit full export must preserve status messages")
+
+	off := exportOne(t, &mockExporter{}, RedactionLevelOff, func(span TraceSpan) {
+		span.SetStatus(SpanStatusError, canary)
+	})
+	assert.Equal(t, SpanStatusError, off.Status)
+	assert.Empty(t, off.StatusMessage, "off mode must strip the unstructured status message")
 }
 
 func TestRedactingExporter_NonSensitiveNotMasked(t *testing.T) {

@@ -3,12 +3,14 @@
 package extension_test
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,37 +19,101 @@ import (
 	"github.com/pengjunchen/go-cli/internal/extension"
 )
 
-// the default loader routes an http(s) path to the JSON-over-HTTP
-// loader and returns the wrapped rpc extensions.
-func TestPluginLoaderHTTP(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // response encoding is best-effort
-			"extensions": []map[string]any{{"name": "a"}, {"name": "b"}},
-		})
+func TestPluginLoaderRejectsHTTPDescriptorAsUnavailable(t *testing.T) {
+	const canary = "remote-url-secret-canary-4a91"
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{"extensions":[{"name":"must-not-load"}]}`)) //nolint:errcheck
 	}))
 	defer srv.Close()
+	endpoint := srv.URL + "/extensions?token=" + canary
 
+	var logs bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
 	loader := extension.NewDefaultPluginLoader()
-	exts, err := loader.Load(context.Background(), srv.URL)
-	require.NoError(t, err)
-	require.Len(t, exts, 2)
-	assert.Equal(t, "a", exts[0].Name())
-	assert.Equal(t, "b", exts[1].Name())
+	_, err := loader.Load(context.Background(), endpoint)
+	require.ErrorIs(t, err, extension.ErrRemoteExtensionUnsupported)
+	assert.Zero(t, requests.Load())
+	assert.NotContains(t, err.Error(), canary)
+	assert.NotContains(t, logs.String(), canary)
+	assert.Contains(t, logs.String(), "<remote-extension-path>")
 
-	// Loaded extensions satisfy the Extension contract.
-	require.NoError(t, exts[0].Init(context.Background(), extension.NewExtensionRegistry()))
-	require.NoError(t, exts[0].Shutdown(context.Background()))
+	manager := extension.NewPluginManager(loader)
+	managerErr := manager.Load(context.Background(), []string{endpoint})
+	require.ErrorIs(t, managerErr, extension.ErrRemoteExtensionUnsupported)
+	assert.NotContains(t, managerErr.Error(), canary)
+	assert.NotContains(t, logs.String(), canary)
+	assert.Zero(t, requests.Load())
 }
 
-// the gRPC scheme is recognized but flagged unsupported in the
-// zero-dependency build.
+func TestPluginLoaderRejectsHTTPSDescriptorAsUnavailable(t *testing.T) {
+	const canary = "https-url-secret-canary-390a"
+	var requests atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{"extensions":[]}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+	loader := extension.NewDefaultPluginLoader(extension.WithPluginHTTPClient(srv.Client()))
+	_, err := loader.Load(context.Background(), srv.URL+"/plugins?key="+canary)
+	require.ErrorIs(t, err, extension.ErrRemoteExtensionUnsupported)
+	assert.Zero(t, requests.Load())
+	assert.NotContains(t, err.Error(), canary)
+}
+
+func TestPluginLoaderCanceledContextRejectsHTTPBeforeContext(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := extension.NewDefaultPluginLoader().Load(ctx, srv.URL+"/plugins")
+	require.ErrorIs(t, err, extension.ErrRemoteExtensionUnsupported)
+	assert.Zero(t, requests.Load())
+}
+
 func TestPluginLoaderGRPCUnsupported(t *testing.T) {
 	loader := extension.NewDefaultPluginLoader()
 	_, err := loader.Load(context.Background(), "grpc://127.0.0.1:50051")
 	require.ErrorIs(t, err, extension.ErrUnsupportedRPC)
 }
 
-// loading a nonexistent .so path surfaces a clear, wrapped error.
+func TestPluginLoaderGRPCVariousCasing(t *testing.T) {
+	loader := extension.NewDefaultPluginLoader()
+	for _, path := range []string{"grpc://host", "GRPC://host"} {
+		_, err := loader.Load(context.Background(), path)
+		assert.ErrorIs(t, err, extension.ErrUnsupportedRPC, "path %q", path)
+	}
+}
+
+func TestPluginLoaderGRPCPathRedactsSecrets(t *testing.T) {
+	const canary = "grpc-url-secret-canary-42f8"
+	path := "grpc://user:" + canary + "@host:50051/extensions?token=" + canary
+	var logs bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	loader := extension.NewDefaultPluginLoader()
+	_, err := loader.Load(context.Background(), path)
+	require.ErrorIs(t, err, extension.ErrUnsupportedRPC)
+	assert.NotContains(t, err.Error(), canary)
+	assert.NotContains(t, logs.String(), canary)
+	assert.Contains(t, logs.String(), "<remote-extension-path>")
+
+	managerErr := extension.NewPluginManager(loader).Load(context.Background(), []string{path})
+	require.ErrorIs(t, managerErr, extension.ErrUnsupportedRPC)
+	assert.NotContains(t, managerErr.Error(), canary)
+	assert.NotContains(t, logs.String(), canary)
+}
+
+func TestPluginLoaderNames(t *testing.T) {
+	assert.Equal(t, "default-plugin-loader", extension.NewDefaultPluginLoader().Name())
+}
+
 func TestPluginLoaderingNonExistentPlugin(t *testing.T) {
 	loader := extension.NewDefaultPluginLoader()
 	missing := filepath.Join(t.TempDir(), "nonexistent.so")
@@ -57,74 +123,26 @@ func TestPluginLoaderingNonExistentPlugin(t *testing.T) {
 	assert.Contains(t, err.Error(), missing)
 }
 
-// an HTTP endpoint that fails to decode returns a clear error.
-func TestPluginLoaderingHTTPBadPayload(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("not-json")) //nolint:errcheck // response writing is best-effort
-	}))
-	defer srv.Close()
-
-	loader := extension.NewDefaultPluginLoader()
-	_, err := loader.Load(context.Background(), srv.URL)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "decode")
+func assertRemoteRejectedNoRequest(t *testing.T, path string, requests *atomic.Int32) {
+	t.Helper()
+	_, err := extension.NewDefaultPluginLoader().Load(context.Background(), path)
+	require.ErrorIs(t, err, extension.ErrRemoteExtensionUnsupported)
+	assert.Zero(t, requests.Load())
 }
 
-// an HTTP endpoint returning non-200 surfaces the status in the error.
-func TestPluginLoaderingHTTPNonOK(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+func TestPluginLoaderRejectsHTTPVariantsBeforeNetwork(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(strings.Repeat("x", 128))) //nolint:errcheck
 	}))
 	defer srv.Close()
-
-	loader := extension.NewDefaultPluginLoader()
-	_, err := loader.Load(context.Background(), srv.URL)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "500")
-}
-
-// TestPluginLoaderSSRFBlocksPrivateIPs verifies that endpoints at private or
-// link-local IP ranges are rejected (AC-1). HTTPS is used so the HTTPS gate
-// passes and the IP check is the layer that rejects.
-func TestPluginLoaderSSRFBlocksPrivateIPs(t *testing.T) {
-	loader := extension.NewDefaultPluginLoader()
-	for _, endpoint := range []string{
-		"https://169.254.1.1/ext",    // link-local
-		"https://10.0.0.1/ext",       // RFC 1918 10/8
-		"https://172.16.0.1/ext",     // RFC 1918 172.16/12 lower bound
-		"https://172.31.255.255/ext", // RFC 1918 172.16/12 upper bound
-		"https://192.168.1.1/ext",    // RFC 1918 192.168/16
+	for _, path := range []string{
+		srv.URL + "/empty?extensions=[]",
+		"http://10.0.0.1/extensions",
+		"https://169.254.169.254/latest/meta-data",
+		"https://192.168.1.1/extensions",
 	} {
-		_, err := loader.Load(context.Background(), endpoint)
-		require.Error(t, err, "endpoint %q should be blocked", endpoint)
-		assert.Contains(t, err.Error(), "blocked")
+		assertRemoteRejectedNoRequest(t, path, &requests)
 	}
-}
-
-// TestPluginLoaderSSRFResponseSizeLimit verifies that a response body exceeding
-// 10MB is rejected (AC-2). The test server runs on 127.0.0.1 so the HTTPS and
-// IP checks pass, leaving the size check as the only rejection point.
-func TestPluginLoaderSSRFResponseSizeLimit(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"extensions":[`)) //nolint:errcheck // best-effort
-		chunk := []byte(strings.Repeat(" ", 4096))
-		for i := 0; i < 10*1024*1024/4096+1; i++ {
-			_, _ = w.Write(chunk) //nolint:errcheck // best-effort
-		}
-	}))
-	defer srv.Close()
-
-	loader := extension.NewDefaultPluginLoader()
-	_, err := loader.Load(context.Background(), srv.URL)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "exceeds")
-}
-
-// TestPluginLoaderSSRFRejectsNonHTTPS verifies that non-HTTPS endpoints are
-// rejected when the host is not localhost (AC-3).
-func TestPluginLoaderSSRFRejectsNonHTTPS(t *testing.T) {
-	loader := extension.NewDefaultPluginLoader()
-	_, err := loader.Load(context.Background(), "http://example.com/ext")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HTTPS")
 }

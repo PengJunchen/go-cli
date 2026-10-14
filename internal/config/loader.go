@@ -17,7 +17,7 @@ const (
 	// names, e.g. GO_CLI_VERBOSE, GO_CLI_MODEL_NAME.
 	defaultEnvPrefix = "GO_CLI"
 
-	defaultMaxTokens = 4096
+	defaultMaxTokens = DefaultLLMMaxTokens
 
 	defaultCompactionMaxTokens = 128000
 
@@ -33,11 +33,13 @@ const (
 // < Flag < Override. A later source overrides an earlier one on a per-field
 // basis (Override wins).
 type Loader struct {
-	filePath  string
-	envPrefix string
-	flag      *Config
-	override  *Config
-	validate  Validator
+	filePath     string
+	fileBytes    []byte
+	hasFileBytes bool
+	envPrefix    string
+	flag         *Config
+	override     *Config
+	validate     Validator
 }
 
 // NewLoader returns a Loader that uses the default environment prefix and the
@@ -52,6 +54,17 @@ func NewLoader() *Loader {
 // WithFile sets the configuration file layer source.
 func (l *Loader) WithFile(path string) *Loader {
 	l.filePath = path
+	l.fileBytes = nil
+	l.hasFileBytes = false
+	return l
+}
+
+// WithFileBytes sets a file layer whose format comes from originPath while
+// parsing only the supplied frozen bytes.
+func (l *Loader) WithFileBytes(originPath string, data []byte) *Loader {
+	l.filePath = originPath
+	l.fileBytes = append([]byte(nil), data...)
+	l.hasFileBytes = true
 	return l
 }
 
@@ -169,6 +182,26 @@ func (l *Loader) Load(ctx context.Context) (*Config, error) {
 	return cfg, nil
 }
 
+// LoadFileLayer parses only the configured file layer and does not apply
+// defaults, environment variables, flags, overrides, or final validation.
+func (l *Loader) LoadFileLayer(ctx context.Context) (*Config, error) {
+	if l.filePath == "" {
+		return nil, fmt.Errorf("config: file layer is not configured")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	format := ConfigFormatJSON
+	if detected, err := DetectConfigFormat(l.filePath); err == nil {
+		format = detected
+	}
+	cfg, err := l.loadFile(ctx, format)
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
 // loadFile reads the configuration file (JSON or YAML, chosen by format) into
 // a partial Config and emits a per-source trace span.
 func (l *Loader) loadFile(ctx context.Context, format ConfigFormat) (*Config, error) {
@@ -180,10 +213,20 @@ func (l *Loader) loadFile(ctx context.Context, format ConfigFormat) (*Config, er
 		tracing.Attribute{Key: "format", Value: format.String()},
 	)
 
-	data, err := os.ReadFile(l.filePath)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return nil, fmt.Errorf("read config file: %w", err)
+		return nil, err
+	}
+	var data []byte
+	if l.hasFileBytes {
+		data = append([]byte(nil), l.fileBytes...)
+	} else {
+		var err error
+		data, err = os.ReadFile(l.filePath)
+		if err != nil {
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			return nil, fmt.Errorf("read config file: %w", err)
+		}
 	}
 
 	var cfg Config
@@ -216,7 +259,7 @@ func envKey(prefix, key string) string { return prefix + "_" + key }
 
 // loadFromEnv builds a partial Config from GO_CLI_* environment variables.
 func loadFromEnv(prefix string) *Config {
-	cfg := &Config{}
+	cfg := &Config{samplingPresenceKnown: true}
 	if v, ok := parseBoolEnv(envKey(prefix, "VERBOSE")); ok && v {
 		cfg.verbose = true
 	}
@@ -224,12 +267,12 @@ func loadFromEnv(prefix string) *Config {
 	cfg.Provider.APIKey = os.Getenv(envKey(prefix, "PROVIDER_API_KEY"))
 	cfg.Provider.BaseURL = os.Getenv(envKey(prefix, "PROVIDER_BASE_URL"))
 	cfg.Provider.Model = os.Getenv(envKey(prefix, "PROVIDER_MODEL"))
-	cfg.Provider.Temperature = parseFloatEnv(envKey(prefix, "PROVIDER_TEMPERATURE"))
-	cfg.Provider.MaxTokens = parseIntEnv(envKey(prefix, "PROVIDER_MAX_TOKENS"))
+	cfg.Provider.Temperature, cfg.Provider.temperatureSet = parseFloatEnvSet(envKey(prefix, "PROVIDER_TEMPERATURE"))
+	cfg.Provider.MaxTokens, cfg.Provider.maxTokensSet = parseIntEnvSet(envKey(prefix, "PROVIDER_MAX_TOKENS"))
 
 	cfg.Model.Name = os.Getenv(envKey(prefix, "MODEL_NAME"))
-	cfg.Model.Temperature = parseFloatEnv(envKey(prefix, "MODEL_TEMPERATURE"))
-	cfg.Model.MaxTokens = parseIntEnv(envKey(prefix, "MODEL_MAX_TOKENS"))
+	cfg.Model.Temperature, cfg.Model.temperatureSet = parseFloatEnvSet(envKey(prefix, "MODEL_TEMPERATURE"))
+	cfg.Model.MaxTokens, cfg.Model.maxTokensSet = parseIntEnvSet(envKey(prefix, "MODEL_MAX_TOKENS"))
 
 	cfg.Tracing.Exporter = os.Getenv(envKey(prefix, "TRACING_EXPORTER"))
 	cfg.Tracing.Level = os.Getenv(envKey(prefix, "TRACING_LEVEL"))
@@ -283,8 +326,9 @@ func defaultConfig() *Config {
 	enabled := true
 	auditEnabled := true
 	return &Config{
-		Provider: ProviderConfig{MaxTokens: defaultMaxTokens},
-		Model:    ModelConfig{MaxTokens: defaultMaxTokens},
+		Provider:              ProviderConfig{MaxTokens: defaultMaxTokens},
+		Model:                 ModelConfig{MaxTokens: defaultMaxTokens},
+		samplingPresenceKnown: true,
 		Tracing: TracingConfig{
 			Enabled:  &enabled,
 			Exporter: defaultTracingExporter,
@@ -294,6 +338,7 @@ func defaultConfig() *Config {
 			Strategy:  "micro_first",
 			MaxTokens: defaultCompactionMaxTokens,
 		},
+		TUI: TUIConfig{DiffStyle: defaultTUIDiffStyle},
 		Production: ProductionConfig{
 			Audit: AuditConfig{Enabled: &auditEnabled},
 		},
@@ -303,10 +348,64 @@ func defaultConfig() *Config {
 // mergeConfigs returns a new Config overlaying non-zero values of over onto
 // base, giving over higher priority on a per-field basis.
 func mergeConfigs(base, over *Config) *Config {
+	if base == nil {
+		base = &Config{}
+	}
 	out := new(Config)
 	*out = *base
-	overlayValue(reflect.ValueOf(out).Elem(), reflect.ValueOf(over).Elem())
+	if over != nil {
+		overlayValue(reflect.ValueOf(out).Elem(), reflect.ValueOf(over).Elem())
+	}
+	mergeSampling(out, base, over)
 	return out
+}
+
+func mergeSampling(out, base, over *Config) {
+	baseKnown := base.samplingPresenceKnown
+	if over == nil {
+		over = &Config{samplingPresenceKnown: true}
+	}
+	overKnown := over.samplingPresenceKnown
+
+	out.Provider.Temperature, out.Provider.temperatureSet = mergeSamplingFloat(
+		base.Provider.Temperature, base.Provider.temperatureSet, baseKnown,
+		over.Provider.Temperature, over.Provider.temperatureSet, overKnown,
+	)
+	out.Provider.MaxTokens, out.Provider.maxTokensSet = mergeSamplingInt(
+		base.Provider.MaxTokens, base.Provider.maxTokensSet, baseKnown,
+		over.Provider.MaxTokens, over.Provider.maxTokensSet, overKnown,
+	)
+	out.Model.Temperature, out.Model.temperatureSet = mergeSamplingFloat(
+		base.Model.Temperature, base.Model.temperatureSet, baseKnown,
+		over.Model.Temperature, over.Model.temperatureSet, overKnown,
+	)
+	out.Model.MaxTokens, out.Model.maxTokensSet = mergeSamplingInt(
+		base.Model.MaxTokens, base.Model.maxTokensSet, baseKnown,
+		over.Model.MaxTokens, over.Model.maxTokensSet, overKnown,
+	)
+	out.SmallModel.Temperature, out.SmallModel.temperatureSet = mergeSamplingFloat(
+		base.SmallModel.Temperature, base.SmallModel.temperatureSet, baseKnown,
+		over.SmallModel.Temperature, over.SmallModel.temperatureSet, overKnown,
+	)
+	out.SmallModel.MaxTokens, out.SmallModel.maxTokensSet = mergeSamplingInt(
+		base.SmallModel.MaxTokens, base.SmallModel.maxTokensSet, baseKnown,
+		over.SmallModel.MaxTokens, over.SmallModel.maxTokensSet, overKnown,
+	)
+	out.samplingPresenceKnown = true
+}
+
+func mergeSamplingFloat(baseValue float64, baseSet, baseKnown bool, overValue float64, overSet, overKnown bool) (float64, bool) {
+	if overSet || (!overKnown && overValue != 0) {
+		return overValue, true
+	}
+	return baseValue, baseSet || (!baseKnown && baseValue != 0)
+}
+
+func mergeSamplingInt(baseValue int, baseSet, baseKnown bool, overValue int, overSet, overKnown bool) (int, bool) {
+	if overSet || (!overKnown && overValue != 0) {
+		return overValue, true
+	}
+	return baseValue, baseSet || (!baseKnown && baseValue != 0)
 }
 
 // overlayValue copies non-zero exported fields from src onto dst recursively.
@@ -434,6 +533,18 @@ func parseFloatEnv(key string) float64 {
 	return f
 }
 
+func parseFloatEnvSet(key string) (float64, bool) {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0, false
+	}
+	return f, true
+}
+
 func parseIntEnv(key string) int {
 	v := os.Getenv(key)
 	if v == "" {
@@ -444,6 +555,18 @@ func parseIntEnv(key string) int {
 		return 0
 	}
 	return i
+}
+
+func parseIntEnvSet(key string) (int, bool) {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0, false
+	}
+	i, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, false
+	}
+	return i, true
 }
 
 func parseBoolEnv(key string) (bool, bool) {

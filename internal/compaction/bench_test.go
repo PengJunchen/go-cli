@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 // makeBenchItems builds a realistic conversation with n entries: a system
@@ -17,8 +19,10 @@ func makeBenchItems(n int) []TurnItem {
 	for i := 1; i < n; i++ {
 		switch i % 3 {
 		case 0:
+			callID := fmt.Sprintf("bench-call-%d", i-1)
 			items = append(items, TurnItem{
 				Role:       RoleTool,
+				ToolCallID: callID,
 				ToolName:   "read",
 				ToolResult: strings.Repeat("x", 200),
 			})
@@ -28,9 +32,11 @@ func makeBenchItems(n int) []TurnItem {
 				Content: fmt.Sprintf("user message number %d", i),
 			})
 		case 2:
+			callID := fmt.Sprintf("bench-call-%d", i)
 			items = append(items, TurnItem{
-				Role:    RoleAssistant,
-				Content: fmt.Sprintf("assistant response number %d", i),
+				Role:      RoleAssistant,
+				Content:   fmt.Sprintf("assistant response number %d", i),
+				ToolCalls: []llm.ToolCall{{ID: callID, Name: "read"}},
 			})
 		}
 	}
@@ -130,7 +136,7 @@ func BenchmarkFindCutPoint(b *testing.B) {
 			items := makeBenchItems(n)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_ = compactor.findCutPoint(items, 10*n, est)
+				_, _ = compactor.findCutPoint(items, 10*n, est)
 			}
 		})
 	}
@@ -156,7 +162,7 @@ func BenchmarkFindCutPointFullScan(b *testing.B) {
 // findCutPointFullScan replicates the pre-fix findCutPoint algorithm that
 // calls estimateTokens on items[cut:] for every cut, producing O(n²) behaviour.
 func findCutPointFullScan(items []TurnItem, maxTokens int, estimator TokenEstimator) int {
-	placeholder := estimateTokens([]TurnItem{{Content: summaryPlaceholder}}, estimator)
+	placeholder := estimateTokens([]TurnItem{{Role: RoleUser, Content: summaryPlaceholder, IsCompaction: true}}, estimator)
 	for cut := 0; cut <= len(items); cut++ {
 		if cut < len(items) && items[cut].Role == RoleTool {
 			continue

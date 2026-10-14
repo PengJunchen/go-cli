@@ -30,7 +30,18 @@ func TestKindToContentType(t *testing.T) {
 }
 
 func TestCoreEventToAgentEvent(t *testing.T) {
-	ev := core.AgentEvent{Kind: "tool_call", Content: "read_file"}
+	index := uint64(7)
+	ordinal := uint64(3)
+	truncated := false
+	ev := core.AgentEvent{
+		Kind:                       "tool_call",
+		Content:                    "read_file",
+		RunID:                      "run-1",
+		CanonicalTranscriptIndex:   &index,
+		AssistantTranscriptOrdinal: &ordinal,
+		ReceiptOutcome:             "success",
+		SourceTruncated:            &truncated,
+	}
 	got := CoreEventToAgentEvent(ev)
 	if got.Type != "tool_call" {
 		t.Errorf("Type = %q, want %q", got.Type, "tool_call")
@@ -40,6 +51,20 @@ func TestCoreEventToAgentEvent(t *testing.T) {
 	}
 	if got.ContentType != ContentTypeToolCall {
 		t.Errorf("ContentType = %q, want %q", got.ContentType, ContentTypeToolCall)
+	}
+	if got.RunID != "run-1" || got.ReceiptOutcome != "success" {
+		t.Fatalf("occurrence identity and typed outcome were not bridged: %#v", got)
+	}
+	if got.CanonicalTranscriptIndex == nil || *got.CanonicalTranscriptIndex != 7 ||
+		got.AssistantTranscriptOrdinal == nil || *got.AssistantTranscriptOrdinal != 3 ||
+		got.SourceTruncated == nil || *got.SourceTruncated {
+		t.Fatalf("occurrence coordinates and tri-state metadata were not bridged: %#v", got)
+	}
+	index = 8
+	ordinal = 4
+	truncated = true
+	if *got.CanonicalTranscriptIndex != 7 || *got.AssistantTranscriptOrdinal != 3 || *got.SourceTruncated {
+		t.Fatal("bridge event pointers alias the source event")
 	}
 }
 
@@ -109,5 +134,47 @@ func TestBridgeEventsEmptyStream(t *testing.T) {
 		case <-timeout:
 			t.Fatal("bridge did not close after empty stream")
 		}
+	}
+}
+
+func TestBridgeEventsOwnedJoinsAfterClosingItsOutput(t *testing.T) {
+	stream := core.NewEventStream(1)
+	owned := BridgeEventsOwned(context.Background(), stream)
+	stream.Close()
+
+	for range owned.Events() {
+	}
+	select {
+	case <-owned.Done():
+	case <-time.After(time.Second):
+		t.Fatal("owned bridge did not close its join signal after output closure")
+	}
+}
+
+func TestBridgePreservesTokenUsageProvenance(t *testing.T) {
+	coreEvent := core.AgentEvent{
+		Kind: "token_usage",
+		TokenUsage: &core.TokenUsage{
+			InputTokens: 12, OutputTokens: 4, MaxTokens: 100,
+			Cost: 0.0012, UnknownUsageAttempts: 1, UnknownCostAttempts: 2,
+			UsageSource:    core.TokenUsageSourceReported,
+			CostSources:    []core.TokenUsageCostSource{core.TokenUsageCostEstimated, core.TokenUsageCostUnknown},
+			PriceSources:   []core.TokenUsagePriceSource{core.TokenUsagePriceConfiguredTier},
+			ProviderModels: []core.TokenUsageProviderModel{{ProviderID: "openai", ModelID: "gpt-4o-mini"}},
+		},
+	}
+
+	got := CoreEventToAgentEvent(coreEvent)
+	if got.TokenUsage == nil {
+		t.Fatal("token usage was dropped")
+	}
+	if got.TokenUsage.UnknownUsageAttempts != 1 || got.TokenUsage.UnknownCostAttempts != 2 {
+		t.Fatalf("unknown attempt counts = (%d, %d), want (1, 2)", got.TokenUsage.UnknownUsageAttempts, got.TokenUsage.UnknownCostAttempts)
+	}
+	if got.TokenUsage.UsageSource != core.TokenUsageSourceReported || len(got.TokenUsage.CostSources) != 2 || len(got.TokenUsage.PriceSources) != 1 {
+		t.Fatalf("token usage sources were not preserved: %+v", got.TokenUsage)
+	}
+	if len(got.TokenUsage.ProviderModels) != 1 || got.TokenUsage.ProviderModels[0].ProviderID != "openai" || got.TokenUsage.ProviderModels[0].ModelID != "gpt-4o-mini" {
+		t.Fatalf("provider/model evidence was not preserved: %+v", got.TokenUsage.ProviderModels)
 	}
 }

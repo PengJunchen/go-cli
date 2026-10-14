@@ -1,6 +1,16 @@
 package config
 
-import "time"
+import (
+	"time"
+
+	"github.com/pengjunchen/go-cli/internal/approval"
+)
+
+// DefaultLLMMaxTokens is the final model-token fallback when neither the
+// selected model nor its matching provider configuration sets a value.
+const DefaultLLMMaxTokens = 4096
+
+const defaultTUIDiffStyle = "unified"
 
 // Config is the root application configuration. It is deeply nested into
 // sections mirroring the go-cli configuration file / environment schema.
@@ -30,8 +40,21 @@ type Config struct {
 	ModelRegistry ModelRegistryConfig `json:"model_registry"`
 	History       HistoryConfig       `json:"history"`
 	TUI           TUIConfig           `json:"tui" yaml:"tui"`
+	// ProjectSourceTrustStatus is a presentation value only. It is not proof
+	// that project configuration or other executable sources may be consumed.
+	ProjectSourceTrustStatus ProjectSourceTrustStatus `json:"project_source_trust_status,omitempty"`
 
-	verbose bool
+	verbose                   bool
+	samplingPresenceKnown     bool
+	projectSourceSnapshot     *approval.ProjectSourceSnapshot
+	verifiedProjectSources    *approval.VerifiedProjectSources
+	projectTrustManager       approval.TrustManager `json:"-" yaml:"-" mapstructure:"-"`
+	projectExtensionSourceIDs map[string]string
+	projectACPCommandSourceID string
+	projectACPCommandPath     string
+	projectOverlay            *Config
+	userGlobalConfig          *Config
+	mcpServersProvenance      MCPServersProvenance
 }
 
 // Verbose returns whether verbose output is enabled.
@@ -39,19 +62,23 @@ func (c *Config) Verbose() bool { return c.verbose }
 
 // ProviderConfig holds the LLM provider connection settings.
 type ProviderConfig struct {
-	Name        string  `json:"name"`
-	APIKey      string  `json:"api_key"`
-	BaseURL     string  `json:"base_url"`
-	Model       string  `json:"model"`
-	Temperature float64 `json:"temperature"`
-	MaxTokens   int     `json:"max_tokens"`
+	Name           string  `json:"name"`
+	APIKey         string  `json:"api_key"`
+	BaseURL        string  `json:"base_url"`
+	Model          string  `json:"model"`
+	Temperature    float64 `json:"temperature"`
+	MaxTokens      int     `json:"max_tokens"`
+	temperatureSet bool
+	maxTokensSet   bool
 }
 
 // ModelConfig holds the default model selection and generation parameters.
 type ModelConfig struct {
-	Name        string  `json:"name"`
-	Temperature float64 `json:"temperature"`
-	MaxTokens   int     `json:"max_tokens"`
+	Name           string  `json:"name"`
+	Temperature    float64 `json:"temperature"`
+	MaxTokens      int     `json:"max_tokens"`
+	temperatureSet bool
+	maxTokensSet   bool
 }
 
 // SmallModelConfig holds settings for a lightweight model used for background
@@ -59,12 +86,102 @@ type ModelConfig struct {
 // Model are empty, the small model is not built and all tasks fall back to the
 // primary model.
 type SmallModelConfig struct {
-	Provider    string  `json:"provider"`
-	APIKey      string  `json:"api_key"`
-	BaseURL     string  `json:"base_url"`
-	Model       string  `json:"model"`
-	Temperature float64 `json:"temperature"`
-	MaxTokens   int     `json:"max_tokens"`
+	Provider       string  `json:"provider"`
+	APIKey         string  `json:"api_key"`
+	BaseURL        string  `json:"base_url"`
+	Model          string  `json:"model"`
+	Temperature    float64 `json:"temperature"`
+	MaxTokens      int     `json:"max_tokens"`
+	temperatureSet bool
+	maxTokensSet   bool
+}
+
+// SamplingSettings carries one section's sampling values and their presence.
+// The Set fields distinguish an explicit zero from an omitted setting.
+type SamplingSettings struct {
+	Temperature    float64
+	TemperatureSet bool
+	MaxTokens      int
+	MaxTokensSet   bool
+}
+
+// SetTemperature sets an explicit provider temperature, including zero.
+func (p *ProviderConfig) SetTemperature(value float64) {
+	p.Temperature = value
+	p.temperatureSet = true
+}
+
+// SetMaxTokens sets an explicit provider token limit, including zero.
+func (p *ProviderConfig) SetMaxTokens(value int) {
+	p.MaxTokens = value
+	p.maxTokensSet = true
+}
+
+// SetTemperature sets an explicit model temperature, including zero.
+func (m *ModelConfig) SetTemperature(value float64) {
+	m.Temperature = value
+	m.temperatureSet = true
+}
+
+// SetMaxTokens sets an explicit model token limit, including zero.
+func (m *ModelConfig) SetMaxTokens(value int) {
+	m.MaxTokens = value
+	m.maxTokensSet = true
+}
+
+// SetTemperature sets an explicit small-model temperature, including zero.
+func (m *SmallModelConfig) SetTemperature(value float64) {
+	m.Temperature = value
+	m.temperatureSet = true
+}
+
+// SetMaxTokens sets an explicit small-model token limit, including zero.
+func (m *SmallModelConfig) SetMaxTokens(value int) {
+	m.MaxTokens = value
+	m.maxTokensSet = true
+}
+
+// ProviderSampling returns provider-level sampling settings. For a config
+// assembled by Loader or UnmarshalConfig, source presence is authoritative;
+// for older code-built Config values, non-zero scalars remain explicit.
+func (c *Config) ProviderSampling() SamplingSettings {
+	if c == nil {
+		return SamplingSettings{}
+	}
+	return samplingSettings(c.Provider.Temperature, c.Provider.temperatureSet, c.Provider.MaxTokens, c.Provider.maxTokensSet, c.samplingPresenceKnown)
+}
+
+// ModelSampling returns model-level sampling settings. Built-in fallback
+// values are returned with their Set bits clear.
+func (c *Config) ModelSampling() SamplingSettings {
+	if c == nil {
+		return SamplingSettings{}
+	}
+	return samplingSettings(c.Model.Temperature, c.Model.temperatureSet, c.Model.MaxTokens, c.Model.maxTokensSet, c.samplingPresenceKnown)
+}
+
+// SmallModelSampling returns small-model sampling settings. Built-in fallback
+// values are returned with their Set bits clear.
+func (c *Config) SmallModelSampling() SamplingSettings {
+	if c == nil {
+		return SamplingSettings{}
+	}
+	return samplingSettings(c.SmallModel.Temperature, c.SmallModel.temperatureSet, c.SmallModel.MaxTokens, c.SmallModel.maxTokensSet, c.samplingPresenceKnown)
+}
+
+func samplingSettings(temperature float64, temperatureSet bool, maxTokens int, maxTokensSet bool, presenceKnown bool) SamplingSettings {
+	if !temperatureSet && !presenceKnown && temperature != 0 {
+		temperatureSet = true
+	}
+	if !maxTokensSet && !presenceKnown && maxTokens != 0 {
+		maxTokensSet = true
+	}
+	return SamplingSettings{
+		Temperature:    temperature,
+		TemperatureSet: temperatureSet,
+		MaxTokens:      maxTokens,
+		MaxTokensSet:   maxTokensSet,
+	}
 }
 
 // AgentConfig holds agent loop behavior settings.
@@ -196,12 +313,13 @@ type CommandsConfig struct {
 	Dir string `json:"dir"`
 }
 
-// WebSearchConfig controls the web search provider selection. When Provider
-// is empty or "mock", the MockSearchProvider is used (default). "fetch" selects
-// the DuckDuckGo HTML scraping provider, and "brave" selects the Brave Search
-// API provider (requires APIKey).
+// WebSearchConfig controls production web search provider selection. An empty
+// or "mock" provider leaves web_search unavailable; the MockSearchProvider is
+// intended for explicit Go test injection. "fetch" selects the DuckDuckGo HTML
+// scraping provider, and "brave" selects the Brave Search API provider
+// (requires APIKey).
 type WebSearchConfig struct {
-	Provider string `json:"provider"` // "mock" (default), "fetch", "brave"
+	Provider string `json:"provider"` // "fetch" or "brave"; empty and "mock" are unavailable
 	APIKey   string `json:"api_key"`  // for brave provider
 	Timeout  string `json:"timeout"`  // duration string, default "10s"
 }
@@ -240,13 +358,17 @@ type LoopDetectorConfig struct {
 	TestFailureThreshold int `json:"test_failure_threshold"`
 	// SameToolCallThreshold triggers after this many repeated identical tool calls.
 	SameToolCallThreshold int `json:"same_tool_call_threshold"`
+	// Disposition chooses whether a detected loop warns or stops the active
+	// run. Empty keeps the backward-compatible warn behavior.
+	Disposition string `json:"disposition"`
 }
 
-// SandboxConfig controls the workspace sandbox applied to the bash tool.
+// SandboxConfig controls workspace path scopes and resource limits for default tools.
 type SandboxConfig struct {
-	// AllowedPaths restricts command execution to these directories (and
-	// their subdirectories). When empty, the current working directory is
-	// used as a safe default.
+	// AllowedPaths restricts Bash working directories and, when explicitly
+	// nonempty, scopes default file tools to these directories and their
+	// subdirectories. When empty, Bash uses the current working directory as a
+	// safe default and default file tools remain unrestricted.
 	AllowedPaths []string `json:"allowed_paths"`
 	// MaxCPU bounds the CPU time a single command may consume.
 	MaxCPU time.Duration `json:"max_cpu"`
@@ -337,18 +459,27 @@ type HookConfig struct {
 }
 
 // ACPConfig controls Agent Communication Protocol (ACP) multi-agent
-// communication. When Transport and Endpoints are both non-empty, the CLI
-// creates an ACPClient, connects to the first endpoint, and wires an
-// ACPMiddlewareAdapter into the loop middleware chain so inbound ACP messages
-// are dispatched to sub-agents.
+// communication. Stdio transport starts Command directly with Args and uses
+// owned child stdin/stdout pipes and same-process-group cleanup; it does not
+// wrap Command in a shell. Descendants that leave the process group with
+// setsid or setpgid are outside this cleanup boundary. Grpc transport connects
+// to the first endpoint.
 type ACPConfig struct {
 	// Transport selects the wire format: "stdio" (newline-delimited JSON over
-	// stdin/stdout) or "grpc" (JSON-over-HTTP). When empty, ACP is disabled.
+	// an owned child process) or "grpc" (JSON-over-HTTP). When empty, ACP is disabled.
 	Transport string `json:"transport"`
-	// Endpoints lists the peer endpoints. For "grpc" transport each entry is an
-	// HTTP URL; for "stdio" the first entry is informational (stdin/stdout are
-	// used automatically).
+	// Endpoints lists peer endpoints. For "grpc" transport each entry is an
+	// HTTP URL. Stdio does not use Endpoints.
 	Endpoints []string `json:"endpoints"`
+	// Command is the executable to start for stdio transport. It is invoked
+	// directly, without shell expansion.
+	Command string `json:"command"`
+	// Args are passed as discrete arguments to Command for stdio transport.
+	Args []string `json:"args"`
+	// BearerTokenEnv names the environment variable holding the bearer token for
+	// the private HTTP ACP profile. If set, the exact variable is required; the
+	// token is never stored in config. This field does not apply to stdio.
+	BearerTokenEnv string `json:"bearer_token_env" yaml:"bearer_token_env"`
 	// Timeout bounds ACP operations in seconds. Zero means no explicit timeout.
 	Timeout int `json:"timeout"`
 }
@@ -437,8 +568,8 @@ type TUIConfig struct {
 	Theme string `json:"theme" yaml:"theme"`
 	// WordWrap sets the render word-wrap width in columns. Zero disables wrapping.
 	WordWrap int `json:"word_wrap" yaml:"word_wrap"`
-	// DiffStyle selects the diff preview style: unified, split, or auto.
-	// Empty defaults to auto.
+	// DiffStyle selects the supported diff preview style. Empty defaults to
+	// unified.
 	DiffStyle string `json:"diff_style" yaml:"diff_style"`
 	// Mode selects the TUI event source: "local" (default) consumes events
 	// from the in-process EventStream; "remote" consumes SSE events from a

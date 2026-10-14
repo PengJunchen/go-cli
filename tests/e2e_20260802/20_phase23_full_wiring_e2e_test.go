@@ -73,15 +73,8 @@ func (c *stubDoctorChecker) Check(_ context.Context) cli.DoctorCheck {
 // tool from executing.
 func TestE2E_Phase23_ApprovalGateBlocksBash(t *testing.T) {
 	inner := &recordingTool{name: "bash"}
-	tr := tools.NewDefaultToolRegistry()
-	require.NoError(t, tr.Register(context.Background(), inner))
-
-	mw := approval.NewApprovalMiddleware(
-		approval.NewSafetyPolicyClassifier([]string{"bash"}),
-		approval.NewInMemoryApprovalStore(),
-		approval.WithAutoApprove(false),
-	)
-	wrapped := tools.NewMiddlewareToolRegistry(tr, mw.WrapToolCall)
+	base, wrapped, _ := newPreparedApprovalRuntime(t, approval.NewSafetyPolicyClassifier([]string{"bash"}), false, nil, nil)
+	require.NoError(t, base.Register(context.Background(), inner))
 
 	def, err := wrapped.Get(context.Background(), "bash")
 	require.NoError(t, err)
@@ -89,6 +82,7 @@ func TestE2E_Phase23_ApprovalGateBlocksBash(t *testing.T) {
 	_, execErr := def.Execute(context.Background(), toolCall("bash"))
 	require.ErrorIs(t, execErr, approval.ErrToolDenied)
 	assert.False(t, inner.executed, "bash must not execute when denied by approval gate")
+	assert.Zero(t, inner.calls.Load(), "denied bash must have no executor side effects")
 }
 
 // =============================================================================

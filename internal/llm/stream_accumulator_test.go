@@ -42,13 +42,15 @@ func TestEinoStream_UsesDefaultSSEParser(t *testing.T) {
 			": another comment",
 			"data: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}",
 			"",
+			"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}",
+			"",
 			"data: [DONE]",
 			"",
 		}, "\n"))
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -83,7 +85,7 @@ func TestEinoStream_JSONFallback_DetectNonSSE(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -131,7 +133,7 @@ func TestEinoStream_ToolCallAccumulation_Shared(t *testing.T) {
 	defer srv.Close()
 
 	// Run through EinoProvider.
-	einoModel := &HTTPChatModel{
+	einoModel := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -252,6 +254,13 @@ func TestDetectJSONResponse_LeadingWhitespace(t *testing.T) {
 // automatically.
 func runStreamAccumulator(t *testing.T, eventData ...string) ([]ToolCall, string, []MessageChunk) {
 	t.Helper()
+	toolCalls, finishReason, chunks, err := runStreamAccumulatorResult(t, eventData...)
+	require.NoError(t, err)
+	return toolCalls, finishReason, chunks
+}
+
+func runStreamAccumulatorResult(t *testing.T, eventData ...string) ([]ToolCall, string, []MessageChunk, error) {
+	t.Helper()
 	events := make(chan SSEEvent, len(eventData)+1)
 	for _, data := range eventData {
 		events <- SSEEvent{Data: data}
@@ -260,14 +269,14 @@ func runStreamAccumulator(t *testing.T, eventData ...string) ([]ToolCall, string
 	close(events)
 
 	ch := make(chan MessageChunk, 64)
-	toolCalls, finishReason, _ := accumulateOpenAIStreamToolCalls(context.Background(), events, ch)
+	toolCalls, finishReason, _, err := accumulateOpenAIStreamToolCalls(context.Background(), events, ch)
 	close(ch)
 
 	var chunks []MessageChunk
 	for c := range ch {
 		chunks = append(chunks, c)
 	}
-	return toolCalls, finishReason, chunks
+	return toolCalls, finishReason, chunks, err
 }
 
 // TestStreamAccumulator_WithAPIIDsUsesRealID verifies that when the API
@@ -287,18 +296,22 @@ func TestStreamAccumulator_WithAPIIDsUsesRealID(t *testing.T) {
 	assert.Equal(t, "SF", args["city"])
 }
 
-// TestStreamAccumulator_WithoutIDsFallsBackSynthetic verifies that when the
-// stream never carries a tool call ID, the accumulator falls back to the
-// synthetic "call_%d" scheme so downstream code still has a non-empty ID.
-func TestStreamAccumulator_WithoutIDsFallsBackSynthetic(t *testing.T) {
-	toolCalls, _, _ := runStreamAccumulator(t,
+// Missing wire IDs must fail closed instead of inventing a call ID that cannot
+// be correlated with provider-side tool history.
+func TestStreamAccumulator_RejectsMissingIDs(t *testing.T) {
+	_, _, _, err := runStreamAccumulatorResult(t,
 		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
 		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":\"SF\"}"}}]}}]}`,
 		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
-	require.Len(t, toolCalls, 1)
-	assert.Equal(t, "call_0", toolCalls[0].ID)
-	assert.Equal(t, "get_weather", toolCalls[0].Name)
+	require.ErrorContains(t, err, "missing an ID or name")
+}
+
+func TestStreamAccumulator_RequiresTerminalFinishReason(t *testing.T) {
+	_, _, _, err := runStreamAccumulatorResult(t,
+		`{"choices":[{"delta":{"content":"partial"}}]}`,
+	)
+	require.ErrorContains(t, err, "without a terminal finish reason")
 }
 
 // TestStreamAccumulator_MultipleToolCallsTracked verifies that tool call IDs
@@ -319,18 +332,47 @@ func TestStreamAccumulator_MultipleToolCallsTracked(t *testing.T) {
 	assert.Equal(t, "search", toolCalls[2].Name)
 }
 
-// TestStreamAccumulator_FirstWriteWins verifies that once an ID is stored for
-// an index, subsequent deltas for the same index do not overwrite it
-// (first-write-wins semantics). This matches the behaviour already used for
-// tool names.
-func TestStreamAccumulator_FirstWriteWins(t *testing.T) {
-	toolCalls, _, _ := runStreamAccumulator(t,
+func TestStreamAccumulator_RejectsConflictingIDs(t *testing.T) {
+	_, _, _, err := runStreamAccumulatorResult(t,
 		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_first","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
 		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_second","function":{"arguments":"{\"city\":\"SF\"}"}}]}}]}`,
 		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
-	require.Len(t, toolCalls, 1)
-	assert.Equal(t, "call_first", toolCalls[0].ID)
+	require.ErrorContains(t, err, "conflicting IDs")
+}
+
+func TestStreamAccumulator_RejectsConflictingNames(t *testing.T) {
+	_, _, _, err := runStreamAccumulatorResult(t,
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"delete_file","arguments":"{}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	require.ErrorContains(t, err, "conflicting names")
+}
+
+func TestStreamAccumulator_RejectsInvalidToolCallIndexesBeforeAllocation(t *testing.T) {
+	for _, index := range []string{"-1", "100000"} {
+		t.Run(index, func(t *testing.T) {
+			_, _, _, err := runStreamAccumulatorResult(t,
+				fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":%s,"id":"call_1","type":"function","function":{"name":"read","arguments":"{}"}}]}}]}`, index),
+			)
+			require.ErrorContains(t, err, "outside the supported range")
+		})
+	}
+}
+
+func TestStreamAccumulator_RejectsNonObjectToolArguments(t *testing.T) {
+	for _, rawArgs := range []string{"null", "[]", "true", "42", `"value"`} {
+		t.Run(rawArgs, func(t *testing.T) {
+			encodedArgs, err := json.Marshal(rawArgs)
+			require.NoError(t, err)
+			_, _, _, err = runStreamAccumulatorResult(t,
+				fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":%s}}]}}]}`, encodedArgs),
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+			)
+			require.Error(t, err, "wire tool arguments must be a JSON object")
+		})
+	}
 }
 
 // TestToolCallID_MatchesNonStreaming verifies that the streaming accumulator
@@ -461,7 +503,7 @@ func TestAccumulateOpenAIStreamToolCalls_Race(t *testing.T) {
 			close(ev)
 
 			ch := make(chan MessageChunk, 64)
-			accumulateOpenAIStreamToolCalls(context.Background(), ev, ch)
+			_, _, _, _ = accumulateOpenAIStreamToolCalls(context.Background(), ev, ch)
 			close(ch)
 			for range ch {
 			}
@@ -506,7 +548,7 @@ func BenchmarkAccumulateToolCalls_Builder(b *testing.B) {
 		close(events)
 
 		ch := make(chan MessageChunk, 64)
-		accumulateOpenAIStreamToolCalls(context.Background(), events, ch)
+		_, _, _, _ = accumulateOpenAIStreamToolCalls(context.Background(), events, ch)
 		close(ch)
 		for range ch {
 		}

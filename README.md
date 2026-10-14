@@ -131,10 +131,12 @@ EinoProvider implements OpenAI-compatible protocol via `net/http`, zero external
 
 ### Built-in Tools
 
+This table describes implemented tool components; it is not the per-run model tool registry. Check `/tools` for tools registered in the current interactive session and `/help` for default capability limits.
+
 | Category | Tool | Description |
 |---|---|---|
 | File/Shell | `bash` | Execute shell commands (streaming output, sandbox & resource limits) |
-| File/Shell | `read` | Read files (supports images) |
+| File/Shell | `read` | Read text files |
 | File/Shell | `write` | Write files |
 | File/Shell | `edit` | Diff edit (old/new replacement) |
 | File/Shell | `grep` | Regex search (pure Go mode supported) |
@@ -145,15 +147,15 @@ EinoProvider implements OpenAI-compatible protocol via `net/http`, zero external
 | Git | `git_merge`/`git_stash`/`git_stash_pop`/`git_reset`/`git_revert` | Git workflow |
 | Git | `git_pr_create` | Pull request creation |
 | Web | `web_fetch` | Fetch URL content |
-| Web | `web_search` | Web search (mock/fetch/brave providers) |
+| Web | `web_search` | Requires a configured search provider; unavailable by default |
 | Web | `tool_search` | Semantic tool search |
-| Productivity | `todo_write` | Todo list management |
-| Productivity | `task_create`/`task_get`/`task_list`/`task_update` | Task store |
-| Productivity | `goal_create`/`goal_update`/`goal_list`/`goal_get` | Goal store |
+| Productivity | `todo_write` | In-process todo list; not retained across restarts |
+| Productivity | `task_create`/`task_get`/`task_list`/`task_update` | In-process task store; not retained across restarts |
+| Productivity | `goal_create`/`goal_update`/`goal_list`/`goal_get` | In-process goal store; not retained across restarts |
 | Code | `lsp_query` | Language Server Protocol queries |
-| Multimodal | `image_read` | Read & decode images |
+| Multimodal | `image_read` | Not registered in the default CLI |
 | Interaction | `ask_user` | Human-in-the-loop question |
-| Interaction | `enter_plan_mode`/`exit_plan_mode` | Plan mode toggle |
+| Interaction | `/plan enter`/`/plan exit` | User-controlled Plan Mode; not model-call tools |
 | Agent | `dispatch_subagent` | SubAgent dispatch |
 | Agent | `remote_bash` | Remote shell via SSH |
 
@@ -173,9 +175,10 @@ Auto-routing by ascending cost: **Micro → Summary → Truncating**
 
 ### Session Management
 
-- **SessionTree**: Append-only tree structure, supports branching (`Branch`), moving (`MoveTo`), context rebuilding (`BuildContext`)
+- **SessionTree**: Core API supports branching (`Branch`), moving (`MoveTo`), and context rebuilding (`BuildContext`). The default CLI resumes only by exact physical session ID within a configured session directory; fork, branch switching, snapshot, and migration are unsupported.
 - **JSONLSessionStore**: File persistence, one JSON record per line, append-only writes
 - **BranchSummary**: Auto-generate summary when leaving a branch
+- **Memory**: `/memory` manages user-entered records; the default CLI does not extract memories automatically or inject stored memories into model prompts.
 
 ### Extension System
 
@@ -212,6 +215,22 @@ Inter-process Agent communication protocol, two adapters:
 | **gRPCAdapter** | JSON-over-HTTP |
 
 Message types: `connect` / `disconnect` / `message` / `response` / `ack` / `error`
+
+The `grpc` transport uses the private JSON-over-HTTP profile. Set
+`acp.bearer_token_env` to the name of a dedicated environment variable to send
+a bearer token to that configured HTTP endpoint. The value is read at startup,
+is never stored in config, and a missing or malformed explicit reference fails
+assembly before any ACP request. When the field is unset, only a credential
+scoped to provider `acp`, protocol `go-cli-acp-json/1`, and the endpoint origin
+is eligible. This setting does not apply to `stdio`.
+
+```yaml
+acp:
+  transport: grpc
+  endpoints:
+    - http://127.0.0.1:8081/acp
+  bearer_token_env: GO_CLI_ACP_BEARER_TOKEN
+```
 
 ### MCP Tool Integration
 

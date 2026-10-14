@@ -20,28 +20,54 @@ import (
 // TestServeCmdNonLoopbackNoAuthRejected verifies that binding to a
 // non-loopback address with --no-auth is rejected (SEC-17).
 func TestServeCmdNonLoopbackNoAuthRejected(t *testing.T) {
-	out := &safeBuffer{}
-	c := newServeCmd(out)
+	for _, addr := range []string{":0", "0.0.0.0:9090", "[::]:9090"} {
+		t.Run(addr, func(t *testing.T) {
+			out := &safeBuffer{}
+			c := newServeCmd(out)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- c.Run(ctx, NewDefaultConfig(false), []string{
+					"--no-auth",
+					"--approve", "deny",
+					"--addr", addr,
+				})
+			}()
 
-	err := c.Run(context.Background(), NewDefaultConfig(false), []string{
-		"--no-auth",
-		"--addr", "0.0.0.0:9090",
-	})
-
-	if err == nil {
-		t.Fatal("expected error when --no-auth is used with non-loopback address")
-	}
-
-	ue, ok := err.(*UsageError)
-	if !ok {
-		t.Fatalf("expected UsageError, got %T: %v", err, err)
-	}
-
-	if !strings.Contains(ue.Error(), "non-loopback") {
-		t.Errorf("error should mention non-loopback, got: %v", err)
-	}
-	if !strings.Contains(ue.Error(), "0.0.0.0:9090") {
-		t.Errorf("error should mention the address, got: %v", err)
+			deadline := time.NewTimer(3 * time.Second)
+			defer deadline.Stop()
+			for {
+				select {
+				case err := <-done:
+					if err == nil {
+						t.Fatal("expected error when --no-auth is used with wildcard address")
+					}
+					ue, ok := err.(*UsageError)
+					if !ok {
+						t.Fatalf("expected UsageError, got %T: %v", err, err)
+					}
+					if !strings.Contains(ue.Error(), "non-loopback") {
+						t.Errorf("error should mention non-loopback, got: %v", err)
+					}
+					if !strings.Contains(ue.Error(), addr) {
+						t.Errorf("error should mention the address, got: %v", err)
+					}
+					return
+				case <-deadline.C:
+					cancel()
+					err := <-done
+					t.Fatalf("serve did not reject wildcard address (run returned %v)", err)
+				default:
+					if strings.Contains(out.String(), "listening") {
+						cancel()
+						err := <-done
+						t.Fatalf("serve started on wildcard address before rejecting --no-auth (run returned %v)", err)
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+		})
 	}
 }
 
@@ -53,7 +79,7 @@ func TestServeCmdNonLoopbackWarning(t *testing.T) {
 	c := newServeCmd(out)
 	c.errOut = errOut
 
-	tokenPath := filepath.Join(t.TempDir(), "serve-token")
+	tokenPath := privateServeTokenPath(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -61,8 +87,9 @@ func TestServeCmdNonLoopbackWarning(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		// Auth is enabled (default); no TLS. Should print warning.
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "0.0.0.0:0",
+			"--approve", "deny",
 			"--token-file", tokenPath,
 		})
 	}()
@@ -109,15 +136,16 @@ func TestServeCmdNonLoopbackWithTLSNoWarning(t *testing.T) {
 	c := newServeCmd(out)
 	c.errOut = errOut
 
-	tokenPath := filepath.Join(t.TempDir(), "serve-token")
+	tokenPath := privateServeTokenPath(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "0.0.0.0:0",
+			"--approve", "deny",
 			"--token-file", tokenPath,
 			"--tls-cert", certPath,
 			"--tls-key", keyPath,
@@ -165,6 +193,7 @@ func TestServeCmdTLSMissingKey(t *testing.T) {
 	// Only cert, no key.
 	err := c.Run(context.Background(), NewDefaultConfig(false), []string{
 		"--addr", "127.0.0.1:0",
+		"--approve", "deny",
 		"--tls-cert", "cert.pem",
 	})
 	if err == nil {
@@ -181,6 +210,7 @@ func TestServeCmdTLSMissingKey(t *testing.T) {
 	// Only key, no cert.
 	err = c.Run(context.Background(), NewDefaultConfig(false), []string{
 		"--addr", "127.0.0.1:0",
+		"--approve", "deny",
 		"--tls-key", "key.pem",
 	})
 	if err == nil {
@@ -197,6 +227,7 @@ func TestServeCmdTLSFileNotReadable(t *testing.T) {
 	missingPath := filepath.Join(t.TempDir(), "nonexistent.pem")
 	err := c.Run(context.Background(), NewDefaultConfig(false), []string{
 		"--addr", "127.0.0.1:0",
+		"--approve", "deny",
 		"--tls-cert", missingPath,
 		"--tls-key", missingPath,
 	})
@@ -225,9 +256,10 @@ func TestServeCmdLoopbackNoWarning(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--no-auth",
 			"--addr", "127.0.0.1:0",
+			"--approve", "deny",
 		})
 	}()
 

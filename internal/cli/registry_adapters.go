@@ -120,34 +120,12 @@ var _ core.Compactor = (*compactorAdapter)(nil)
 
 func (a *compactorAdapter) Compact(ctx context.Context, messages []core.AgentMessage, maxTokens int) ([]core.AgentMessage, error) {
 	if len(messages) == 0 {
-		return messages, nil
+		return core.CloneAgentMessages(messages), nil
 	}
-	items := make([]compaction.TurnItem, len(messages))
-	for i, msg := range messages {
-		items[i] = compaction.TurnItem{
-			ID:            fmt.Sprintf("msg-%d", i),
-			Role:          msg.Role,
-			Content:       msg.Content,
-			ContentBlocks: msg.ContentBlocks,
-			ToolCalls:     msg.ToolCalls,
-			ToolCallID:    msg.ToolCallID,
-			ToolName:      msg.ToolName,
-		}
-	}
+	items := messagesToTurnItems(messages)
 	compacted, err := a.inner.Compact(ctx, items, maxTokens, a.estimator)
 	if err != nil {
 		return nil, fmt.Errorf("registry compactor adapter: %w", err)
 	}
-	result := make([]core.AgentMessage, len(compacted))
-	for i, item := range compacted {
-		result[i] = core.AgentMessage{
-			Role:          item.Role,
-			Content:       item.Content,
-			ContentBlocks: item.ContentBlocks,
-			ToolCalls:     item.ToolCalls,
-			ToolCallID:    item.ToolCallID,
-			ToolName:      item.ToolName,
-		}
-	}
-	return result, nil
+	return turnItemsToMessages(compacted.Items), nil
 }

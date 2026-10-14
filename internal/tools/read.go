@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"strings"
@@ -26,6 +27,10 @@ const (
 // ReadToolOption configures a ReadTool.
 type ReadToolOption func(*ReadTool)
 
+func withReadCanonicalWorkspaceRoot(root string) ReadToolOption {
+	return func(tool *ReadTool) { tool.canonicalWorkspaceRoot = root }
+}
+
 // WithWorkdir sets the base directory that relative paths are resolved
 // against.
 func WithWorkdir(dir string) ReadToolOption {
@@ -42,16 +47,30 @@ func WithFollowSymlinks(b bool) ReadToolOption {
 	return func(t *ReadTool) { t.FollowSymlinks = b }
 }
 
+// WithReadPathWhitelist restricts reads to the configured base paths after
+// resolving existing symlinks. An empty slice preserves the unrestricted
+// behavior for callers that do not configure a file-tool scope.
+func WithReadPathWhitelist(paths []string) ReadToolOption {
+	return func(t *ReadTool) { t.whitelist = NewPathWhitelist(paths) }
+}
+
 // ReadTool reads the contents of files and lists directories. It implements
 // the ToolDefinition interface.
 type ReadTool struct {
-	workdir        string
-	maxBytes       int
-	FollowSymlinks bool
-	names          []string
+	workdir                string
+	maxBytes               int
+	FollowSymlinks         bool
+	names                  []string
+	whitelist              PathWhitelist
+	canonicalWorkspaceRoot string
 }
 
 var _ ToolDefinition = (*ReadTool)(nil)
+
+type readDirectoryEntry struct {
+	name  string
+	isDir bool
+}
 
 // NewReadTool returns a ReadTool with sensible defaults (workdir ".", max
 // bytes 1 MiB). Options may override the defaults.
@@ -76,6 +95,18 @@ func (t *ReadTool) Names() []string { return t.names }
 // Description returns a brief description of the tool.
 func (t *ReadTool) Description() string {
 	return "read: reads a file's contents or lists a directory. Args: path (string)."
+}
+
+// Parameters returns the JSON Schema for the path this tool reads or lists.
+func (t *ReadTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{"type": "string"},
+		},
+		"required":             []any{"path"},
+		"additionalProperties": false,
+	}
 }
 
 // Execute reads the file at the given path (relative paths resolve against the
@@ -135,31 +166,55 @@ func (t *ReadTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	}
 
 	if info.IsDir() {
-		entries, listErr := os.ReadDir(abspath)
+		directory, openErr := os.Open(abspath)
+		if openErr != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			logger.Error("read.readdir_failed", "path", abspath, "err", openErr)
+			return nil, fmt.Errorf("read: %w", openErr)
+		}
+
+		entries := newBoundedTopK[readDirectoryEntry](directoryCaptureMaxEntries, directoryCaptureMaxEntryBytes,
+			func(entry readDirectoryEntry) string { return entry.name },
+			func(a, b readDirectoryEntry) bool { return a.name < b.name },
+		)
+		listErr := scanDirectoryBatches(ctx, directory, directoryReadBatchSize, func(entry fs.DirEntry) error {
+			item := readDirectoryEntry{name: entry.Name(), isDir: entry.IsDir()}
+			return entries.Add(item)
+		})
+		if closeErr := directory.Close(); closeErr != nil {
+			listErr = errors.Join(listErr, closeErr)
+		}
 		if listErr != nil {
 			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 			logger.Error("read.readdir_failed", "path", abspath, "err", listErr)
 			return nil, fmt.Errorf("read: %w", listErr)
 		}
 
-		var sb strings.Builder
-		for _, e := range entries {
-			sb.WriteString(e.Name())
-			if e.IsDir() {
-				sb.WriteString("/")
+		output := newBoundedDirectoryOutput(directoryCaptureMaxOutputBytes)
+		for _, entry := range entries.Sorted() {
+			name := directoryDisplayName(entry.name)
+			if entry.isDir {
+				name += "/"
 			}
-			sb.WriteString("\n")
+			if !output.AppendLine(name) {
+				break
+			}
 		}
-
-		span.SetAttributes(tracing.Attribute{Key: "success", Value: true})
+		truncated := entries.Truncated() || output.Truncated()
+		span.SetAttributes(
+			tracing.Attribute{Key: "entries", Value: output.Records()},
+			tracing.Attribute{Key: "truncated", Value: truncated},
+			tracing.Attribute{Key: "success", Value: true},
+		)
 		logger.Info("read.dir",
 			"path", abspath,
-			"entries", len(entries),
+			"entries", output.Records(),
+			"truncated", truncated,
 			"duration_ms", time.Since(start).Milliseconds())
 
 		return &ToolResult{
-			Output:   strings.TrimSuffix(sb.String(), "\n"),
-			Metadata: map[string]any{"path": abspath, "entries": len(entries)},
+			Output:   output.String(),
+			Metadata: map[string]any{"path": abspath, "entries": output.Records(), "truncated": truncated},
 		}, nil
 	}
 
@@ -203,8 +258,25 @@ func (t *ReadTool) PromptGuidelines() []string {
 	return []string{"Use read to examine files instead of cat or sed"}
 }
 
-// resolvePath resolves a possibly-relative path against the workdir, cleans
-// the result, and prevents path traversal outside the workdir.
+// resolvePath resolves a possibly-relative path against the workdir, prevents
+// workdir traversal, and applies the configured path whitelist.
 func (t *ReadTool) resolvePath(path string) (string, error) {
-	return resolveWithinWorkdir("read", t.workdir, path)
+	abspath, err := resolveWithinWorkdir("read", t.workdir, path)
+	if err != nil {
+		return abspath, err
+	}
+	if t.whitelist.unrestricted() {
+		return abspath, nil
+	}
+
+	// Resolve existing symlink components, including the final component, so
+	// an allowed symlink can only be followed when its target remains in scope.
+	// Execute still applies the existing FollowSymlinks policy to the final link.
+	// This path check is check-then-use and is not a race-free OS sandbox: a
+	// concurrent symlink replacement between validation and open can race it.
+	realPath := resolveSymlinks(abspath)
+	if !t.whitelist.IsAllowed(realPath) {
+		return abspath, fmt.Errorf("read: path %q escapes the path whitelist", path)
+	}
+	return abspath, nil
 }

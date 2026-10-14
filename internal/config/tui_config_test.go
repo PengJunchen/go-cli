@@ -13,6 +13,7 @@ func TestTUIConfig_Defaults(t *testing.T) {
 	assert.Equal(t, "", cfg.TUI.Theme)
 	assert.Equal(t, 0, cfg.TUI.WordWrap)
 	assert.Equal(t, "", cfg.TUI.DiffStyle)
+	assert.Equal(t, "unified", defaultConfig().TUI.DiffStyle)
 }
 
 func TestTUIConfig_ValidTheme(t *testing.T) {
@@ -32,9 +33,24 @@ func TestTUIConfig_InvalidTheme(t *testing.T) {
 
 func TestTUIConfig_ValidDiffStyle(t *testing.T) {
 	cfg := defaultConfig()
-	cfg.TUI = TUIConfig{DiffStyle: "split"}
+	cfg.TUI = TUIConfig{DiffStyle: "unified"}
 	err := NewDefaultValidator().Validate(*cfg)
 	require.NoError(t, err)
+}
+
+func TestTUIConfig_UnsupportedDiffStyles(t *testing.T) {
+	for _, style := range []string{"split", "auto"} {
+		t.Run(style, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.TUI.DiffStyle = style
+			err := NewDefaultValidator().Validate(*cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "diff_style")
+			assert.Contains(t, err.Error(), "supported: unified")
+			assert.NotContains(t, err.Error(), "split")
+			assert.NotContains(t, err.Error(), "auto")
+		})
+	}
 }
 
 func TestTUIConfig_InvalidDiffStyle(t *testing.T) {

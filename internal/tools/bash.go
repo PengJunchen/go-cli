@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -141,6 +142,18 @@ func (t *BashTool) Description() string {
 	return "bash: runs a shell command and returns its combined output. Args: command (string)."
 }
 
+// Parameters returns the JSON Schema for the command this tool executes.
+func (t *BashTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"command": map[string]any{"type": "string"},
+		},
+		"required":             []any{"command"},
+		"additionalProperties": false,
+	}
+}
+
 // Execute runs the given shell command under the tool's timeout and captures
 // combined stdout+stderr. A command that exceeds the timeout is killed and an
 // error is returned.
@@ -186,38 +199,86 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if err := execCtx.Err(); err != nil {
+		return nil, fmt.Errorf("bash: canceled before start: %w", err)
+	}
 
 	// Wrap the command with resource limits (ulimit) so only the child
 	// process is affected, not the Go runtime.
 	command = wrapCommandWithLimits(command, t.ResourceLimits)
 
-	cmd := exec.CommandContext(execCtx, "bash", "-lc", command)
+	cmd := exec.Command("bash", "-lc", command)
 	cmd.Dir = t.Workdir
 	cmd.Env = filteredEnv(t.Env)
 
-	var buf bytes.Buffer
-	// Bound the amount of data buffered so hostile or noisy output cannot
-	// exhaust memory.
-	limited := &limitedWriter{max: t.MaxOutput, buf: &buf}
-	cmd.Stdout = limited
-	cmd.Stderr = limited
-
-	runErr := cmd.Run()
+	managed, err := startManagedLocalBashCommand(execCtx, cancel, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("bash: start: %w", err)
+	}
+	capture := newBoundedOutputCapture(t.MaxOutput)
+	lifecycle := managed.collect(execCtx, func(reader io.Reader, stream string) (bool, error) {
+		_, readErr := io.Copy(capture.writer(stream), reader)
+		return readErr == nil, readErr
+	})
+	reportPreparedLocalProcessCompletion(ctx, lifecycle)
 	ms := time.Since(start).Milliseconds()
-	limited.truncate()
+	_, _, output, truncated := capture.snapshot("\n[output truncated]")
+	metadata := map[string]any{
+		"duration_ms":       ms,
+		"truncated":         truncated,
+		"containment_scope": processContainmentScope,
+	}
+	runErr := lifecycle.runErr
+	readerErr := lifecycle.readerErr
+	cleanupErr := lifecycle.cleanupErr
+	if cleanupErr != nil {
+		metadata["cleanup_error"] = cleanupErr.Error()
+	}
+	if readerErr != nil {
+		metadata["read_error"] = readerErr.Error()
+	}
+	if lifecycle.escalated && execCtx.Err() == nil {
+		metadata["error"] = "background process stopped; outcome unknown"
+	}
 
-	output := buf.String()
-	metadata := map[string]any{"duration_ms": ms}
-
-	if execCtx.Err() != nil {
+	if lifecycle.interrupted {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		metadata["exit_code"] = -1
-		metadata["error"] = "timed out"
-		logger.Error("bash.timeout",
+		message := "canceled"
+		cause := error(execCtx.Err())
+		if cause == nil {
+			cause = context.Canceled
+		}
+		if errors.Is(cause, context.DeadlineExceeded) {
+			message = "timed out"
+			cause = fmt.Errorf("bash: timed out after %s: %w", timeout.String(), cause)
+		}
+		metadata["error"] = message
+		logger.Error("bash.execution_interrupted",
 			"tool", "bash",
 			"duration_ms", ms,
+			"reason", message,
 			"timeout", timeout.String())
-		return &ToolResult{Output: output, Metadata: metadata}, fmt.Errorf("bash: timed out after %s: %w", timeout.String(), execCtx.Err())
+		return &ToolResult{Output: output, Metadata: metadata}, localLifecycleError(cause, lifecycle)
+	}
+
+	if !lifecycle.quiescent {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		metadata["exit_code"] = exitCode(runErr)
+		cause := errors.Join(errProcessCleanupUnconfirmed, cleanupErr, readerErr)
+		return &ToolResult{Output: output, Metadata: metadata}, pendingProcessErrorWithDone(cause, true, lifecycle.executionDone)
+	}
+
+	if lifecycle.escalated {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		metadata["exit_code"] = exitCode(runErr)
+		return &ToolResult{Output: output, Metadata: metadata}, newUnknownExecutionError(errors.Join(errProcessGroupRemained, runErr))
+	}
+
+	if readerErr != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		metadata["exit_code"] = exitCode(runErr)
+		return &ToolResult{Output: output, Metadata: metadata}, newUnknownExecutionError(fmt.Errorf("bash: output read failed: %w", readerErr))
 	}
 
 	if runErr != nil {

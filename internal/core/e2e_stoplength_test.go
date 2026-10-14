@@ -65,7 +65,7 @@ func TestET_stop_length_continuation(t *testing.T) {
 
 	// Subtest 2: When the model keeps returning finish_reason="length", the
 	// loop issues at most 3 continuation attempts (1 original + 3 continuations
-	// = 4 total calls). The merged content includes all partial chunks.
+	// = 4 total calls), then rejects the incomplete candidate.
 	t.Run("max_3_continuation_attempts", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -79,17 +79,22 @@ func TestET_stop_length_continuation(t *testing.T) {
 		))
 		loop := NewLoopAgent(WithLLM(model))
 
-		events, err := loop.Run(ctx, Submission{Content: "go"})
-		require.NoError(t, err)
+		runResult, err := loop.RunCanonical(ctx, Submission{Content: "go"})
+		require.EqualError(t, err, "core: response remains truncated after 3 continuation attempts")
 
 		// 1 original + 3 continuations = 4 total calls. The loop must not
 		// issue a 5th call even though the 4th response is still truncated.
-		assert.Equal(t, 4, model.CallCount())
+		require.Equal(t, 4, model.CallCount())
 
-		// The merged content includes all four partial chunks.
-		messages := findEvents(events, "message")
-		require.Len(t, messages, 1)
-		assert.Equal(t, "p1p2p3p4", messages[0])
+		// Exhausted continuation candidates are reported as an error event and
+		// never become a complete assistant message or canonical transcript row.
+		assert.Empty(t, findEvents(runResult.Events, "message"))
+		errors := filterEvents(runResult.Events, "error")
+		require.Len(t, errors, 1)
+		assert.Equal(t, err.Error(), errors[0].Content)
+		require.Len(t, runResult.Transcript, 1)
+		assert.Equal(t, string(llm.RoleUser), runResult.Transcript[0].Message.Role)
+		assert.Equal(t, "go", runResult.Transcript[0].Message.Content)
 	})
 
 	// Subtest 3: Multiple continuation chunks are merged correctly. The first

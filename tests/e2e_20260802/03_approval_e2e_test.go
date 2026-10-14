@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +30,23 @@ func toolCall(name string) tools.ToolCall {
 
 func toolCallWithArgs(name string, args map[string]any) tools.ToolCall {
 	return tools.ToolCall{ID: "id-" + name, Name: name, Args: args}
+}
+
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+	return dir
+}
+
+func canonicalPrivateTempDir(t *testing.T) string {
+	t.Helper()
+	canonical, err := filepath.EvalSymlinks(privateTempDir(t))
+	require.NoError(t, err)
+	return canonical
 }
 
 func dummyExec(_ context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
@@ -396,7 +414,7 @@ func TestApproval_TrustManager(t *testing.T) {
 	})
 
 	t.Run("trust and untrust a project", func(t *testing.T) {
-		path := "/tmp/test-project"
+		path := canonicalPrivateTempDir(t)
 
 		err := tm.TrustProject(ctx, path)
 		require.NoError(t, err)
@@ -438,10 +456,10 @@ func TestApproval_TrustManager(t *testing.T) {
 	t.Run("expired trust entry treated as untrusted", func(t *testing.T) {
 		freshStore := approval.NewInMemoryTrustStore()
 		freshTM := approval.NewDefaultTrustManager(freshStore)
-		path := "/tmp/expired-project"
+		path := canonicalPrivateTempDir(t)
 
 		// Trust first.
-		freshTM.TrustProject(ctx, path) //nolint:errcheck,gosec
+		require.NoError(t, freshTM.TrustProject(ctx, path))
 		assert.True(t, freshTM.IsTrusted(ctx, path))
 
 		// Manually set expires_at in the past.
@@ -449,8 +467,8 @@ func TestApproval_TrustManager(t *testing.T) {
 		require.NoError(t, err)
 		entry := entries[path]
 		entry.ExpiresAt = time.Now().Add(-1 * time.Hour).Format(time.RFC3339)
-		entries[path] = entry
-		err = freshStore.Save(entries)
+		entry.TrustGeneration++
+		err = freshStore.Add(path, entry)
 		require.NoError(t, err)
 
 		// Now it should be untrusted.
@@ -468,7 +486,7 @@ type trustManagerAccessor interface {
 // =============================================================================
 
 func TestApproval_FileTrustStore(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	filePath := filepath.Join(dir, "trust.json")
 
 	t.Run("new store loads empty without error", func(t *testing.T) {
@@ -496,7 +514,7 @@ func TestApproval_FileTrustStore(t *testing.T) {
 	})
 
 	t.Run("remove entry", func(t *testing.T) {
-		dir := t.TempDir()
+		dir := privateTempDir(t)
 		removePath := filepath.Join(dir, "remove.json")
 		store := approval.NewFileTrustStore(removePath)
 
@@ -759,7 +777,7 @@ func TestApproval_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("file trust store does not error on missing file", func(t *testing.T) {
-		store := approval.NewFileTrustStore(filepath.Join(t.TempDir(), "no-such-file.json"))
+		store := approval.NewFileTrustStore(filepath.Join(privateTempDir(t), "no-such-file.json"))
 		entries, err := store.Load()
 		require.NoError(t, err)
 		assert.Empty(t, entries)
@@ -767,6 +785,7 @@ func TestApproval_EdgeCases(t *testing.T) {
 
 	t.Run("file trust store handles empty file", func(t *testing.T) {
 		dir := t.TempDir()
+		require.NoError(t, os.Chmod(dir, 0o700), "trust store parent must satisfy the private-file contract")
 		path := filepath.Join(dir, "empty.json")
 		err := os.WriteFile(path, []byte{}, 0o600)
 		require.NoError(t, err)
@@ -870,39 +889,44 @@ func TestApproval_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("file trust store concurrent add", func(t *testing.T) {
-		dir := t.TempDir()
+		dir := privateTempDir(t)
 		store := approval.NewFileTrustStore(filepath.Join(dir, "concurrent.json"))
 
 		var wg sync.WaitGroup
 		n := 30
+		errs := make([]error, n)
 		for i := 0; i < n; i++ {
 			wg.Add(1)
 			go func(idx int) {
 				defer wg.Done()
-				path := "/p" + string(rune('a'+idx%26))
-				store.Add(path, approval.TrustEntry{Path: path}) //nolint:errcheck,gosec
+				path := "/p" + strconv.Itoa(idx)
+				errs[idx] = store.Add(path, approval.TrustEntry{Path: path})
 			}(i)
 		}
 		wg.Wait()
+		for _, err := range errs {
+			require.NoError(t, err)
+		}
 
 		entries, err := store.Load()
 		require.NoError(t, err)
-		assert.NotEmpty(t, entries)
+		assert.Len(t, entries, n)
 	})
 
 	t.Run("expired trust entry with unparsable time is untrusted", func(t *testing.T) {
 		store := approval.NewInMemoryTrustStore()
 		tm := approval.NewDefaultTrustManager(store)
-		path := "/tmp/bad-expiry"
+		path := canonicalPrivateTempDir(t)
 
-		tm.TrustProject(ctx, path) //nolint:errcheck,gosec
+		require.NoError(t, tm.TrustProject(ctx, path))
 
 		// Corrupt the expires_at field.
-		entries, _ := store.Load() //nolint:errcheck,gosec
+		entries, err := store.Load()
+		require.NoError(t, err)
 		entry := entries[path]
 		entry.ExpiresAt = "not-a-valid-time"
-		entries[path] = entry
-		store.Save(entries) //nolint:errcheck,gosec
+		entry.TrustGeneration++
+		require.NoError(t, store.Add(path, entry))
 
 		assert.False(t, tm.IsTrusted(ctx, path))
 	})

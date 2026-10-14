@@ -70,11 +70,10 @@ func TestStripANSINoWrap(t *testing.T) {
 	assert.Equal(t, "", stripANSI("", 5))
 }
 
-// TestStripANSIUnicodeColumns verifies every rune, including multibyte, is
-// treated as one printable column.
+// TestStripANSIUnicodeColumns verifies wrapping uses terminal-cell width.
 func TestStripANSIUnicodeColumns(t *testing.T) {
 	out := stripANSI("世界ok", 2)
-	assert.Equal(t, "世界\nok", out)
+	assert.Equal(t, "世\n界\nok", out)
 }
 
 // TestJoinIntsWasRemoved: the manual joinInts helper was deleted together with
@@ -89,15 +88,15 @@ func TestMarkdownRendererPreservesContent(t *testing.T) {
 	assert.Contains(t, stripEscape(out), "abcdefgh")
 }
 
-// TestTableRendererPreservesRowOrder verifies table header emphasis is applied
-// only to the first line and subsequent rows are passed through verbatim.
+// TestTableRendererPreservesRowOrder verifies row order and tab expansion while
+// table header emphasis is applied only to the first line.
 func TestTableRendererPreservesRowOrder(t *testing.T) {
 	out := (TableRenderer{}).Render(context.Background(), "a\tb\nc\td", RenderOpts{Theme: DarkTheme{}})
 	lines := strings.Split(out, "\n")
 	require.Len(t, lines, 2)
 	// Header row is styled (starts with an escape); data row is not.
 	assert.True(t, strings.HasPrefix(lines[0], "\x1b["))
-	assert.Equal(t, "c\td", lines[1])
+	assert.Equal(t, "c       d", lines[1])
 }
 
 // TestDiffRendererEmptyContent verifies diff on a single blank line renders the

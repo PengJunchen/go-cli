@@ -3,13 +3,16 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mcp"
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/verify"
@@ -130,18 +134,12 @@ func TestInteractiveCmd_RegisterMCPTools_EmptyServers(t *testing.T) {
 func TestInteractiveCmd_RegisterMCPTools_StdioServer(t *testing.T) {
 	ctx := t.Context()
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
-	rc := &config.Config{
-		MCP: config.MCPConfig{
-			Servers: []config.MCPServerConfig{
-				{
-					Name:    "stdio-server",
-					Command: "/nonexistent/command/xyz",
-					Args:    []string{"--flag"},
-					Env:     map[string]string{"KEY": "VALUE"},
-				},
-			},
-		},
-	}
+	rc := trustedGlobalMCPTestConfig(t, []config.MCPServerConfig{{
+		Name:    "stdio-server",
+		Command: "/nonexistent/command/xyz",
+		Args:    []string{"--flag"},
+		Env:     map[string]string{"KEY": "VALUE"},
+	}})
 
 	err := registerMCPTools(ctx, rc, tr)
 	require.NoError(t, err) // Connect failures are logged, not propagated.
@@ -151,46 +149,81 @@ func TestInteractiveCmd_RegisterMCPTools_StdioServer(t *testing.T) {
 	assert.Empty(t, registered)
 }
 
-func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
+func TestInteractiveCmd_RegisterMCPTools_StreamableHTTPServer(t *testing.T) {
 	ctx := t.Context()
 	srv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPost {
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"sse-tool","description":"An SSE tool"}]}}`)) //nolint:errcheck
-		} else {
-			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read JSON-RPC request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var request struct {
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			http.Error(w, "decode JSON-RPC request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch request.Method {
+		case "tools/list":
+			writeMockMCPResult(w, r, map[string]any{
+				"tools": []map[string]any{{"name": "http-tool", "description": "A Streamable HTTP tool", "inputSchema": mockMCPInputSchema()}},
+			})
+		case "tools/call":
+			writeMockMCPResult(w, r, map[string]any{
+				"content": []map[string]any{{"type": "text", "text": "ok"}},
+			})
+		default:
+			http.Error(w, "unexpected JSON-RPC method: "+request.Method, http.StatusBadRequest)
 		}
 	}))
 	defer srv.Close()
 
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
-	rc := &config.Config{
-		MCP: config.MCPConfig{
-			Servers: []config.MCPServerConfig{
-				{Name: "sse-server", URL: srv.URL},
-			},
-		},
-	}
+	rc := trustedGlobalMCPTestConfig(t, []config.MCPServerConfig{{Name: "http-server", URL: srv.URL}})
 
 	err := registerMCPTools(ctx, rc, tr)
 	require.NoError(t, err)
 
-	tool, err := tr.Get(ctx, mcp.NormalizeToolName("sse-server", "sse-tool"))
+	tool, err := tr.Get(ctx, mcp.NormalizeToolName("http-server", "http-tool"))
 	require.NoError(t, err)
 	assert.NotNil(t, tool)
-	assert.Equal(t, "mcp__sse-server__sse-tool", tool.Name())
+	assert.Equal(t, "mcp__http-server__http-tool", tool.Name())
+
+	result, err := tool.Execute(ctx, tools.ToolCall{
+		ID:   "call-http-tool",
+		Name: tool.Name(),
+		Args: map[string]any{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Contains(t, result.Output, "ok")
+}
+
+func TestHTTPMCPAdapterRejectsLegacySSEBeforeNetwork(t *testing.T) {
+	ctx := t.Context()
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	adapter := mcp.NewHTTPClientAdapter(mcp.MCPServerConfig{
+		Name:      "legacy-sse-server",
+		URL:       srv.URL,
+		Transport: mcp.MCPTransportSSE,
+	})
+	err := adapter.Connect(ctx)
+	require.ErrorIs(t, err, mcp.ErrUnsupportedHTTPTransport)
+	assert.Zero(t, requests.Load(), "legacy SSE transport must be rejected before probing the endpoint")
 }
 
 func TestInteractiveCmd_RegisterMCPTools_NoTransport(t *testing.T) {
 	ctx := t.Context()
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
-	rc := &config.Config{
-		MCP: config.MCPConfig{
-			Servers: []config.MCPServerConfig{
-				{Name: "no-transport-server"},
-			},
-		},
-	}
+	rc := trustedGlobalMCPTestConfig(t, []config.MCPServerConfig{{Name: "no-transport-server"}})
 
 	err := registerMCPTools(ctx, rc, tr)
 	require.NoError(t, err)
@@ -240,7 +273,10 @@ func TestInteractiveCmd_RegisterSkillTools_LoadError(t *testing.T) {
 
 func TestInteractiveCmd_RegisterSkillTools_ValidDir(t *testing.T) {
 	ctx := t.Context()
-	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "go-cli", "skills")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
 
 	skillContent := `---
 name: registered-skill
@@ -296,12 +332,11 @@ func TestPromptCmd_BuildModel_WithConfig(t *testing.T) {
 }
 
 func TestPromptCmd_BuildModel_WithNilConfig(t *testing.T) {
-	t.Run("default provider succeeds", func(t *testing.T) {
+	t.Run("default provider requires a scoped credential", func(t *testing.T) {
 		model, _, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
-		require.NoError(t, err)
-		assert.NotNil(t, model)
-		require.NotNil(t, cleanup)
-		cleanup()
+		require.ErrorIs(t, err, llm.ErrProviderCredentialRequired)
+		assert.Nil(t, model)
+		assert.Nil(t, cleanup)
 	})
 
 	t.Run("nonexistent provider fails", func(t *testing.T) {
@@ -334,12 +369,11 @@ func TestInteractiveCmd_BuildModel_WithConfig(t *testing.T) {
 }
 
 func TestInteractiveCmd_BuildModel_WithNilConfig(t *testing.T) {
-	t.Run("default provider succeeds", func(t *testing.T) {
+	t.Run("default provider requires a scoped credential", func(t *testing.T) {
 		model, _, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
-		require.NoError(t, err)
-		assert.NotNil(t, model)
-		require.NotNil(t, cleanup)
-		cleanup()
+		require.ErrorIs(t, err, llm.ErrProviderCredentialRequired)
+		assert.Nil(t, model)
+		assert.Nil(t, cleanup)
 	})
 
 	t.Run("nonexistent provider fails", func(t *testing.T) {

@@ -3,12 +3,14 @@ package core
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -17,15 +19,19 @@ import (
 // scriptedChatModel returns a fixed sequence of responses (each possibly nil)
 // then a final content-only response, letting tests drive every loop branch.
 type scriptedChatModel struct {
-	mu   sync.Mutex
-	seq  []*llm.Message
-	errs []error
-	idx  int
+	mu       sync.Mutex
+	seq      []*llm.Message
+	errs     []error
+	idx      int
+	requests [][]llm.Message
 }
 
-func (m *scriptedChatModel) Generate(_ context.Context, _ []llm.Message, _ ...llm.Option) (*llm.Message, error) {
+func (m *scriptedChatModel) Generate(_ context.Context, messages []llm.Message, _ ...llm.Option) (*llm.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	request := make([]llm.Message, len(messages))
+	copy(request, messages)
+	m.requests = append(m.requests, request)
 	if m.idx >= len(m.seq) {
 		return &llm.Message{Role: llm.RoleAssistant, Content: "fallback"}, nil
 	}
@@ -207,20 +213,49 @@ func TestLoopToolNilResult(t *testing.T) {
 	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
 
 	events, err := loop.Run(context.Background(), Submission{Content: "go"})
-	require.NoError(t, err)
-	// The nil tool result yields an empty tool_result event but no error.
+	require.ErrorContains(t, err, "tool execution returned no receipt")
+	// A nil receipt cannot be reported as successful tool execution.
 	toolResults := findEvents(events, "tool_result")
 	require.Len(t, toolResults, 1)
-	assert.Equal(t, "", toolResults[0])
+	assert.Contains(t, toolResults[0], "returned no receipt")
+	assert.NotEmpty(t, findEvents(events, "error"))
+	assert.Equal(t, 1, model.idx, "the model must not be called again after a missing receipt")
 }
 
-func TestLoopToolArgsNonMapDropped(t *testing.T) {
+func TestLoopStopsBeforeProviderWhenMandatorySystemBudgetError(t *testing.T) {
+	model := &scriptedChatModel{seq: []*llm.Message{
+		{
+			Role:      llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "ok", Args: map[string]any{}}},
+		},
+		{Role: llm.RoleAssistant, Content: "must not be dispatched"},
+	}}
+	loop := NewLoopAgent(
+		WithLLM(model),
+		WithTools(scriptedRegistry(scriptedTool{name: "ok", res: &tools.ToolResult{Output: "done"}})),
+		WithSystemPrompt(strings.Repeat("mandatory-system-", 10)),
+		WithMaxIterations(3),
+	)
+	loop.SetMidTurnCompaction(
+		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
+		compaction.NewUnifiedCompactor(),
+		compaction.NewHeuristicTokenEstimator(),
+		10,
+	)
+
+	events, err := loop.Run(context.Background(), Submission{Content: "run tool"})
+	require.ErrorIs(t, err, compaction.ErrMandatorySystemPromptOverBudget)
+	assert.Equal(t, 0, model.idx, "mandatory context that exceeds the budget must stop before provider dispatch")
+	assert.NotEmpty(t, findEvents(events, "error"))
+}
+
+func TestLoopToolArgsNonMapRejectedBeforeDispatch(t *testing.T) {
 	toolSrv := mock.NewMockToolServer()
 	_, err := toolSrv.RegisterReadFileTool("content")
 	require.NoError(t, err)
 
-	// llm.ToolCall.Args is a JSON primitive rather than map[string]any;
-	// toToolsCall must drop it without panicking.
+	// llm.ToolCall.Args is a JSON primitive rather than a complete argument
+	// object; the loop must reject it before dispatching the tool.
 	model := &scriptedChatModel{seq: []*llm.Message{
 		{
 			Role:      llm.RoleAssistant,
@@ -232,14 +267,10 @@ func TestLoopToolArgsNonMapDropped(t *testing.T) {
 	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
 
 	events, err := loop.Run(context.Background(), Submission{Content: "go"})
-	require.NoError(t, err)
-
-	// The tool eventually ran (a tool_result event exists) and finished.
-	toolResults := findEvents(events, "tool_result")
-	require.NotEmpty(t, toolResults)
-	messages := findEvents(events, "message")
-	require.Len(t, messages, 2)
-	assert.Equal(t, "done", messages[1])
+	require.ErrorContains(t, err, "invalid arguments")
+	assert.Empty(t, findEvents(events, "tool_call"))
+	assert.Empty(t, findEvents(events, "tool_result"))
+	assert.Empty(t, findEvents(events, "message"))
 }
 
 func TestLoopContextCancelTwoBranches(t *testing.T) {

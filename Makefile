@@ -1,4 +1,5 @@
-.PHONY: build test test-cov test-log test-leak lint fmt vet tidy clean check verify scan help
+.PHONY: build test test-cov test-cov-check test-e2e test-mock test-no-plugin \
+	test-log test-leak lint fmt vet tidy clean check verify scan help
 
 PROJECT_NAME ?= go-cli
 BUILD_DIR    ?= ./bin
@@ -8,6 +9,7 @@ COVERAGE_THRESHOLD ?= 65
 GO      ?= go
 GOFLAGS ?= -trimpath
 LDFLAGS ?= -s -w
+override VERIFY_TEST_GATE = go run ./internal/verify/cmd/test-gate
 
 # Build
 build:
@@ -15,38 +17,80 @@ build:
 
 # Run all tests
 test:
-	go test -race -count=1 ./internal/... ./tests/...
+	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 -package=./...
 
 # Run tests with coverage
 test-cov:
 	@mkdir -p $(COVERAGE_DIR)
-	go test -race -coverprofile=$(COVERAGE_DIR)/coverage.out -covermode=atomic ./internal/... ./tests/...
+	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-coverprofile=$(COVERAGE_DIR)/coverage.out -go-arg=-covermode=atomic -package=./...
 	go tool cover -func=$(COVERAGE_DIR)/coverage.out
 
 # Coverage threshold check
 test-cov-check:
 	@mkdir -p $(COVERAGE_DIR)
-	@go test -coverprofile=$(COVERAGE_DIR)/coverage.out ./... 2>/dev/null
-	@COVERAGE=$$(go tool cover -func=$(COVERAGE_DIR)/coverage.out | grep total | awk '{print $$3}' | sed 's/%//') && \
-		echo "Total coverage: $${COVERAGE}%" && \
-		if [ $$(echo "$$COVERAGE < $(COVERAGE_THRESHOLD)" | bc) -eq 1 ]; then \
-			echo "ERROR: Coverage $${COVERAGE}% is below threshold $(COVERAGE_THRESHOLD)%"; \
-			exit 1; \
-		else \
-			echo "Coverage check passed: $${COVERAGE}% >= $(COVERAGE_THRESHOLD)%"; \
-		fi
+	@$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-coverprofile=$(COVERAGE_DIR)/coverage.out -package=./...
+	@if report=$$(go tool cover -func=$(COVERAGE_DIR)/coverage.out 2>&1); then \
+	    :; \
+	else \
+	    cover_status=$$?; \
+	    printf '%s\n' "$$report"; \
+	    echo "ERROR: go tool cover failed with exit code $$cover_status"; \
+	    exit "$$cover_status"; \
+	fi; \
+	printf '%s\n' "$$report"; \
+	threshold='$(COVERAGE_THRESHOLD)'; \
+	if ! awk -v threshold="$$threshold" 'BEGIN { if (threshold !~ /^[0-9]+([.][0-9]+)?$$/ || threshold + 0 > 100) exit 1; exit 0 }'; then \
+	    echo "ERROR: Coverage threshold must be a number between 0 and 100"; \
+	    exit 2; \
+	fi; \
+	coverage=$$(printf '%s\n' "$$report" | awk '$$1 == "total:" { count++; if (NF != 3 || $$2 != "(statements)" || $$3 !~ /^[0-9]+([.][0-9]+)?%$$/) invalid = 1; value = $$3; sub(/%$$/, "", value); if (value + 0 > 100) invalid = 1 } END { if (count != 1 || invalid) exit 1; print value }'); \
+	if [ $$? -ne 0 ]; then \
+	    echo "ERROR: go tool cover output must contain exactly one valid total coverage line"; \
+	    exit 1; \
+	fi; \
+	echo "Total coverage: $${coverage}%"; \
+	if awk -v coverage="$$coverage" -v threshold="$$threshold" 'BEGIN { exit !(coverage + 0 >= threshold + 0) }'; then \
+	echo "Coverage check passed: $${coverage}% >= $${threshold}%"; \
+	else \
+	    echo "ERROR: Coverage $${coverage}% is below threshold $${threshold}%"; \
+	    exit 1; \
+	fi
 
 # Run log-based verification tests
 test-log:
-	go test -race -count=1 -run "TestLogCapturer" ./internal/verify/...
+	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 -go-arg=-run=TestLogCapturer -package=./internal/verify/...
 
 # Run goroutine leak tests
 test-leak:
-	go test -race -count=1 -run "TestAssertNoGoroutineLeak|TestGoLeakChecker" ./internal/verify/...
+	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 '-go-arg=-run=TestAssertNoGoroutineLeak|TestGoLeakChecker' -package=./internal/verify/...
+
+# Run E2E-tagged tests in the packages that define them.
+test-e2e:
+	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 -go-arg=-tags=e2e \
+		-package=./internal/core -package=./internal/llm -package=./internal/memory \
+		-package=./internal/tools -package=./internal/tui -package=./tests/...
+
+# Run mock-tagged tests only in their supported package scope.
+test-mock:
+	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 -go-arg=-tags=mock -package=./internal/mock/...
+
+# Exercise the no_plugin stubs in the packages that provide them. Keep this
+# separate from Linux jobs that require the native plugin lifecycle test.
+test-no-plugin:
+	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 -go-arg=-tags=no_plugin \
+		-package=./internal/extension/... -package=./internal/cli/...
 
 # AST scan for mock/hardcoded bypass detection
 scan:
-	go run ./internal/verify/cmd/scanner -dir ./internal -format text
+	$(GO) run ./internal/verify/cmd/scanner-gate \
+		-dir ./internal \
+		-scanner-command $(GO) \
+		-scanner-arg=run \
+		-scanner-arg=./internal/verify/cmd/scanner \
+		-scanner-arg=-dir \
+		-scanner-arg=./internal \
+		-scanner-arg=-format \
+		-scanner-arg=json
 
 # Run golangci-lint
 lint:

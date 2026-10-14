@@ -19,6 +19,15 @@ type errTrustStore struct {
 	saveErr   error
 }
 
+type transactionalErrTrustStore struct {
+	*errTrustStore
+	updateErr error
+}
+
+func (s *transactionalErrTrustStore) Update(context.Context, func(map[string]TrustEntry) (bool, error)) error {
+	return s.updateErr
+}
+
 func (s *errTrustStore) Load() (map[string]TrustEntry, error) {
 	return nil, s.loadErr
 }
@@ -75,7 +84,10 @@ func TestIsTrusted_StoreLoadError(t *testing.T) {
 
 func TestTrustProject_StoreAddError(t *testing.T) {
 	addErr := errors.New("write failed")
-	tm := NewDefaultTrustManager(&errTrustStore{addErr: addErr})
+	tm := NewDefaultTrustManager(&transactionalErrTrustStore{
+		errTrustStore: &errTrustStore{addErr: addErr},
+		updateErr:     addErr,
+	})
 	err := tm.TrustProject(context.Background(), "/repo/a")
 	require.Error(t, err)
 	assert.Equal(t, addErr, err)
@@ -83,7 +95,10 @@ func TestTrustProject_StoreAddError(t *testing.T) {
 
 func TestRevokeTrust_StoreRemoveError(t *testing.T) {
 	removeErr := errors.New("remove failed")
-	tm := NewDefaultTrustManager(&errTrustStore{removeErr: removeErr})
+	tm := NewDefaultTrustManager(&transactionalErrTrustStore{
+		errTrustStore: &errTrustStore{removeErr: removeErr},
+		updateErr:     removeErr,
+	})
 	err := tm.RevokeTrust(context.Background(), "/repo/a")
 	require.Error(t, err)
 	assert.Equal(t, removeErr, err)
@@ -127,7 +142,7 @@ func TestContentFingerprint_BasedOnContent(t *testing.T) {
 }
 
 func TestFileTrustStore_SaveRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "trust.json")
+	path := privateTrustStorePath(t)
 	store := NewFileTrustStore(path)
 
 	entries := map[string]TrustEntry{
@@ -143,7 +158,9 @@ func TestFileTrustStore_SaveRoundTrip(t *testing.T) {
 }
 
 func TestFileTrustStore_EmptyFileYieldsEmpty(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "trust.json")
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	path := filepath.Join(dir, "trust.json")
 	require.NoError(t, os.WriteFile(path, []byte{}, 0o600))
 
 	store := NewFileTrustStore(path)
@@ -153,12 +170,97 @@ func TestFileTrustStore_EmptyFileYieldsEmpty(t *testing.T) {
 }
 
 func TestFileTrustStore_CorruptJSON(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "trust.json")
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	path := filepath.Join(dir, "trust.json")
 	require.NoError(t, os.WriteFile(path, []byte("{invalid json"), 0o600))
 
 	store := NewFileTrustStore(path)
 	_, err := store.Load()
 	require.Error(t, err, "corrupt JSON must return an error")
+}
+
+func TestFileTrustStoreLoadRequiresPrivateFileAndParent(t *testing.T) {
+	t.Run("rejects broad file permissions", func(t *testing.T) {
+		for _, mode := range []os.FileMode{0o644, 0o666} {
+			t.Run(mode.String(), func(t *testing.T) {
+				dir := t.TempDir()
+				require.NoError(t, os.Chmod(dir, 0o700))
+				path := filepath.Join(dir, "trust.json")
+				require.NoError(t, os.WriteFile(path, []byte(`{"/workspace":{"path":"/workspace"}}`), 0o600))
+				require.NoError(t, os.Chmod(path, mode))
+
+				entries, err := NewFileTrustStore(path).Load()
+				require.Error(t, err, "a broadly accessible trust file must not authorize stored entries")
+				assert.Nil(t, entries)
+				info, statErr := os.Stat(path)
+				require.NoError(t, statErr)
+				assert.Equal(t, mode, info.Mode().Perm(), "loading must not silently upgrade old trust records")
+			})
+		}
+	})
+
+	t.Run("rejects replaceable parent directory", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "shared")
+		require.NoError(t, os.Mkdir(dir, 0o755))
+		require.NoError(t, os.Chmod(dir, 0o755))
+		path := filepath.Join(dir, "trust.json")
+		require.NoError(t, os.WriteFile(path, []byte(`{"/workspace":{"path":"/workspace"}}`), 0o600))
+
+		entries, err := NewFileTrustStore(path).Load()
+		require.Error(t, err, "a trust file in a replaceable directory must not authorize stored entries")
+		assert.Nil(t, entries)
+	})
+
+	t.Run("accepts private file and parent", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.Chmod(dir, 0o700))
+		path := filepath.Join(dir, "trust.json")
+		content := []byte(`{"/workspace":{"path":"/workspace"}}`)
+		require.NoError(t, os.WriteFile(path, content, 0o600))
+
+		entries, err := NewFileTrustStore(path).Load()
+		require.NoError(t, err)
+		assert.Equal(t, TrustEntry{Path: "/workspace"}, entries["/workspace"])
+	})
+}
+
+func TestFileTrustStoreSaveRejectsWideFileAndPreservesContents(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	path := filepath.Join(dir, "trust.json")
+	original := []byte(`{"old":{}}`)
+	require.NoError(t, os.WriteFile(path, original, 0o644))
+	require.NoError(t, os.Chmod(path, 0o644))
+
+	entries := map[string]TrustEntry{"/workspace": {Path: "/workspace", TrustedAt: "2026-09-25T00:00:00Z"}}
+	require.Error(t, NewFileTrustStore(path).Save(entries), "transactional replacement must not consume an insecure prior snapshot")
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm(), "failed replacement must not repair or reinterpret the existing file")
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, original, got)
+}
+
+func TestFileTrustStoreSaveRejectsAccessibleParentAndPreservesOldFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "shared")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, os.Chmod(dir, 0o755))
+	path := filepath.Join(dir, "trust.json")
+	old := []byte(`{"old":{"path":"/old"}}`)
+	require.NoError(t, os.WriteFile(path, old, 0o600))
+
+	err := NewFileTrustStore(path).Save(map[string]TrustEntry{"/new": {Path: "/new"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "private")
+	got, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, old, got)
+	dirInfo, statErr := os.Stat(dir)
+	require.NoError(t, statErr)
+	assert.Equal(t, os.FileMode(0o755), dirInfo.Mode().Perm())
 }
 
 func TestInMemoryTrustStore_Save(t *testing.T) {

@@ -142,3 +142,53 @@ func TestBridgeErrorPropagation(t *testing.T) {
 
 	bridge.Wait()
 }
+
+// TestEventBridgeCancelAfterReadReportsDropped verifies that cancellation is
+// accounted for when the bridge has already read an event but its full output
+// buffer prevents forwarding it.
+func TestEventBridgeCancelAfterReadReportsDropped(t *testing.T) {
+	const outputCapacity = 64
+	src := make(chan BridgeEvent)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bridge := NewEventBridge(src)
+	out := bridge.Forward(ctx)
+
+	sendDeadline := time.NewTimer(2 * time.Second)
+	defer sendDeadline.Stop()
+	for i := 0; i < outputCapacity+1; i++ {
+		select {
+		case src <- BridgeEvent{Index: i, Data: fmt.Sprintf("ev-%d", i)}:
+		case <-sendDeadline.C:
+			t.Fatalf("timed out sending event %d", i)
+		}
+	}
+
+	// The unbuffered source send above handshakes with the bridge's receive of
+	// event 65. Since the bridge forwards serially, the preceding 64 events
+	// already fill its output buffer when this cancellation is signaled.
+	cancel()
+
+	waited := make(chan struct{})
+	go func() {
+		bridge.Wait()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+	case <-time.After(time.Second):
+		t.Fatal("bridge did not stop after cancellation")
+	}
+
+	forwarded := 0
+	for ev := range out {
+		assert.Equal(t, forwarded, ev.Index, "forwarded events must remain FIFO")
+		forwarded++
+	}
+	require.Equal(t, outputCapacity, forwarded)
+
+	stats := bridge.Stats()
+	assert.Equal(t, uint64(outputCapacity), stats.Forwarded)
+	assert.Equal(t, uint64(1), stats.DroppedAfterRead)
+}

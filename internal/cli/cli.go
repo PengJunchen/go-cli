@@ -76,10 +76,102 @@ func newExecutionError(msg string, err error) *ExecutionError {
 
 // Run executes the CLI with the given configuration and arguments, writing
 // output to out. It creates a default registry that RunWithRegistry populates
-// with the built-in version and help commands.
+// with the built-in commands.
 func Run(ctx context.Context, cfg Config, args []string, out io.Writer) error {
 	reg := NewDefaultCommandRegistry()
 	return RunWithRegistry(ctx, cfg, args, out, reg)
+}
+
+type globalFlags struct {
+	showVersion bool
+	printUsage  bool
+}
+
+func newGlobalFlagSet(out io.Writer) (*flag.FlagSet, *globalFlags) {
+	fs := flag.NewFlagSet("go-cli", flag.ContinueOnError)
+	fs.SetOutput(out)
+
+	options := &globalFlags{}
+	fs.BoolVar(&options.showVersion, "version", false, "print version and exit")
+	fs.BoolVar(&options.printUsage, "help", false, "print usage and exit")
+	return fs, options
+}
+
+// IsGlobalHelpOrVersion reports whether the root flag parser accepts args and
+// recognizes a global help or version request. Invalid flags and flags after a
+// command do not qualify for config-independent dispatch.
+func IsGlobalHelpOrVersion(args []string) bool {
+	fs, options := newGlobalFlagSet(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		return false
+	}
+	return options.showVersion || options.printUsage
+}
+
+// RegisterBuiltinCommands adds the built-in commands to reg unless the caller
+// has already registered a command with the same name. This lets callers
+// initialize one registry before config loading and reuse it for dispatch.
+func RegisterBuiltinCommands(reg CommandRegistry, out io.Writer) {
+	builtinNames := []string{"version", "help", "prompt", "interactive", "doctor", "serve", "models"}
+	allPresent := true
+	for _, name := range builtinNames {
+		if _, exists := reg.Get(name); !exists {
+			allPresent = false
+			break
+		}
+	}
+	if allPresent {
+		return
+	}
+
+	usage := func() { writeUsage(out, reg) }
+	builtins := []Command{
+		newVersionCmd(out),
+		newHelpCmd(out, usage),
+		newPromptCmd(out),
+		newInteractiveCmd(nil, out),
+		newDoctorCmd(out),
+		newServeCmd(out),
+		newModelsCmd(out),
+	}
+	for _, cmd := range builtins {
+		if _, exists := reg.Get(cmd.Name()); exists {
+			slog.Default().Info("built-in command already registered; keeping caller's", "command", cmd.Name())
+			continue
+		}
+		if err := reg.Register(cmd); err != nil {
+			slog.Default().Info("built-in command registration failed; keeping caller's", "command", cmd.Name(), "err", err)
+		}
+	}
+}
+
+func writeUsage(out io.Writer, reg CommandRegistry) {
+	_, _ = fmt.Fprintf(out, "Usage: go-cli [options] <command> [args]\n\nOptions:\n") //nolint:errcheck // usage output is best-effort
+	fs, _ := newGlobalFlagSet(out)
+	fs.PrintDefaults()
+	_, _ = fmt.Fprintf(out, "\nCommands:\n") //nolint:errcheck // usage output is best-effort
+	for _, cmd := range reg.List() {
+		_, _ = fmt.Fprintf(out, "  %-10s %s\n", cmd.Name(), cmd.Synopsis()) //nolint:errcheck // usage output is best-effort
+	}
+}
+
+// PromptArgsFromCLI applies the same global flag parsing and first-positional
+// command routing as RunWithRegistry, without executing a command. It reports
+// false when a global help/version flag takes precedence or when the selected
+// command is not prompt.
+func PromptArgsFromCLI(argv []string) ([]string, bool, error) {
+	fs, options := newGlobalFlagSet(io.Discard)
+	if err := fs.Parse(argv); err != nil {
+		return nil, false, newUsageError("flag parse: %v", err)
+	}
+	if options.showVersion || options.printUsage {
+		return nil, false, nil
+	}
+	args := fs.Args()
+	if len(args) == 0 || args[0] != "prompt" {
+		return nil, false, nil
+	}
+	return args[1:], true, nil
 }
 
 // RunWithRegistry executes the CLI with the given configuration, arguments,
@@ -91,23 +183,9 @@ func RunWithRegistry(ctx context.Context, cfg Config, args []string, out io.Writ
 		return err
 	}
 
-	fs := flag.NewFlagSet("go-cli", flag.ContinueOnError)
-	fs.SetOutput(out)
-
-	var showVersion bool
-	fs.BoolVar(&showVersion, "version", false, "print version and exit")
-
-	var printUsage bool
-	fs.BoolVar(&printUsage, "help", false, "print usage and exit")
-
-	fs.Usage = func() {
-		_, _ = fmt.Fprintf(out, "Usage: go-cli [options] <command> [args]\n\nOptions:\n") //nolint:errcheck // usage output is best-effort
-		fs.PrintDefaults()
-		_, _ = fmt.Fprintf(out, "\nCommands:\n") //nolint:errcheck // usage output is best-effort
-		for _, cmd := range reg.List() {
-			_, _ = fmt.Fprintf(out, "  %-10s %s\n", cmd.Name(), cmd.Synopsis()) //nolint:errcheck // usage output is best-effort
-		}
-	}
+	RegisterBuiltinCommands(reg, out)
+	fs, options := newGlobalFlagSet(out)
+	fs.Usage = func() { writeUsage(out, reg) }
 
 	if err := fs.Parse(args); err != nil {
 		return newUsageError("flag parse: %v", err)
@@ -117,37 +195,14 @@ func RunWithRegistry(ctx context.Context, cfg Config, args []string, out io.Writ
 		slog.Default().Debug("verbose mode enabled")
 	}
 
-	// Ensure the built-in commands are resolvable from the registry. Errors are
-	// tolerated so that a caller-supplied registry may provide its own versions.
-	if err := reg.Register(newVersionCmd(out)); err != nil {
-		slog.Default().Info("built-in version command already registered; keeping caller's", "err", err)
-	}
-	if err := reg.Register(newHelpCmd(out, fs.Usage)); err != nil {
-		slog.Default().Info("built-in help command already registered; keeping caller's", "err", err)
-	}
-	if err := reg.Register(newPromptCmd(out)); err != nil {
-		slog.Default().Info("built-in prompt command already registered; keeping caller's", "err", err)
-	}
-	if err := reg.Register(newInteractiveCmd(nil, out)); err != nil {
-		slog.Default().Info("built-in interactive command already registered; keeping caller's", "err", err)
-	}
-	if err := reg.Register(newDoctorCmd(out)); err != nil {
-		slog.Default().Info("built-in doctor command already registered; keeping caller's", "err", err)
-	}
-	if err := reg.Register(newServeCmd(out)); err != nil {
-		slog.Default().Info("built-in serve command already registered; keeping caller's", "err", err)
-	}
-	if err := reg.Register(newModelsCmd(out)); err != nil {
-		slog.Default().Info("built-in models command already registered; keeping caller's", "err", err)
+	if options.showVersion {
+		cmd, _ := reg.Get("version")
+		return runCommand(ctx, cfg, cmd, nil)
 	}
 
-	if showVersion {
-		return runCommand(ctx, cfg, newVersionCmd(out), nil)
-	}
-
-	if printUsage {
-		fs.Usage()
-		return nil
+	if options.printUsage {
+		cmd, _ := reg.Get("help")
+		return runCommand(ctx, cfg, cmd, nil)
 	}
 
 	subArgs := fs.Args()

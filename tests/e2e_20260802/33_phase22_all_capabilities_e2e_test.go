@@ -10,6 +10,8 @@ package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -26,7 +28,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tools"
-	"github.com/pengjunchen/go-cli/internal/tracing"
+	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
 // =============================================================================
@@ -40,7 +42,7 @@ func phase33TestConfig() *config.Config {
 	return &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    "openai",
-			BaseURL: "http://127.0.0.1:0",
+			BaseURL: "http://127.0.0.1:12345/v1",
 			APIKey:  "test-key",
 		},
 	}
@@ -51,12 +53,141 @@ func phase33TestConfig() *config.Config {
 // uses a fresh context.
 func phase33Assemble(t *testing.T, cfg *config.Config) *cli.AgentAssembly {
 	t.Helper()
+	if cfg.Git.WorkDir == "" {
+		cfg.Git.WorkDir = t.TempDir()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	assembly, err := cli.AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard, cli.WithApproveMode(cli.ApproveAuto))
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
 	return assembly
+}
+
+func phase33AssembleWithApproval(t *testing.T, cfg *config.Config, approvalCh chan tui.ApprovalRequest) *cli.AgentAssembly {
+	t.Helper()
+	if cfg.Git.WorkDir == "" {
+		cfg.Git.WorkDir = t.TempDir()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	assembly, err := cli.AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard, cli.WithApprovalChannel(approvalCh))
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+	return assembly
+}
+
+func phase33ApprovalConfig(t *testing.T) (*config.Config, string) {
+	t.Helper()
+	workspace := t.TempDir()
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	cfg := phase33TestConfig()
+	cfg.Git.WorkDir = workspace
+	cfg.Sandbox.AllowedPaths = []string{workspace, cwd}
+	return cfg, workspace
+}
+
+func phase33PreparedModeRegistry(
+	t *testing.T,
+	mode approval.PermissionMode,
+	approvalCh chan tui.ApprovalRequest,
+) (*tools.MiddlewareToolRegistry, *core.DefaultPlanModeController, string) {
+	t.Helper()
+	ctx := context.Background()
+	workspace := t.TempDir()
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	base := tools.NewDefaultToolRegistry()
+	require.NoError(t, tools.RegisterDefaults(ctx, base,
+		tools.WithRegisteredBuiltinWhitelist([]string{"bash", "read"}),
+		tools.WithRegisteredBashSandbox(tools.NewDefaultBashSandbox(tools.WithAllowedPaths([]string{cwd, workspace}))),
+		tools.WithRegisteredPathWhitelist([]string{workspace}),
+	))
+	fence, err := tools.DispatchFenceFromRegistry(base)
+	require.NoError(t, err)
+	planController := core.NewDefaultPlanModeController(fence)
+	middleware := approval.NewApprovalMiddleware(
+		&approval.DenyAllClassifier{},
+		approval.NewInMemoryApprovalStore(),
+		approval.WithAutoApprove(false),
+		approval.WithPermissionModeResolver(approval.NewDefaultPermissionModeResolver()),
+		approval.WithPermissionMode(mode),
+		approval.WithCallback(approval.NewTeaApprovalCallback(approvalCh)),
+		approval.WithDispatchFence(fence),
+		approval.WithPlanModeController(planController),
+	)
+	registry := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, registry.SetPreparedToolPolicy(middleware.PreparedPolicy))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+	return registry, planController, workspace
+}
+
+func phase33CallWithApproval(
+	t *testing.T,
+	registry tools.ToolRegistry,
+	approvalCh <-chan tui.ApprovalRequest,
+	call tools.ToolCall,
+	markerPath string,
+	decision tui.ApprovalDecision,
+) (*tools.ToolResult, error) {
+	t.Helper()
+	tool, err := registry.Get(context.Background(), call.Name)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	done := make(chan struct {
+		result *tools.ToolResult
+		err    error
+	}, 1)
+	go func() {
+		result, callErr := tool.Execute(ctx, call)
+		done <- struct {
+			result *tools.ToolResult
+			err    error
+		}{result: result, err: callErr}
+	}()
+	joined := false
+	defer func() {
+		cancel()
+		if !joined {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("prepared tool call did not join after approval context cancellation")
+			}
+		}
+	}()
+
+	var request tui.ApprovalRequest
+	select {
+	case request = <-approvalCh:
+	case <-done:
+		joined = true
+		return nil, fmt.Errorf("prepared tool call completed before approval request for %q", call.Name)
+	case <-ctx.Done():
+		t.Fatalf("tool call did not request approval: %v", ctx.Err())
+	}
+	require.Equal(t, call.Name, request.ToolName)
+	assert.Equal(t, call.Args, request.Args, "approval must describe the exact prepared call")
+	require.NotNil(t, request.ResponseCh)
+	if markerPath != "" {
+		_, statErr := os.Stat(markerPath)
+		require.ErrorIs(t, statErr, os.ErrNotExist, "tool side effect must remain absent while approval is pending")
+	}
+	select {
+	case request.ResponseCh <- tui.ApprovalResponse{Decision: decision}:
+	case <-ctx.Done():
+		t.Fatalf("approval callback stopped waiting before the test response: %v", ctx.Err())
+	}
+
+	select {
+	case outcome := <-done:
+		joined = true
+		return outcome.result, outcome.err
+	case <-ctx.Done():
+		t.Fatalf("prepared tool call did not finish after approval response: %v", ctx.Err())
+		return nil, ctx.Err()
+	}
 }
 
 // phase33ToolNames returns the set of tool names registered by AssembleAgent.
@@ -71,17 +202,30 @@ func phase33ToolNames(t *testing.T, tr tools.ToolRegistry) map[string]bool {
 	return names
 }
 
+// phase33PlanSlashDeps supplies the only dependencies used by PlanHandler.
+// The remaining accessors are intentionally unavailable in this focused test.
+type phase33PlanSlashDeps struct {
+	cli.Dependencies
+	planCtrl core.PlanModeController
+}
+
+func (d phase33PlanSlashDeps) Out() io.Writer { return io.Discard }
+
+func (d phase33PlanSlashDeps) PlanCtrl() core.PlanModeController { return d.planCtrl }
+
 // =============================================================================
 // AC-1: ToolRegistry Completeness — all expected tools registered
 // =============================================================================
 
 // TestET_Phase22_AllCapabilities_AC1_ToolRegistryCompleteness verifies that
-// the assembled ToolRegistry contains all expected builtin, task, goal, web,
-// plan-mode, git, and subagent tools. Tool name discrepancies between the
-// task spec and actual code are reported as logged warnings but do not fail
-// the test; the test checks for the ACTUAL names.
+// the assembled model-facing ToolRegistry contains the expected builtin,
+// task, goal, web, git, and subagent tools. Plan Mode transitions stay
+// unavailable to model calls and remain available through the user /plan
+// slash handler.
 func TestET_Phase22_AllCapabilities_AC1_ToolRegistryCompleteness(t *testing.T) {
-	assembly := phase33Assemble(t, phase33TestConfig())
+	cfg := phase33TestConfig()
+	cfg.WebSearch.Provider = "fetch"
+	assembly := phase33Assemble(t, cfg)
 
 	names := phase33ToolNames(t, assembly.ToolRegistry)
 
@@ -96,8 +240,6 @@ func TestET_Phase22_AllCapabilities_AC1_ToolRegistryCompleteness(t *testing.T) {
 		"web_fetch", "web_search",
 		// User interaction
 		"ask_user",
-		// Plan mode
-		"enter_plan_mode", "exit_plan_mode",
 		// Git
 		"git_diff", "git_status", "git_commit",
 		// Subagent
@@ -114,18 +256,35 @@ func TestET_Phase22_AllCapabilities_AC1_ToolRegistryCompleteness(t *testing.T) {
 	}
 	assert.Empty(t, missing, "all expected tools should be registered; missing: %v", missing)
 
+	ctx := context.Background()
+	for _, name := range []string{"enter_plan_mode", "exit_plan_mode"} {
+		_, err := assembly.ToolRegistry.Get(ctx, name)
+		require.ErrorIs(t, err, tools.ErrToolNotFound,
+			"model-facing plan control %q must stay unavailable", name)
+	}
+
 	// Report discrepancies between task spec names and actual names.
-	// The task spec lists different names; the actual code uses these:
+	// Plan Mode transition names are intentionally not mapped because these
+	// controls are user-only, not model-facing tools.
 	discrepancies := map[string]string{
 		"ask_user_question": "ask_user",
-		"plan_mode_enter":   "enter_plan_mode",
-		"plan_mode_exit":    "exit_plan_mode",
 		"subagent":          "dispatch_subagent",
 	}
 	for specName, actualName := range discrepancies {
 		assert.True(t, names[actualName],
 			"task spec lists %q but actual tool name is %q (found in registry)", specName, actualName)
 	}
+
+	require.NotNil(t, assembly.PlanCtrl, "user /plan commands require the assembled PlanMode controller")
+	planHandler := &cli.PlanHandler{}
+	require.Equal(t, "plan", planHandler.Name(), "the user slash command is /plan")
+	planDeps := phase33PlanSlashDeps{planCtrl: assembly.PlanCtrl}
+	_, err := planHandler.Handle(ctx, []string{"enter", "user requested"}, planDeps)
+	require.NoError(t, err)
+	assert.True(t, assembly.PlanCtrl.IsActive(), "/plan enter must still activate plan mode")
+	_, err = planHandler.Handle(ctx, []string{"exit", "user completed planning"}, planDeps)
+	require.NoError(t, err)
+	assert.False(t, assembly.PlanCtrl.IsActive(), "/plan exit must still deactivate plan mode")
 
 	// Sanity: the registry should have a reasonable number of tools.
 	assert.GreaterOrEqual(t, len(names), 25, "registry should have at least 25 tools")
@@ -139,7 +298,6 @@ func TestET_Phase22_AllCapabilities_AC1_ToolRegistryCompleteness(t *testing.T) {
 // core tools (read, write, grep) execute successfully through the assembled
 // (wrapped) registry. The bash tool is verified separately in AC-9 (approval).
 func TestET_Phase22_AllCapabilities_AC2_CoreToolsFunctional(t *testing.T) {
-	t.Skip("Pre-existing failure: write tool output format changed (queued → wrote)")
 	assembly := phase33Assemble(t, phase33TestConfig())
 
 	dir := t.TempDir()
@@ -155,7 +313,7 @@ func TestET_Phase22_AllCapabilities_AC2_CoreToolsFunctional(t *testing.T) {
 		"content": "hello world\nline2\n",
 	}))
 	require.NoError(t, err)
-	assert.Contains(t, res.Output, "queued")
+	assert.Equal(t, "wrote 18 bytes to "+filePath, res.Output)
 
 	// Verify file on disk.
 	data, err := os.ReadFile(filePath)
@@ -184,8 +342,8 @@ func TestET_Phase22_AllCapabilities_AC2_CoreToolsFunctional(t *testing.T) {
 	assert.Contains(t, res.Output, "ac2_test.txt")
 
 	// bash — execute a simple echo command through the wrapped registry.
-	// In PermissionDefault mode the resolver returns a SafetyPolicyClassifier
-	// with no forbidden tools, so bash is allowed.
+	// This shared helper opts into the CLI's explicit ApproveAuto mode
+	// (AutoFull); it does not exercise PermissionDefault behavior.
 	bashDef, err := assembly.ToolRegistry.Get(ctx, "bash")
 	require.NoError(t, err)
 
@@ -345,137 +503,166 @@ func TestET_Phase22_AllCapabilities_AC7_Phase19ComponentsNotNil(t *testing.T) {
 // AC-8: Config-Driven Tracing — Tracer non-nil when enabled, JSONL file created
 // =============================================================================
 
-// TestET_Phase22_AllCapabilities_AC8_ConfigDrivenTracing verifies that when
-// config has tracing.enabled=true with exporter=jsonl, the assembled Tracer is
-// non-nil and the JSONL trace file is created on disk after a span is emitted.
+// TestET_Phase22_AllCapabilities_AC8_ConfigDrivenTracing verifies that the real
+// CLI invocation loads enabled JSONL tracing from user config and writes spans.
 func TestET_Phase22_AllCapabilities_AC8_ConfigDrivenTracing(t *testing.T) {
-	dir := t.TempDir()
-
-	cfg := phase33TestConfig()
-	tracingEnabled := true
-	cfg.Tracing.Enabled = &tracingEnabled
-	cfg.Tracing.Exporter = "jsonl"
-	cfg.Tracing.FilePath = dir
-
-	assembly := phase33Assemble(t, cfg)
-	require.NotNil(t, assembly.Tracer, "Tracer must be non-nil when tracing is enabled")
-
-	// The assembly process emits an "assemble.agent" span via
-	// SpanFromContext, but the caller's context does not carry the Tracer, so
-	// that span is a noop. Manually emit a span through the Tracer to verify
-	// the JSONL exporter writes to disk.
-	span, _ := assembly.Tracer.Start(context.Background(), "e2e.test.span", tracing.SpanKindInternal)
-	span.End()
-
-	// span.End() launches a goroutine to export asynchronously, so poll the
-	// trace file until it contains data (or timeout).
-	traceFile := filepath.Join(dir, "main.jsonl")
-
-	var traceData []byte
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		data, statErr := os.ReadFile(traceFile)
-		if statErr == nil && len(data) > 0 {
-			traceData = data
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	// Verify the trace file exists and is non-empty.
-	info, err := os.Stat(traceFile)
-	require.NoError(t, err, "JSONL trace file should exist at %s", traceFile)
-	assert.Greater(t, info.Size(), int64(0), "trace file should be non-empty")
-
-	// Verify the file contains valid JSON lines.
-	require.NotEmpty(t, traceData, "trace file should contain span data")
+	spans := requireRealCLIInvocationTrace(t)
+	require.Len(t, spans, 2, "version command should emit the root and command dispatch spans")
+	assert.ElementsMatch(t, []string{"cli.invocation", "command.dispatch"}, []string{spans[0].Name, spans[1].Name})
+	assert.Equal(t, spans[0].TraceID, spans[1].TraceID)
 }
 
 // =============================================================================
-// AC-9: Approval System — ModeResolver wired, tools allowed in default mode,
-//       denied in plan mode
+// AC-9: Approval System — default Bash requires explicit approval, and Auto
+//       and Plan policies retain their separate prepared-dispatch behavior.
 // =============================================================================
 
 // TestET_Phase22_AllCapabilities_AC9_ApprovalSystem verifies that the approval
 // middleware is wired into the assembled tool registry. The verification is
 // behavioral since ApprovalMiddleware is not directly exposed on AgentAssembly.
 //
-// In the assembled agent, a PermissionModeResolver is wired which overrides
-// the static SafetyPolicyClassifier. For PermissionDefault, the resolver
-// returns a SafetyPolicyClassifier with no forbidden tools, so all tools
-// (including bash) are allowed. For PermissionPlan, the resolver returns a
-// PlanClassifier that classifies all tools as Ask, which with autoApprove=false
-// resolves to Deny.
+// The default safety policy permits only trusted read-only effects without
+// prompting. Bash remains an approval request, and the prepared registry must
+// not execute it until the approval channel returns an explicit allow decision.
+// PermissionAuto, PermissionPlan, CLI auto approval, and active Plan Mode are
+// checked independently because they have different authorization semantics.
 func TestET_Phase22_AllCapabilities_AC9_ApprovalSystem(t *testing.T) {
-	t.Skip("Pre-existing failure: SafetyPolicyClassifier denies bash by default")
-	assembly := phase33Assemble(t, phase33TestConfig())
 	ctx := context.Background()
 
-	// 1. ModeResolver is exposed and functional — the approval system is wired.
-	require.NotNil(t, assembly.ModeResolver, "ModeResolver must be wired by AssembleAgent")
-
-	// Default mode resolves to a classifier that allows all tools.
-	defaultClassifier := assembly.ModeResolver.Resolve(approval.PermissionDefault)
+	resolver := approval.NewDefaultPermissionModeResolver()
+	defaultClassifier := resolver.Resolve(approval.PermissionDefault)
 	require.NotNil(t, defaultClassifier)
-	assert.Equal(t, approval.Allow, defaultClassifier.Classify(ctx, toolCall("bash")),
-		"PermissionDefault should allow bash (resolver returns SafetyPolicyClassifier with no forbidden tools)")
-
-	// Plan mode resolves to a classifier that holds all tools for confirmation (Ask).
-	planClassifier := assembly.ModeResolver.Resolve(approval.PermissionPlan)
+	assert.Equal(t, "safety_policy", defaultClassifier.Name())
+	assert.Equal(t, approval.Ask, defaultClassifier.Classify(ctx, toolCall("bash")),
+		"Default must require approval for arbitrary local execution")
+	autoClassifier := resolver.Resolve(approval.PermissionAuto)
+	require.NotNil(t, autoClassifier)
+	assert.Equal(t, "auto-classifier", autoClassifier.Name())
+	assert.Equal(t, approval.Allow, autoClassifier.Classify(ctx, toolCall("bash")),
+		"the Auto name classifier allows unknown tools, but prepared identity/effect checks still gate Bash")
+	planClassifier := resolver.Resolve(approval.PermissionPlan)
 	require.NotNil(t, planClassifier)
 	assert.Equal(t, approval.Ask, planClassifier.Classify(ctx, toolCall("bash")),
-		"PermissionPlan should classify bash as Ask")
+		"PermissionPlan must require per-call confirmation")
 
-	// 2. In default mode, tools are allowed through the assembled registry.
-	//    The resolver's default classifier allows everything, so bash, read,
-	//    and write should all execute without denial.
-	dir := t.TempDir()
-	filePath := filepath.Join(dir, "ac9_test.txt")
-	require.NoError(t, os.WriteFile(filePath, []byte("test content"), 0644))
+	t.Run("assembled default permits scoped read but denies unapproved Bash", func(t *testing.T) {
+		approvalCh := make(chan tui.ApprovalRequest, 1)
+		cfg, workspace := phase33ApprovalConfig(t)
+		readPath := filepath.Join(workspace, "ac9_read.txt")
+		require.NoError(t, os.WriteFile(readPath, []byte("default-safe-read"), 0o600))
+		assembly := phase33AssembleWithApproval(t, cfg, approvalCh)
+		require.NotNil(t, assembly.ModeResolver, "ModeResolver must be wired by AssembleAgent")
+		assert.Equal(t, "permission_mode", assembly.ModeResolver.Name())
 
-	readDef, err := assembly.ToolRegistry.Get(ctx, "read")
-	require.NoError(t, err)
+		readDef, err := assembly.ToolRegistry.Get(ctx, "read")
+		require.NoError(t, err)
+		readResult, err := readDef.Execute(ctx, toolCallWithArgs("read", map[string]any{"path": readPath}))
+		require.NoError(t, err)
+		assert.Contains(t, readResult.Output, "default-safe-read")
+		assert.Empty(t, approvalCh, "a scoped built-in read should not prompt in Default")
 
-	res, err := readDef.Execute(ctx, toolCallWithArgs("read", map[string]any{
-		"path": filePath,
-	}))
-	require.NoError(t, err, "read should be allowed in default mode")
-	assert.Contains(t, res.Output, "test content")
+		marker := filepath.Join(workspace, "default-denied")
+		_, err = phase33CallWithApproval(t, assembly.ToolRegistry, approvalCh,
+			toolCallWithArgs("bash", map[string]any{"command": fmt.Sprintf("touch %q", marker)}),
+			marker, tui.ApprovalDeny)
+		assert.ErrorIs(t, err, approval.ErrToolDenied)
+		_, statErr := os.Stat(marker)
+		assert.ErrorIs(t, statErr, os.ErrNotExist, "denied Bash must have no file effect")
+	})
 
-	// write should also be allowed in default mode.
-	writeDef, err := assembly.ToolRegistry.Get(ctx, "write")
-	require.NoError(t, err)
+	t.Run("assembled Default executes only after explicit approval", func(t *testing.T) {
+		approvalCh := make(chan tui.ApprovalRequest, 1)
+		cfg, workspace := phase33ApprovalConfig(t)
+		assembly := phase33AssembleWithApproval(t, cfg, approvalCh)
+		marker := filepath.Join(workspace, "default-approved")
+		result, err := phase33CallWithApproval(t, assembly.ToolRegistry, approvalCh,
+			toolCallWithArgs("bash", map[string]any{"command": fmt.Sprintf("touch %q", marker)}),
+			marker, tui.ApprovalAllow)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		info, err := os.Stat(marker)
+		require.NoError(t, err, "the approved Bash process must create its effect marker")
+		assert.Zero(t, info.Size())
+	})
 
-	writePath := filepath.Join(dir, "ac9_written.txt")
-	_, err = writeDef.Execute(ctx, toolCallWithArgs("write", map[string]any{
-		"path":    writePath,
-		"content": "written by ac9",
-	}))
-	require.NoError(t, err, "write should be allowed in default mode")
+	t.Run("PermissionAuto auto-allows scoped read but still gates Bash identity", func(t *testing.T) {
+		approvalCh := make(chan tui.ApprovalRequest, 1)
+		registry, _, workspace := phase33PreparedModeRegistry(t, approval.PermissionAuto, approvalCh)
+		readPath := filepath.Join(workspace, "auto_read.txt")
+		require.NoError(t, os.WriteFile(readPath, []byte("auto-safe-read"), 0o600))
+		readDef, err := registry.Get(ctx, "read")
+		require.NoError(t, err)
+		readResult, err := readDef.Execute(ctx, toolCallWithArgs("read", map[string]any{"path": readPath}))
+		require.NoError(t, err)
+		assert.Contains(t, readResult.Output, "auto-safe-read")
+		assert.Empty(t, approvalCh, "trusted scoped reads should be auto-allowed")
 
-	data, err := os.ReadFile(writePath)
-	require.NoError(t, err)
-	assert.Equal(t, "written by ac9", string(data))
+		marker := filepath.Join(workspace, "auto-bash-denied")
+		_, err = phase33CallWithApproval(t, registry, approvalCh,
+			toolCallWithArgs("bash", map[string]any{"command": fmt.Sprintf("touch %q", marker)}),
+			marker, tui.ApprovalDeny)
+		assert.ErrorIs(t, err, approval.ErrToolDenied,
+			"an untrusted local-process identity must be asked even when its name classifier allows unknown tools")
+		_, statErr := os.Stat(marker)
+		assert.ErrorIs(t, statErr, os.ErrNotExist)
+	})
 
-	// 3. Behavioral: a middleware built with the resolver + PermissionPlan
-	//    mode denies tool calls (Ask → Deny with autoApprove=false, no
-	//    callback). This proves the approval system can deny tools.
-	planMW := approval.NewApprovalMiddleware(
-		&approval.AllowAllClassifier{}, // static; overridden by resolver
-		approval.NewInMemoryApprovalStore(),
-		approval.WithAutoApprove(false),
-		approval.WithPermissionModeResolver(assembly.ModeResolver),
-		approval.WithPermissionMode(approval.PermissionPlan),
-	)
-	planTR := tools.NewDefaultToolRegistry()
-	require.NoError(t, planTR.Register(ctx, &recordingTool{name: "bash", execute: dummyExec}))
-	planWrapped := tools.NewMiddlewareToolRegistry(planTR, planMW.WrapToolCall)
+	t.Run("auto-allowed call cannot masquerade as explicitly approved", func(t *testing.T) {
+		approvalCh := make(chan tui.ApprovalRequest, 1)
+		registry, _, workspace := phase33PreparedModeRegistry(t, approval.PermissionAuto, approvalCh)
+		readPath := filepath.Join(workspace, "auto_read_without_prompt.txt")
+		require.NoError(t, os.WriteFile(readPath, []byte("auto-read"), 0o600))
 
-	planDef, err := planWrapped.Get(ctx, "bash")
-	require.NoError(t, err)
-	_, err = planDef.Execute(ctx, toolCall("bash"))
-	assert.ErrorIs(t, err, approval.ErrToolDenied,
-		"PermissionPlan + resolver should deny bash (Ask→Deny)")
+		_, err := phase33CallWithApproval(t, registry, approvalCh,
+			toolCallWithArgs("read", map[string]any{"path": readPath}), "", tui.ApprovalAllow)
+		assert.ErrorContains(t, err, "completed before approval request",
+			"a successful auto-allowed call is not evidence that an explicit approval occurred")
+		assert.Empty(t, approvalCh, "the scoped read should be auto-allowed without a prompt")
+	})
+
+	t.Run("PermissionPlan asks for each call", func(t *testing.T) {
+		approvalCh := make(chan tui.ApprovalRequest, 1)
+		registry, _, workspace := phase33PreparedModeRegistry(t, approval.PermissionPlan, approvalCh)
+		readPath := filepath.Join(workspace, "plan_read.txt")
+		require.NoError(t, os.WriteFile(readPath, []byte("plan-read"), 0o600))
+		readResult, err := phase33CallWithApproval(t, registry, approvalCh,
+			toolCallWithArgs("read", map[string]any{"path": readPath}), "", tui.ApprovalAllow)
+		require.NoError(t, err)
+		require.NotNil(t, readResult)
+		assert.Contains(t, readResult.Output, "plan-read",
+			"PermissionPlan may execute only after the per-call approval callback allows it")
+	})
+
+	t.Run("active Plan Mode blocks Bash even under AutoFull", func(t *testing.T) {
+		approvalCh := make(chan tui.ApprovalRequest, 1)
+		registry, planController, workspace := phase33PreparedModeRegistry(t, approval.PermissionAutoFull, approvalCh)
+		require.NoError(t, planController.Enter(ctx, "AC9 mutation quarantine"))
+		marker := filepath.Join(workspace, "plan-mode-blocked")
+		bashDef, err := registry.Get(ctx, "bash")
+		require.NoError(t, err)
+		_, err = bashDef.Execute(ctx, toolCallWithArgs("bash", map[string]any{"command": fmt.Sprintf("touch %q", marker)}))
+		assert.ErrorIs(t, err, approval.ErrToolDenied)
+		assert.Empty(t, approvalCh, "Plan Mode blocks mutation before an approval prompt")
+		_, statErr := os.Stat(marker)
+		assert.ErrorIs(t, statErr, os.ErrNotExist, "AutoFull must not bypass active Plan Mode")
+	})
+
+	t.Run("pre-prompt Plan Mode denial does not count as explicit approval", func(t *testing.T) {
+		approvalCh := make(chan tui.ApprovalRequest, 1)
+		registry, planController, workspace := phase33PreparedModeRegistry(t, approval.PermissionAutoFull, approvalCh)
+		require.NoError(t, planController.Enter(ctx, "AC9 pre-prompt denial regression"))
+		marker := filepath.Join(workspace, "pre-prompt-plan-denial")
+
+		_, err := phase33CallWithApproval(t, registry, approvalCh,
+			toolCallWithArgs("bash", map[string]any{"command": fmt.Sprintf("touch %q", marker)}),
+			marker, tui.ApprovalAllow)
+		assert.ErrorContains(t, err, "completed before approval request")
+		assert.False(t, errors.Is(err, approval.ErrToolDenied),
+			"a policy denial before any prompt must not look like the user's explicit denial")
+		assert.Empty(t, approvalCh, "Plan Mode must reject before asking for approval")
+		_, statErr := os.Stat(marker)
+		assert.ErrorIs(t, statErr, os.ErrNotExist, "pre-prompt Plan Mode denial must have no effect")
+	})
 }
 
 // =============================================================================

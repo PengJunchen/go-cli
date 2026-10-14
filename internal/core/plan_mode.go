@@ -10,9 +10,9 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
-// PlanModeController manages plan mode state. When plan mode is active, write
-// tools are blocked so the agent can only research and propose a plan without
-// mutating the filesystem or executing commands.
+// PlanModeController manages plan mode state. When plan mode is active, tools
+// outside the explicit read-only set are blocked so the agent can research and
+// propose a plan without invoking unreviewed mutations.
 type PlanModeController interface {
 	// Enter activates plan mode, recording the reason for activation.
 	Enter(ctx context.Context, reason string) error
@@ -21,17 +21,23 @@ type PlanModeController interface {
 	// IsActive reports whether plan mode is currently active.
 	IsActive() bool
 	// ShouldBlockWrite reports whether the named tool should be blocked given
-	// the current plan-mode state.
+	// the current plan-mode state. In active Plan Mode, only explicitly
+	// allowlisted controls pass this coarse name-based preflight.
 	ShouldBlockWrite(toolName string) bool
 }
 
-// writeToolNames is the set of built-in tool names that produce side effects
-// and are therefore blocked while plan mode is active.
-var writeToolNames = map[string]bool{
-	"write":    true,
-	"edit":     true,
-	"bash":     true,
-	"mutation": true,
+// planModeReadOnlyToolNames is the R0 name-based stopgap allowlist for the
+// explicitly approved built-in reads and Plan Mode control tools. All other
+// names, including mutations, custom tools, and unknown tools, fail closed;
+// the guard does not infer permission from prefixes or registration names.
+var planModeReadOnlyToolNames = map[string]struct{}{
+	"read": {}, "ls": {}, "grep": {}, "find": {},
+	"web_search": {}, "web_fetch": {},
+	"git_diff": {}, "git_status": {}, "git_log": {}, "git_branch": {}, "git_blame": {}, "git_remote": {},
+	"lsp_query":   {},
+	"tool_search": {}, "ask_user": {},
+	"goal_get": {}, "goal_list": {}, "task_get": {}, "task_list": {},
+	"enter_plan_mode": {}, "exit_plan_mode": {},
 }
 
 // DefaultPlanModeController is a thread-safe PlanModeController backed by a
@@ -40,32 +46,86 @@ type DefaultPlanModeController struct {
 	mu     sync.RWMutex
 	active bool
 	reason string
+	fence  *tools.DispatchFence
 }
 
 var _ PlanModeController = (*DefaultPlanModeController)(nil)
 
 // NewDefaultPlanModeController returns a DefaultPlanModeController with plan
-// mode initially inactive.
-func NewDefaultPlanModeController() *DefaultPlanModeController {
-	return &DefaultPlanModeController{}
+// mode initially inactive. Supplying a fence lets Plan transitions invalidate
+// prepared tool calls against the same state used by the registry and approval
+// policy. When omitted, the controller owns a fence for compatibility with
+// callers that do not use prepared dispatch.
+func NewDefaultPlanModeController(fences ...*tools.DispatchFence) *DefaultPlanModeController {
+	fence := tools.NewDispatchFence()
+	if len(fences) > 0 && fences[0] != nil {
+		fence = fences[0]
+	}
+	return &DefaultPlanModeController{fence: fence}
+}
+
+// DispatchFence returns the fence used to publish Plan Mode state transitions.
+func (c *DefaultPlanModeController) DispatchFence() *tools.DispatchFence {
+	if c == nil {
+		return nil
+	}
+	return c.fence
+}
+
+// StartIfInactive runs a short process-start callback while Plan transitions
+// are excluded by the shared dispatch fence. It returns false without running
+// start when Plan Mode is active. The boolean reports whether the callback was
+// authorized and invoked, so callers can distinguish a boundary failure from
+// an ordinary process-start error. The callback must only start the child and
+// must return before waiting for it or draining its output.
+func (c *DefaultPlanModeController) StartIfInactive(start func() error) (bool, error) {
+	if c == nil || c.fence == nil {
+		return false, tools.ErrDispatchFenceUnavailable
+	}
+	if start == nil {
+		return false, errors.New("core: Plan mode start callback is nil")
+	}
+
+	authorized := false
+	err := c.fence.WithSnapshot(func(_ tools.DispatchFenceSnapshot) error {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		if c.active {
+			return nil
+		}
+		authorized = true
+		return start()
+	})
+	if err != nil {
+		return authorized, err
+	}
+	return authorized, nil
 }
 
 // Enter activates plan mode and logs the reason.
 func (c *DefaultPlanModeController) Enter(_ context.Context, reason string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.active = true
-	c.reason = reason
+	if _, err := c.fence.Publish(tools.DispatchFencePlan, nil, func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.active = true
+		c.reason = reason
+	}); err != nil {
+		return fmt.Errorf("publish Plan Mode entry: %w", err)
+	}
 	slog.Info("core.plan_mode.enter", "reason", reason)
 	return nil
 }
 
 // Exit deactivates plan mode and logs the summary.
 func (c *DefaultPlanModeController) Exit(_ context.Context, summary string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.active = false
-	c.reason = ""
+	if _, err := c.fence.Publish(tools.DispatchFencePlan, nil, func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.active = false
+		c.reason = ""
+	}); err != nil {
+		return fmt.Errorf("publish Plan Mode exit: %w", err)
+	}
 	slog.Info("core.plan_mode.exit", "summary", summary)
 	return nil
 }
@@ -78,14 +138,16 @@ func (c *DefaultPlanModeController) IsActive() bool {
 }
 
 // ShouldBlockWrite reports whether the named tool should be blocked. It returns
-// true only when plan mode is active and the tool is a known write tool.
+// true when plan mode is active and the tool name is not in the explicit R0
+// built-in read/control allowlist.
 func (c *DefaultPlanModeController) ShouldBlockWrite(toolName string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if !c.active {
 		return false
 	}
-	blocked := writeToolNames[toolName]
+	_, readOnly := planModeReadOnlyToolNames[toolName]
+	blocked := !readOnly
 	if blocked {
 		slog.Debug("core.plan_mode.block_write", "tool", toolName)
 	}
@@ -101,14 +163,14 @@ func (c *DefaultPlanModeController) Reason() string {
 }
 
 // ErrPlanModeBlocked is returned by NewPlanModeToolWrapper when a tool call is
-// blocked because plan mode is active and the tool is a write tool.
+// blocked because plan mode is active and the tool is not allowlisted.
 var ErrPlanModeBlocked = errors.New("plan mode: tool blocked")
 
 // NewPlanModeToolWrapper returns a tools.ToolExecutorWrapper that intercepts
 // tool calls at the ToolExecutorWrapper chain level. When plan mode is active,
-// write tools (write, edit, bash, mutation) are blocked: the wrapper returns a
-// ToolResult with a descriptive message and ErrPlanModeBlocked, without
-// invoking the underlying executor. Read tools pass through unchanged.
+// only explicitly allowlisted read-only tools pass; unknown and side-effecting
+// tools return a descriptive message and ErrPlanModeBlocked without invoking
+// the underlying executor.
 //
 // When the controller is nil (zero-config fallback) or plan mode is inactive,
 // all calls pass through to next unchanged.

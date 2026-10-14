@@ -3,6 +3,7 @@ package production
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/pengjunchen/go-cli/internal/verify"
@@ -50,6 +52,213 @@ func TestClassifyStringMatching(t *testing.T) {
 	require.Equal(t, ErrorFatal, p.Classify(errors.New("permission denied")))
 }
 
+func TestClassifyWrappedProviderError(t *testing.T) {
+	p := NewDefaultRetryPolicy(RetryConfig{}).(*DefaultRetryPolicy) //nolint:errcheck
+	tests := []struct {
+		name   string
+		typeOf llm.ErrorType
+		status int
+		want   ErrorCategory
+	}{
+		{name: "rate limit", typeOf: llm.ErrTypeRateLimit, status: 429, want: ErrorRateLimit},
+		{name: "server", typeOf: llm.ErrTypeServer, status: 503, want: ErrorTransient},
+		{name: "network", typeOf: llm.ErrTypeNetwork, want: ErrorTransient},
+		{name: "auth", typeOf: llm.ErrTypeAuth, status: 401, want: ErrorFatal},
+		{name: "overflow", typeOf: llm.ErrTypeOverflow, status: 400, want: ErrorFatal},
+		{name: "invalid request", typeOf: llm.ErrTypeInvalidRequest, status: 400, want: ErrorFatal},
+		{name: "not found", typeOf: llm.ErrTypeInvalidRequest, status: 404, want: ErrorFatal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &llm.ProviderError{ErrorType: tt.typeOf, StatusCode: tt.status, Provider: "fixture"}
+			require.Equal(t, tt.want, p.Classify(fmt.Errorf("provider wrapper: %w", err)))
+		})
+	}
+}
+
+func TestClassifyWrappedTypedFatalBeforeTransientText(t *testing.T) {
+	p := NewDefaultRetryPolicy(RetryConfig{}).(*DefaultRetryPolicy) //nolint:errcheck
+
+	providerErr := fmt.Errorf("connection reset while wrapping: %w", &llm.ProviderError{
+		ErrorType:  llm.ErrTypeAuth,
+		Provider:   "fixture",
+		StatusCode: 401,
+	})
+	categorizedErr := fmt.Errorf("temporary wrapper: %w", NewError(ErrorFatal, errors.New("denied")))
+
+	require.Equal(t, ErrorFatal, p.Classify(providerErr))
+	require.Equal(t, ErrorFatal, p.Classify(categorizedErr))
+}
+
+func TestClassifyNormalizedProviderErrorBeforeGenericHarnessCode(t *testing.T) {
+	ctx, _ := newRetryTestCtx(t)
+	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3}).(*DefaultRetryPolicy) //nolint:errcheck
+	tests := []struct {
+		name       string
+		typeOf     llm.ErrorType
+		statusCode int
+		wrapText   string
+		wantCode   string
+		want       ErrorCategory
+		wantRetry  bool
+	}{
+		{name: "auth", typeOf: llm.ErrTypeAuth, statusCode: 401, wrapText: "temporary connection reset", wantCode: core.ErrCodeModelError, want: ErrorFatal},
+		{name: "invalid request", typeOf: llm.ErrTypeInvalidRequest, statusCode: 400, wrapText: "temporary connection reset", wantCode: core.ErrCodeModelError, want: ErrorFatal},
+		{name: "not found", typeOf: llm.ErrTypeInvalidRequest, statusCode: 404, wrapText: "temporary connection reset", wantCode: core.ErrCodeModelError, want: ErrorFatal},
+		{name: "overflow", typeOf: llm.ErrTypeOverflow, statusCode: 400, wrapText: "temporary connection reset", wantCode: core.ErrCodeModelError, want: ErrorFatal},
+		{name: "rate limit", typeOf: llm.ErrTypeRateLimit, statusCode: 429, wrapText: "temporary connection reset", wantCode: core.ErrCodeModelError, want: ErrorRateLimit, wantRetry: true},
+		{name: "server", typeOf: llm.ErrTypeServer, statusCode: 503, wrapText: "temporary connection reset", wantCode: core.ErrCodeModelError, want: ErrorTransient, wantRetry: true},
+		{name: "tool auth", typeOf: llm.ErrTypeAuth, statusCode: 401, wrapText: "tool execution failed", wantCode: core.ErrCodeToolError, want: ErrorFatal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			providerErr := &llm.ProviderError{
+				ErrorType:  tt.typeOf,
+				StatusCode: tt.statusCode,
+				Provider:   "fixture",
+				Message:    "temporary connection reset",
+			}
+			normalized := core.NormalizeError(fmt.Errorf("%s: %w", tt.wrapText, providerErr))
+			require.Equal(t, tt.wantCode, normalized.Code, "normalization keeps the generic harness code")
+			require.Equal(t, tt.want, p.Classify(normalized))
+			require.Equal(t, tt.wantRetry, p.ShouldRetry(ctx, normalized, 0))
+		})
+	}
+}
+
+func TestClassifyNormalizedOversizedProviderResponseIsFatal(t *testing.T) {
+	ctx, _ := newRetryTestCtx(t)
+	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3}).(*DefaultRetryPolicy) //nolint:errcheck
+
+	normalized := core.NormalizeError(fmt.Errorf("provider decode: %w", llm.ErrProviderResponseTooLarge))
+
+	require.NotNil(t, normalized)
+	require.ErrorIs(t, normalized, llm.ErrProviderResponseTooLarge)
+	require.Equal(t, ErrorFatal, p.Classify(normalized))
+	require.False(t, p.ShouldRetry(ctx, normalized, 0))
+}
+
+func TestOversizedProviderResponsePreservesExplicitRetryPrecedence(t *testing.T) {
+	ctx, _ := newRetryTestCtx(t)
+	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3}).(*DefaultRetryPolicy) //nolint:errcheck
+	tests := []struct {
+		name      string
+		err       error
+		want      ErrorCategory
+		wantRetry bool
+	}{
+		{
+			name:      "categorized timeout",
+			err:       NewError(ErrorTimeout, llm.ErrProviderResponseTooLarge),
+			want:      ErrorTimeout,
+			wantRetry: true,
+		},
+		{
+			name: "categorized timeout before invalid request",
+			err: NewError(ErrorTimeout, &llm.ProviderError{
+				ErrorType:  llm.ErrTypeInvalidRequest,
+				StatusCode: 400,
+				Provider:   "fixture",
+			}),
+			want:      ErrorTimeout,
+			wantRetry: true,
+		},
+		{
+			name: "harness timeout",
+			err: &core.AgentHarnessError{
+				Code:  core.ErrCodeTimeout,
+				Cause: llm.ErrProviderResponseTooLarge,
+			},
+			want:      ErrorTimeout,
+			wantRetry: true,
+		},
+		{
+			name: "harness timeout before invalid request",
+			err: &core.AgentHarnessError{
+				Code: core.ErrCodeTimeout,
+				Cause: &llm.ProviderError{
+					ErrorType:  llm.ErrTypeInvalidRequest,
+					StatusCode: 400,
+					Provider:   "fixture",
+				},
+			},
+			want:      ErrorTimeout,
+			wantRetry: true,
+		},
+		{
+			name: "bare oversized response",
+			err:  llm.ErrProviderResponseTooLarge,
+			want: ErrorFatal,
+		},
+		{
+			name: "generic normalized model error",
+			err:  core.NormalizeError(fmt.Errorf("provider decode: %w", llm.ErrProviderResponseTooLarge)),
+			want: ErrorFatal,
+		},
+		{
+			name: "generic tool error",
+			err: &core.AgentHarnessError{
+				Code:  core.ErrCodeToolError,
+				Cause: llm.ErrProviderResponseTooLarge,
+			},
+			want: ErrorFatal,
+		},
+		{
+			name: "busy harness error",
+			err: &core.AgentHarnessError{
+				Code:  core.ErrCodeBusy,
+				Cause: llm.ErrProviderResponseTooLarge,
+			},
+			want: ErrorFatal,
+		},
+		{
+			name: "hook rejected harness error",
+			err: &core.AgentHarnessError{
+				Code:  core.ErrCodeHookRejected,
+				Cause: llm.ErrProviderResponseTooLarge,
+			},
+			want: ErrorFatal,
+		},
+		{
+			name: "canceled cause",
+			err:  errors.Join(context.Canceled, llm.ErrProviderResponseTooLarge),
+			want: ErrorFatal,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, p.Classify(tt.err))
+			require.Equal(t, tt.wantRetry, p.ShouldRetry(ctx, tt.err, 0))
+		})
+	}
+}
+
+func TestClassifyNormalizedHarnessTerminalCodeOverridesProviderCause(t *testing.T) {
+	ctx, _ := newRetryTestCtx(t)
+	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3}).(*DefaultRetryPolicy) //nolint:errcheck
+	tests := []struct {
+		name    string
+		message string
+		code    string
+	}{
+		{name: "busy", message: "harness is busy", code: core.ErrCodeBusy},
+		{name: "hook rejected", message: "hook rejected the run", code: core.ErrCodeHookRejected},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			serverErr := &llm.ProviderError{
+				ErrorType: llm.ErrTypeServer,
+				Provider:  "fixture",
+				Message:   "server unavailable",
+			}
+			normalized := core.NormalizeError(fmt.Errorf("%s: %w", tt.message, serverErr))
+			require.Equal(t, tt.code, normalized.Code)
+			require.Equal(t, ErrorFatal, p.Classify(normalized))
+			require.False(t, p.ShouldRetry(ctx, normalized, 0))
+		})
+	}
+}
+
 func TestErrorCategoryString(t *testing.T) {
 	require.Equal(t, "transient", ErrorTransient.String())
 	require.Equal(t, "rate_limit", ErrorRateLimit.String())
@@ -64,9 +273,20 @@ func TestShouldRetryRespectsMaxAttempts(t *testing.T) {
 	err := NewError(ErrorTransient, errors.New("boom"))
 	require.True(t, p.ShouldRetry(ctx, err, 0))
 	require.True(t, p.ShouldRetry(ctx, err, 1))
-	require.True(t, p.ShouldRetry(ctx, err, 2))
+	require.False(t, p.ShouldRetry(ctx, err, 2))
 	require.False(t, p.ShouldRetry(ctx, err, 3))
 	require.False(t, p.ShouldRetry(ctx, err, 10))
+	require.False(t, p.ShouldRetry(ctx, err, -1))
+}
+
+func TestShouldRetryRefusesCanceledContextAndErrors(t *testing.T) {
+	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3})
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.False(t, p.ShouldRetry(canceledCtx, NewError(ErrorTransient, errors.New("temporary")), 0))
+	require.False(t, p.ShouldRetry(context.Background(), fmt.Errorf("wrapped: %w", context.Canceled), 0))
+	require.False(t, p.ShouldRetry(context.Background(), fmt.Errorf("wrapped: %w", context.DeadlineExceeded), 0))
 }
 
 func TestShouldRetryFatalNeverRetries(t *testing.T) {

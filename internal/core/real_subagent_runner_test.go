@@ -2,12 +2,16 @@ package core
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -295,21 +299,38 @@ func TestRealSubAgentRunner_ModelOverride(t *testing.T) {
 		mock.ConversationTurn{AssistantContent: "parent response"},
 	))
 
-	registryModel := mock.NewMockLLMServer(mock.NewConversationTemplate(
-		"System", "registry-model",
-		mock.ConversationTurn{AssistantContent: "registry response"},
-	))
+	var registryCalls atomic.Int32
+	registryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		registryCalls.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
+			http.Error(w, "unexpected provider request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"registry response"}}]}`))
+	}))
+	defer registryServer.Close()
 
 	reg := llm.NewProviderRegistry()
-	require.NoError(t, reg.Register(registryModel))
+	registryProvider := llm.NewEinoProvider(
+		llm.WithProviderName("mock"),
+		llm.WithBaseURL(registryServer.URL),
+		llm.WithHTTPClient(registryServer.Client()),
+		llm.WithDefaultModel("registry-model"),
+	)
+	require.NoError(t, reg.Register(registryProvider))
 
-	factory := NewRealSubAgentRunnerFactory(parentModel, reg, tools.NewDefaultToolRegistry())
+	factory := NewRealSubAgentRunnerFactory(parentModel, reg, tools.NewDefaultToolRegistry(),
+		WithMidTurnCompaction(nil, nil, compaction.NewHeuristicTokenEstimator(), 50000),
+	)
 	runner := factory(SubAgentConfig{Name: "test", MaxTurns: 3, Model: "mock"})
 
 	final, err := runner.Run(context.Background(), "test", nil, func(AgentEvent) {})
 	require.NoError(t, err)
 	assert.Equal(t, "registry response", final.Content,
 		"runner should use the registry model when cfg.Model is set")
+	assert.EqualValues(t, 1, registryCalls.Load(), "the trusted registry adapter should serve the request")
+	assert.Zero(t, parentModel.CallCount(), "the parent model must not be used for an override")
 }
 
 // TestRealSubAgentRunner_ModelOverrideFallsBackToParent proves the runner

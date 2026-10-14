@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -37,7 +36,7 @@ func phase22ProdTestConfig() *config.Config {
 	return &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    "openai",
-			BaseURL: "http://127.0.0.1:0",
+			BaseURL: "http://127.0.0.1:12345/v1",
 			APIKey:  "test-key",
 		},
 	}
@@ -48,6 +47,9 @@ func phase22ProdTestConfig() *config.Config {
 // uses a fresh context.
 func phase22ProdAssemble(t *testing.T, cfg *config.Config) *cli.AgentAssembly {
 	t.Helper()
+	if cfg.Git.WorkDir == "" {
+		cfg.Git.WorkDir = t.TempDir()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	assembly, err := cli.AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard, cli.WithApproveMode(cli.ApproveAuto))
@@ -224,7 +226,6 @@ func TestET_Phase22_Production_AuditLog(t *testing.T) {
 // TestET_Phase22_Production_Telemetry verifies that AssembleAgent wires a
 // non-nil Telemetry that records metrics and exposes them via Snapshot.
 func TestET_Phase22_Production_Telemetry(t *testing.T) {
-	t.Skip("Pre-existing failure: telemetry metric not recorded for tool calls")
 	assembly := phase22ProdAssemble(t, phase22ProdTestConfig())
 	require.NotNil(t, assembly.Telemetry, "Telemetry must be wired by AssembleAgent")
 
@@ -245,8 +246,9 @@ func TestET_Phase22_Production_Telemetry(t *testing.T) {
 	require.True(t, ok, "Telemetry should be *DefaultTelemetry")
 
 	snapshot := dt.Snapshot()
-	assert.Contains(t, snapshot, "e2e.test.counter")
-	assert.Equal(t, 42.0, snapshot["e2e.test.counter"])
+	const testCounterKey = "metric-v1|16:e2e.test.counter|1|4:test|7:phase22|"
+	assert.Contains(t, snapshot, testCounterKey)
+	assert.Equal(t, 42.0, snapshot[testCounterKey])
 
 	// Execute a tool through the assembled registry and verify telemetry
 	// records the tool call count metric.
@@ -261,16 +263,9 @@ func TestET_Phase22_Production_Telemetry(t *testing.T) {
 	require.NoError(t, err)
 
 	snapshot = dt.Snapshot()
-	// Telemetry now uses composite keys with labels (MD-7): name{k=v,...}
-	var foundToolCall bool
-	for k, v := range snapshot {
-		if strings.HasPrefix(k, "tool.call.count{") && v > 0.0 {
-			foundToolCall = true
-			break
-		}
-	}
-	assert.True(t, foundToolCall,
-		"telemetry should record tool.call.count with labels after tool execution")
+	const todoWriteCountKey = "metric-v1|15:tool.call.count|2|9:cache_hit|5:false|10:tool_class|5:other|"
+	assert.Equal(t, 1.0, snapshot[todoWriteCountKey],
+		"the assembled tool registry should record the executed tool under a bounded class")
 }
 
 // =============================================================================
@@ -328,22 +323,18 @@ func TestET_Phase22_Production_HookChain(t *testing.T) {
 }
 
 // =============================================================================
-// AC-9: Tracing config — Tracer non-nil when enabled, nil when disabled
+// AC-9: Tracing config — standalone assembly leaves tracer ownership to CLI
 // =============================================================================
 
-// TestET_Phase22_Production_TracingEnabled verifies that when config has
-// tracing.enabled = true, the assembled Tracer is non-nil.
-func TestET_Phase22_Production_TracingEnabled(t *testing.T) {
-	dir := t.TempDir()
-
+// TestET_Phase22_Production_StandaloneAssemblyDefersTracingOwnership verifies
+// that standalone assembly leaves tracer ownership to the CLI invocation.
+func TestET_Phase22_Production_StandaloneAssemblyDefersTracingOwnership(t *testing.T) {
 	cfg := phase22ProdTestConfig()
 	tracingEnabled := true
 	cfg.Tracing.Enabled = &tracingEnabled
-	cfg.Tracing.Exporter = "jsonl"
-	cfg.Tracing.FilePath = dir
 
 	assembly := phase22ProdAssemble(t, cfg)
-	require.NotNil(t, assembly.Tracer, "Tracer must be non-nil when tracing is enabled")
+	assert.Nil(t, assembly.Tracer, "standalone assembly must not create a second invocation tracer")
 }
 
 // TestET_Phase22_Production_TracingDisabled verifies that when tracing is not

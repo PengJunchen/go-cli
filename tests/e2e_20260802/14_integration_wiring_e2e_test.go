@@ -580,7 +580,7 @@ func TestWT_Compaction_MidTurnThresholdTrigger(t *testing.T) {
 		out:  []compaction.TurnItem{{Role: compaction.RoleSystem, Content: "compacted", IsCompaction: true}},
 	}
 
-	out, res, err := mtc.CompactIfNeeded(ctx, items, 50, est, rc)
+	out, res, err := compactIfNeededForTest(ctx, mtc, items, 50, est, rc)
 	require.NoError(t, err)
 	assert.True(t, res.Triggered, "compaction should be triggered when items exceed threshold")
 	assert.Equal(t, compaction.TriggerThreshold, res.Reason)
@@ -607,11 +607,18 @@ func TestWT_Compaction_UnifiedRouterDegrades(t *testing.T) {
 		items := []compaction.TurnItem{
 			{Role: compaction.RoleSystem, Content: "sys"},
 			{Role: compaction.RoleUser, Content: "hello"},
-			{Role: compaction.RoleTool, ToolName: "read", ToolResult: strings.Repeat("t", 200)},
-			{Role: compaction.RoleAssistant, Content: "hi"},
+			{
+				Role:    compaction.RoleAssistant,
+				Content: "hi",
+				ToolCalls: []llm.ToolCall{{
+					ID:   "read-1",
+					Name: "read",
+				}},
+			},
+			{Role: compaction.RoleTool, ToolCallID: "read-1", ToolName: "read", ToolResult: strings.Repeat("t", 200)},
 		}
 
-		out, err := uni.Compact(ctx, items, 100, est)
+		out, err := compactItemsForTest(ctx, uni, items, 100, est)
 		require.NoError(t, err)
 		assert.Equal(t, compaction.StrategyMicro, uni.LastStrategy())
 		assert.LessOrEqual(t, tokenSum(out, est), 100)
@@ -626,7 +633,7 @@ func TestWT_Compaction_UnifiedRouterDegrades(t *testing.T) {
 			})
 		}
 
-		out, err := uni.Compact(ctx, items, 20, est)
+		out, err := compactItemsForTest(ctx, uni, items, 20, est)
 		require.NoError(t, err)
 		assert.Equal(t, compaction.StrategyTruncating, uni.LastStrategy())
 		assert.LessOrEqual(t, tokenSum(out, est), 20)
@@ -655,15 +662,25 @@ func TestWT_Compaction_LongConversationStability(t *testing.T) {
 			Role:    compaction.RoleUser,
 			Content: fmt.Sprintf("user message %d", i),
 		})
-		if turn.AssistantContent != "" {
+		assistantCalls := make([]llm.ToolCall, 0, len(turn.AssistantToolCalls))
+		for _, tc := range turn.AssistantToolCalls {
+			assistantCalls = append(assistantCalls, llm.ToolCall{
+				ID:   tc.ID,
+				Name: tc.Name,
+				Args: tc.Args,
+			})
+		}
+		if turn.AssistantContent != "" || len(assistantCalls) > 0 {
 			items = append(items, compaction.TurnItem{
-				Role:    compaction.RoleAssistant,
-				Content: turn.AssistantContent,
+				Role:      compaction.RoleAssistant,
+				Content:   turn.AssistantContent,
+				ToolCalls: assistantCalls,
 			})
 		}
 		for _, tc := range turn.AssistantToolCalls {
 			items = append(items, compaction.TurnItem{
 				Role:       compaction.RoleTool,
+				ToolCallID: tc.ID,
 				ToolName:   tc.Name,
 				ToolResult: fmt.Sprintf("result for %s at iteration %d", tc.Name, i),
 			})
@@ -674,7 +691,7 @@ func TestWT_Compaction_LongConversationStability(t *testing.T) {
 
 	// Run through compaction with a constrained budget.
 	uni := compaction.NewUnifiedCompactor()
-	out, err := uni.Compact(ctx, items, 500, est)
+	out, err := compactItemsForTest(ctx, uni, items, 500, est)
 	require.NoError(t, err, "compaction should not panic or error")
 	assert.NotEmpty(t, out, "output should not be empty")
 	assert.LessOrEqual(t, tokenSum(out, est), 500, "output should fit within budget")
@@ -759,29 +776,31 @@ func TestWT_Middleware_ModelMiddlewareWraps(t *testing.T) {
 // Feature:   DefaultSubAgent lifecycle states
 func TestWT_SubAgent_LifecycleStates(t *testing.T) {
 	conf := core.SubAgentConfig{Name: "lifecycle-worker", MaxTurns: 3}
-	sub := core.NewDefaultSubAgent(conf)
-	sa := sub.(*core.DefaultSubAgent) //nolint:errcheck
+	fixture := newHeldSubAgentFixture(t, conf)
+	sub := fixture.sub
 
 	// Verify initial state is Idle.
-	assert.Equal(t, core.SubAgentIdle, sa.State())
+	assert.Equal(t, core.SubAgentIdle, sub.State())
 
 	// Run: state transitions to Running.
-	ch, err := sub.Run(context.Background(), "do something")
+	ch, err := sub.Run(fixture.ctx, "do something")
 	require.NoError(t, err)
 	require.NotNil(t, ch)
-	assert.Equal(t, core.SubAgentRunning, sa.State())
+	waitForSubAgentRunner(t, fixture.started)
+	assert.Equal(t, core.SubAgentRunning, sub.State())
 
+	fixture.release()
 	// Drain events.
 	for range ch {
 	}
 
 	// Wait for final result.
-	msg, werr := sub.Wait(context.Background())
+	msg, werr := sub.Wait(fixture.ctx)
 	require.NoError(t, werr)
 	assert.Equal(t, "assistant", string(msg.Role))
 
 	// Verify final state is Completed.
-	assert.Equal(t, core.SubAgentCompleted, sa.State())
+	assert.Equal(t, core.SubAgentCompleted, sub.State())
 }
 
 // Test ID:   WT-SUBAGENT-002

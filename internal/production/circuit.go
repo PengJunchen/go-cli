@@ -69,6 +69,7 @@ type DefaultCircuitBreaker struct {
 	name string
 
 	state               CircuitState
+	generation          uint64
 	consecutiveFailures int
 	halfOpenCalls       int
 	halfOpenSuccesses   int
@@ -78,6 +79,8 @@ type DefaultCircuitBreaker struct {
 
 // Compile-time assertion that DefaultCircuitBreaker satisfies CircuitBreaker.
 var _ CircuitBreaker = (*DefaultCircuitBreaker)(nil)
+var _ CircuitBreakerWithoutFallback = (*DefaultCircuitBreaker)(nil)
+var _ StreamingCircuitBreaker = (*DefaultCircuitBreaker)(nil)
 
 // NewDefaultCircuitBreaker returns a DefaultCircuitBreaker backed by cfg with
 // sensible defaults for zero-valued fields. It starts in the Closed state.
@@ -118,6 +121,10 @@ func NewDefaultCircuitBreaker(cfg CircuitBreakerConfig, opts ...Option) CircuitB
 // configured fallback, when provided) while Open. It records the outcome to
 // drive state transitions.
 func (b *DefaultCircuitBreaker) Execute(ctx context.Context, fn func() (any, error)) (any, error) {
+	return b.execute(ctx, fn, true)
+}
+
+func (b *DefaultCircuitBreaker) execute(ctx context.Context, fn func() (any, error), allowFallback bool) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -125,10 +132,11 @@ func (b *DefaultCircuitBreaker) Execute(ctx context.Context, fn func() (any, err
 	b.mu.Lock()
 
 	allowed, fallback := b.allowLocked(ctx)
+	generation := b.generation
 	b.mu.Unlock()
 
 	if !allowed {
-		if fallback != nil {
+		if allowFallback && fallback != nil {
 			return fallback()
 		}
 		return nil, ErrCircuitOpen
@@ -137,13 +145,13 @@ func (b *DefaultCircuitBreaker) Execute(ctx context.Context, fn func() (any, err
 	result, err := func() (any, error) {
 		defer func() {
 			if r := recover(); r != nil {
-				b.record(ctx, fmt.Errorf("panic: %v", r))
+				b.record(ctx, generation, fmt.Errorf("panic: %v", r))
 				panic(r)
 			}
 		}()
 		return fn()
 	}()
-	b.record(ctx, err)
+	b.record(ctx, generation, err)
 	return result, err
 }
 
@@ -184,9 +192,12 @@ func (b *DefaultCircuitBreaker) fallbackEnabled() bool { return b.fallback != ni
 func (b *DefaultCircuitBreaker) fallbackFn() func() (any, error) { return b.fallback }
 
 // record applies the outcome of a call to the state machine.
-func (b *DefaultCircuitBreaker) record(ctx context.Context, err error) {
+func (b *DefaultCircuitBreaker) record(ctx context.Context, generation uint64, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if generation != b.generation {
+		return
+	}
 
 	switch b.state {
 	case CircuitClosed:
@@ -227,6 +238,7 @@ func (b *DefaultCircuitBreaker) transitionLocked(ctx context.Context, next Circu
 	}
 	prev := b.state
 	b.state = next
+	b.generation++
 
 	span, ctx := tracing.SpanFromContext(ctx, "production.circuit", tracing.SpanKindInternal)
 	defer span.End()
@@ -253,6 +265,7 @@ func (b *DefaultCircuitBreaker) Reset(_ context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.state = CircuitClosed
+	b.generation++
 	b.consecutiveFailures = 0
 	b.halfOpenCalls = 0
 	b.halfOpenSuccesses = 0

@@ -50,18 +50,32 @@ type hookPayload struct {
 // JSON payload on stdin describing the event, and (for tool events) the tool
 // name, arguments and result.
 type ShellHook struct {
-	name    string
-	event   HookEvent
-	command string
-	timeout time.Duration
+	name       string
+	event      HookEvent
+	command    string
+	timeout    time.Duration
+	startGuard ShellHookStartGuard
 }
 
+// ShellHookStartGuard authorizes the process launch itself. Implementations
+// may wrap start in a short transaction; they must not hold their guard while
+// the child process runs.
+type ShellHookStartGuard func(ctx context.Context, start func() error) error
+
 var _ HookSystem = (*ShellHook)(nil)
+
+var errShellHookGuardDidNotStart = errors.New("core: shell hook start guard did not start its child")
 
 // NewShellHook builds a ShellHook that runs command when event fires, bounded
 // by timeout.
 func NewShellHook(name string, event HookEvent, command string, timeout time.Duration) *ShellHook {
 	return &ShellHook{name: name, event: event, command: command, timeout: timeout}
+}
+
+// NewShellHookWithStartGuard builds a shell hook whose process launch is
+// authorized by startGuard. The child is awaited only after the guard returns.
+func NewShellHookWithStartGuard(name string, event HookEvent, command string, timeout time.Duration, startGuard ShellHookStartGuard) *ShellHook {
+	return &ShellHook{name: name, event: event, command: command, timeout: timeout, startGuard: startGuard}
 }
 
 // Name returns the hook identifier.
@@ -71,8 +85,9 @@ func (h *ShellHook) Name() string { return h.name }
 func (h *ShellHook) Event() HookEvent { return h.event }
 
 // PreToolUse runs the shell command before a tool call. Exit code 0 allows the
-// call; non-zero denies it. Execution failures (timeout, cannot start) are
-// logged and treated as allow (AC-5).
+// call; non-zero denies it. Ordinary execution failures (timeout, cannot
+// start) are logged and treated as allow (AC-5); an explicitly typed safe
+// policy denial is propagated so callers can cancel the tool safely.
 func (h *ShellHook) PreToolUse(ctx context.Context, tool string, args map[string]any) (bool, error) {
 	if h.event != EventPreToolUse {
 		return true, nil
@@ -83,6 +98,9 @@ func (h *ShellHook) PreToolUse(ctx context.Context, tool string, args map[string
 	payload := hookPayload{Event: string(h.event), Tool: tool, Args: args}
 	output, err := h.execCommand(timeoutCtx, payload)
 	if err != nil {
+		if _, safe := SafeToolInterceptionMessage(err); safe {
+			return false, err
+		}
 		if timeoutCtx.Err() != nil {
 			// Timeout or parent context cancellation — treat as allow (AC-5).
 			slog.Warn("core.hook.timeout", "hook", h.name, "event", h.event, "command", h.command)
@@ -183,7 +201,28 @@ func (h *ShellHook) execCommand(ctx context.Context, payload hookPayload) (strin
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
+	started := false
+	start := func() error {
+		err := cmd.Start()
+		started = err == nil
+		return err
+	}
+	var startErr error
+	if h.startGuard != nil {
+		startErr = h.startGuard(ctx, start)
+	} else {
+		startErr = start()
+	}
+	if startErr != nil {
+		if started {
+			startErr = errors.Join(startErr, cmd.Wait())
+		}
+		return buf.String(), startErr
+	}
+	if !started {
+		return buf.String(), errShellHookGuardDidNotStart
+	}
+	if err := cmd.Wait(); err != nil {
 		return buf.String(), err
 	}
 	return buf.String(), nil
@@ -216,25 +255,45 @@ func (m *HookManager) AfterRun(_ context.Context, _ Submission, _ Result, _ erro
 
 // PreToolUseInterceptor returns a ToolInterceptor that invokes PreToolUse on
 // every managed hook. A hook returning allow=false blocks the tool call
-// (AC-4). A hook returning an error is logged and the chain continues (AC-5).
+// (AC-4). Ordinary hook errors are logged and the chain continues (AC-5), but
+// explicitly typed safe policy denials are propagated to the loop.
 //
 // The ToolInterceptor signature does not carry a context, so the hooks run
 // under context.Background(); each shell hook applies its own timeout.
 func (m *HookManager) PreToolUseInterceptor() ToolInterceptor {
 	return func(toolName, _ string, args map[string]any) error {
-		ctx := context.Background()
-		for _, h := range m.hooks {
-			allow, err := h.PreToolUse(ctx, toolName, args)
-			if err != nil {
-				slog.Warn("core.hook_manager.pre_tool_use_error", "err", err)
-				continue // AC-5
-			}
-			if !allow {
-				return fmt.Errorf("tool %s blocked by hook", toolName) // AC-4
-			}
-		}
-		return nil
+		return m.preToolUse(context.Background(), toolName, args)
 	}
+}
+
+// PreToolUseContextInterceptor returns the run-context-aware variant of the
+// pre-tool interceptor. It preserves the active run context for cancellation
+// and trust-generation checks while retaining legacy AC-5 handling for hook
+// execution errors.
+func (m *HookManager) PreToolUseContextInterceptor() ContextToolInterceptor {
+	return func(ctx context.Context, toolName, _ string, args map[string]any) error {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		return m.preToolUse(ctx, toolName, args)
+	}
+}
+
+func (m *HookManager) preToolUse(ctx context.Context, toolName string, args map[string]any) error {
+	for _, h := range m.hooks {
+		allow, err := h.PreToolUse(ctx, toolName, args)
+		if err != nil {
+			if _, safe := SafeToolInterceptionMessage(err); safe {
+				return err
+			}
+			slog.Warn("core.hook_manager.pre_tool_use_error", "err", err)
+			continue // AC-5
+		}
+		if !allow {
+			return fmt.Errorf("tool %s blocked by hook", toolName) // AC-4
+		}
+	}
+	return nil
 }
 
 // PostToolUseWrapper returns a tools.ToolExecutorWrapper that invokes

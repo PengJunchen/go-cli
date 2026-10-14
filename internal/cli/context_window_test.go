@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -53,8 +54,64 @@ func TestTokenUsageEvent(t *testing.T) {
 	}
 }
 
-// TestCostHandler verifies that the /cost command displays context window
-// occupancy (total tokens / context window as a percentage).
+func TestTokenUsageEventUsesAttemptSubtotalsAndUnknownCounts(t *testing.T) {
+	agent := core.NewAgentImpl("attempt-usage", &stubAgentLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "request"},
+		{Role: "assistant", Content: "response", Usage: &llm.Usage{InputTokens: 99, OutputTokens: 99}},
+	}))
+	tracker := production.NewCostTracker(nil)
+	known := llm.ProviderAttemptResult{
+		OperationID: "op-known",
+		AttemptID:   "attempt-known",
+		Identity: llm.AttemptIdentity{
+			ProviderID: "openai",
+			ModelID:    "gpt-4o",
+			ProtocolID: llm.ProtocolOpenAICompatible,
+			OriginKind: llm.OriginResolverDefaultEndpoint,
+			Candidate:  "candidate-known",
+		},
+		Outcome: llm.AttemptSuccess,
+		Usage: llm.UsageEvidence{
+			State:  llm.UsageKnown,
+			Usage:  &llm.Usage{InputTokens: 12, OutputTokens: 4, TotalTokens: 16},
+			Source: llm.UsageProviderResponse,
+		},
+	}
+	unknown := known
+	unknown.OperationID = "op-unknown"
+	unknown.AttemptID = "attempt-unknown"
+	unknown.Identity.Candidate = "candidate-unknown"
+	unknown.Outcome = llm.AttemptTransportFailure
+	unknown.Failure = llm.FailureTransientProvider
+	unknown.Usage = llm.UnknownUsageEvidence()
+	_, err := tracker.RecordAttempt(known)
+	require.NoError(t, err)
+	_, err = tracker.RecordAttempt(unknown)
+	require.NoError(t, err)
+
+	assembly := &AgentAssembly{
+		CoreRuntime:          CoreRuntime{Agent: agent},
+		ProductionResilience: ProductionResilience{CostTracker: tracker},
+		ModelConfig:          ModelConfig{ContextWindow: 8192},
+	}
+	stream := core.NewEventStream(16)
+	emitTokenUsageEvent(stream, assembly)
+
+	select {
+	case event := <-stream.Events():
+		require.NotNil(t, event.TokenUsage)
+		assert.Equal(t, 12, event.TokenUsage.InputTokens)
+		assert.Equal(t, 4, event.TokenUsage.OutputTokens)
+		assert.Equal(t, 1, event.TokenUsage.UnknownUsageAttempts)
+		assert.Equal(t, 1, event.TokenUsage.UnknownCostAttempts)
+		assert.Greater(t, event.TokenUsage.Cost, 0.0)
+	default:
+		t.Fatal("expected a token_usage event")
+	}
+}
+
+// TestCostHandler verifies that cumulative per-request token totals are not
+// presented as current context-window occupancy.
 func TestCostHandler(t *testing.T) {
 	statsReg := production.NewStatsRegistry()
 	statsReg.RecordTokens("sess-1", 5000, 3000)
@@ -74,13 +131,29 @@ func TestCostHandler(t *testing.T) {
 	output := buf.String()
 	assert.Contains(t, output, "Context:")
 	assert.Contains(t, output, "128000")
-	// 8000 total tokens / 128000 = 6%
-	assert.Contains(t, output, "(6%)")
+	assert.Contains(t, output, "Context:   unknown/128000 (current occupancy unavailable)")
+	assert.NotContains(t, output, "Context:   8000/128000", "cumulative request usage is not current context occupancy")
 }
 
-// TestContextWindowFallback verifies that when ModelInfo.ContextWindow is 0
-// (the provider does not report a context window), the AgentAssembly falls
-// back to MaxTokens for the ContextWindow value.
+func TestCostHandlerReportsUnknownContextOccupancyWithoutSessionSnapshot(t *testing.T) {
+	var buf bytes.Buffer
+	sc := &slashContext{
+		statsRegistry: production.NewStatsRegistry(),
+		sessionID:     "missing-session",
+		out:           &buf,
+		contextWindow: 128000,
+	}
+
+	_, err := (&CostHandler{}).Handle(context.Background(), nil, sc)
+	require.NoError(t, err)
+
+	output := buf.String()
+	assert.Contains(t, output, "Context:   unknown/128000 (current occupancy unavailable)")
+	assert.NotContains(t, output, "Context:   0/128000", "a missing session snapshot must not imply empty context")
+}
+
+// TestContextWindowFallback verifies that an unknown model window stays
+// unknown while the separate local compaction ceiling remains available.
 func TestContextWindowFallback(t *testing.T) {
 	// Use the EinoProvider path (BaseURL set) without configuring any models.
 	// findModelInfo will return a zero ModelInfo with ContextWindow=0.
@@ -101,14 +174,13 @@ func TestContextWindowFallback(t *testing.T) {
 	assert.Equal(t, 0, modelInfo.ContextWindow,
 		"buildModel should return zero ContextWindow when provider has no model list")
 
-	// Simulate the fallback logic from AssembleAgent.
-	maxTokens := 8000
-	contextWindow := modelInfo.ContextWindow
-	if contextWindow <= 0 {
-		contextWindow = maxTokens
-	}
-	assert.Equal(t, maxTokens, contextWindow,
-		"ContextWindow should fall back to MaxTokens when ModelInfo.ContextWindow is 0")
+	assembly, err := AssembleAgent(ctx, rc, "eino", "test-model", io.Discard, WithMaxTokens(8000))
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+	assert.Zero(t, assembly.ContextWindow,
+		"unknown model context capacity must not be replaced by a local compaction threshold")
+	assert.Equal(t, 8000, assembly.MaxTokens,
+		"the local compaction ceiling remains available as separate metadata")
 }
 
 // TestFindModelInfo verifies the helper that locates a model by name in a

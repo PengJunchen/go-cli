@@ -80,6 +80,45 @@ func TestTodoSnapshotReplacement(t *testing.T) {
 	assert.Contains(t, view, "Todos [1/1 completed]")
 }
 
+func TestTodoUpdateRejectsStaleRevisionAndCopiesItems(t *testing.T) {
+	m := newTestModel(make(chan AgentEvent, 1))
+	latest := []TodoItem{{ID: "2", Content: "latest state", Status: "completed"}}
+	m.Update(TodoUpdateMsg{Revision: 2, Items: latest})
+	latest[0].Content = "mutated by sender"
+	m.Update(TodoUpdateMsg{Revision: 1, Items: []TodoItem{{ID: "1", Content: "stale state", Status: "pending"}}})
+
+	view := stripEscape(m.View())
+	assert.Contains(t, view, "latest state")
+	assert.NotContains(t, view, "mutated by sender")
+	assert.NotContains(t, view, "stale state")
+	assert.Contains(t, view, "Todos [1/1 completed]")
+}
+
+func TestRevisionlessTodoUpdateRemainsCompatibleAfterSnapshot(t *testing.T) {
+	m := newTestModel(make(chan AgentEvent, 1))
+	m.Update(TodoUpdateMsg{Revision: 3, Items: []TodoItem{{ID: "1", Content: "seeded", Status: "pending"}}})
+	m.Update(TodoUpdateMsg{Items: []TodoItem{{ID: "2", Content: "legacy update", Status: "completed"}}})
+
+	assert.Equal(t, uint64(3), m.todoRevision, "an unversioned update must not lower the revision guard")
+	assert.Contains(t, stripEscape(m.View()), "legacy update")
+
+	m.Update(TodoUpdateMsg{Revision: 2, Items: []TodoItem{{ID: "3", Content: "stale update", Status: "pending"}}})
+	view := stripEscape(m.View())
+	assert.Contains(t, view, "legacy update")
+	assert.NotContains(t, view, "stale update")
+}
+
+func TestTodoInitialSnapshotSeedsNewApp(t *testing.T) {
+	items := []TodoItem{{ID: "1", Content: "restored todo", Status: "completed"}}
+	app := NewBubbleteaApp(nil, WithTodoSnapshot(TodoUpdateMsg{Revision: 3, Items: items}))
+	items[0].Content = "mutated after app creation"
+
+	view := stripEscape(app.View())
+	assert.Contains(t, view, "restored todo")
+	assert.NotContains(t, view, "mutated after app creation")
+	assert.Contains(t, view, "Todos [1/1 completed]")
+}
+
 // TestContentTypeTodoEvent verifies an AgentEvent with ContentTypeTodo updates
 // the snapshot via the event stream path.
 func TestContentTypeTodoEvent(t *testing.T) {

@@ -12,15 +12,34 @@ import (
 // interface. It dispatches on args["action"] to add, update, list, or remove
 // todo items.
 type TodoWriteTool struct {
-	store *TodoStore
+	store    *TodoStore
+	onChange TodoWriteChangeHandler
 }
 
+// TodoWriteChangeHandler receives a copied store snapshot after a todo mutation.
+type TodoWriteChangeHandler func(TodoSnapshot) error
+
+// TodoWriteOption configures optional TodoWriteTool behavior.
+type TodoWriteOption func(*TodoWriteTool)
+
 var _ ToolDefinition = (*TodoWriteTool)(nil)
+var _ Parameterized = (*TodoWriteTool)(nil)
 
 // NewTodoWriteTool returns a TodoWriteTool backed by the given TodoStore, which
 // must be non-nil.
-func NewTodoWriteTool(store *TodoStore) *TodoWriteTool {
-	return &TodoWriteTool{store: store}
+func NewTodoWriteTool(store *TodoStore, options ...TodoWriteOption) *TodoWriteTool {
+	tool := &TodoWriteTool{store: store}
+	for _, option := range options {
+		if option != nil {
+			option(tool)
+		}
+	}
+	return tool
+}
+
+// WithTodoWriteChangeHandler registers a callback for successful todo mutations.
+func WithTodoWriteChangeHandler(handler TodoWriteChangeHandler) TodoWriteOption {
+	return func(tool *TodoWriteTool) { tool.onChange = handler }
 }
 
 // Name returns the tool name.
@@ -29,6 +48,23 @@ func (t *TodoWriteTool) Name() string { return "todo_write" }
 // Description returns a brief description of the tool.
 func (t *TodoWriteTool) Description() string {
 	return "todo_write: manages a todo list. Args: action (string: add|update|list|remove), id (string), content (string), status (string), priority (string)."
+}
+
+// Parameters returns the JSON Schema for the todo action and its optional
+// action-specific fields.
+func (*TodoWriteTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"action":   map[string]any{"type": "string", "enum": []string{"add", "update", "list", "remove"}},
+			"id":       map[string]any{"type": "string"},
+			"content":  map[string]any{"type": "string"},
+			"status":   map[string]any{"type": "string"},
+			"priority": map[string]any{"type": "string"},
+		},
+		"required":             []string{"action"},
+		"additionalProperties": false,
+	}
 }
 
 // Execute dispatches a todo action based on args["action"].
@@ -79,9 +115,9 @@ func (t *TodoWriteTool) doAdd(call ToolCall) (*ToolResult, error) {
 		Status:   status,
 		Priority: priority,
 	}
-	t.store.Add(item)
-
-	id := t.lastAddedID()
+	snapshot := t.store.Add(item)
+	id := snapshot.Items[len(snapshot.Items)-1].ID
+	t.notifyChange(snapshot)
 
 	slog.Debug("todo_write.added", "id", id, "content", content)
 
@@ -109,7 +145,9 @@ func (t *TodoWriteTool) doUpdate(call ToolCall) (*ToolResult, error) {
 		return nil, errors.New("todo_write: 'status' is required for update action")
 	}
 
-	t.store.Update(id, status)
+	if snapshot, changed := t.store.Update(id, status); changed {
+		t.notifyChange(snapshot)
+	}
 
 	slog.Debug("todo_write.updated", "id", id, "status", status)
 
@@ -152,7 +190,9 @@ func (t *TodoWriteTool) doRemove(call ToolCall) (*ToolResult, error) {
 		return nil, errors.New("todo_write: 'id' is required for remove action")
 	}
 
-	t.store.Remove(id)
+	if snapshot, changed := t.store.Remove(id); changed {
+		t.notifyChange(snapshot)
+	}
 
 	slog.Debug("todo_write.removed", "id", id)
 
@@ -166,12 +206,11 @@ func (t *TodoWriteTool) doRemove(call ToolCall) (*ToolResult, error) {
 	}, nil
 }
 
-// lastAddedID returns the ID of the most recently added item. The store is
-// expected to have at least one item after doAdd calls Add.
-func (t *TodoWriteTool) lastAddedID() string {
-	items := t.store.List()
-	if len(items) == 0 {
-		return ""
+func (t *TodoWriteTool) notifyChange(snapshot TodoSnapshot) {
+	if t.onChange == nil {
+		return
 	}
-	return items[len(items)-1].ID
+	if err := t.onChange(snapshot); err != nil {
+		slog.Warn("todo_write.change_notification_failed", "revision", snapshot.Revision, "err", err)
+	}
 }

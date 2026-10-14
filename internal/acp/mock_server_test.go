@@ -95,9 +95,12 @@ type MockACPServer struct {
 	replyFunc  func(ACPMessage) *ACPMessage
 	closeSendF func()
 
-	mu       sync.Mutex
-	received []ACPMessage
-	pending  []ACPMessage
+	mu          sync.Mutex
+	received    []ACPMessage
+	pending     []ACPMessage
+	httpPending []httpACPEnvelope
+	sessions    map[string]string
+	nextID      uint64
 }
 
 // Compile-time assertion that MockACPServer satisfies ACPServer.
@@ -106,8 +109,9 @@ var _ ACPServer = (*MockACPServer)(nil)
 // NewMockACPServer returns a MockACPServer for the given transport mode.
 func NewMockACPServer(name string, mode ACPTransport) *MockACPServer {
 	return &MockACPServer{
-		name: name,
-		mode: mode,
+		name:     name,
+		mode:     mode,
+		sessions: make(map[string]string),
 		replyFunc: func(msg ACPMessage) *ACPMessage {
 			if msg.Type == TypeMessage {
 				return &ACPMessage{
@@ -204,23 +208,86 @@ func (s *MockACPServer) buildReplyLocked(msg ACPMessage) *ACPMessage {
 
 // httpHandler routes the gRPC-style JSON-over-HTTP requests.
 func (s *MockACPServer) httpHandler(w http.ResponseWriter, r *http.Request) {
+	profiles := r.Header.Values(ACPHTTPProfileHeader)
+	if len(profiles) != 1 || profiles[0] != ACPHTTPProfileV1 {
+		http.Error(w, "unsupported profile", http.StatusBadRequest)
+		return
+	}
 	switch r.URL.Path {
-	case "/connect", "/disconnect":
+	case "/connect":
+		var envelope httpACPEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil || envelope.Version != ACPHTTPProfileV1 {
+			http.Error(w, "unsupported envelope", http.StatusBadRequest)
+			return
+		}
+		s.mu.Lock()
+		s.nextID++
+		sessionID := fmt.Sprintf("mock-session-%d", s.nextID)
+		s.sessions[sessionID] = envelope.SenderID
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"version": ACPHTTPProfileV1, "session_id": sessionID,
+		})
+	case "/disconnect":
+		var envelope httpACPEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil || envelope.Version != ACPHTTPProfileV1 {
+			http.Error(w, "unsupported envelope", http.StatusBadRequest)
+			return
+		}
+		s.mu.Lock()
+		delete(s.sessions, envelope.SessionID)
+		s.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	case "/send":
-		var msg ACPMessage
-		if err := json.NewDecoder(r.Body).Decode(&msg); err == nil {
-			s.record(msg)
+		var envelope httpACPEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil || envelope.Version != ACPHTTPProfileV1 {
+			http.Error(w, "unsupported envelope", http.StatusBadRequest)
+			return
 		}
+		s.mu.Lock()
+		alias, ok := s.sessions[envelope.SessionID]
+		if !ok || alias != envelope.SenderID {
+			s.mu.Unlock()
+			http.Error(w, "unknown session", http.StatusNotFound)
+			return
+		}
+		msg := envelope.message()
+		s.received = append(s.received, msg)
+		if reply := s.buildReplyLocked(msg); reply != nil {
+			s.httpPending = append(s.httpPending, httpEnvelopeFromMessage(envelope.SessionID, *reply))
+		}
+		s.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	case "/stream":
 		s.mu.Lock()
-		out := s.pending
-		s.pending = nil
+		sessionID := r.URL.Query().Get("session_id")
+		alias, ok := s.sessions[sessionID]
+		if !ok {
+			s.mu.Unlock()
+			http.Error(w, "unknown session", http.StatusNotFound)
+			return
+		}
+		if senderID := r.URL.Query().Get("sender_id"); senderID != "" && senderID != alias {
+			s.mu.Unlock()
+			http.Error(w, "alias mismatch", http.StatusBadRequest)
+			return
+		}
+		out := make([]httpACPEnvelope, 0, len(s.httpPending))
+		remaining := s.httpPending[:0]
+		for _, envelope := range s.httpPending {
+			if envelope.SessionID == sessionID {
+				out = append(out, envelope)
+			} else {
+				remaining = append(remaining, envelope)
+			}
+		}
+		s.httpPending = remaining
 		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.WriteHeader(http.StatusOK)
-		for _, msg := range out {
-			data, err := json.Marshal(msg)
+		for _, envelope := range out {
+			data, err := json.Marshal(envelope)
 			if err != nil {
 				continue
 			}

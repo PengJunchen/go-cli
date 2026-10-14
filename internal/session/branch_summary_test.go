@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/pengjunchen/go-cli/internal/verify"
@@ -76,9 +77,13 @@ type testBranchSummary struct {
 	summary string
 	entries []SessionEntry
 	calls   int
+	mutate  func([]SessionEntry)
 }
 
 func (t *testBranchSummary) Summarize(_ context.Context, entries []SessionEntry) (string, error) {
+	if t.mutate != nil {
+		t.mutate(entries)
+	}
 	t.entries = append([]SessionEntry(nil), entries...)
 	t.calls++
 	return t.summary, nil
@@ -120,6 +125,39 @@ func TestTree_MoveToAppendsBranchSummary(t *testing.T) {
 	assert.Equal(t, EntryTypeSystem, summaryEntry.Type)
 	assert.Equal(t, "DEPARTED-SUM", summaryEntry.Content)
 	assert.True(t, summaryEntry.IsSummary)
+}
+
+func TestTree_MoveToBranchSummaryCannotMutateStoredEntries(t *testing.T) {
+	ctx := context.Background()
+	mutatingSummary := &testBranchSummary{
+		summary: "safe summary",
+		mutate: func(entries []SessionEntry) {
+			require.Len(t, entries, 2)
+			args := entries[1].ToolCalls[0].Args.(map[string]any)
+			args["nested"].(map[string]any)["value"] = "summarizer mutation"
+			entries[1].ToolCalls[0].ID = "summarizer call ID"
+			entries[1].ContentBlocks[0].Text = "summarizer block mutation"
+		},
+	}
+	tree := newConcreteTree()
+	require.NoError(t, tree.Append(ctx, newTestEntry("root", "", EntryTypeUser)))
+	assistant := newToolCallEntry("assistant", "root", []llm.ToolCall{{
+		ID: "provider-call-id", Name: "inspect",
+		Args: map[string]any{"nested": map[string]any{"value": "canonical"}},
+	}})
+	assistant.ContentBlocks = []llm.ContentBlock{{Type: "text", Text: "canonical block"}}
+	require.NoError(t, tree.Append(ctx, assistant))
+	require.NoError(t, tree.MoveTo(ctx, "assistant"))
+	tree.SetBranchSummary(mutatingSummary)
+	require.NoError(t, tree.Append(ctx, newTestEntry("next", "assistant", EntryTypeUser)))
+	require.NoError(t, tree.MoveTo(ctx, "next"))
+
+	branch, err := tree.GetBranch(ctx, "assistant")
+	require.NoError(t, err)
+	require.Len(t, branch, 2)
+	assert.Equal(t, "canonical", branch[1].ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["value"])
+	assert.Equal(t, "provider-call-id", branch[1].ToolCalls[0].ID)
+	assert.Equal(t, "canonical block", branch[1].ContentBlocks[0].Text)
 }
 
 // BuildContext reconstructing the departed branch includes the summary.

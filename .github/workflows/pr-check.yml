@@ -13,6 +13,9 @@ jobs:
   compliant:
     name: Compliant
     runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+      GOCLI_REQUIRE_NATIVE_PLUGIN_TEST: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,4 +63,7 @@ jobs:
           version: v2.12.2
 
       - name: Run tests
-        run: go test -race -count=1 ./...
+        run: make test
+
+      - name: Run AST scanner gate
+        run: make scan

@@ -60,8 +60,8 @@ func TestEinoProviderBuild_ResolvesCfgModel(t *testing.T) {
 // HTTPChatModel.generate internals
 // ---------------------------------------------------------------------------
 
-// TestHTTPChatModel_roundTripErrorBody verifies a non-2xx response surfaces the
-// trimmed payload as an error.
+// TestHTTPChatModel_roundTripErrorBody verifies a non-2xx response preserves
+// safe classification metadata while hiding the free-form response payload.
 func TestHTTPChatModel_roundTripErrorBody(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -70,15 +70,19 @@ func TestHTTPChatModel_roundTripErrorBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m := &HTTPChatModel{
+	m := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
 	}
 	_, err := m.Generate(context.Background(), nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "rate limited")
+	assert.NotContains(t, err.Error(), "rate limited")
+	assert.Contains(t, err.Error(), "rate_limit")
 	assert.Contains(t, err.Error(), "429")
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, "rate limited", providerErr.Message)
 }
 
 // TestHTTPChatModel_roundTripRequestBuildError verifies an unparsable endpoint
@@ -88,21 +92,23 @@ func TestHTTPChatModel_roundTripRequestBuildError(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	// "http://[::1" is an unterminated bracketed host so
 	// http.NewRequestWithContext fails during request construction.
-	m := &HTTPChatModel{
+	m := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL("http://[::1")),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
 	}
 	_, err := m.Generate(context.Background(), nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "build request")
+	var setupErr *PreDispatchCandidateError
+	require.ErrorAs(t, err, &setupErr)
+	assert.Equal(t, PreDispatchInvalidRequest, setupErr.Class)
 }
 
 // TestHTTPChatModel_buildBodyToolMessages verifies tool input messages are
 // serialized with their ToolCallID and Name preserved in the request body.
 func TestHTTPChatModel_buildBodyToolMessages(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
-	m := &HTTPChatModel{
+	m := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -157,7 +163,7 @@ func TestHTTPChatModel_GenerateUsageTokens(t *testing.T) {
 // temperature / max tokens for the HTTPChatModel.
 func TestHTTPChatModel_UsageOverrides(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
-	m := &HTTPChatModel{
+	m := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(),
 		cfg:      ModelConfig{Model: "m", Temperature: 0.1, MaxTokens: 3},
 		client:   http.DefaultClient,
@@ -166,8 +172,10 @@ func TestHTTPChatModel_UsageOverrides(t *testing.T) {
 	require.NoError(t, err)
 	var req openAIRequest
 	require.NoError(t, json.Unmarshal(body, &req))
-	assert.Equal(t, 0.9, req.Temperature)
-	assert.Equal(t, 42, req.MaxTokens)
+	require.NotNil(t, req.Temperature)
+	assert.Equal(t, 0.9, *req.Temperature)
+	require.NotNil(t, req.MaxTokens)
+	assert.Equal(t, 42, *req.MaxTokens)
 }
 
 // TestHTTPChatModel_StreamSuccess verifies Stream delivers the full content as

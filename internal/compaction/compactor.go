@@ -10,7 +10,8 @@
 //     boundaries, aggregates file-operation history, and replaces the oldest
 //     region with a single summary entry.
 //   - TruncatingCompactor: fallback. It keeps system entries and drops the
-//     oldest non-system entries until the list fits the budget.
+//     oldest non-system entries until the list fits, or reports an error when
+//     the mandatory system instructions alone exceed the budget.
 //
 // The Compactor interface is the single extension point; a UnifiedCompactor
 // (a later task) routes between these strategies. Compaction decisions emit
@@ -57,11 +58,21 @@ type TurnItem struct {
 	// ContentBlocks holds typed content parts for multimodal messages
 	// (text + images). When non-nil, it takes precedence over Content.
 	ContentBlocks []llm.ContentBlock `json:"content_blocks,omitempty"`
+	// Usage contains provider token accounting associated with this message.
+	Usage *llm.Usage `json:"usage,omitempty"`
+	// FinishReason records why the model ended this message, when provided.
+	FinishReason string `json:"finish_reason,omitempty"`
 	// ToolCalls holds tool invocations requested by the assistant.
 	ToolCalls []llm.ToolCall `json:"tool_calls,omitempty"`
 	// ToolCallID associates a tool-result message with the originating tool
 	// call.
 	ToolCallID string `json:"tool_call_id,omitempty"`
+	// InputKind preserves the source of user messages in canonical history.
+	InputKind string `json:"input_kind,omitempty"`
+	// ReceiptOutcome preserves the terminal outcome for canonical tool receipts.
+	ReceiptOutcome string `json:"receipt_outcome,omitempty"`
+	// Runtime preserves runtime-only source coordinates through compaction.
+	Runtime llm.RuntimeMetadata `json:"-"`
 }
 
 // Strategy identifies which compaction approach produced or was requested for a
@@ -79,6 +90,22 @@ const (
 	// StrategyTruncating uses the truncation fallback strategy.
 	StrategyTruncating
 )
+
+// NewProjection describes the exact source boundary and raw body for a newly
+// created summary. It is nil for strategies that do not create a summary.
+type NewProjection struct {
+	Summary string
+	Through llm.SourceThrough
+}
+
+// CompactionResult contains the exact output and winner of one strategy call.
+// Projection facts are returned with that call rather than inferred from
+// mutable strategy telemetry.
+type CompactionResult struct {
+	Items         []TurnItem
+	Strategy      Strategy
+	NewProjection *NewProjection
+}
 
 // String returns a stable, lowercase identifier for the strategy.
 func (s Strategy) String() string {
@@ -99,14 +126,18 @@ func (s Strategy) String() string {
 // (TruncatingCompactor) is required to satisfy the constraint.
 var ErrRequiresTruncating = errors.New("compaction: budget exceeded; truncating required")
 
+// ErrMandatorySystemPromptOverBudget reports that preserved system instructions
+// alone exceed the requested conversation budget.
+var ErrMandatorySystemPromptOverBudget = errors.New("compaction: mandatory system prompt exceeds token budget")
+
 // Compactor rewrites a conversation so that its estimated token count does not
 // exceed maxTokens.
 type Compactor interface {
 	// Compact compacts items under the given token budget, returning the
-	// rewritten list and any error. Implementations must be safe for concurrent
-	// use and must not mutate the input slice's backing array unless they are
-	// the sole owner.
-	Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) ([]TurnItem, error)
+	// rewritten list, per-call winner and any new source projection. Implementations
+	// must be safe for concurrent use and must not mutate the input slice's
+	// backing array unless they are the sole owner.
+	Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) (CompactionResult, error)
 }
 
 // Summarizer produces a summary for a given conversation text. It is a narrow,
@@ -124,6 +155,14 @@ type Summarizer interface {
 func estimateTokens(items []TurnItem, estimator TokenEstimator) int {
 	total := 0
 	for _, it := range items {
+		if it.IsCompaction {
+			content := it.Content
+			if content == "" {
+				content = "[compacted]"
+			}
+			total += estimateLength(UntrustedSummaryContext(content), estimator)
+			continue
+		}
 		if it.Content != "" {
 			total += estimateLength(it.Content, estimator)
 		}
@@ -146,6 +185,35 @@ func estimateTokens(items []TurnItem, estimator TokenEstimator) int {
 		}
 	}
 	return total
+}
+
+// estimateTokensCopy estimates a slice without writing token-cache values back
+// into caller-owned TurnItems.
+func estimateTokensCopy(items []TurnItem, estimator TokenEstimator) int {
+	return estimateTokens(append([]TurnItem(nil), items...), estimator)
+}
+
+func mandatorySystemPromptTokens(items []TurnItem, estimator TokenEstimator) int {
+	total := 0
+	for _, item := range items {
+		if item.Role != RoleSystem || item.IsCompaction {
+			continue
+		}
+		total += mandatorySystemPromptItemTokens(item, estimator)
+	}
+	return total
+}
+
+func mandatorySystemPromptItemTokens(item TurnItem, estimator TokenEstimator) int {
+	item.EstimatedTokens = 0
+	return estimateItemTokens(&item, estimator)
+}
+
+func checkMandatorySystemPromptBudget(items []TurnItem, maxTokens int, estimator TokenEstimator) error {
+	if mandatorySystemPromptTokens(items, estimator) > maxTokens {
+		return ErrMandatorySystemPromptOverBudget
+	}
+	return nil
 }
 
 // estimateLength estimates the token count of a single text blob.

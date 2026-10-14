@@ -20,9 +20,16 @@ type TodoItem struct {
 
 // TodoStore manages an ordered list of TodoItem entries. It is concurrency-safe.
 type TodoStore struct {
-	mu      sync.RWMutex
-	items   []TodoItem
-	counter int64
+	mu       sync.RWMutex
+	items    []TodoItem
+	counter  int64
+	revision uint64
+}
+
+// TodoSnapshot is a copied view of the todo store at one revision.
+type TodoSnapshot struct {
+	Revision uint64
+	Items    []TodoItem
 }
 
 // NewTodoStore returns an empty TodoStore.
@@ -34,7 +41,7 @@ func NewTodoStore() *TodoStore {
 
 // Add appends a todo item to the store. When item.ID is empty an auto-incremented
 // ID of the form "todo-N" is assigned.
-func (s *TodoStore) Add(item TodoItem) {
+func (s *TodoStore) Add(item TodoItem) TodoSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -49,23 +56,44 @@ func (s *TodoStore) Add(item TodoItem) {
 		item.Priority = "medium"
 	}
 	s.items = append(s.items, item)
+	s.revision++
 	slog.Debug("todo_store.add", "id", item.ID, "status", item.Status)
+	return s.snapshotLocked()
 }
 
 // Update sets the status of the todo item with the given ID. It is a no-op when
 // the ID is unknown.
-func (s *TodoStore) Update(id string, status string) {
+func (s *TodoStore) Update(id string, status string) (TodoSnapshot, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for i := range s.items {
 		if s.items[i].ID == id {
+			if s.items[i].Status == status {
+				slog.Debug("todo_store.update_unchanged", "id", id, "status", status)
+				return s.snapshotLocked(), false
+			}
 			s.items[i].Status = status
+			s.revision++
 			slog.Debug("todo_store.update", "id", id, "status", status)
-			return
+			return s.snapshotLocked(), true
 		}
 	}
 	slog.Debug("todo_store.update_not_found", "id", id)
+	return s.snapshotLocked(), false
+}
+
+// Snapshot returns the current todo state with an independent item slice.
+func (s *TodoStore) Snapshot() TodoSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.snapshotLocked()
+}
+
+func (s *TodoStore) snapshotLocked() TodoSnapshot {
+	items := make([]TodoItem, len(s.items))
+	copy(items, s.items)
+	return TodoSnapshot{Revision: s.revision, Items: items}
 }
 
 // List returns a copy of all todo items in insertion order.
@@ -80,16 +108,18 @@ func (s *TodoStore) List() []TodoItem {
 
 // Remove deletes the todo item with the given ID. It is a no-op when the ID is
 // unknown.
-func (s *TodoStore) Remove(id string) {
+func (s *TodoStore) Remove(id string) (TodoSnapshot, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for i, item := range s.items {
 		if item.ID == id {
 			s.items = append(s.items[:i], s.items[i+1:]...)
+			s.revision++
 			slog.Debug("todo_store.remove", "id", id)
-			return
+			return s.snapshotLocked(), true
 		}
 	}
 	slog.Debug("todo_store.remove_not_found", "id", id)
+	return s.snapshotLocked(), false
 }

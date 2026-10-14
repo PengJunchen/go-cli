@@ -2,6 +2,8 @@ package tools
 
 import (
 	"context"
+	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -10,6 +12,24 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type dataThenErrorReader struct {
+	data     []byte
+	err      error
+	afterErr error
+	once     bool
+}
+
+func (r *dataThenErrorReader) Read(p []byte) (int, error) {
+	if !r.once {
+		r.once = true
+		return copy(p, r.data), r.err
+	}
+	if r.afterErr != nil {
+		return 0, r.afterErr
+	}
+	return 0, io.EOF
+}
 
 // streamEvent is a single recorded output line from a mockStreamSink.
 type streamEvent struct {
@@ -22,6 +42,24 @@ type streamEvent struct {
 type mockStreamSink struct {
 	mu     sync.Mutex
 	events []streamEvent
+}
+
+type scriptedReadErrorReader struct {
+	data     []byte
+	readErr  error
+	drainErr error
+	sentData bool
+}
+
+func (r *scriptedReadErrorReader) Read(p []byte) (int, error) {
+	if !r.sentData {
+		r.sentData = true
+		return copy(p, r.data), r.readErr
+	}
+	if r.drainErr != nil {
+		return 0, r.drainErr
+	}
+	return 0, io.EOF
 }
 
 func (m *mockStreamSink) Send(content, toolCallID, stream string) error {
@@ -111,6 +149,53 @@ func TestStreamingBashStreamSink(t *testing.T) {
 	assert.Equal(t, "stdout", events[1].Stream)
 }
 
+func TestStreamingBashReportsPreparedProcessCompletionAfterNormalAndError(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		command   string
+		wantError bool
+	}{
+		{name: "normal", command: "printf joined"},
+		{name: "nonzero exit", command: "printf failed; exit 7", wantError: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			reported := make(chan struct{})
+			var proof PreparedCompletionProof
+			var processDone <-chan struct{}
+			ctx := withPreparedCompletionReporter(context.Background(), func(got PreparedCompletionProof, done <-chan struct{}) {
+				proof = got
+				processDone = done
+				close(reported)
+			})
+
+			tool := NewStreamingBashTool(WithNoSandbox())
+			_, err := tool.ExecuteStreaming(ctx, ToolCall{
+				ID:   "call-completion",
+				Name: "bash",
+				Args: map[string]any{"command": testCase.command},
+			}, &mockStreamSink{})
+			if testCase.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			select {
+			case <-reported:
+			case <-time.After(5 * time.Second):
+				t.Fatal("streaming bash did not report its completed local process group")
+			}
+			assert.Equal(t, CompletionOwnedProcessGroupJoined, proof)
+			require.NotNil(t, processDone)
+			select {
+			case <-processDone:
+			default:
+				t.Fatal("streaming bash reported before the process group and readers joined")
+			}
+		})
+	}
+}
+
 // TestStreamingBashTimeout verifies that a command exceeding the timeout is
 // killed and returns an error.
 func TestStreamingBashTimeout(t *testing.T) {
@@ -139,6 +224,254 @@ func TestStreamingBashTruncation(t *testing.T) {
 	// The command itself succeeds (exit 0), only the output is truncated.
 	require.NoError(t, err)
 	assert.Contains(t, result.Output, "[output truncated]")
+}
+
+func TestReadPipeReportsReaderErrorAfterDraining(t *testing.T) {
+	const maxOutput = 10
+	readErr := errors.New("injected reader failure")
+	reader := &scriptedReadErrorReader{
+		data:    []byte("kept\n"),
+		readErr: readErr,
+	}
+	capture := newStreamingBashOutputCapture(maxOutput)
+
+	drained, err := readPipe(reader, "stdout", nil, "call-reader-error", capture)
+	require.True(t, drained)
+	require.ErrorIs(t, err, readErr)
+	output, truncated := capture.output()
+	assert.True(t, truncated)
+	assert.Contains(t, output, "kept\n")
+	assert.Contains(t, output, "[output truncated]")
+	assert.LessOrEqual(t, len(output), maxOutput+len("\n[output truncated]"))
+}
+
+func TestReadPipeReportsDrainFailure(t *testing.T) {
+	const maxOutput = 10
+	readErr := errors.New("injected scanner read failure")
+	drainErr := errors.New("injected drain failure")
+	reader := &scriptedReadErrorReader{
+		data:     []byte("kept\n"),
+		readErr:  readErr,
+		drainErr: drainErr,
+	}
+	capture := newStreamingBashOutputCapture(maxOutput)
+
+	drained, err := readPipe(reader, "stderr", nil, "call-drain-error", capture)
+	assert.False(t, drained)
+	assert.ErrorIs(t, err, readErr)
+	assert.ErrorIs(t, err, drainErr)
+	output, truncated := capture.output()
+	assert.True(t, truncated)
+	assert.Contains(t, output, "kept\n")
+	assert.Contains(t, output, "[output truncated]")
+	assert.LessOrEqual(t, len(output), maxOutput+len("\n[output truncated]"))
+}
+
+// TestStreamingBashDrainsPastMaxOutput verifies that a finite command can
+// finish after output capture reaches its limit, while retained output and
+// streamed events stay bounded and the result reports truncation.
+func TestStreamingBashDrainsPastMaxOutput(t *testing.T) {
+	const (
+		maxOutput = 20
+		timeout   = 1200 * time.Millisecond
+	)
+	tool := NewStreamingBashTool(
+		WithTimeout(timeout),
+		WithMaxOutput(maxOutput),
+		WithNoSandbox(),
+	)
+	sink := &mockStreamSink{}
+	started := time.Now()
+	result, err := tool.ExecuteStreaming(context.Background(), ToolCall{
+		ID:   "call-drain",
+		Name: "bash",
+		Args: map[string]any{"command": "printf 'x\\n%.0s' {1..100000}"},
+	}, sink)
+	elapsed := time.Since(started)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Less(t, elapsed, timeout)
+	assert.LessOrEqual(t, len(result.Output), maxOutput+len("\n[output truncated]"))
+	assert.Contains(t, result.Output, "[output truncated]")
+	assert.LessOrEqual(t, len(result.Output)-len("\n[output truncated]"), maxOutput)
+	assert.Equal(t, true, result.Metadata["truncated"])
+
+	var streamedBytes int
+	var truncationEvents int
+	for _, event := range sink.getEvents() {
+		if event.Content == "[output truncated]" {
+			truncationEvents++
+		}
+		streamedBytes += len(event.Content) + 1
+	}
+	assert.Equal(t, 1, truncationEvents)
+	assert.LessOrEqual(t, streamedBytes, maxOutput+len("\n[output truncated]"))
+}
+
+func TestStreamingBashDrainsConcurrentStdoutStderr(t *testing.T) {
+	const (
+		maxOutput = 20
+		timeout   = 3 * time.Second
+	)
+	tool := NewStreamingBashTool(
+		WithTimeout(timeout),
+		WithMaxOutput(maxOutput),
+		WithNoSandbox(),
+	)
+	sink := &mockStreamSink{}
+	result, err := tool.ExecuteStreaming(context.Background(), ToolCall{
+		ID:   "call-drain-both",
+		Name: "bash",
+		Args: map[string]any{"command": "for ((i=0; i<100000; i++)); do printf 'x\\n'; printf 'y\\n' >&2; done"},
+	}, sink)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	// Combined ToolResult output adds one presentation separator when both
+	// streams retain bytes; that separator is not a source byte.
+	assert.LessOrEqual(t, len(result.Output), maxOutput+1+len("\n[output truncated]"))
+	assert.Contains(t, result.Output, "[output truncated]")
+	assert.LessOrEqual(t, len(result.Output)-len("\n[output truncated]"), maxOutput+1)
+	assert.Equal(t, true, result.Metadata["truncated"])
+
+	var streamedBytes int
+	var truncationEvents int
+	for _, event := range sink.getEvents() {
+		if event.Content == "[output truncated]" {
+			truncationEvents++
+		}
+		streamedBytes += len(event.Content)
+		if event.Content != "[output truncated]" {
+			streamedBytes++
+		}
+	}
+	assert.Equal(t, 1, truncationEvents)
+	assert.LessOrEqual(t, streamedBytes, maxOutput+len("\n[output truncated]"))
+}
+
+func TestStreamingBashLongLineReportsScannerErrorAndDrains(t *testing.T) {
+	const (
+		maxOutput = 20
+		timeout   = 3 * time.Second
+	)
+	tool := NewStreamingBashTool(
+		WithTimeout(timeout),
+		WithMaxOutput(maxOutput),
+		WithNoSandbox(),
+	)
+	started := time.Now()
+	result, err := tool.Execute(context.Background(), ToolCall{
+		ID:   "call-long-line",
+		Name: "bash",
+		Args: map[string]any{"command": "printf '%2000000s' ''"},
+	})
+	elapsed := time.Since(started)
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "timed out")
+	require.NotNil(t, result)
+	assert.Less(t, elapsed, timeout)
+	assert.LessOrEqual(t, len(result.Output), maxOutput+len("\n[output truncated]"))
+	assert.Contains(t, result.Output, "[output truncated]")
+	assert.LessOrEqual(t, len(result.Output)-len("\n[output truncated]"), maxOutput)
+	assert.Equal(t, true, result.Metadata["truncated"])
+	assert.Contains(t, result.Metadata["read_error"], "token too long")
+}
+
+func TestReadPipeSurfacesNonEOFReadErrorAfterDraining(t *testing.T) {
+	readFailure := errors.New("injected pipe read failure")
+	capture := newStreamingBashOutputCapture(4)
+	reader := &dataThenErrorReader{data: []byte("abcdef\n"), err: readFailure, once: false}
+
+	drained, err := readPipe(reader, "stdout", nil, "call-read-error", capture)
+	output, truncated := capture.output()
+
+	require.ErrorIs(t, err, readFailure)
+	assert.True(t, drained, "the reader reaches EOF after the reported read error")
+	assert.True(t, truncated)
+	assert.Contains(t, output, "[output truncated]")
+	assert.LessOrEqual(t, len(output), 4+len(streamingBashTruncatedMarker))
+}
+
+func TestReadPipeReportsFailedDrain(t *testing.T) {
+	readFailure := errors.New("injected persistent pipe failure")
+	capture := newStreamingBashOutputCapture(2)
+	reader := &dataThenErrorReader{data: []byte("ok\n"), err: readFailure, afterErr: readFailure}
+
+	drained, err := readPipe(reader, "stderr", nil, "call-drain-error", capture)
+	output, truncated := capture.output()
+
+	require.ErrorIs(t, err, readFailure)
+	assert.False(t, drained, "an error during the post-scanner drain cannot claim EOF")
+	assert.True(t, truncated)
+	assert.Contains(t, output, "[output truncated]")
+	assert.LessOrEqual(t, len(output), 2+len(streamingBashTruncatedMarker))
+}
+
+func TestStreamingBashCaptureCountsCRLFAndEOFSourceBytes(t *testing.T) {
+	capture := newStreamingBashOutputCapture(6)
+	stdoutDrained, stdoutErr := readPipe(strings.NewReader("a\r\nb"), "stdout", nil, "call-source-budget", capture)
+	stderrDrained, stderrErr := readPipe(strings.NewReader("x\r\ny"), "stderr", nil, "call-source-budget", capture)
+
+	require.NoError(t, stdoutErr)
+	require.NoError(t, stderrErr)
+	assert.True(t, stdoutDrained)
+	assert.True(t, stderrDrained)
+	assert.Equal(t, "a\r\nb", capture.stdout.String(), "CRLF delimiters and EOF tails count as their original source bytes")
+	assert.Equal(t, "x\r", capture.stderr.String(), "the second stream may retain only the remaining source-byte budget")
+	assert.Equal(t, 6, capture.stdout.Len()+capture.stderr.Len())
+	_, truncated := capture.output()
+	assert.True(t, truncated)
+}
+
+func TestStreamingBashCaptureDoesNotInventEOFNewline(t *testing.T) {
+	capture := newStreamingBashOutputCapture(4)
+	drained, err := readPipe(strings.NewReader("tail"), "stdout", nil, "call-eof-tail", capture)
+
+	require.NoError(t, err)
+	assert.True(t, drained)
+	assert.Equal(t, "tail", capture.stdout.String())
+	output, truncated := capture.output()
+	assert.Equal(t, "tail", output)
+	assert.False(t, truncated)
+}
+
+func TestStreamingBashCancellationWaitsForReaders(t *testing.T) {
+	tool := NewStreamingBashTool(
+		WithTimeout(5*time.Second),
+		WithMaxOutput(1<<20),
+		WithNoSandbox(),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sink := &mockStreamSink{}
+	done := make(chan error, 1)
+	go func() {
+		_, err := tool.ExecuteStreaming(ctx, ToolCall{
+			ID:   "call-cancel-readers",
+			Name: "bash",
+			Args: map[string]any{"command": "while :; do printf 'x\\n'; done"},
+		}, sink)
+		done <- err
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for len(sink.getEvents()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	require.NotEmpty(t, sink.getEvents(), "the command should start streaming before cancellation")
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Less(t, time.Since(started), time.Second)
+		finishedEvents := len(sink.getEvents())
+		time.Sleep(10 * time.Millisecond)
+		assert.Equal(t, finishedEvents, len(sink.getEvents()), "reader goroutines must be joined before ExecuteStreaming returns")
+	case <-time.After(time.Second):
+		t.Fatal("ExecuteStreaming did not return after context cancellation")
+	}
 }
 
 // TestStreamingBashSandbox verifies that sandbox validation blocks

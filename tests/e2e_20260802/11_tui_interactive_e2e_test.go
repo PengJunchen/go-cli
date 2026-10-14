@@ -338,10 +338,15 @@ func TestE2EInteractive_AutoCompaction(t *testing.T) {
 			ID:      fmt.Sprintf("asst-%d", i),
 			Role:    compaction.RoleAssistant,
 			Content: "Here is the content of the file: " + strings.Repeat("y", 80),
+			ToolCalls: []llm.ToolCall{{
+				ID:   fmt.Sprintf("read-%d", i),
+				Name: "read",
+			}},
 		})
 		items = append(items, compaction.TurnItem{
 			ID:         fmt.Sprintf("tool-%d", i),
 			Role:       compaction.RoleTool,
+			ToolCallID: fmt.Sprintf("read-%d", i),
 			ToolName:   "read",
 			ToolResult: strings.Repeat("z", 120),
 		})
@@ -364,7 +369,7 @@ func TestE2EInteractive_AutoCompaction(t *testing.T) {
 	assert.Equal(t, compaction.TriggerThreshold, compactResult.Reason)
 
 	// Verify the result has fewer tokens.
-	afterTokens := tokenSum(result, est)
+	afterTokens := tokenSum(result.Items, est)
 	assert.LessOrEqual(t, afterTokens, maxTokens, "compacted items should fit within the budget")
 	assert.Less(t, afterTokens, beforeTokens, "compacted items should have fewer tokens than before")
 }

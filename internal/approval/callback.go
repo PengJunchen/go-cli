@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,8 +13,23 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tui"
 )
+
+var errApprovalCacheBoundToDifferentFence = errors.New("approval: cache is bound to a different dispatch fence")
+
+type approvalGrantPublisher interface {
+	PublishApprovalGrant(tools.DispatchFenceSnapshot, func()) (tools.DispatchFenceSnapshot, error)
+}
+
+func publishApprovalGrant(fence *tools.DispatchFence, expected tools.DispatchFenceSnapshot, update func()) (tools.DispatchFenceSnapshot, error) {
+	publisher, ok := any(fence).(approvalGrantPublisher)
+	if !ok || fence == nil {
+		return tools.DispatchFenceSnapshot{}, tools.ErrDispatchFenceUnavailable
+	}
+	return publisher.PublishApprovalGrant(expected, update)
+}
 
 // ApprovalResult represents the user's decision.
 type ApprovalResult int
@@ -55,9 +71,14 @@ func NewInteractiveApprovalCallback(stdin io.Reader, stdout io.Writer) *Interact
 // RequestApproval prints a y/n/a prompt and reads a line from stdin. "y" allows
 // the call once, "n" denies it, and "a" allows it and persists the decision.
 // When stdin is not a terminal (non-TTY) the call is denied without blocking.
-func (c *InteractiveApprovalCallback) RequestApproval(_ context.Context, toolName string, _ map[string]any) (ApprovalResult, error) {
+func (c *InteractiveApprovalCallback) RequestApproval(ctx context.Context, toolName string, args map[string]any) (ApprovalResult, error) {
+	result, _, _, err := c.requestApprovalWithChoice(ctx, toolName, args)
+	return result, err
+}
+
+func (c *InteractiveApprovalCallback) requestApprovalWithChoice(_ context.Context, toolName string, _ map[string]any) (ApprovalResult, string, string, error) {
 	if !isTerminalReader(c.stdin) {
-		return ApprovalDeny, nil
+		return ApprovalDeny, "", "non_tty_deny", nil
 	}
 
 	fmt.Fprintf(c.stdout, "[approval] Tool '%s' wants to execute. Allow? (y/n/a): ", toolName) //nolint:errcheck
@@ -66,19 +87,19 @@ func (c *InteractiveApprovalCallback) RequestApproval(_ context.Context, toolNam
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && err != io.EOF {
-			return ApprovalDeny, fmt.Errorf("read approval input: %w", err)
+			return ApprovalDeny, "", "callback_error", fmt.Errorf("read approval input: %w", err)
 		}
 		answer := strings.TrimSpace(strings.ToLower(line))
 		switch answer {
 		case "y", "yes":
-			return ApprovalAllow, nil
+			return ApprovalAllow, "allow_once", "user", nil
 		case "n", "no":
-			return ApprovalDeny, nil
+			return ApprovalDeny, "deny", "user", nil
 		case "a", "always":
-			return ApprovalAlwaysAllow, nil
+			return ApprovalAlwaysAllow, "allow_always", "user", nil
 		}
 		if err == io.EOF {
-			return ApprovalDeny, nil
+			return ApprovalDeny, "", "input_ended", nil
 		}
 		fmt.Fprintf(c.stdout, "[approval] Invalid input. Allow? (y/n/a): ") //nolint:errcheck
 	}
@@ -148,6 +169,7 @@ func (c *TeaApprovalCallback) RequestApproval(ctx context.Context, toolName stri
 		ToolName:   toolName,
 		Args:       args,
 		ResponseCh: respCh,
+		Context:    ctx,
 	}
 	if c.diffPreviewFn != nil {
 		req.DiffPreview = c.diffPreviewFn(ctx, toolName, args)
@@ -159,16 +181,23 @@ func (c *TeaApprovalCallback) RequestApproval(ctx context.Context, toolName stri
 	}
 	select {
 	case resp := <-respCh:
-		switch resp.Decision {
-		case tui.ApprovalAllow:
-			return ApprovalAllow, nil
-		case tui.ApprovalAlwaysAllow:
-			return ApprovalAlwaysAllow, nil
-		default:
-			return ApprovalDeny, nil
-		}
+		return approvalResultFromResponse(ctx, resp)
 	case <-ctx.Done():
 		return ApprovalDeny, ctx.Err()
+	}
+}
+
+func approvalResultFromResponse(ctx context.Context, resp tui.ApprovalResponse) (ApprovalResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ApprovalDeny, err
+	}
+	switch resp.Decision {
+	case tui.ApprovalAllow:
+		return ApprovalAllow, nil
+	case tui.ApprovalAlwaysAllow:
+		return ApprovalAlwaysAllow, nil
+	default:
+		return ApprovalDeny, nil
 	}
 }
 
@@ -180,6 +209,8 @@ type ApprovalCache struct {
 	mu      sync.RWMutex
 	path    string
 	entries map[string]bool // key -> allowed
+	fence   *tools.DispatchFence
+	epoch   uint64
 }
 
 // NewApprovalCache builds an ApprovalCache backed by the given file path. The
@@ -195,45 +226,77 @@ func NewApprovalCache(path string) *ApprovalCache {
 // missing file leaves the cache empty and returns nil. For security, the file
 // must have 0600 permissions and be owned by the current user; otherwise the
 // load is rejected to prevent tampering via world-readable or foreign-owned
-// cache files.
+// cache files. Replacing a cache after it already contains grants publishes an
+// approval-policy revision so prepared invocations captured before the
+// replacement become stale.
 func (c *ApprovalCache) LoadFromFile(path string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.path = path
-	c.entries = make(map[string]bool)
-
+	entries := make(map[string]bool)
+	var loadErr error
 	info, err := os.Stat(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+		if !os.IsNotExist(err) {
+			loadErr = fmt.Errorf("stat approval cache: %w", err)
 		}
-		return fmt.Errorf("stat approval cache: %w", err)
-	}
+	} else {
+		// Verify file permissions: only the owner may read or write the cache.
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			slog.Warn("approval.cache_insecure_permissions", "path", path, "perm", fmt.Sprintf("%o", perm))
+			loadErr = fmt.Errorf("approval cache %s has permissions %o, expected 0600", path, perm)
+		}
 
-	// Verify file permissions: only the owner may read or write the cache.
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		slog.Warn("approval.cache_insecure_permissions", "path", path, "perm", fmt.Sprintf("%o", perm))
-		return fmt.Errorf("approval cache %s has permissions %o, expected 0600", path, perm)
-	}
+		// Verify file ownership on Unix-like systems. On platforms where the
+		// Sys() call does not return *syscall.Stat_t, the check is skipped.
+		if loadErr == nil {
+			if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Uid != uint32(os.Getuid()) {
+				slog.Warn("approval.cache_foreign_owner", "path", path, "uid", stat.Uid, "expected", os.Getuid())
+				loadErr = fmt.Errorf("approval cache %s owned by uid %d, expected %d", path, stat.Uid, os.Getuid())
+			}
+		}
 
-	// Verify file ownership on Unix-like systems. On platforms where the
-	// Sys() call does not return *syscall.Stat_t, the check is skipped.
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		if stat.Uid != uint32(os.Getuid()) {
-			slog.Warn("approval.cache_foreign_owner", "path", path, "uid", stat.Uid, "expected", os.Getuid())
-			return fmt.Errorf("approval cache %s owned by uid %d, expected %d", path, stat.Uid, os.Getuid())
+		if loadErr == nil {
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				loadErr = fmt.Errorf("read approval cache: %w", readErr)
+			} else if unmarshalErr := json.Unmarshal(data, &entries); unmarshalErr != nil {
+				loadErr = fmt.Errorf("unmarshal approval cache: %w", unmarshalErr)
+			}
 		}
 	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read approval cache: %w", err)
+	for {
+		c.mu.RLock()
+		fence := c.fence
+		c.mu.RUnlock()
+
+		if fence == nil {
+			c.mu.Lock()
+			if c.fence != nil {
+				c.mu.Unlock()
+				continue
+			}
+			c.replaceLocked(path, entries)
+			c.mu.Unlock()
+			return loadErr
+		}
+
+		_, publishErr := fence.Publish(tools.DispatchFenceApproval, nil, func() {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			c.replaceLocked(path, entries)
+		})
+		if publishErr != nil {
+			return errors.Join(loadErr, fmt.Errorf("publish approval cache replacement: %w", publishErr))
+		}
+		return loadErr
 	}
-	if err := json.Unmarshal(data, &c.entries); err != nil {
-		return fmt.Errorf("unmarshal approval cache: %w", err)
+}
+
+func (c *ApprovalCache) replaceLocked(path string, entries map[string]bool) {
+	if len(c.entries) > 0 {
+		c.epoch++
 	}
-	return nil
+	c.path = path
+	c.entries = entries
 }
 
 // SaveToFile writes the cache entries as JSON to the given path with 0600
@@ -242,9 +305,13 @@ func (c *ApprovalCache) LoadFromFile(path string) error {
 // or tampering with the cache.
 func (c *ApprovalCache) SaveToFile(path string) error {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
+	entries := make(map[string]bool, len(c.entries))
+	for key, allowed := range c.entries {
+		entries[key] = allowed
+	}
+	c.mu.RUnlock()
 
-	data, err := json.MarshalIndent(c.entries, "", "  ")
+	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal approval cache: %w", err)
 	}
@@ -280,7 +347,63 @@ func (c *ApprovalCache) Get(key string) (bool, bool) {
 
 // Set marks the key as always-allowed.
 func (c *ApprovalCache) Set(key string) {
+	for {
+		c.mu.RLock()
+		fence := c.fence
+		c.mu.RUnlock()
+		if fence == nil {
+			c.mu.Lock()
+			if c.fence != nil {
+				c.mu.Unlock()
+				continue
+			}
+			c.entries[key] = true
+			c.mu.Unlock()
+			return
+		}
+		if _, err := c.publishPreparedGrant(fence, fence.Snapshot(), key, nil); err != nil {
+			slog.Warn("approval.cache_grant_failed", "error", err)
+		}
+		return
+	}
+}
+
+func (c *ApprovalCache) bindFence(fence *tools.DispatchFence) error {
+	if fence == nil {
+		return tools.ErrDispatchFenceUnavailable
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.fence != nil && c.fence != fence {
+		return errApprovalCacheBoundToDifferentFence
+	}
+	c.fence = fence
+	return nil
+}
+
+func (c *ApprovalCache) publishPreparedGrant(fence *tools.DispatchFence, expected tools.DispatchFenceSnapshot, key string, after func()) (tools.DispatchFenceSnapshot, error) {
+	c.mu.RLock()
+	bound := c.fence
+	c.mu.RUnlock()
+	if bound != fence {
+		return tools.DispatchFenceSnapshot{}, errApprovalCacheBoundToDifferentFence
+	}
+	return publishApprovalGrant(fence, expected, func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.setPreparedGrantLocked(key)
+		if after != nil {
+			after()
+		}
+	})
+}
+
+func (c *ApprovalCache) setPreparedGrantLocked(key string) {
 	c.entries[key] = true
+}
+
+func (c *ApprovalCache) policyEpoch() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.epoch
 }

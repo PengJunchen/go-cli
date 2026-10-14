@@ -6,7 +6,197 @@
 // against them.
 package llm
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+)
+
+// SourceKind identifies the runtime origin of a message. Source coordinates
+// are carried between core layers only and are never sent to a provider.
+type SourceKind uint8
+
+const (
+	SourceNone SourceKind = iota
+	SourcePriorPublished
+	SourceRunTranscript
+	SourceRunSummary
+	SourceEphemeral
+	SourcePendingRunInput
+)
+
+// SourceThrough is a cursor in the immutable run-start history followed by
+// the current run's canonical transcript.
+type SourceThrough struct {
+	PriorHistoryCount uint64
+	TranscriptCount   uint64
+}
+
+// SourceRef identifies one source-backed item or a runtime-only ephemeral
+// item. Fields not selected by Kind must remain at their zero value.
+type SourceRef struct {
+	Kind             SourceKind
+	RunID            string
+	HistoryRevision  string
+	BranchID         string
+	SourceEntryID    string
+	PriorOrdinal     uint64
+	PriorSourceCount uint64
+	TranscriptIndex  uint64
+	Through          SourceThrough
+}
+
+var ErrInvalidSourceRef = errors.New("llm: invalid runtime source reference")
+
+// Validate verifies that the source reference contains exactly the fields
+// allowed by its tag. A zero ordinal, count, or index is valid when selected.
+func (source SourceRef) Validate() error {
+	invalid := func(reason string) error {
+		return fmt.Errorf("%w: %s", ErrInvalidSourceRef, reason)
+	}
+	noPrior := source.HistoryRevision == "" && source.BranchID == "" && source.SourceEntryID == "" && source.PriorOrdinal == 0
+	noRunCount := source.PriorSourceCount == 0 && source.TranscriptIndex == 0
+	noThrough := source.Through == (SourceThrough{})
+	switch source.Kind {
+	case SourceNone, SourceEphemeral:
+		if source.RunID != "" || !noPrior || !noRunCount || !noThrough {
+			return invalid("non-durable source carries coordinates")
+		}
+	case SourcePriorPublished:
+		if source.HistoryRevision == "" || source.BranchID == "" || source.SourceEntryID == "" || source.RunID != "" || !noRunCount || !noThrough {
+			return invalid("prior source requires revision, branch, and entry ID only")
+		}
+	case SourceRunTranscript:
+		if source.RunID == "" || !noPrior || !noThrough {
+			return invalid("transcript source requires run ID and transcript coordinates only")
+		}
+	case SourceRunSummary:
+		if source.RunID == "" || !noPrior || !noRunCount || source.Through == (SourceThrough{}) {
+			return invalid("run summary requires run ID and non-empty source boundary only")
+		}
+	case SourcePendingRunInput:
+		if source.RunID == "" || !noPrior || !noThrough || source.TranscriptIndex != 0 {
+			return invalid("pending input requires run ID and prior source count only")
+		}
+	default:
+		return invalid("unknown source kind")
+	}
+	return nil
+}
+
+// RuntimeMetadata carries provenance and a canonical receipt outcome through
+// runtime transformations. It is deliberately absent from provider payloads
+// and durable session records.
+type RuntimeMetadata struct {
+	Source         SourceRef
+	ReceiptOutcome string
+}
+
+// LocalStreamAbortCause marks cancellation initiated by a stream consumer
+// because the stream could not be accepted locally. Its fixed error text keeps
+// provider response details out of cancellation diagnostics, while Unwrap
+// preserves the original cause for errors.Is and errors.As classification.
+type LocalStreamAbortCause struct {
+	cause error
+}
+
+// NewLocalStreamAbortCause wraps the reason a stream consumer stopped reading.
+func NewLocalStreamAbortCause(cause error) *LocalStreamAbortCause {
+	return &LocalStreamAbortCause{cause: cause}
+}
+
+// Error returns a stable, provider-independent description.
+func (*LocalStreamAbortCause) Error() string { return "local stream abort" }
+
+// Unwrap exposes the local failure for typed and sentinel error classification.
+func (c *LocalStreamAbortCause) Unwrap() error { return c.cause }
+
+func cancelStreamAttempt(parent context.Context, cancel context.CancelCauseFunc, cause error) {
+	if inherited := context.Cause(parent); inherited != nil {
+		cancel(inherited)
+		return
+	}
+	if cause == nil {
+		cause = context.Canceled
+	}
+	cancel(NewLocalStreamAbortCause(cause))
+}
+
+func drainMessageChunks(ch <-chan MessageChunk) {
+	if ch == nil {
+		return
+	}
+	for range ch {
+	}
+}
+
+// forwardMessageStreamAttempt owns a successful attempt channel until it closes
+// so the attempt context can be released without canceling the live stream.
+func forwardMessageStreamAttempt(parent context.Context, cancel context.CancelCauseFunc, source <-chan MessageChunk) <-chan MessageChunk {
+	out := make(chan MessageChunk, cap(source))
+	go func() {
+		defer close(out)
+		var finalChunk *MessageChunk
+		fail := func(failure error) {
+			select {
+			case out <- MessageChunk{Error: failure}:
+			case <-parent.Done():
+			}
+			cancelStreamAttempt(parent, cancel, failure)
+			drainMessageChunks(source)
+		}
+		for {
+			var chunk MessageChunk
+			var ok bool
+			select {
+			case <-parent.Done():
+				cause := context.Cause(parent)
+				if cause == nil {
+					cause = parent.Err()
+				}
+				cancelStreamAttempt(parent, cancel, cause)
+				drainMessageChunks(source)
+				return
+			case chunk, ok = <-source:
+			}
+			if !ok {
+				cancel(nil)
+				if finalChunk != nil {
+					select {
+					case out <- *finalChunk:
+					case <-parent.Done():
+					}
+				}
+				return
+			}
+			if chunk.Error != nil {
+				fail(chunk.Error)
+				return
+			}
+			if finalChunk != nil {
+				fail(errors.New("llm: stream emitted data after its final chunk"))
+				return
+			}
+			if chunk.Final {
+				final := chunk
+				finalChunk = &final
+				continue
+			}
+			select {
+			case out <- chunk:
+			case <-parent.Done():
+				cause := context.Cause(parent)
+				if cause == nil {
+					cause = parent.Err()
+				}
+				cancelStreamAttempt(parent, cancel, cause)
+				drainMessageChunks(source)
+				return
+			}
+		}
+	}()
+	return out
+}
 
 // Role identifies the speaker of a message in a conversation.
 type Role string
@@ -55,6 +245,9 @@ type Message struct {
 	// stop|length|tool_calls|content_filter. When "length", the output was
 	// truncated due to max_tokens and the caller may request a continuation.
 	FinishReason string `json:"finish_reason,omitempty"`
+	// Runtime carries source provenance only within the runtime. Provider
+	// encoders must never include it in protocol payloads.
+	Runtime RuntimeMetadata `json:"-"`
 }
 
 // ImageURL represents an image specified by URL or base64 data URI.
@@ -102,6 +295,27 @@ type MessageChunk struct {
 	Error error `json:"-"`
 }
 
+func sendStreamError(_ context.Context, ch chan MessageChunk, err error) {
+	if err == nil {
+		return
+	}
+	select {
+	case ch <- MessageChunk{Error: err}:
+	default:
+		// On terminal failure, prefer preserving the error signal over queued
+		// candidate deltas. The consumer must never mistake a truncated channel
+		// close for a successful stream.
+		select {
+		case <-ch:
+		default:
+		}
+		select {
+		case ch <- MessageChunk{Error: err}:
+		default:
+		}
+	}
+}
+
 // ModelInfo describes a model exposed by a provider.
 type ModelInfo struct {
 	Name            string  `json:"name"`
@@ -137,11 +351,17 @@ type ModelInfo struct {
 
 // ModelConfig configures how a provider should build a chat model.
 type ModelConfig struct {
-	Model       string  `json:"model"`
-	Temperature float64 `json:"temperature"`
-	MaxTokens   int     `json:"max_tokens"`
-	APIKey      string  `json:"api_key,omitempty"`
-	BaseURL     string  `json:"base_url,omitempty"`
+	Model          string        `json:"model"`
+	Temperature    float64       `json:"temperature"`
+	TemperatureSet bool          `json:"-"`
+	MaxTokens      int           `json:"max_tokens"`
+	MaxTokensSet   bool          `json:"-"`
+	APIKey         string        `json:"api_key,omitempty"`
+	BaseURL        string        `json:"base_url,omitempty"`
+	Credential     CredentialRef `json:"-"`
+	// credentialResolved marks a resolver-produced config. Adapter-level
+	// constructor defaults must not fill a missing key after scoped resolution.
+	credentialResolved bool
 }
 
 // ToolDefinition describes a tool that the model may invoke. It is the
@@ -198,7 +418,8 @@ type BaseChatModel interface {
 	// Generate produces a complete response for the given conversation.
 	Generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error)
 	// Stream produces the conversation response as a chunk channel. The
-	// channel must eventually be closed by the implementation.
+	// implementation must close the channel only after it has stopped sending
+	// and finished cleaning up request resources such as response bodies.
 	Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error)
 }
 

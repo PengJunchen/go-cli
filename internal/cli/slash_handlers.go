@@ -2,12 +2,16 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
 )
 
@@ -19,9 +23,9 @@ const maxHistoryPreview = 60
 // Existing commands (migrated from the switch in slash.go)
 // ----------------------------------------------------------------------------
 
-// HelpHandler lists all registered slash commands. It reads the handler list
-// dynamically from the registry so newly registered commands appear
-// automatically.
+// HelpHandler lists registered slash commands and the default entry's static
+// capability boundaries. It reads the command list dynamically from the
+// registry so newly registered commands appear automatically.
 type HelpHandler struct {
 	reg *SlashCommandRegistry
 }
@@ -39,6 +43,26 @@ func (h *HelpHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 		}
 	}
 	fmt.Fprintln(deps.Out(), "  exit      Exit the interactive session") //nolint:errcheck
+	fmt.Fprintln(deps.Out(), "\nCapability boundaries (default entry):") //nolint:errcheck
+	for _, boundary := range []string{
+		"Memory: user-managed with /memory only; no automatic extraction or prompt injection.",
+		"Goal, Task, and Todo: stored only in memory for this process; not kept across restarts.",
+		"Session storage: without session.store_path, /session is unsupported.",
+		"Durable mode exposes /session tree, branches, pending, and explicit one-action reconciliation; resume uses --resume-session <physical-id> at startup.",
+		"Durable /session resume, fork, clone, and switch are unsupported.",
+		"Legacy mutable mode supports /session tree, branches, resume, fork, clone, and switch with a wired mutable tree; resume listing needs a session store.",
+		"Session snapshot and schema migration are unavailable.",
+		"Image reading and Web Agent UI: unavailable. Web Search requires a configured provider.",
+		"Remote TUI is unavailable. Serve exposes only the private go-cli-acp-json/1 profile; official ACP and ask approvals are unavailable.",
+		"Serve requires --approve auto or --approve deny. Hard cost budgets are unsupported; usage and cost reports may be incomplete or estimated, and a displayed $0 is not proof of zero spend.",
+		"Plan Mode changes only through the user's /plan enter|exit commands; model calls cannot switch it.",
+		"Themes cover a renderer subset. Diffs are unified; ASCII mode is unsupported; NO_COLOR only disables color.",
+		"MCP server configuration hot reload is unsupported.",
+		"Interactive terminal evidence is limited to one native Darwin arm64 journey; Linux and Windows are unverified.",
+		"Docker target is linux/amd64; runtime support is unverified.",
+	} {
+		fmt.Fprintf(deps.Out(), "  %s\n", boundary) //nolint:errcheck
+	}
 	return "", nil
 }
 
@@ -53,8 +77,49 @@ func (h *CostHandler) Description() string { return "Show accumulated cost and u
 
 func (h *CostHandler) Handle(_ context.Context, _ []string, deps Dependencies) (string, error) {
 	if deps.CostTracker() != nil {
-		fmt.Fprintf(deps.Out(), "Total cost: $%.4f\n", deps.CostTracker().Total()) //nolint:errcheck
-		fmt.Fprintf(deps.Out(), "Total calls: %d\n", deps.CostTracker().Calls())   //nolint:errcheck
+		attempts, attemptSummary := deps.CostTracker().AttemptCostSnapshot()
+		if attemptSummary.Attempts > 0 {
+			fmt.Fprintf(deps.Out(), "Known cost subtotal: $%.4f\n", attemptSummary.CombinedKnownCostSubtotal)                                     //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "Attempt known cost subtotal: $%.4f\n", attemptSummary.KnownCostSubtotal)                                     //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "Provider attempts: %d\n", attemptSummary.Attempts)                                                           //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "Known provider tokens: %d in / %d out\n", attemptSummary.KnownInputTokens, attemptSummary.KnownOutputTokens) //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "Unknown usage attempts: %d\n", attemptSummary.UnknownUsageAttempts)                                          //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "Unknown cost attempts: %d\n", attemptSummary.UnknownCostAttempts)                                            //nolint:errcheck
+			fmt.Fprintln(deps.Out(), "Attempt evidence:")                                                                                         //nolint:errcheck
+			for _, attempt := range attempts {
+				usageSource := "unknown"
+				usageDetail := ""
+				if attempt.Result.Usage.State == llm.UsageKnown && attempt.Result.Usage.Source == llm.UsageProviderResponse {
+					usageSource = "reported"
+					usageDetail = fmt.Sprintf(" (%d in / %d out)", attempt.Result.Usage.Usage.InputTokens, attempt.Result.Usage.Usage.OutputTokens)
+				}
+				amount := "unknown"
+				if attempt.Status != production.AttemptCostUnknown {
+					amount = fmt.Sprintf("$%.4f", attempt.CostUSD)
+				}
+				_, _ = fmt.Fprintf(deps.Out(), "  attempt_id=%q outcome=%s amount=%s provider=%q model=%q usage=%s%s cost=%s price_source=%s\n",
+					attempt.Result.AttemptID,
+					attemptOutcomeLabel(attempt.Result.Outcome),
+					amount,
+					attempt.Result.Identity.ProviderID,
+					attempt.Result.Identity.ModelID,
+					usageSource,
+					usageDetail,
+					attemptCostStatusLabel(attempt.Status),
+					attemptCostPriceSourceLabel(attempt.PriceSource),
+				)
+			}
+		} else {
+			fmt.Fprintf(deps.Out(), "Total cost: $%.4f\n", deps.CostTracker().Total()) //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "Total calls: %d\n", deps.CostTracker().Calls())   //nolint:errcheck
+		}
+		if attemptSummary.LegacyCalls > 0 {
+			_, _ = fmt.Fprintf(deps.Out(), "Legacy cost records: %d; known subtotal: $%.4f; provider/model and usage provenance not retained; price_source=%s\n",
+				attemptSummary.LegacyCalls,
+				attemptSummary.LegacyKnownCostSubtotal,
+				attemptCostPriceSourceLabel(attemptSummary.LegacyPriceSource),
+			)
+		}
 
 		// Sub-agent cost breakdown.
 		subTotal := deps.CostTracker().SubagentTotal()
@@ -80,17 +145,56 @@ func (h *CostHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 			fmt.Fprintf(deps.Out(), "  Tokens out: %d\n", stats.TokensOut) //nolint:errcheck
 		}
 	}
-	if deps.ContextWindow() > 0 {
-		totalTokens := 0
-		if deps.StatsRegistry() != nil && deps.SessionID() != "" {
-			if stats, ok := deps.StatsRegistry().GetSessionStats(deps.SessionID()); ok {
-				totalTokens = stats.TokensIn + stats.TokensOut
-			}
-		}
-		pct := totalTokens * 100 / deps.ContextWindow()
-		fmt.Fprintf(deps.Out(), "  Context:   %d/%d (%d%%)\n", totalTokens, deps.ContextWindow(), pct) //nolint:errcheck
+	if contextWindow := deps.ContextWindow(); contextWindow > 0 {
+		// SessionStats tokens accumulate across provider calls; they do not
+		// describe the current prompt's context-window occupancy.
+		fmt.Fprintf(deps.Out(), "  Context:   unknown/%d (current occupancy unavailable)\n", contextWindow) //nolint:errcheck
+	} else {
+		fmt.Fprintln(deps.Out(), "  Context:   unknown (model context window unavailable)") //nolint:errcheck
+	}
+	if ceiling := deps.LocalCompactionCeiling(); ceiling > 0 {
+		fmt.Fprintf(deps.Out(), "  Local compaction ceiling: %d tokens\n", ceiling) //nolint:errcheck
 	}
 	return "", nil
+}
+
+func attemptCostStatusLabel(status production.AttemptCostStatus) string {
+	switch status {
+	case production.AttemptCostProviderReported:
+		return "reported"
+	case production.AttemptCostEstimated:
+		return "estimated"
+	default:
+		return "unknown"
+	}
+}
+
+func attemptOutcomeLabel(outcome llm.AttemptOutcome) string {
+	switch outcome {
+	case llm.AttemptSuccess:
+		return "success"
+	case llm.AttemptProviderFailure:
+		return "provider_failure"
+	case llm.AttemptTransportFailure:
+		return "transport_failure"
+	case llm.AttemptCancelled:
+		return "canceled"
+	default:
+		return "unknown"
+	}
+}
+
+func attemptCostPriceSourceLabel(source production.AttemptCostPriceSource) string {
+	switch source {
+	case production.AttemptCostFromProvider:
+		return "provider"
+	case production.AttemptCostFromDefaultTier:
+		return "default_tier"
+	case production.AttemptCostFromConfiguredTier:
+		return "configured_tier"
+	default:
+		return "unknown"
+	}
 }
 
 // CompactHandler manually triggers the compaction hook on the agent's history
@@ -173,7 +277,7 @@ var _ SlashCommandHandler = (*ModelHandler)(nil)
 
 func (h *ModelHandler) Name() string { return "model" }
 func (h *ModelHandler) Description() string {
-	return "Show or switch the current model (/model [name])"
+	return "Show or switch the current model (/model [name] or /model --provider <id> -- <name>)"
 }
 
 func (h *ModelHandler) Handle(ctx context.Context, args []string, deps Dependencies) (string, error) {
@@ -185,6 +289,25 @@ func (h *ModelHandler) Handle(ctx context.Context, args []string, deps Dependenc
 			fmt.Fprintf(deps.Out(), "Current model: %s\n", deps.ModelName()) //nolint:errcheck
 			return "", nil
 		}
+		currentSpec := sel.CurrentModelSpec()
+		modelSpecs := sel.AvailableModelSpecs()
+		if len(modelSpecs) != 0 {
+			fmt.Fprintln(deps.Out(), "Available models:") //nolint:errcheck
+			for _, model := range modelSpecs {
+				marker := "  "
+				if model.ProviderID == currentSpec.ProviderID && model.ModelID == currentSpec.ModelID {
+					marker = "* "
+				}
+				fmt.Fprintf(deps.Out(), "%s[%s] %s", marker, model.ProviderID, model.ModelID) //nolint:errcheck
+				if model.Info.Description != "" {
+					fmt.Fprintf(deps.Out(), " - %s", model.Info.Description) //nolint:errcheck
+				}
+				fmt.Fprintln(deps.Out()) //nolint:errcheck
+			}
+			fmt.Fprintf(deps.Out(), "\nCurrent: [%s] %s\n", currentSpec.ProviderID, currentSpec.ModelID) //nolint:errcheck
+			return "", nil
+		}
+
 		current := sel.PrimaryModelName()
 		models := sel.AvailableModels()
 		if len(models) == 0 {
@@ -207,11 +330,31 @@ func (h *ModelHandler) Handle(ctx context.Context, args []string, deps Dependenc
 		return "", nil
 	}
 
-	// Switch model.
-	modelName := args[0]
 	if sel == nil {
 		return "", fmt.Errorf("model switching not available")
 	}
+
+	if args[0] == "--provider" {
+		if len(args) < 4 || args[2] != "--" {
+			return "", fmt.Errorf("usage: /model --provider <id> -- <model-id>")
+		}
+		candidate := llm.ModelSpec{
+			ProviderID: args[1],
+			ModelID:    strings.Join(args[3:], " "),
+		}
+		if strings.TrimSpace(candidate.ModelID) == "" {
+			return "", fmt.Errorf("usage: /model --provider <id> -- <model-id>")
+		}
+		if err := sel.SwitchModelSpec(ctx, candidate); err != nil {
+			return "", fmt.Errorf("switch model: %w", err)
+		}
+		current := sel.CurrentModelSpec()
+		fmt.Fprintf(deps.Out(), "Switched to model: [%s] %s\n", current.ProviderID, current.ModelID) //nolint:errcheck
+		return "", nil
+	}
+
+	// A bare model identifier always remains scoped to the current provider.
+	modelName := args[0]
 	if err := sel.SwitchModel(ctx, modelName); err != nil {
 		return "", fmt.Errorf("switch model: %w", err)
 	}
@@ -219,20 +362,53 @@ func (h *ModelHandler) Handle(ctx context.Context, args []string, deps Dependenc
 	return "", nil
 }
 
-// SessionHandler delegates to the SessionSlashHandler for session tree
-// operations (/tree, /fork, /resume). Without sub-arguments it defaults to
-// showing the tree.
-type SessionHandler struct{}
+// sessionCommandMode describes the session capabilities wired into one REPL.
+type sessionCommandMode uint8
+
+const (
+	sessionCommandModeUnavailable sessionCommandMode = iota
+	sessionCommandModeDurable
+	sessionCommandModeLegacy
+)
+
+// SessionHandler delegates to the SessionSlashHandler for session operations.
+// Without sub-arguments it defaults to showing the tree.
+type SessionHandler struct {
+	mode           sessionCommandMode
+	durableSession *durableCLISession
+	runSlotGuard   core.RunSlotGuard
+}
 
 var _ SlashCommandHandler = (*SessionHandler)(nil)
 
 func (h *SessionHandler) Name() string { return "session" }
 func (h *SessionHandler) Description() string {
-	return "Session operations (subcommands: tree, fork, resume, branches, clone, switch)"
+	if h == nil {
+		return "Session commands are unsupported without session.store_path."
+	}
+	switch h.mode {
+	case sessionCommandModeDurable:
+		return "Durable session commands: /session tree, /session branches, /session pending, and /session reconcile; resume at startup with --resume-session <physical-id>."
+	case sessionCommandModeLegacy:
+		return "Legacy session operations (subcommands: tree, fork, resume, branches, clone, switch; requires a mutable session tree)."
+	default:
+		return "Session commands are unsupported without session.store_path."
+	}
 }
 
 // Subcommands returns the subcommands supported by /session for tab completion.
 func (h *SessionHandler) Subcommands() []Subcommand {
+	if h == nil || h.mode == sessionCommandModeUnavailable {
+		return nil
+	}
+	if h.mode == sessionCommandModeDurable {
+		return []Subcommand{
+			{Name: "tree", Description: "Show the durable session tree"},
+			{Name: "branches", Description: "List durable session branches"},
+			{Name: "pending", Description: "List unresolved durable actions"},
+			{Name: "reconcile", Description: "Explicitly accept one unknown action outcome"},
+		}
+	}
 	return []Subcommand{
 		{Name: "tree", Description: "Show session tree (default)"},
 		{Name: "fork", Description: "Fork the current session"},
@@ -244,8 +420,31 @@ func (h *SessionHandler) Subcommands() []Subcommand {
 }
 
 func (h *SessionHandler) Handle(ctx context.Context, args []string, deps Dependencies) (string, error) {
+	if h != nil && h.mode == sessionCommandModeDurable && len(args) > 0 {
+		switch args[0] {
+		case "pending":
+			if len(args) != 1 {
+				fmt.Fprintln(deps.Out(), "Usage: /session pending") //nolint:errcheck
+				return "", nil
+			}
+			output, err := h.durablePendingOutput(ctx)
+			if err != nil {
+				fmt.Fprintf(deps.Out(), "Error: %v\n", err) //nolint:errcheck
+				return "", nil
+			}
+			fmt.Fprint(deps.Out(), output) //nolint:errcheck
+			return "", nil
+		case "reconcile":
+			if err := h.reconcilePendingAction(ctx, args[1:]); err != nil {
+				fmt.Fprintf(deps.Out(), "Error: %v\n", err) //nolint:errcheck
+			} else {
+				fmt.Fprintf(deps.Out(), "Recorded explicit reconciliation for the selected action; its original outcome remains unknown.\n") //nolint:errcheck
+			}
+			return "", nil
+		}
+	}
 	if deps.SessionHandler() == nil {
-		fmt.Fprintln(deps.Out(), "Session tree not configured.") //nolint:errcheck
+		fmt.Fprintln(deps.Out(), "Unsupported: /session requires session.store_path.") //nolint:errcheck
 		return "", nil
 	}
 	// Map /session to /tree when no subcommand is given; otherwise use the
@@ -262,6 +461,119 @@ func (h *SessionHandler) Handle(ctx context.Context, args []string, deps Depende
 	}
 	fmt.Fprint(deps.Out(), output) //nolint:errcheck
 	return "", nil
+}
+
+func (h *SessionHandler) durablePendingOutput(ctx context.Context) (string, error) {
+	if h == nil || h.mode != sessionCommandModeDurable || h.durableSession == nil {
+		return "", errors.New("durable session recovery is unavailable")
+	}
+	if err := h.durableSession.syncRecordedResolutions(ctx); err != nil {
+		return "", err
+	}
+	snapshot, err := h.durableSession.snapshotSelected()
+	if err != nil {
+		return "", err
+	}
+	pending, err := session.InspectPendingActions(snapshot)
+	if err != nil {
+		return "", err
+	}
+	var output strings.Builder
+	fmt.Fprintf(&output, "Session %s branch %s revision %s\n", snapshot.SessionID, snapshot.ActiveBranchID, snapshot.PublishedView.Revision)
+	if len(pending) == 0 {
+		output.WriteString("No unresolved durable actions.\n")
+		return output.String(), nil
+	}
+	output.WriteString("Unresolved durable actions (tool arguments are omitted):\n")
+	for _, action := range pending {
+		if action.Action.ActionID == "" {
+			fmt.Fprintf(&output, "- call=%s action=unreserved dispatch=unknown receipt=unknown\n", action.Action.ToolCallID)
+			continue
+		}
+		fmt.Fprintf(&output, "- action=%s tool=%s dispatch=%s receipt=%s", action.Action.ActionID, action.ToolName, action.DispatchState, action.ReceiptOutcome)
+		if action.ReconcileReady {
+			output.WriteString(" reconcile=available")
+		}
+		output.WriteByte('\n')
+	}
+	output.WriteString("For one unknown dispatched action, use /session reconcile <action-id> --revision=<revision> --accept-unknown-risk --reason=<short-token> [--reference=<id>].\n")
+	return output.String(), nil
+}
+
+func (h *SessionHandler) reconcilePendingAction(ctx context.Context, args []string) error {
+	if h == nil || h.mode != sessionCommandModeDurable || h.durableSession == nil {
+		return errors.New("durable session recovery is unavailable")
+	}
+	if len(args) == 0 || args[0] == "" {
+		return errors.New("usage: /session reconcile <action-id> --revision=<revision> --accept-unknown-risk --reason=<short-token> [--reference=<id>]")
+	}
+	actionID := args[0]
+	if len(actionID) > 256 {
+		return errors.New("action ID is too long")
+	}
+	var revision, reason, reference string
+	accepted := false
+	seen := make(map[string]bool, 4)
+	for _, arg := range args[1:] {
+		if arg == "--accept-unknown-risk" {
+			if seen["accept"] {
+				return errors.New("duplicate reconciliation option")
+			}
+			seen["accept"] = true
+			accepted = true
+			continue
+		}
+		name, value, ok := strings.Cut(arg, "=")
+		if !ok || value == "" || !strings.HasPrefix(name, "--") {
+			return errors.New("reconciliation options must use --name=value form")
+		}
+		key := strings.TrimPrefix(name, "--")
+		if key != "revision" && key != "reason" && key != "reference" || seen[key] {
+			return errors.New("unknown or duplicate reconciliation option")
+		}
+		seen[key] = true
+		switch key {
+		case "revision":
+			revision = value
+		case "reason":
+			reason = value
+		case "reference":
+			reference = value
+		}
+	}
+	if !accepted || revision == "" || reason == "" {
+		return errors.New("reconciliation requires --accept-unknown-risk, --revision, and --reason")
+	}
+	if len(revision) > 256 {
+		return errors.New("session revision is too long")
+	}
+	if registrar, ok := h.runSlotGuard.(core.RunSlotWrapperRegistrar); ok {
+		if _, active := registrar.ActiveRunStatus(); active {
+			return errors.New("reconciliation is unavailable while a run owner is active")
+		}
+	}
+	snapshot, err := h.durableSession.snapshotSelected()
+	if err != nil {
+		return err
+	}
+	if snapshot.PublishedView.Revision != revision {
+		return errors.New("session revision changed; run /session pending again")
+	}
+	selected, found, err := session.FindActionByID(snapshot, actionID)
+	if err != nil {
+		return err
+	}
+	if !found || (!selected.ReconcileReady && !(selected.Resolved && selected.Resolution == core.ResolutionOperatorReconciled)) {
+		return errors.New("action is not an unresolved dispatched unknown receipt")
+	}
+	request := session.OperatorReconciliationRequest{
+		Action: selected.Action, ExpectedRevision: revision, Reason: reason,
+		Reference: reference, AcceptUnknownRisk: accepted,
+	}
+	if err := h.durableSession.reconcileUnknownAction(ctx, request); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ----------------------------------------------------------------------------

@@ -1,12 +1,18 @@
 package tools
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -179,9 +185,7 @@ func NewDefaultGitTool(cwd string) *DefaultGitTool {
 // ensureRepo verifies that cwd is inside a git work tree. It returns a
 // user-friendly error when it is not, instead of panicking.
 func (g *DefaultGitTool) ensureRepo(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-inside-work-tree")
-	cmd.Dir = g.cwd
-	if err := cmd.Run(); err != nil {
+	if _, err := g.runReadOnly(ctx, "rev-parse", "--is-inside-work-tree"); err != nil {
 		return fmt.Errorf("git: not inside a work tree (run from within a git repository): %w", err)
 	}
 	return nil
@@ -190,7 +194,7 @@ func (g *DefaultGitTool) ensureRepo(ctx context.Context) error {
 // Diff runs `git diff` (or `git diff --staged`) with an optional path filter
 // and returns the unified diff text.
 func (g *DefaultGitTool) Diff(ctx context.Context, opts GitDiffOptions) (string, error) {
-	if err := g.ensureRepo(ctx); err != nil {
+	if err := g.ensureRepoForDiff(ctx); err != nil {
 		return "", err
 	}
 
@@ -202,12 +206,20 @@ func (g *DefaultGitTool) Diff(ctx context.Context, opts GitDiffOptions) (string,
 		args = append(args, "--", opts.Path)
 	}
 
-	out, err := g.run(ctx, args...)
+	readArgs := append([]string{"diff", "--no-ext-diff", "--no-textconv"}, args[1:]...)
+	out, err := g.runReadOnlyManaged(ctx, readArgs...)
 	if err != nil {
 		return "", err
 	}
 	slog.Debug("git.diff", "staged", opts.Staged, "path", opts.Path, "bytes", len(out))
 	return out, nil
+}
+
+func (g *DefaultGitTool) ensureRepoForDiff(ctx context.Context) error {
+	if _, err := g.runReadOnlyManaged(ctx, "rev-parse", "--is-inside-work-tree"); err != nil {
+		return fmt.Errorf("git: not inside a work tree (run from within a git repository): %w", err)
+	}
+	return nil
 }
 
 // Status runs `git status --porcelain` and parses the result into a list of
@@ -217,7 +229,7 @@ func (g *DefaultGitTool) Status(ctx context.Context) ([]GitFileStatus, error) {
 		return nil, err
 	}
 
-	out, err := g.run(ctx, "status", "--porcelain")
+	out, err := g.runReadOnly(ctx, "status", "--porcelain")
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +297,7 @@ func (g *DefaultGitTool) Log(ctx context.Context, opts GitLogOptions) ([]GitLogE
 		args = append(args, "--", opts.Path)
 	}
 
-	out, err := g.run(ctx, args...)
+	out, err := g.runReadOnly(ctx, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -318,7 +330,7 @@ func (g *DefaultGitTool) Branch(ctx context.Context) ([]GitBranch, error) {
 		return nil, err
 	}
 
-	out, err := g.run(ctx, "branch", "-a")
+	out, err := g.runReadOnly(ctx, "branch", "-a")
 	if err != nil {
 		return nil, err
 	}
@@ -389,7 +401,7 @@ func (g *DefaultGitTool) Blame(ctx context.Context, file string, startLine, endL
 	}
 
 	rangeArg := fmt.Sprintf("%d,%d", startLine, endLine)
-	out, err := g.run(ctx, "blame", "--line-porcelain", "-L", rangeArg, file)
+	out, err := g.runReadOnly(ctx, "blame", "--line-porcelain", "-L", rangeArg, "--", file)
 	if err != nil {
 		return nil, err
 	}
@@ -499,7 +511,7 @@ func (g *DefaultGitTool) Merge(ctx context.Context, branch string) (*MergeResult
 	if err != nil {
 		// Merge conflicts cause git merge to exit non-zero. Check whether
 		// there are unmerged files to distinguish conflicts from other errors.
-		conflictOut, cErr := g.run(ctx, "diff", "--name-only", "--diff-filter=U")
+		conflictOut, cErr := g.runReadOnly(ctx, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=U")
 		if cErr == nil {
 			var conflicts []string
 			for _, line := range strings.Split(conflictOut, "\n") {
@@ -643,7 +655,7 @@ func (g *DefaultGitTool) Remote(ctx context.Context) ([]RemoteInfo, error) {
 		return nil, err
 	}
 
-	out, err := g.run(ctx, "remote", "-v")
+	out, err := g.runReadOnly(ctx, "remote", "-v")
 	if err != nil {
 		return nil, err
 	}
@@ -681,6 +693,133 @@ func (g *DefaultGitTool) run(ctx context.Context, args ...string) (string, error
 		return string(out), fmt.Errorf("%s", strings.TrimSpace(string(out)))
 	}
 	return string(out), nil
+}
+
+// runReadOnly executes a fixed Git read invocation with known helper paths
+// disabled and optional index writes suppressed. Repository-defined clean
+// filters can still execute during status/diff; callers must not infer a
+// trusted read effect from this runner alone.
+func (g *DefaultGitTool) runReadOnly(ctx context.Context, args ...string) (string, error) {
+	readArgs := gitReadOnlyArgs(args)
+
+	cmd := exec.CommandContext(ctx, "git", readArgs...)
+	cmd.Dir = g.cwd
+	cmd.Env = gitReadOnlyEnvironment(os.Environ())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		commandErr := err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			commandErr = errors.Join(err, ctxErr)
+		}
+		if diagnostic := strings.TrimSpace(string(out)); diagnostic != "" {
+			return string(out), fmt.Errorf("git read-only command failed (%s): %w", diagnostic, commandErr)
+		}
+		return string(out), fmt.Errorf("git read-only command failed: %w", commandErr)
+	}
+	return string(out), nil
+}
+
+// runReadOnlyManaged runs the Git helper used by diff previews under the
+// existing process-group owner. It deliberately uses exec.Command rather than
+// CommandContext: collect owns cancellation, process-group cleanup, and pipe
+// reader joining as one lifecycle.
+func (g *DefaultGitTool) runReadOnlyManaged(ctx context.Context, args ...string) (string, error) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return "", newUnknownExecutionError(errors.Join(
+			errProcessContainmentUnconfirmed,
+			errors.New("managed Git diff process groups are unsupported on this operating system"),
+		))
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("git read-only command failed: %w", err)
+	}
+
+	execCtx, cancel := context.WithCancel(ctx)
+	cmd := exec.Command("git", gitReadOnlyArgs(args)...)
+	cmd.Dir = g.cwd
+	cmd.Env = gitReadOnlyEnvironment(os.Environ())
+	managed, err := startManagedLocalCommand(cancel, cmd)
+	if err != nil {
+		cancel()
+		return "", gitReadOnlyCommandFailure("", err)
+	}
+
+	var output gitDiffCombinedOutput
+	lifecycle := managed.collect(execCtx, func(reader io.Reader, _ string) (bool, error) {
+		_, readErr := io.Copy(&output, reader)
+		return readErr == nil, readErr
+	})
+	cancel()
+
+	combined := output.String()
+	commandErr := errors.Join(lifecycle.runErr, lifecycle.readerErr, lifecycle.cleanupErr)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		commandErr = errors.Join(commandErr, ctxErr)
+	}
+	if !lifecycle.containmentProven {
+		cause := errors.Join(commandErr, errProcessContainmentUnconfirmed)
+		failure := gitReadOnlyCommandFailure(combined, cause)
+		if lifecycle.executionDone != nil {
+			return combined, pendingProcessErrorWithDone(failure, true, lifecycle.executionDone)
+		}
+		return combined, newUnknownExecutionError(failure)
+	}
+	if commandErr != nil {
+		return combined, gitReadOnlyCommandFailure(combined, commandErr)
+	}
+	return combined, nil
+}
+
+func gitReadOnlyArgs(args []string) []string {
+	readArgs := []string{
+		"--no-optional-locks",
+		"-c", "core.fsmonitor=false",
+		"-c", "core.untrackedCache=false",
+		"-c", "diff.external=",
+		"-c", "log.showSignature=false",
+	}
+	return append(readArgs, args...)
+}
+
+func gitReadOnlyCommandFailure(output string, cause error) error {
+	if diagnostic := strings.TrimSpace(output); diagnostic != "" {
+		return fmt.Errorf("git read-only command failed (%s): %w", diagnostic, cause)
+	}
+	return fmt.Errorf("git read-only command failed: %w", cause)
+}
+
+type gitDiffCombinedOutput struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (w *gitDiffCombinedOutput) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buffer.Write(p)
+}
+
+func (w *gitDiffCombinedOutput) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buffer.String()
+}
+
+func gitReadOnlyEnvironment(environment []string) []string {
+	filtered := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		upperKey := strings.ToUpper(key)
+		if upperKey == "GIT_OPTIONAL_LOCKS" ||
+			upperKey == "GIT_CONFIG_PARAMETERS" ||
+			upperKey == "GIT_CONFIG_COUNT" ||
+			strings.HasPrefix(upperKey, "GIT_CONFIG_KEY_") ||
+			strings.HasPrefix(upperKey, "GIT_CONFIG_VALUE_") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return append(filtered, "GIT_OPTIONAL_LOCKS=0")
 }
 
 // parsePorcelain parses a single `git status --porcelain` line into zero or
@@ -776,7 +915,7 @@ func (g *DefaultGitTool) WorktreeList(ctx context.Context) ([]WorktreeInfo, erro
 	if err := g.ensureRepo(ctx); err != nil {
 		return nil, err
 	}
-	out, err := g.run(ctx, "worktree", "list", "--porcelain")
+	out, err := g.runReadOnly(ctx, "worktree", "list", "--porcelain")
 	if err != nil {
 		return nil, err
 	}

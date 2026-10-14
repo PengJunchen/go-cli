@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -155,4 +157,60 @@ func TestRun_EmptyOutputNoStderrOnSuccess(t *testing.T) {
 	assert.NotEmpty(t, stdout.String())
 	// Ensure the text output is not the literal JSON braces.
 	assert.False(t, strings.HasPrefix(stdout.String(), "{"))
+}
+
+func TestScannerProcessFailureFailsGate(t *testing.T) {
+	output, err := runScannerGateFixture(t, "process-failure")
+	assert.Error(t, err, "a non-zero scanner process must fail the gate")
+	assert.Contains(t, output, "scanner command failed")
+	assert.Contains(t, output, "exit status 23")
+}
+
+func TestScannerInvalidJSONFailsGate(t *testing.T) {
+	output, err := runScannerGateFixture(t, "invalid-json")
+	assert.Error(t, err, "malformed scanner JSON must fail the gate")
+	assert.Contains(t, output, "invalid JSON")
+}
+
+func TestScannerErrorFindingFailsGate(t *testing.T) {
+	output, err := runScannerGateFixture(t, "error-json")
+	assert.Error(t, err, "an ERROR in valid scanner JSON must fail the gate")
+	assert.Contains(t, output, "SCAN-012")
+	assert.Contains(t, output, "scanner reported 1 ERROR finding")
+}
+
+func runScannerGateFixture(t *testing.T, mode string) (string, error) {
+	t.Helper()
+
+	testBinary, err := os.Executable()
+	require.NoError(t, err)
+	repoRoot := filepath.Clean(filepath.Join("..", "..", "..", ".."))
+	cmd := exec.Command("go", "run", "./internal/verify/cmd/scanner-gate",
+		"-dir", "./internal",
+		"-scanner-command", testBinary,
+		"-scanner-arg=-test.run=^TestScannerGateSubprocessFixture$",
+	)
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "GO_CLI_SCANNER_GATE_FIXTURE_MODE="+mode)
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
+func TestMain(m *testing.M) {
+	if mode := os.Getenv("GO_CLI_SCANNER_GATE_FIXTURE_MODE"); mode != "" {
+		switch mode {
+		case "process-failure":
+			_, _ = fmt.Fprint(os.Stdout, `{"dir":".","findings":[],"summary":{"total_files":1,"total_findings":0,"errors":0,"warnings":0,"infos":0}}`)
+			os.Exit(23)
+		case "invalid-json":
+			_, _ = fmt.Fprint(os.Stdout, "{broken-json")
+			os.Exit(0)
+		case "error-json":
+			_, _ = fmt.Fprint(os.Stdout, `{"dir":".","findings":[{"rule_id":"SCAN-012","file":"core.go","line":9,"severity":"ERROR","message":"unresolved interface"}],"summary":{"total_files":1,"total_findings":1,"errors":1,"warnings":0,"infos":0}}`)
+			os.Exit(0)
+		default:
+			os.Exit(24)
+		}
+	}
+	os.Exit(m.Run())
 }

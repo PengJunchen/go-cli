@@ -39,8 +39,8 @@ func chdir(t *testing.T, dir string) {
 	t.Cleanup(func() { _ = os.Chdir(origDir) })
 }
 
-// TestTrustedLoad verifies that when the trust check approves the project,
-// both global and project configs are loaded and merged.
+// TestTrustedLoad verifies that the legacy path callback cannot grant
+// executable project-source authority.
 func TestTrustedLoad(t *testing.T) {
 	homeDir := writeGlobalConfig(t, `{"provider":{"name":"global-provider"}}`)
 	projectDir := writeProjectConfig(t, ".go-cli.json", `{"model":{"name":"project-model"}}`)
@@ -53,7 +53,9 @@ func TestTrustedLoad(t *testing.T) {
 	cfg, err := LoadTrusted(trustCheck)
 	require.NoError(t, err)
 	assert.Equal(t, "global-provider", cfg.Provider.Name)
-	assert.Equal(t, "project-model", cfg.Model.Name)
+	assert.Equal(t, "", cfg.Model.Name)
+	assert.Equal(t, ProjectSourceTrustUnsupported, cfg.ProjectSourceTrustStatus)
+	assert.Nil(t, cfg.VerifiedProjectSources())
 }
 
 // TestGlobalOnlyBeforeTrust verifies that when the trust check denies the
@@ -74,8 +76,8 @@ func TestGlobalOnlyBeforeTrust(t *testing.T) {
 	assert.Equal(t, "", cfg.Model.Name)
 }
 
-// TestTrustedProjectLoads verifies that project config values override global
-// config values when the project is trusted.
+// TestTrustedProjectLoads verifies that a path-only callback cannot authorize
+// project config values even when it reports trusted.
 func TestTrustedProjectLoads(t *testing.T) {
 	homeDir := writeGlobalConfig(t, `{"provider":{"name":"global-provider"},"model":{"name":"global-model"}}`)
 	projectDir := writeProjectConfig(t, ".go-cli.json", `{"model":{"name":"project-model"}}`)
@@ -89,8 +91,8 @@ func TestTrustedProjectLoads(t *testing.T) {
 	require.NoError(t, err)
 	// Global value preserved (project file does not set provider.name).
 	assert.Equal(t, "global-provider", cfg.Provider.Name)
-	// Project value overrides global value.
-	assert.Equal(t, "project-model", cfg.Model.Name)
+	// The global value remains because the path-only callback cannot authorize a project overlay.
+	assert.Equal(t, "global-model", cfg.Model.Name)
 }
 
 // TestUntrustedFallback verifies that when no global config exists and the

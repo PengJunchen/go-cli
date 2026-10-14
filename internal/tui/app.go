@@ -2,15 +2,20 @@ package tui
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -18,6 +23,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/term"
 	"github.com/muesli/termenv"
+
+	"github.com/pengjunchen/go-cli/internal/core"
 )
 
 // Msg is the generic message type delivered to an App via Send. It corresponds
@@ -47,24 +54,137 @@ type AgentEvent struct {
 	// TokenUsage carries token consumption data for "token_usage" events.
 	// It is nil for all other event types.
 	TokenUsage *TokenUsageData
-	// ToolCallID associates streaming output with the originating tool
-	// call. Populated for tool_output events; empty for other types.
+	// ToolCallID is the source-provided tool identifier on tool lifecycle and
+	// output events. The live view associates it only within the active group.
 	ToolCallID string
 	// Stream identifies the output source for tool_output events: "stdout"
 	// or "stderr".
 	Stream string
-	// IsError marks a tool_result event as an error for structured
-	// detection. When true, the TUI sets the tool_call entry status to
-	// Error instead of Completed, without relying on string matching.
+	// IsError preserves the structured error marker from tool events. On a
+	// uniquely associated tool_result, it sets the call status to Error.
 	IsError bool
+	// RunID and transcript coordinates identify the producer-owned occurrence.
+	RunID                      string
+	CanonicalTranscriptIndex   *uint64
+	AssistantTranscriptOrdinal *uint64
+	// ReceiptOutcome carries the exact typed tool receipt outcome when present.
+	ReceiptOutcome string
+	// SourceTruncated is copied only from structured source metadata.
+	SourceTruncated *bool
+	// ToolCalls carries the assistant-proposed tool calls attached to a
+	// message event. These are provisional until a matching tool_call event
+	// confirms execution has started.
+	ToolCalls []ToolCallData
+}
+
+func (event AgentEvent) clone() AgentEvent {
+	if event.CanonicalTranscriptIndex != nil {
+		index := *event.CanonicalTranscriptIndex
+		event.CanonicalTranscriptIndex = &index
+	}
+	if event.AssistantTranscriptOrdinal != nil {
+		ordinal := *event.AssistantTranscriptOrdinal
+		event.AssistantTranscriptOrdinal = &ordinal
+	}
+	if event.SourceTruncated != nil {
+		truncated := *event.SourceTruncated
+		event.SourceTruncated = &truncated
+	}
+	if event.ToolCalls != nil {
+		event.ToolCalls = append([]ToolCallData(nil), event.ToolCalls...)
+	}
+	if event.TokenUsage != nil {
+		usage := *event.TokenUsage
+		usage.CostSources = append([]core.TokenUsageCostSource(nil), event.TokenUsage.CostSources...)
+		usage.PriceSources = append([]core.TokenUsagePriceSource(nil), event.TokenUsage.PriceSources...)
+		usage.ProviderModels = append([]core.TokenUsageProviderModel(nil), event.TokenUsage.ProviderModels...)
+		event.TokenUsage = &usage
+	}
+	return event
+}
+
+// ToolCallData is the presentation-safe subset of an assistant tool call.
+// ArgsUnavailable is set when the source arguments are not a valid JSON value
+// or cannot be copied safely; callers should render that state explicitly.
+type ToolCallData struct {
+	ID              string
+	Name            string
+	Args            any
+	ArgsUnavailable bool
+}
+
+// activeToolCallGroup contains only presentation-time associations for the
+// current assistant tool-call message. It is reset at the next assistant
+// message boundary and does not create durable session identifiers.
+type activeToolCallGroup struct {
+	byID      map[string]*AccordionEntry
+	ambiguous map[string]struct{}
+	consumed  map[string]struct{}
+}
+
+func newActiveToolCallGroup() *activeToolCallGroup {
+	return &activeToolCallGroup{
+		byID:      make(map[string]*AccordionEntry),
+		ambiguous: make(map[string]struct{}),
+		consumed:  make(map[string]struct{}),
+	}
+}
+
+func (g *activeToolCallGroup) lookup(id string) (*AccordionEntry, bool) {
+	if g == nil || id == "" {
+		return nil, false
+	}
+	if _, ambiguous := g.ambiguous[id]; ambiguous {
+		return nil, false
+	}
+	if _, consumed := g.consumed[id]; consumed {
+		return nil, false
+	}
+	entry, ok := g.byID[id]
+	return entry, ok
+}
+
+func (g *activeToolCallGroup) add(id string, entry *AccordionEntry) bool {
+	if g == nil || id == "" || entry == nil {
+		return false
+	}
+	if _, ambiguous := g.ambiguous[id]; ambiguous {
+		return false
+	}
+	if _, consumed := g.consumed[id]; consumed {
+		return false
+	}
+	if _, exists := g.byID[id]; exists {
+		delete(g.byID, id)
+		g.ambiguous[id] = struct{}{}
+		return false
+	}
+	g.byID[id] = entry
+	return true
+}
+
+// consume retires an ID after its single terminal result receipt. Later events
+// with the same ID remain visible but cannot be attached to the old call.
+func (g *activeToolCallGroup) consume(id string) {
+	if g == nil || id == "" {
+		return
+	}
+	delete(g.byID, id)
+	g.consumed[id] = struct{}{}
 }
 
 // TokenUsageData mirrors core.TokenUsage for the TUI layer.
 type TokenUsageData struct {
-	InputTokens  int
-	OutputTokens int
-	MaxTokens    int
-	Cost         float64
+	InputTokens          int
+	OutputTokens         int
+	MaxTokens            int
+	Cost                 float64
+	UnknownUsageAttempts int
+	UnknownCostAttempts  int
+	UsageSource          core.TokenUsageSource
+	CostSources          []core.TokenUsageCostSource
+	PriceSources         []core.TokenUsagePriceSource
+	ProviderModels       []core.TokenUsageProviderModel
 }
 
 // App is the top-level TUI application entry point. It runs a message-queue-
@@ -75,8 +195,14 @@ type App interface {
 	// Run consumes events until the associated context is canceled, the event
 	// channel closes, or Quit is called. It returns the loop's stopping error.
 	Run(ctx context.Context) error
-	// Send enqueues a message for the render loop to process.
-	Send(msg Msg)
+	// Send enqueues a message for the render loop to process, returning an
+	// inspectable error if the bounded queue is full or the app is stopping.
+	Send(msg Msg) error
+	// CriticalSendContext enqueues a critical message, waiting for queue space
+	// while the current app run remains active and ctx is not canceled.
+	CriticalSendContext(ctx context.Context, msg Msg) error
+	// LocalSendGapCount reports messages rejected by the local TUI queue.
+	LocalSendGapCount() uint64
 	// Quit requests a graceful stop of the render loop.
 	Quit()
 }
@@ -90,6 +216,23 @@ var _ App = (*BubbleteaApp)(nil)
 // AppOption configures a BubbleteaApp at construction time.
 type AppOption func(*BubbleteaApp)
 
+// WithInitialTranscript seeds a new app with one validated selected-branch
+// snapshot. The value is cloned before the app exposes it to the model.
+func WithInitialTranscript(snapshot CanonicalTranscriptSnapshot) AppOption {
+	return func(a *BubbleteaApp) {
+		cloned := snapshot.Clone()
+		a.initialTranscript = &cloned
+	}
+}
+
+// WithRunPublicationIdentity binds reliable refreshes to the active owner run.
+func WithRunPublicationIdentity(runID, ownerGeneration string) AppOption {
+	return func(a *BubbleteaApp) {
+		a.expectedRunID = runID
+		a.expectedOwnerGeneration = ownerGeneration
+	}
+}
+
 // WithRegistry sets the renderer registry used for content-type dispatch.
 func WithRegistry(reg *RendererRegistry) AppOption {
 	return func(a *BubbleteaApp) { a.reg = reg }
@@ -98,6 +241,16 @@ func WithRegistry(reg *RendererRegistry) AppOption {
 // WithThemeManager sets the theme manager used to resolve the active theme.
 func WithThemeManager(mgr *ThemeManager) AppOption {
 	return func(a *BubbleteaApp) { a.themeMgr = mgr }
+}
+
+// WithTodoSnapshot seeds a new app with the Assembly's revisioned todo state.
+func WithTodoSnapshot(snapshot TodoUpdateMsg) AppOption {
+	return func(a *BubbleteaApp) {
+		a.initialTodoSnapshot = TodoUpdateMsg{
+			Revision: snapshot.Revision,
+			Items:    cloneTodoItems(snapshot.Items),
+		}
+	}
 }
 
 // WithWidth sets the target render width in terminal columns.
@@ -144,6 +297,13 @@ func WithFollowUpCallback(cb func(string)) AppOption {
 // cancel the running turn.
 func WithCancelCallback(cb func()) AppOption {
 	return func(a *BubbleteaApp) { a.cancelCallback = cb }
+}
+
+// WithDeferQuitUntilTranscriptRefresh keeps the app alive when the user asks
+// to quit, while still invoking the cancel callback. The caller must apply
+// the joined run's canonical transcript refresh and then call Quit.
+func WithDeferQuitUntilTranscriptRefresh() AppOption {
+	return func(a *BubbleteaApp) { a.deferQuitUntilTranscriptRefresh = true }
 }
 
 // WithPauseCallback registers a callback invoked when the user presses Space
@@ -238,10 +398,28 @@ type BubbleteaApp struct {
 
 	// done closes once Run has fully cleaned up and exited.
 	done chan struct{}
+	// eventSourceDone closes after the model has observed the event stream end.
+	eventSourceDone chan struct{}
+	// ownedPumps joins the app-owned event and control source readers before
+	// Run closes Done. Bubble Tea command goroutines are intentionally not
+	// treated as app-owned workers because Bubble Tea does not expose a join.
+	ownedPumps sync.WaitGroup
+	// queueSpace receives a coalesced notification after the render loop takes
+	// a queued message, allowing critical senders to wait without polling.
+	queueSpace chan struct{}
+	// sendMu protects send admission and the active run/quit state.
+	sendMu        sync.Mutex
+	activeRunDone <-chan struct{}
+	uiContextDone <-chan struct{}
+	quitRequested bool
 
 	// quitOnce guards the quit channel so Quit is idempotent.
 	quitOnce sync.Once
 	quitCh   chan struct{}
+
+	controlMu     sync.Mutex
+	activeRefresh *transcriptRefreshRequest
+	nextControlID atomic.Uint64
 
 	// programReady is closed once Run has stored the tea.Program, allowing
 	// callers to wait for program availability without polling. It is closed
@@ -259,12 +437,13 @@ type BubbleteaApp struct {
 
 	// Option fields applied by WithXxx. They are mirrored into the model at
 	// construction time and retained here for test inspection.
-	reg         *RendererRegistry
-	themeMgr    *ThemeManager
-	events      <-chan AgentEvent
-	width       int
-	inputReader io.Reader
-	interactive bool
+	deferQuitUntilTranscriptRefresh bool
+	reg                             *RendererRegistry
+	themeMgr                        *ThemeManager
+	events                          <-chan AgentEvent
+	width                           int
+	inputReader                     io.Reader
+	interactive                     bool
 
 	onUpdate           func(string)
 	steerCallback      func(string)
@@ -283,6 +462,12 @@ type BubbleteaApp struct {
 	modeLabel string
 	wordWrap  int
 	diffStyle string
+
+	initialTranscript       *CanonicalTranscriptSnapshot
+	initialTranscriptErr    error
+	initialTodoSnapshot     TodoUpdateMsg
+	expectedRunID           string
+	expectedOwnerGeneration string
 }
 
 // NewBubbleteaApp constructs an app wired to the given event source, using a
@@ -292,13 +477,15 @@ type BubbleteaApp struct {
 // Run where the run context is available.
 func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp {
 	a := &BubbleteaApp{
-		reg:          NewDefaultRegistry(),
-		themeMgr:     NewThemeManager(),
-		events:       events,
-		done:         make(chan struct{}),
-		quitCh:       make(chan struct{}),
-		programReady: make(chan struct{}),
-		interactive:  isTerminal(),
+		reg:             NewDefaultRegistry(),
+		themeMgr:        NewThemeManager(),
+		events:          events,
+		done:            make(chan struct{}),
+		eventSourceDone: make(chan struct{}),
+		queueSpace:      make(chan struct{}, 1),
+		quitCh:          make(chan struct{}),
+		programReady:    make(chan struct{}),
+		interactive:     isTerminal(),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -308,12 +495,34 @@ func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp 
 	// consistent with the stream lipgloss actually renders to.
 	lipgloss.SetColorProfile(resolveColorProfile(os.Stderr))
 	a.model = newTeaModel(a)
+	if a.initialTranscript != nil {
+		if err := a.initialTranscript.Validate(); err != nil {
+			a.initialTranscriptErr = err
+		} else {
+			a.model.transcriptSnapshot = a.initialTranscript.Clone()
+			a.model.hasTranscriptSnapshot = true
+			if err := a.model.installTranscriptSnapshotLocked(a.model.transcriptSnapshot); err != nil {
+				a.initialTranscriptErr = err
+			}
+		}
+	}
 	return a
 }
 
+// NewBubbleteaAppWithTranscript constructs an app from a validated canonical
+// selected-branch snapshot.
+func NewBubbleteaAppWithTranscript(events <-chan AgentEvent, snapshot CanonicalTranscriptSnapshot, opts ...AppOption) (*BubbleteaApp, error) {
+	app := NewBubbleteaApp(events, append(opts, WithInitialTranscript(snapshot))...)
+	if app.initialTranscriptErr != nil {
+		return nil, app.initialTranscriptErr
+	}
+	return app, nil
+}
+
 // Run starts the bubbletea program. It returns when the context is canceled,
-// the event channel closes, or Quit is invoked. The loop tears down internal
-// resources before returning.
+// Quit is invoked, or an event source closes before a canonical transcript
+// snapshot was attached. Snapshot-backed apps remain active for a final model
+// refresh after their event source closes.
 //
 // In interactive (TTY) mode bubbletea owns terminal rendering (raw mode,
 // keyboard, resize, diff-based repaint) on stderr. In non-interactive mode the
@@ -324,25 +533,97 @@ func (a *BubbleteaApp) Run(ctx context.Context) error {
 	if !a.running.CompareAndSwap(false, true) {
 		return errAlreadyRunning
 	}
-	// runCtx is canceled when Run returns so any waitForEvent/waitForMsg
-	// command goroutines still blocked on their channels unblock and exit
-	// (bubbletea cannot kill a cmd func blocked on a user channel). It is also
-	// passed to the program as its context so context cancellation propagates
-	// to the event loop.
+	a.sendMu.Lock()
+	if a.cleaned {
+		a.done = make(chan struct{})
+		a.quitCh = make(chan struct{})
+		a.quitOnce = sync.Once{}
+		a.quitRequested = false
+		a.programReady = make(chan struct{})
+		a.readyOnce = sync.Once{}
+		a.cleaned = false
+		a.model.quitCh = a.quitCh
+		a.model.mu.Lock()
+		a.model.todoSnapshot = cloneTodoItems(a.initialTodoSnapshot.Items)
+		a.model.todoRevision = a.initialTodoSnapshot.Revision
+		a.model.mu.Unlock()
+	}
+	a.uiContextDone = ctx.Done()
+	a.sendMu.Unlock()
+	// runCtx is the context for the program and its app-owned message pump.
 	runCtx, cancelRun := context.WithCancel(ctx)
-	defer cancelRun()
+	var messagePumpDone <-chan struct{}
 	defer func() {
+		cancelRun()
+		a.ownedPumps.Wait()
+		a.closePendingTranscriptRefresh(ErrTranscriptRefreshClosed)
+		if messagePumpDone != nil {
+			<-messagePumpDone
+		}
+		a.sendMu.Lock()
+		a.activeRunDone = nil
+		a.uiContextDone = nil
 		a.running.Store(false)
+		a.sendMu.Unlock()
 		a.program.Store(nil)
 		a.cleanup()
 	}()
 
+	a.sendMu.Lock()
+	a.activeRunDone = runCtx.Done()
+	a.sendMu.Unlock()
 	a.model.runDone = runCtx.Done()
 	prog := tea.NewProgram(a.model, a.programOptions(runCtx)...)
 	a.program.Store(prog)
+	messagePumpDone = startMessagePump(runCtx, a.model.msgCh, a.queueSpace, prog.Send)
+	a.startSourcePumps(runCtx, prog.Send)
 	a.readyOnce.Do(func() { close(a.programReady) })
 	_, err := prog.Run()
 	return err
+}
+
+func (a *BubbleteaApp) startSourcePumps(ctx context.Context, send func(tea.Msg)) {
+	if a.events != nil {
+		a.ownedPumps.Add(1)
+		go func() {
+			defer a.ownedPumps.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case event, ok := <-a.events:
+					if !ok {
+						send(agentEventStreamClosedMsg{})
+						return
+					}
+					send(agentEventMsg{event: event})
+				}
+			}
+		}()
+	}
+
+	a.ownedPumps.Add(1)
+	go func() {
+		defer a.ownedPumps.Done()
+		quitCh := (<-chan struct{})(a.quitCh)
+		approvalCh := a.approvalCh
+		for quitCh != nil || approvalCh != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-quitCh:
+				send(quitRequestedMsg{})
+				return
+			case request, ok := <-approvalCh:
+				if !ok {
+					approvalCh = nil
+					send(approvalChannelClosedMsg{})
+					continue
+				}
+				send(approvalRequestMsg{req: request})
+			}
+		}
+	}()
 }
 
 // programOptions builds the tea.ProgramOption set for the current run. Input is
@@ -369,24 +650,33 @@ func (a *BubbleteaApp) programOptions(ctx context.Context) []tea.ProgramOption {
 	return opts
 }
 
-// Send pushes a message into the model's message queue, dropping it if the
-// queue is full so a slow renderer never blocks the producer. It is safe to
-// call before Run starts; the queued message is drained once the program's
-// event loop begins.
-func (a *BubbleteaApp) Send(msg Msg) {
-	a.model.send(msg)
-}
-
 // Quit requests a graceful stop of the render loop. It is safe to call
 // multiple times and from any goroutine.
 func (a *BubbleteaApp) Quit() {
-	a.quitOnce.Do(func() { close(a.quitCh) })
+	a.quitOnce.Do(func() {
+		a.sendMu.Lock()
+		a.quitRequested = true
+		close(a.quitCh)
+		a.sendMu.Unlock()
+	})
+	a.closePendingTranscriptRefresh(ErrTranscriptRefreshClosed)
 	slog.Debug("tui.app.quit", "requested", true)
 }
 
 // Done returns a channel that closes once the render loop has fully cleaned
 // up and exited, enabling callers to wait on quit completion.
-func (a *BubbleteaApp) Done() <-chan struct{} { return a.done }
+func (a *BubbleteaApp) Done() <-chan struct{} {
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
+	return a.done
+}
+
+// EventSourceDone closes after the model has processed the event-stream close
+// message. Snapshot-backed callers can wait for it before applying a durable
+// refresh while the UI remains active.
+func (a *BubbleteaApp) EventSourceDone() <-chan struct{} {
+	return a.model.eventSourceDone
+}
 
 // Program returns the underlying tea.Program after Run has started.
 // Returns nil before Run is called or after it has exited.
@@ -403,6 +693,8 @@ func (a *BubbleteaApp) Program() *tea.Program {
 // a nil-check on Program() to handle the window where the program has
 // not yet been stored.
 func (a *BubbleteaApp) ProgramReady() <-chan struct{} {
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
 	return a.programReady
 }
 
@@ -411,6 +703,12 @@ func (a *BubbleteaApp) EventsProcessed() int64 { return a.model.eventsSeen.Load(
 
 // MessagesProcessed reports how many messages the loop has consumed via Send.
 func (a *BubbleteaApp) MessagesProcessed() int64 { return a.model.msgsSeen.Load() }
+
+// LocalSendGapCount reports messages rejected by the local TUI message queue.
+// It is independent of any event-gap count reported by Core.
+func (a *BubbleteaApp) LocalSendGapCount() uint64 {
+	return a.model.localSendGapCount.Load()
+}
 
 // View returns the current rendered view. It is safe for concurrent callers and
 // delegates to the model under its mutex. In interactive mode the accordion
@@ -433,12 +731,15 @@ func (a *BubbleteaApp) cleanup() {
 		a.model.mu.Lock()
 		a.model.streamBuf = make(map[string]*strings.Builder)
 		a.model.todoSnapshot = nil
+		a.model.todoRevision = 0
 		a.model.mu.Unlock()
 	}
+	a.sendMu.Lock()
 	if !a.cleaned {
 		a.cleaned = true
 		close(a.done)
 	}
+	a.sendMu.Unlock()
 	slog.Debug("tui.app.cleanup", "cleaned", true)
 }
 
@@ -456,22 +757,32 @@ type teaModel struct {
 	interactive bool
 
 	// event / message sources
-	events <-chan AgentEvent
-	msgCh  chan Msg
-	quitCh <-chan struct{}
+	events          <-chan AgentEvent
+	eventSourceDone chan struct{}
+	msgCh           chan Msg
+	queueSpace      chan<- struct{}
+	quitCh          <-chan struct{}
 	// runDone is closed (via runCtx cancellation) when the current Run exits,
-	// unblocking lingering waitForEvent/waitForMsg command goroutines so they
-	// do not leak. It is nil when the model is exercised without a program.
+	// unblocking interaction-cancel command goroutines. It is nil when the
+	// model is exercised without a program.
 	runDone <-chan struct{}
 
 	// accordion + streaming
 	accordion      *AccordionModel
 	streamBuf      map[string]*strings.Builder
 	streamingEntry *AccordionEntry
-	streamingBuf   strings.Builder
-	// streamingMD caches rendered markdown lines during incremental streaming
-	// so each token chunk does not trigger an O(n²) full re-render. It is
-	// lazily created and Reset when a new streaming message begins.
+	// streamingBuf owns the complete source for the one active provisional
+	// response; streamingMD retains only a bounded terminal preview.
+	streamingBuf  strings.Builder
+	streamingHash hash.Hash
+	// finalizedStreamDigest identifies a producer's optional complete-message
+	// duplicate immediately after done without retaining another full copy.
+	finalizedStreamDigest      [sha256.Size]byte
+	finalizedStreamSourceBytes int
+	hasFinalizedStreamDigest   bool
+	toolCallGroup              *activeToolCallGroup
+	// streamingMD incrementally consumes new chunks and keeps only a bounded
+	// safe preview window. It is reset when a new streaming message begins.
 	streamingMD *StreamingMarkdownRenderer
 
 	// steer input
@@ -487,16 +798,19 @@ type teaModel struct {
 	followUpCallback  func(string)
 
 	// callbacks
-	onUpdate       func(string)
-	cancelCallback func()
-	pauseCallback  func()
-	resumeCallback func()
-	paused         bool
+	deferQuitUntilTranscriptRefresh bool
+	onUpdate                        func(string)
+	cancelCallback                  func()
+	pauseCallback                   func()
+	resumeCallback                  func()
+	paused                          bool
 
-	// approval flow: approvalCh delivers requests from the middleware;
-	// pendingApproval is the request currently awaiting a user decision.
-	approvalCh      <-chan ApprovalRequest
-	pendingApproval *ApprovalRequest
+	// interaction flow serializes approval and ask_user modals in arrival order.
+	approvalCh          <-chan ApprovalRequest
+	approvalReaderDone  bool
+	activeInteraction   *pendingInteraction
+	queuedInteractions  []pendingInteraction
+	interactionSequence uint64
 
 	// thinkingVisibility controls how thinking entries are rendered:
 	// "show" (default), "collapse", or "hide".
@@ -511,11 +825,47 @@ type teaModel struct {
 	wordWrap  int
 	diffStyle string
 
+	transcriptSnapshot     CanonicalTranscriptSnapshot
+	transcriptLoadedScope  string
+	hasTranscriptSnapshot  bool
+	transcriptViewport     *transcriptViewport
+	toolTranscriptViewport *transcriptViewport
+	transcriptSplitActive  bool
+	hasTranscriptToolRows  bool
+	liveTranscriptRows     map[string]transcriptViewportRow
+	liveAssistantRows      map[AssistantOccurrenceKey]string
+	liveAssistantRenderers map[AssistantOccurrenceKey]*StreamingMarkdownRenderer
+	assistantProgress      *AssistantOccurrenceKey
+	liveToolRows           map[liveToolOccurrence]string
+	liveToolRenderers      map[liveToolOccurrence]*StreamingMarkdownRenderer
+	liveToolTruncation     map[liveToolOccurrence]*bool
+	liveToolReceipts       map[liveToolOccurrence]string
+	canonicalAssistantKeys map[AssistantOccurrenceKey]struct{}
+	canonicalToolEntryKeys map[liveToolOccurrence]string
+	liveRowOrder           []string
+	liveRowSequence        uint64
+	transcriptSearchMode   bool
+	transcriptSearchInput  string
+	transcriptSearchAfter  string
+	selectedTranscriptKey  string
+	selectedTranscriptTool bool
+	liveStatus             string
+	runObservation         RunObservation
+	durablePublication     core.DurablePublication
+	expectedRunID          string
+	expectedOwnerGen       string
+
 	// token usage
-	tokenInput  int
-	tokenOutput int
-	tokenMax    int
-	tokenCost   float64
+	tokenInput                int
+	tokenOutput               int
+	tokenMax                  int
+	tokenCost                 float64
+	tokenUnknownUsageAttempts int
+	tokenUnknownCostAttempts  int
+	tokenUsageSource          core.TokenUsageSource
+	tokenCostSources          []core.TokenUsageCostSource
+	tokenPriceSources         []core.TokenUsagePriceSource
+	tokenProviderModels       []core.TokenUsageProviderModel
 
 	// spinner (bubbles spinner) shown while a tool call is in progress.
 	spinner       spinner.Model
@@ -524,6 +874,8 @@ type teaModel struct {
 	// quitting is set when the user requests quit so View can render a
 	// goodbye line.
 	quitting bool
+	// eventSourceClosed records source completion without ending the UI task.
+	eventSourceClosed bool
 
 	// helpOverlay is set when the user presses '?' to show the keyboard
 	// shortcut help overlay. While true the overlay is modal: only Esc or
@@ -535,86 +887,166 @@ type teaModel struct {
 	// progress panel. It is updated when a ContentTypeTodo event or a
 	// TodoUpdateMsg arrives, and rendered above the status bar.
 	todoSnapshot []TodoItem
+	todoRevision uint64
 
 	// concurrency: guards all mutable state above. Update runs single-threaded
 	// inside bubbletea, but external callers (tests, View) access the model
 	// concurrently, so the mutex serializes View against in-flight updates.
-	mu         sync.Mutex
-	eventsSeen atomic.Int64
-	msgsSeen   atomic.Int64
+	mu                sync.Mutex
+	eventsSeen        atomic.Int64
+	msgsSeen          atomic.Int64
+	localSendGapCount atomic.Uint64
 }
 
 // newTeaModel builds a teaModel from the option fields already applied to the
 // BubbleteaApp adapter.
 func newTeaModel(a *BubbleteaApp) *teaModel {
 	return &teaModel{
-		reg:                a.reg,
-		themeMgr:           a.themeMgr,
-		width:              a.width,
-		interactive:        a.interactive,
-		events:             a.events,
-		msgCh:              make(chan Msg, 16),
-		quitCh:             a.quitCh,
-		streamBuf:          make(map[string]*strings.Builder),
-		accordion:          NewAccordionModel(),
-		onUpdate:           a.onUpdate,
-		steerCallback:      a.steerCallback,
-		followUpCallback:   a.followUpCallback,
-		cancelCallback:     a.cancelCallback,
-		pauseCallback:      a.pauseCallback,
-		resumeCallback:     a.resumeCallback,
-		approvalCh:         a.approvalCh,
-		thinkingVisibility: a.thinkingVisibility,
-		modelName:          a.modelName,
-		turnCount:          a.turnCount,
-		sessionID:          a.sessionID,
-		modeLabel:          a.modeLabel,
-		wordWrap:           a.wordWrap,
-		diffStyle:          a.diffStyle,
-		spinner:            spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		reg:                             a.reg,
+		themeMgr:                        a.themeMgr,
+		width:                           a.width,
+		interactive:                     a.interactive,
+		events:                          a.events,
+		eventSourceDone:                 a.eventSourceDone,
+		msgCh:                           make(chan Msg, 16),
+		queueSpace:                      a.queueSpace,
+		quitCh:                          a.quitCh,
+		streamBuf:                       make(map[string]*strings.Builder),
+		liveTranscriptRows:              make(map[string]transcriptViewportRow),
+		liveAssistantRows:               make(map[AssistantOccurrenceKey]string),
+		liveAssistantRenderers:          make(map[AssistantOccurrenceKey]*StreamingMarkdownRenderer),
+		liveToolRows:                    make(map[liveToolOccurrence]string),
+		liveToolRenderers:               make(map[liveToolOccurrence]*StreamingMarkdownRenderer),
+		liveToolTruncation:              make(map[liveToolOccurrence]*bool),
+		liveToolReceipts:                make(map[liveToolOccurrence]string),
+		canonicalAssistantKeys:          make(map[AssistantOccurrenceKey]struct{}),
+		canonicalToolEntryKeys:          make(map[liveToolOccurrence]string),
+		accordion:                       NewAccordionModel(),
+		onUpdate:                        a.onUpdate,
+		steerCallback:                   a.steerCallback,
+		followUpCallback:                a.followUpCallback,
+		cancelCallback:                  a.cancelCallback,
+		deferQuitUntilTranscriptRefresh: a.deferQuitUntilTranscriptRefresh,
+		pauseCallback:                   a.pauseCallback,
+		resumeCallback:                  a.resumeCallback,
+		approvalCh:                      a.approvalCh,
+		thinkingVisibility:              a.thinkingVisibility,
+		todoSnapshot:                    cloneTodoItems(a.initialTodoSnapshot.Items),
+		todoRevision:                    a.initialTodoSnapshot.Revision,
+		modelName:                       a.modelName,
+		turnCount:                       a.turnCount,
+		sessionID:                       a.sessionID,
+		modeLabel:                       a.modeLabel,
+		wordWrap:                        a.wordWrap,
+		diffStyle:                       a.diffStyle,
+		expectedRunID:                   a.expectedRunID,
+		expectedOwnerGen:                a.expectedOwnerGeneration,
+		spinner:                         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 	}
 }
 
-// Init starts the bubbletea command loop. It arms listeners for the agent event
-// stream, messages pushed via Send, the quit signal, and (when wired) approval
-// requests from the middleware. The spinner tick is started on demand.
+// Init leaves channel ownership to BubbleteaApp.Run, which starts and joins the
+// event, message, quit, and approval pumps around the Bubble Tea program.
 func (m *teaModel) Init() tea.Cmd {
-	done := m.runDone
-	cmds := []tea.Cmd{
-		waitForEvent(m.events, done),
-		waitForMsg(m.msgCh, done),
-		waitForQuit(m.quitCh, done),
-	}
-	if m.approvalCh != nil {
-		cmds = append(cmds, waitForApproval(m.approvalCh, done))
-	}
-	return tea.Batch(cmds...)
+	return nil
 }
 
 // Update handles all incoming tea.Msg values: agent events from the stream,
 // keyboard input, terminal resizes, spinner ticks, and messages pushed via Send.
 func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case transcriptRefreshControlMsg:
+		if msg.request == nil || !msg.request.apply(m) {
+			return m, nil
+		}
+		request := msg.request
+		return m, func() tea.Msg { return transcriptRefreshViewQueuedMsg{request: request} }
+	case transcriptRefreshViewQueuedMsg:
+		if msg.request != nil {
+			msg.request.completeApplied()
+		}
+		return m, nil
 	case agentEventMsg:
 		m.eventsSeen.Add(1)
 		cmd := m.handleEvent(msg.event)
-		return m, tea.Batch(waitForEvent(m.events, m.runDone), cmd)
-	case approvalRequestMsg:
+		return m, cmd
+	case agentEventStreamClosedMsg:
 		m.mu.Lock()
-		m.pendingApproval = &msg.req
+		m.assistantProgress = nil
+		if !m.eventSourceClosed {
+			m.eventSourceClosed = true
+			if m.eventSourceDone != nil {
+				close(m.eventSourceDone)
+			}
+		}
+		keepSnapshotRefreshOpen := m.hasTranscriptSnapshot
+		if !keepSnapshotRefreshOpen {
+			m.cancelInteractionsLocked()
+		}
+		m.mu.Unlock()
+		if !keepSnapshotRefreshOpen {
+			return m, tea.Quit
+		}
+		return m, nil
+	case quitRequestedMsg:
+		m.mu.Lock()
+		m.cancelInteractionsLocked()
+		m.mu.Unlock()
+		return m, tea.Quit
+	case approvalChannelClosedMsg:
+		m.mu.Lock()
+		m.approvalReaderDone = true
+		m.cancelApprovalInteractionsLocked()
 		view := ""
 		if m.shouldNotify() {
 			view = m.renderViewLocked()
 		}
 		m.mu.Unlock()
 		m.notify(view)
-		return m, waitForApproval(m.approvalCh, m.runDone)
+		return m, nil
+	case approvalRequestMsg:
+		m.mu.Lock()
+		token, finished := m.enqueueApprovalLocked(msg.req)
+		view := ""
+		if m.shouldNotify() {
+			view = m.renderViewLocked()
+		}
+		m.mu.Unlock()
+		m.notify(view)
+		var cancelWait tea.Cmd
+		if finished != nil {
+			cancelWait = waitForInteractionCancel(msg.req.Context, token, finished, m.runDone)
+		}
+		return m, cancelWait
+	case HITLMessage:
+		return m.handleHITLMessage(msg)
+	case interactionCanceledMsg:
+		m.mu.Lock()
+		m.cancelInteractionLocked(msg.token, msg.err)
+		view := ""
+		if m.shouldNotify() {
+			view = m.renderViewLocked()
+		}
+		m.mu.Unlock()
+		m.notify(view)
+		return m, nil
 	case tea.KeyMsg:
 		return m, m.handleKey(msg)
 	case tea.WindowSizeMsg:
 		m.mu.Lock()
 		m.width = msg.Width
 		m.height = msg.Height
+		m.refreshStreamingPreviewLocked(context.Background())
+		if current := m.activeInteraction; current != nil && current.approval != nil {
+			current.detailOffset = 0
+			current.reviewedDetailLines = nil
+			current.reviewedDetailCount = 0
+		}
+		if m.hasTranscriptSnapshot && (m.width >= splitWidthThreshold) != m.transcriptSplitActive {
+			if err := m.rebuildTranscriptPaneLayoutLocked(); err != nil {
+				slog.Debug("tui.transcript.resize_layout_failed", "err", err)
+			}
+		}
 		// Panel dimensions (leftWidth, rightWidth, panelHeight) are derived
 		// on the fly in renderViewLocked() from m.width/m.height, so no
 		// separate fields are needed. When width >= splitWidthThreshold,
@@ -648,17 +1080,27 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var view string
 		notify := m.shouldNotify()
 		m.mu.Lock()
-		m.todoSnapshot = msg.Items
+		// Revision zero is the legacy unversioned form of TodoUpdateMsg. Keep
+		// accepting it for existing callers, but do not let it lower the
+		// revision guard used to reject stale revisioned snapshots.
+		if msg.Revision != 0 && msg.Revision < m.todoRevision {
+			m.mu.Unlock()
+			return m, nil
+		}
+		m.todoSnapshot = cloneTodoItems(msg.Items)
+		if msg.Revision != 0 {
+			m.todoRevision = msg.Revision
+		}
 		if notify {
 			view = m.renderViewLocked()
 		}
 		m.mu.Unlock()
 		m.notify(view)
-		return m, waitForMsg(m.msgCh, m.runDone)
+		return m, nil
 	default:
 		// A message pushed via Send that is not a recognized tea message.
 		m.msgsSeen.Add(1)
-		return m, waitForMsg(m.msgCh, m.runDone)
+		return m, nil
 	}
 }
 
@@ -682,11 +1124,30 @@ const splitWidthThreshold = 120
 // and a right panel (tool_call entries with their children), joined
 // horizontally with a vertical separator. Below the threshold, or when no tool
 // entries exist, the classic single-column layout is used.
+func renderInputWithCaret(input string, cursor int) string {
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(input) {
+		cursor = len(input)
+	}
+	for cursor > 0 && cursor < len(input) && !utf8.RuneStart(input[cursor]) {
+		cursor--
+	}
+	return safeTerminalText(input[:cursor]) + "█" + safeTerminalText(input[cursor:])
+}
+
 func (m *teaModel) renderViewLocked() string {
+	if current := m.activeInteraction; current != nil && current.approval != nil {
+		return m.withLocalSendGapNotice(m.renderApprovalInteractionLocked(current))
+	}
 	// When the help overlay is open, render it instead of the normal view.
 	// Agent event flow is unaffected — only UI rendering is redirected.
 	if m.helpOverlay {
-		return m.renderHelpOverlay()
+		return m.withLocalSendGapNotice(m.renderHelpOverlay())
+	}
+	if m.hasTranscriptSnapshot && m.transcriptViewport != nil {
+		return m.renderCanonicalTranscriptViewLocked()
 	}
 	var sb strings.Builder
 
@@ -712,8 +1173,15 @@ func (m *teaModel) renderViewLocked() string {
 		if rightWidth < 1 {
 			rightWidth = 1
 		}
-		// Reserve ~2 lines for the status bar at the bottom.
-		panelHeight := m.height - 2
+		// Reserve two status lines plus the bounded provenance line when usage is present.
+		statusRows := 2
+		if m.assistantProgress != nil {
+			statusRows++
+		}
+		if m.hasTokenUsageStatus() {
+			statusRows++
+		}
+		panelHeight := m.height - statusRows
 		if panelHeight < 1 {
 			panelHeight = 0 // no clipping
 		}
@@ -744,24 +1212,28 @@ func (m *teaModel) renderViewLocked() string {
 		sb.WriteString(m.spinner.View())
 		sb.WriteString(" working...")
 	}
-	// Pending approval entry (interactive approval flow).
-	if m.pendingApproval != nil {
+	if m.assistantProgress != nil {
 		sb.WriteString("\n")
-		sb.WriteString(renderApprovalRequest(m.pendingApproval))
+		sb.WriteString(assistantGenerationProgressLabel)
+	}
+	// The active interaction is rendered as a modal above the status bar.
+	if current := m.activeInteraction; current != nil {
+		sb.WriteString("\n")
+		if current.approval != nil {
+			sb.WriteString(renderApprovalRequestDisplay(current.approval, current.showDiff))
+		} else if current.hitl != nil {
+			sb.WriteString(renderHITLQuestion(current.hitl, current.answer, current.selectedOption))
+		}
 	}
 	// Steer input prompt.
 	if m.steerInputMode {
 		sb.WriteString("\n> steer> ")
-		sb.WriteString(m.steerInput)
-		// Render a block cursor.
-		sb.WriteString("\u2588")
+		sb.WriteString(renderInputWithCaret(m.steerInput, m.steerCursor))
 	}
 	// Follow-up input prompt.
 	if m.followUpInputMode {
 		sb.WriteString("\n> followup> ")
-		sb.WriteString(m.followUpInput)
-		// Render a block cursor.
-		sb.WriteString("\u2588")
+		sb.WriteString(renderInputWithCaret(m.followUpInput, m.followUpCursor))
 	}
 	// Todo progress panel (persistent, above the status bar).
 	if todoPanel := m.renderTodoPanelLocked(); todoPanel != "" {
@@ -770,7 +1242,7 @@ func (m *teaModel) renderViewLocked() string {
 	}
 	// Status bar (model/turn/session/mode + tokens/cost). Shown when any
 	// status info is available.
-	if m.tokenMax > 0 || m.tokenCost > 0 || m.modelName != "" || m.turnCount > 0 || m.sessionID != "" || m.modeLabel != "" {
+	if m.hasTokenUsageStatus() || m.modelName != "" || m.turnCount > 0 || m.sessionID != "" || m.modeLabel != "" {
 		sb.WriteString("\n")
 		sb.WriteString(m.renderStatusBarLocked())
 	}
@@ -782,7 +1254,181 @@ func (m *teaModel) renderViewLocked() string {
 	if m.quitting {
 		sb.WriteString("\n[quitting...]")
 	}
-	return sb.String()
+	return m.withLocalSendGapNotice(sb.String())
+}
+
+// renderFooterLocked builds the actual non-modal footer before transcript
+// geometry is calculated, including wrapped status, input, todo, and gap rows.
+func (m *teaModel) renderFooterLocked() string {
+	var sb strings.Builder
+	if m.spinnerActive {
+		sb.WriteString("\n")
+		sb.WriteString(m.spinner.View())
+		sb.WriteString(" working...")
+	}
+	if m.assistantProgress != nil {
+		sb.WriteString("\n")
+		sb.WriteString(assistantGenerationProgressLabel)
+	}
+	if current := m.activeInteraction; current != nil {
+		sb.WriteString("\n")
+		if current.approval != nil {
+			sb.WriteString(renderApprovalRequestDisplay(current.approval, current.showDiff))
+		} else if current.hitl != nil {
+			sb.WriteString(renderHITLQuestion(current.hitl, current.answer, current.selectedOption))
+		}
+	}
+	if m.steerInputMode {
+		sb.WriteString("\n> steer> ")
+		sb.WriteString(renderInputWithCaret(m.steerInput, m.steerCursor))
+	}
+	if m.followUpInputMode {
+		sb.WriteString("\n> followup> ")
+		sb.WriteString(renderInputWithCaret(m.followUpInput, m.followUpCursor))
+	}
+	if m.liveStatus != "" {
+		sb.WriteString("\n")
+		sb.WriteString(m.liveStatus)
+	}
+	if m.transcriptSearchMode {
+		sb.WriteString("\n> search> ")
+		sb.WriteString(renderInputWithCaret(m.transcriptSearchInput, len(m.transcriptSearchInput)))
+	}
+	if todoPanel := m.renderTodoPanelLocked(); todoPanel != "" {
+		sb.WriteString("\n")
+		sb.WriteString(todoPanel)
+	}
+	if m.hasTokenUsageStatus() || m.modelName != "" || m.turnCount > 0 || m.sessionID != "" || m.modeLabel != "" {
+		sb.WriteString("\n")
+		sb.WriteString(m.renderStatusBarLocked())
+	}
+	if m.paused {
+		sb.WriteString("\n[PAUSED - press Space to resume]")
+	}
+	if m.quitting {
+		sb.WriteString("\n[quitting...]")
+	}
+	if m.runObservation.EventGapCount > 0 {
+		sb.WriteString(fmt.Sprintf("\n[Core event gaps: %d; live events may be incomplete]", m.runObservation.EventGapCount))
+	}
+	if status := m.renderDurablePublicationStatusLocked(); status != "" {
+		sb.WriteString("\n")
+		sb.WriteString(status)
+	}
+	return m.withLocalSendGapNotice(sb.String())
+}
+
+func (m *teaModel) renderDurablePublicationStatusLocked() string {
+	publication := m.durablePublication
+	switch publication.State {
+	case core.DurablePublicationUnbound, "":
+		return ""
+	case core.DurablePublicationPending:
+		return "[durable publication: pending]"
+	case core.DurablePublicationFailed:
+		return "[durable publication: not confirmed]"
+	case core.DurablePublicationSynced:
+		if !m.durablePublicationIsSavedLocked() {
+			return "[durable publication: unconfirmed]"
+		}
+		return fmt.Sprintf("[saved: %s]", m.runObservation.Outcome)
+	default:
+		return "[durable publication: unconfirmed]"
+	}
+}
+
+func (m *teaModel) durablePublicationIsSavedLocked() bool {
+	publication := m.durablePublication
+	observation := m.runObservation
+	return publication.State == core.DurablePublicationSynced &&
+		publication.RunID != "" && publication.RunID == observation.RunID &&
+		publication.SessionID != "" && publication.SessionID == m.transcriptSnapshot.PhysicalSessionID &&
+		publication.OwnerGeneration != "" && publication.OwnerGeneration == observation.OwnerGeneration &&
+		observation.ExecutionState == core.RunExecutionQuiescent &&
+		observation.Outcome == core.RunOutcomeSuccess && observation.EventGapCount == 0 && observation.TerminalEntryID != "" &&
+		observation.TerminalOutcome == observation.Outcome
+}
+
+func (m *teaModel) withLocalSendGapNotice(view string) string {
+	count := m.localSendGapCount.Load()
+	if count == 0 {
+		return view
+	}
+	if view != "" {
+		view += "\n"
+	}
+	return view + fmt.Sprintf("[Local TUI queue gaps: %d messages not delivered]", count)
+}
+
+func (m *teaModel) renderApprovalInteractionLocked(current *pendingInteraction) string {
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	rows := approvalDetailViewportRows(m.height)
+	total := walkApprovalDetailLines(current.approval, current.showDiff, approvalDetailWidth(width), nil)
+	if current.reviewedDetailCount != total {
+		current.reviewedDetailCount = total
+		current.reviewedDetailLines = nil
+	}
+	offset := normalizeApprovalDetailOffset(total, rows, current.detailOffset)
+	current.detailOffset = offset
+	if rows > 0 {
+		if current.reviewedDetailLines == nil {
+			current.reviewedDetailLines = make(map[int]struct{}, total)
+		}
+		end := min(total, offset+rows)
+		for line := offset; line < end; line++ {
+			current.reviewedDetailLines[line] = struct{}{}
+		}
+	}
+	reviewed := len(current.reviewedDetailLines) >= total && total > 0
+	view, _ := renderApprovalRequestPage(
+		current.approval,
+		current.showDiff,
+		current.token,
+		len(m.queuedInteractions),
+		width,
+		m.height,
+		rows,
+		offset,
+		reviewed,
+	)
+	return view
+}
+
+func (m *teaModel) scrollApprovalDetailsLocked(delta int) {
+	current := m.activeInteraction
+	if current == nil || current.approval == nil {
+		return
+	}
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	rows := approvalDetailViewportRows(m.height)
+	total := walkApprovalDetailLines(current.approval, current.showDiff, approvalDetailWidth(width), nil)
+	current.detailOffset = normalizeApprovalDetailOffset(total, rows, current.detailOffset+delta)
+}
+
+func normalizeApprovalDetailOffset(total, rows, offset int) int {
+	if rows <= 0 {
+		return 0
+	}
+	maxOffset := max(0, total-rows)
+	return min(max(offset, 0), maxOffset)
+}
+
+func approvalDetailsReviewed(current *pendingInteraction, total int) bool {
+	if current == nil || total <= 0 || len(current.reviewedDetailLines) < total {
+		return false
+	}
+	for line := 0; line < total; line++ {
+		if _, ok := current.reviewedDetailLines[line]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // statusBarLineStyle styles the first status bar line (model/turn/session/mode).
@@ -849,11 +1495,15 @@ func (m *teaModel) renderWidth() int {
 	return m.width
 }
 
-// renderStatusBarLocked formats a two-line status bar. The first line shows
-// model/turn/session/mode info; the second shows token usage and cost. When
-// token usage exceeds 80%, the second line is rendered in warning color.
+// renderStatusBarLocked formats a fixed-height status bar. The first line
+// shows model/turn/session/mode; the second shows token usage and cost; the
+// third shows bounded provenance or points to the full /cost detail.
 // The caller must hold m.mu.
 func (m *teaModel) renderStatusBarLocked() string {
+	statusWidth := m.width
+	if statusWidth <= 0 {
+		statusWidth = 80
+	}
 	// Line 1: model | turn #N | session | mode
 	parts := make([]string, 0, 4)
 	if m.modelName != "" {
@@ -874,9 +1524,18 @@ func (m *teaModel) renderStatusBarLocked() string {
 		parts = append(parts, m.modeLabel)
 	}
 	line1 := strings.Join(parts, " | ")
+	if lipgloss.Width(line1) > statusWidth && len(parts) > 1 {
+		fixedWidth := lipgloss.Width(strings.Join(parts[1:], " | ")) + lipgloss.Width(" | ")
+		modelBudget := statusWidth - fixedWidth
+		if modelBudget > 0 {
+			parts[0] = truncateStatusBarText(parts[0], modelBudget)
+			line1 = strings.Join(parts, " | ")
+		}
+	}
+	line1 = truncateStatusBarText(line1, statusWidth)
 
-	// Line 2: tokens/cost — only rendered when token data is available.
-	if m.tokenMax == 0 && m.tokenCost == 0 {
+	// Line 2: core token metric and cost. Evidence details stay on line 3.
+	if !m.hasTokenUsageStatus() {
 		if line1 == "" {
 			return ""
 		}
@@ -888,15 +1547,217 @@ func (m *teaModel) renderStatusBarLocked() string {
 	if maxT > 0 {
 		pct = total * 100 / maxT
 	}
-	line2 := fmt.Sprintf("Tokens: %d/%d (%d%%) | Cost: $%.4f", total, maxT, pct, m.tokenCost)
-	if pct > 80 {
+	usageSource := tokenUsageSourceLabel(m.tokenUsageSource)
+	usageDetails := "Tokens: unknown"
+	switch {
+	case usageSource == string(core.TokenUsageSourceEstimated):
+		usageDetails = fmt.Sprintf("Estimated tokens: %d/%d", total, maxT)
+	case usageSource == string(core.TokenUsageSourceReported) && m.tokenUnknownUsageAttempts > 0:
+		usageDetails = fmt.Sprintf("Known tokens: %d/%d", total, maxT)
+	case usageSource == string(core.TokenUsageSourceReported):
+		usageDetails = fmt.Sprintf("Tokens: %d/%d (%d%%)", total, maxT, pct)
+	}
+
+	costSources := tokenUsageCostSourceLabels(m.tokenCostSources)
+	unknownCost := m.tokenUnknownCostAttempts > 0 || slicesContain(costSources, string(core.TokenUsageCostUnknown))
+	costDetails := ""
+	switch {
+	case unknownCost && m.tokenCost <= 0:
+		costDetails = "Cost: unknown"
+	case slicesContain(costSources, string(core.TokenUsageCostEstimated)):
+		costDetails = fmt.Sprintf("Estimated cost: $%.4f", m.tokenCost)
+	case unknownCost:
+		costDetails = fmt.Sprintf("Known cost: $%.4f", m.tokenCost)
+	default:
+		costDetails = fmt.Sprintf("Cost: $%.4f", m.tokenCost)
+	}
+	line2 := truncateStatusBarText(fmt.Sprintf("%s | %s", usageDetails, costDetails), statusWidth)
+	usageComplete := m.tokenUnknownUsageAttempts == 0 && usageSource == string(core.TokenUsageSourceReported)
+	if usageComplete && pct > 80 {
 		line2 = statusBarWarnStyle.Render(line2)
 	}
 
+	provenance := tokenUsageProvenanceLine(m, statusWidth)
 	if line1 == "" {
-		return line2
+		return line2 + "\n" + provenance
 	}
-	return statusBarLineStyle.Render(line1) + "\n" + line2
+	return statusBarLineStyle.Render(line1) + "\n" + line2 + "\n" + provenance
+}
+
+func tokenUsageProvenanceLine(m *teaModel, width int) string {
+	if width > 0 && width < splitWidthThreshold {
+		costSource := tokenUsageNarrowCostSourceLabel(m.tokenCostSources)
+		if width < 70 {
+			return truncateStatusBarText(fmt.Sprintf(
+				"usage=%s (unknown:%d) cost=%s (unknown:%d) /cost",
+				tokenUsageSourceLabel(m.tokenUsageSource),
+				m.tokenUnknownUsageAttempts,
+				costSource,
+				m.tokenUnknownCostAttempts,
+			), width)
+		}
+		return truncateStatusBarText(fmt.Sprintf(
+			"usage=%s (unknown usage=%d) cost=%s (unknown cost=%d) /cost",
+			tokenUsageSourceLabel(m.tokenUsageSource),
+			m.tokenUnknownUsageAttempts,
+			costSource,
+			m.tokenUnknownCostAttempts,
+		), width)
+	}
+	return truncateStatusBarText(fmt.Sprintf(
+		"Sources: usage=%s/u%d cost=%s/c%d price=%s actual=%s",
+		tokenUsageSourceLabel(m.tokenUsageSource),
+		m.tokenUnknownUsageAttempts,
+		strings.Join(tokenUsageCostSourceLabels(m.tokenCostSources), ","),
+		m.tokenUnknownCostAttempts,
+		strings.Join(tokenUsagePriceSourceLabels(m.tokenPriceSources), ","),
+		tokenUsageProviderModels(m.tokenProviderModels),
+	), width)
+}
+
+func tokenUsageNarrowCostSourceLabel(sources []core.TokenUsageCostSource) string {
+	labels := tokenUsageCostSourceLabels(sources)
+	for _, preferred := range []string{
+		string(core.TokenUsageCostEstimated),
+		string(core.TokenUsageCostReported),
+	} {
+		for _, label := range labels {
+			if label == preferred {
+				return label
+			}
+		}
+	}
+	return string(core.TokenUsageCostUnknown)
+}
+
+func truncateStatusBarText(value string, width int) string {
+	if width <= 0 || lipgloss.Width(value) <= width {
+		return value
+	}
+	ellipsis := "…"
+	available := width - lipgloss.Width(ellipsis)
+	if available <= 0 {
+		return ellipsis
+	}
+	var clipped strings.Builder
+	used := 0
+	for _, r := range value {
+		runeText := string(r)
+		runeWidth := lipgloss.Width(runeText)
+		if used+runeWidth > available {
+			break
+		}
+		clipped.WriteRune(r)
+		used += runeWidth
+	}
+	return clipped.String() + ellipsis
+}
+
+func (m *teaModel) hasTokenUsageStatus() bool {
+	return m.tokenMax != 0 || m.tokenCost != 0 || m.tokenInput != 0 || m.tokenOutput != 0 ||
+		m.tokenUsageSource != "" || len(m.tokenCostSources) > 0 || len(m.tokenPriceSources) > 0 ||
+		len(m.tokenProviderModels) > 0 || m.tokenUnknownUsageAttempts > 0 || m.tokenUnknownCostAttempts > 0
+}
+
+func tokenUsageSourceLabel(source core.TokenUsageSource) string {
+	switch source {
+	case core.TokenUsageSourceReported, core.TokenUsageSourceEstimated:
+		return string(source)
+	default:
+		return string(core.TokenUsageSourceUnknown)
+	}
+}
+
+func tokenUsageCostSourceLabels(sources []core.TokenUsageCostSource) []string {
+	labels := make([]string, 0, len(sources))
+	seen := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		label := string(source)
+		switch source {
+		case core.TokenUsageCostReported, core.TokenUsageCostEstimated, core.TokenUsageCostUnknown:
+		default:
+			label = string(core.TokenUsageCostUnknown)
+		}
+		if _, ok := seen[label]; !ok {
+			seen[label] = struct{}{}
+			labels = append(labels, label)
+		}
+	}
+	if len(labels) == 0 {
+		return []string{string(core.TokenUsageCostUnknown)}
+	}
+	sort.Strings(labels)
+	return labels
+}
+
+func tokenUsagePriceSourceLabels(sources []core.TokenUsagePriceSource) []string {
+	labels := make([]string, 0, len(sources))
+	seen := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		label := string(source)
+		switch source {
+		case core.TokenUsagePriceProvider, core.TokenUsagePriceDefaultTier, core.TokenUsagePriceConfiguredTier, core.TokenUsagePriceUnknown:
+		default:
+			label = string(core.TokenUsagePriceUnknown)
+		}
+		if _, ok := seen[label]; !ok {
+			seen[label] = struct{}{}
+			labels = append(labels, label)
+		}
+	}
+	if len(labels) == 0 {
+		return []string{string(core.TokenUsagePriceUnknown)}
+	}
+	sort.Strings(labels)
+	return labels
+}
+
+func tokenUsageProviderModels(models []core.TokenUsageProviderModel) string {
+	pairs := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		provider := safeTokenIdentity(model.ProviderID)
+		modelID := safeTokenIdentity(model.ModelID)
+		if provider == "" {
+			provider = "unknown"
+		}
+		if modelID == "" {
+			modelID = "unknown"
+		}
+		pair := provider + "/" + modelID
+		if _, ok := seen[pair]; !ok {
+			seen[pair] = struct{}{}
+			pairs = append(pairs, pair)
+		}
+	}
+	if len(pairs) == 0 {
+		return "unknown"
+	}
+	sort.Strings(pairs)
+	return strings.Join(pairs, ",")
+}
+
+func safeTokenIdentity(value string) string {
+	clean := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(value))
+	runes := []rune(clean)
+	if len(runes) > 48 {
+		return string(runes[:48]) + "…"
+	}
+	return clean
+}
+
+func slicesContain(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- command factories ----------
@@ -907,10 +1768,34 @@ type agentEventMsg struct {
 	event AgentEvent
 }
 
+type agentEventStreamClosedMsg struct{}
+
+type quitRequestedMsg struct{}
+
+type approvalChannelClosedMsg struct{}
+
 // approvalRequestMsg wraps an ApprovalRequest delivered from the approval
 // channel so the model can render it as an interactive approval entry.
 type approvalRequestMsg struct {
 	req ApprovalRequest
+}
+
+type pendingInteraction struct {
+	token               uint64
+	approval            *ApprovalRequest
+	hitl                *HITLMessage
+	answer              string
+	selectedOption      int
+	showDiff            bool
+	detailOffset        int
+	reviewedDetailCount int
+	reviewedDetailLines map[int]struct{}
+	finished            chan struct{}
+}
+
+type interactionCanceledMsg struct {
+	token uint64
+	err   error
 }
 
 // waitForApproval returns a tea.Cmd that blocks until an ApprovalRequest
@@ -921,7 +1806,7 @@ func waitForApproval(ch <-chan ApprovalRequest, done <-chan struct{}) tea.Cmd {
 		select {
 		case req, ok := <-ch:
 			if !ok {
-				return nil
+				return approvalChannelClosedMsg{}
 			}
 			return approvalRequestMsg{req: req}
 		case <-done:
@@ -930,65 +1815,31 @@ func waitForApproval(ch <-chan ApprovalRequest, done <-chan struct{}) tea.Cmd {
 	}
 }
 
-// waitForEvent returns a tea.Cmd that blocks until an event arrives on the
-// stream. When the stream closes it returns tea.Quit so the program exits
-// cleanly; otherwise it returns the event wrapped in an agentEventMsg. When
-// done closes (the run is ending) it returns nil so the command goroutine can
-// exit instead of leaking.
-func waitForEvent(events <-chan AgentEvent, done <-chan struct{}) tea.Cmd {
-	return func() tea.Msg {
-		select {
-		case ev, ok := <-events:
-			if !ok {
-				return tea.Quit()
+// startMessagePump owns delivery from the app's bounded local queue into the
+// active Bubble Tea program. Run cancels and joins it before App.Done closes.
+func startMessagePump(ctx context.Context, messages <-chan Msg, queueSpace chan<- struct{}, send func(tea.Msg)) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg, ok := <-messages:
+				if !ok {
+					return
+				}
+				select {
+				case queueSpace <- struct{}{}:
+				default:
+				}
+				if send != nil {
+					send(tea.Msg(msg))
+				}
 			}
-			return agentEventMsg{event: ev}
-		case <-done:
-			return nil
 		}
-	}
-}
-
-// waitForMsg returns a tea.Cmd that blocks until a message is pushed via Send.
-// When the message channel closes it returns tea.Quit. When done closes it
-// returns nil so the command goroutine can exit instead of leaking.
-func waitForMsg(ch chan Msg, done <-chan struct{}) tea.Cmd {
-	return func() tea.Msg {
-		select {
-		case msg, ok := <-ch:
-			if !ok {
-				return tea.Quit()
-			}
-			return tea.Msg(msg)
-		case <-done:
-			return nil
-		}
-	}
-}
-
-// waitForQuit returns a tea.Cmd that blocks until the quit channel closes or
-// done closes, then returns tea.Quit. This makes Quit() race-free regardless of
-// whether the program has started. Selecting on done ensures the command
-// goroutine exits instead of leaking when the run ends (e.g. when the event
-// channel closes and the program exits via waitForEvent's tea.Quit).
-func waitForQuit(ch <-chan struct{}, done <-chan struct{}) tea.Cmd {
-	return func() tea.Msg {
-		select {
-		case <-ch:
-			return tea.Quit()
-		case <-done:
-			return nil
-		}
-	}
-}
-
-// send pushes a message onto the model's queue, dropping it when full so a slow
-// consumer never blocks the producer.
-func (m *teaModel) send(msg Msg) {
-	select {
-	case m.msgCh <- msg:
-	default:
-	}
+	}()
+	return done
 }
 
 // ---------- event handling ----------
@@ -1000,7 +1851,21 @@ func (m *teaModel) send(msg Msg) {
 // entries; other entries are expanded by default. It returns a tea.Cmd (a
 // spinner tick) when the spinner is activated, nil otherwise.
 func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
+	ev = ev.clone()
 	ctx := context.Background()
+	if isAssistantGenerationLifecycleEvent(ev.Type) {
+		m.updateAssistantGenerationProgress(ev)
+		return nil
+	}
+
+	// A done event may precede one producer's optional complete-message
+	// duplicate. Keep the digest only for the immediately following complete
+	// message; any intervening event makes later identical content a new message.
+	if ev.Type != "message" || ev.Incremental || ev.ContentType == ContentTypeUser {
+		m.mu.Lock()
+		m.hasFinalizedStreamDigest = false
+		m.mu.Unlock()
+	}
 
 	// Handle token_usage events by updating the status bar data and re-rendering.
 	if ev.Type == "token_usage" && ev.TokenUsage != nil {
@@ -1011,6 +1876,12 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		m.tokenOutput = ev.TokenUsage.OutputTokens
 		m.tokenMax = ev.TokenUsage.MaxTokens
 		m.tokenCost = ev.TokenUsage.Cost
+		m.tokenUnknownUsageAttempts = ev.TokenUsage.UnknownUsageAttempts
+		m.tokenUnknownCostAttempts = ev.TokenUsage.UnknownCostAttempts
+		m.tokenUsageSource = ev.TokenUsage.UsageSource
+		m.tokenCostSources = append([]core.TokenUsageCostSource(nil), ev.TokenUsage.CostSources...)
+		m.tokenPriceSources = append([]core.TokenUsagePriceSource(nil), ev.TokenUsage.PriceSources...)
+		m.tokenProviderModels = append([]core.TokenUsageProviderModel(nil), ev.TokenUsage.ProviderModels...)
 		if notify {
 			view = m.renderViewLocked()
 		}
@@ -1039,24 +1910,60 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		return nil
 	}
 
+	// A done event is a lifecycle marker. Its content can repeat the final
+	// answer, so it is never rendered as user-visible text.
+	if ev.Type == "done" {
+		m.mu.Lock()
+		finalizedStream := m.finishStreamingLocked(ctx)
+		m.toolCallGroup = nil
+		view := ""
+		if finalizedStream && m.shouldNotify() {
+			view = m.renderViewLocked()
+		}
+		m.mu.Unlock()
+		m.notify(view)
+		return nil
+	}
+	m.mu.Lock()
+	hasCanonicalTranscript := m.hasTranscriptSnapshot
+	m.mu.Unlock()
+	if hasCanonicalTranscript {
+		if ev.ContentType == ContentTypeToolCall || ev.ContentType == ContentTypeToolOutput || ev.ContentType == ContentTypeToolResult ||
+			ev.Type == "message" || ev.ContentType == ContentTypeAssistant {
+			return m.handleCanonicalTranscriptEvent(ev)
+		}
+		return m.handleCanonicalAuxiliaryEvent(ctx, ev)
+	}
+
 	if ev.Incremental {
 		m.handleIncremental(ctx, ev)
 		return nil
+	}
+
+	isAssistantMessage := ev.Type == "message" || ev.ContentType == ContentTypeAssistant
+	if isAssistantMessage {
+		m.closeToolCallGroup()
 	}
 
 	// Finalize any active streaming entry so the next incremental event
 	// creates a fresh entry rather than appending to a completed message.
 	m.mu.Lock()
 	hadStreaming := m.streamingEntry != nil
-	m.streamingEntry = nil
-	m.streamingBuf.Reset()
+	skipFinalDuplicate := false
+	if hadStreaming {
+		m.finishStreamingLocked(ctx)
+		skipFinalDuplicate = isAssistantMessage && m.matchesFinalizedStreamLocked(ev.Content)
+	} else if isAssistantMessage && m.matchesFinalizedStreamLocked(ev.Content) {
+		skipFinalDuplicate = true
+	}
 	m.mu.Unlock()
 
 	// When the loop finishes streaming, it sends a non-incremental "message"
 	// event carrying the complete content for downstream consumers (harness
-	// result, lastMessageEvent). The TUI has already rendered the content
-	// incrementally, so skip this duplicate.
-	if hadStreaming && ev.Type == "message" {
+	// result, lastMessageEvent). Skip it only when its source exactly matches
+	// the stream; a distinct message must remain visible.
+	if skipFinalDuplicate {
+		m.startToolCallGroup(ev.ToolCalls)
 		return nil
 	}
 
@@ -1065,25 +1972,6 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 	// entry is auto-collapsed with a "thought for Xs" duration summary.
 	if ev.ContentType != ContentTypeThinking && ev.ContentType != ContentTypeStreamingThink {
 		m.finalizeThinking()
-	}
-
-	// Track tool lifecycle: tool_call sets the entry to Running; tool_result
-	// updates the matching tool_call entry (by ToolCallID, fallback to last)
-	// to Completed or Error. The global spinner is activated when any tool is
-	// running and deactivated when all tools have completed.
-	activateSpinner := false
-	if ev.ContentType == ContentTypeToolCall {
-		m.mu.Lock()
-		m.spinnerActive = true
-		activateSpinner = true
-		m.mu.Unlock()
-	} else if ev.ContentType == ContentTypeToolResult {
-		m.mu.Lock()
-		m.updateToolResultStatusLocked(ev.ToolCallID, ev.IsError)
-		// Deactivate the global spinner only if no tool_call entries are still
-		// running.
-		m.spinnerActive = m.hasRunningToolLocked()
-		m.mu.Unlock()
 	}
 
 	start := time.Now()
@@ -1107,49 +1995,45 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		})
 	}
 
-	// tool_output events append to the originating tool_call entry (matched
-	// by ToolCallID) instead of creating a new top-level entry, keeping
-	// streaming output grouped with its tool call. Falls back to the last
-	// tool_call entry when ToolCallID is not populated.
-	if ct == ContentTypeToolOutput {
-		var view string
-		notify := m.shouldNotify()
-		appended := false
+	if ct == ContentTypeToolCall {
+		m.handleToolCallEvent(ev, out)
+		slog.DebugContext(ctx, "tui.app.render",
+			"content_type", ct,
+			"trace_id", ev.TraceID,
+			"span_id", ev.SpanID,
+			"latency_us", time.Since(start).Microseconds(),
+		)
+		// Commands run asynchronously; capture the value receiver while locked
+		// so this scheduled tick cannot read a later spinner update.
 		m.mu.Lock()
-		target := m.accordion.FindByToolCallID(ev.ToolCallID)
-		if target == nil {
-			for i := len(m.accordion.entries) - 1; i >= 0; i-- {
-				e := m.accordion.entries[i]
-				if e.ContentType == ContentTypeToolCall {
-					target = e
-					break
-				}
-			}
-		}
-		if target != nil {
-			if target.Full != "" {
-				target.Full += "\n" + out
-			} else {
-				target.Full = out
-			}
-			target.Summary = summarizeFirstLine(target.Full, 80)
-			appended = true
-			if notify {
-				view = m.renderViewLocked()
-			}
-		}
+		tick := m.spinner.Tick
 		m.mu.Unlock()
-		if appended {
-			m.notify(view)
-			slog.DebugContext(ctx, "tui.app.render",
-				"content_type", ct,
-				"trace_id", ev.TraceID,
-				"span_id", ev.SpanID,
-				"latency_us", time.Since(start).Microseconds(),
-			)
-			return nil
-		}
-		// Fall through to addEntry if no tool_call entry to append to.
+		return tick
+	}
+
+	if ct == ContentTypeToolResult {
+		m.handleToolResultEvent(ev, out)
+		slog.DebugContext(ctx, "tui.app.render",
+			"content_type", ct,
+			"trace_id", ev.TraceID,
+			"span_id", ev.SpanID,
+			"latency_us", time.Since(start).Microseconds(),
+		)
+		return nil
+	}
+
+	// Tool output joins only a uniquely associated call in the active
+	// assistant group. Missing, duplicate, and late IDs stay visible as
+	// standalone incomplete entries.
+	if ct == ContentTypeToolOutput {
+		m.handleToolOutputEvent(ev, out)
+		slog.DebugContext(ctx, "tui.app.render",
+			"content_type", ct,
+			"trace_id", ev.TraceID,
+			"span_id", ev.SpanID,
+			"latency_us", time.Since(start).Microseconds(),
+		)
+		return nil
 	}
 
 	// Respect the thinking visibility setting: "hide" skips the entry entirely,
@@ -1167,7 +2051,12 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		}
 	}
 
-	m.addEntry(ct, out, ev.ToolCallID)
+	if !isAssistantMessage || ev.Content != "" || len(ev.ToolCalls) == 0 {
+		m.addEntry(ct, out, ev.ToolCallID)
+	}
+	if isAssistantMessage {
+		m.startToolCallGroup(ev.ToolCalls)
+	}
 
 	// Apply thinking visibility: "collapse" forces the entry collapsed.
 	if ct == ContentTypeThinking && m.thinkingVisibility == "collapse" {
@@ -1181,19 +2070,6 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		m.mu.Unlock()
 	}
 
-	// Set tool_call entry status to Running and record the start time so the
-	// status icon (spinner) and duration display work correctly.
-	if ct == ContentTypeToolCall {
-		m.mu.Lock()
-		if len(m.accordion.entries) > 0 {
-			last := m.accordion.entries[len(m.accordion.entries)-1]
-			if last.ContentType == ContentTypeToolCall {
-				last.ToolStatus = ToolStatusRunning
-				last.ToolStartTime = time.Now()
-			}
-		}
-		m.mu.Unlock()
-	}
 	// Record thinking start time for duration display when auto-collapsed.
 	if ct == ContentTypeThinking {
 		m.mu.Lock()
@@ -1213,10 +2089,184 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		"latency_us", time.Since(start).Microseconds(),
 	)
 
-	if activateSpinner {
-		return func() tea.Msg { return m.spinner.Tick() }
-	}
 	return nil
+}
+
+func (m *teaModel) closeToolCallGroup() {
+	m.mu.Lock()
+	m.toolCallGroup = nil
+	m.mu.Unlock()
+}
+
+// startToolCallGroup renders assistant-proposed calls as pending entries and
+// builds an ephemeral, group-local ID index. Duplicate and empty IDs remain
+// visible but cannot be used to associate later events.
+func (m *teaModel) startToolCallGroup(calls []ToolCallData) {
+	if len(calls) == 0 {
+		return
+	}
+
+	group := newActiveToolCallGroup()
+	counts := make(map[string]int, len(calls))
+	for _, call := range calls {
+		if call.ID != "" {
+			counts[call.ID]++
+		}
+	}
+	for id, count := range counts {
+		if count > 1 {
+			group.ambiguous[id] = struct{}{}
+		}
+	}
+
+	var view string
+	notify := m.shouldNotify()
+	m.mu.Lock()
+	m.toolCallGroup = group
+	for _, call := range calls {
+		entry := entryFor(ContentTypeToolCall, renderToolCallDetails(call), m.interactive, call.ID)
+		entry.ToolStatus = ToolStatusPending
+		m.accordion.AddStandalone(entry)
+		if call.ID != "" && counts[call.ID] == 1 {
+			group.byID[call.ID] = entry
+		}
+	}
+	if notify {
+		view = m.renderViewLocked()
+	}
+	m.mu.Unlock()
+	m.notify(view)
+}
+
+func renderToolCallDetails(call ToolCallData) string {
+	name := call.Name
+	if name == "" {
+		name = "(unnamed)"
+	}
+	if call.ArgsUnavailable {
+		return safeTerminalText("[tool] " + name + " (detail unavailable)")
+	}
+
+	args := call.Args
+	if args == nil {
+		return safeTerminalText((&ToolCallRenderer{}).RenderCollapsed(name, nil))
+	}
+	payload, err := json.Marshal(args)
+	if err != nil {
+		return safeTerminalText("[tool] " + name + " (detail unavailable)")
+	}
+	if object, ok := args.(map[string]any); ok {
+		displayArgs := make(map[string]any, len(object))
+		for key, value := range object {
+			switch value.(type) {
+			case nil, bool, string,
+				int, int8, int16, int32, int64,
+				uint, uint8, uint16, uint32, uint64,
+				float32, float64:
+				displayArgs[key] = value
+			default:
+				raw, marshalErr := json.Marshal(value)
+				if marshalErr != nil {
+					return safeTerminalText("[tool] " + name + " (detail unavailable)")
+				}
+				displayArgs[key] = string(raw)
+			}
+		}
+		return safeTerminalText((&ToolCallRenderer{}).RenderCollapsed(name, displayArgs))
+	}
+	return safeTerminalText("[tool] " + name + "(" + string(payload) + ")")
+}
+
+// handleToolCallEvent confirms execution only when an actual tool_call event
+// arrives. When the active assistant group cannot identify the event uniquely,
+// the call remains visible as an independent running entry without creating a
+// guessed association.
+func (m *teaModel) handleToolCallEvent(ev AgentEvent, rendered string) {
+	var view string
+	notify := m.shouldNotify()
+	m.mu.Lock()
+	if m.toolCallGroup == nil {
+		m.toolCallGroup = newActiveToolCallGroup()
+	}
+	group := m.toolCallGroup
+	target, matched := group.lookup(ev.ToolCallID)
+	if matched && target.ToolStatus == ToolStatusPending {
+		target.ToolStatus = ToolStatusRunning
+		target.ToolStartTime = time.Now()
+	} else if matched {
+		// A second start with the same ID inside one group is ambiguous. Keep
+		// the original entry intact and show the observed call independently.
+		delete(group.byID, ev.ToolCallID)
+		group.ambiguous[ev.ToolCallID] = struct{}{}
+		matched = false
+	}
+	if !matched {
+		target = entryFor(ContentTypeToolCall, safeTerminalText(rendered), m.interactive, ev.ToolCallID)
+		target.ToolStatus = ToolStatusRunning
+		target.ToolStartTime = time.Now()
+		m.accordion.AddStandalone(target)
+		group.add(ev.ToolCallID, target)
+	}
+	m.spinnerActive = true
+	if notify {
+		view = m.renderViewLocked()
+	}
+	m.mu.Unlock()
+	m.notify(view)
+}
+
+func (m *teaModel) handleToolOutputEvent(ev AgentEvent, rendered string) {
+	var view string
+	notify := m.shouldNotify()
+	m.mu.Lock()
+	target, matched := m.toolCallGroup.lookup(ev.ToolCallID)
+	if matched {
+		if target.Full != "" {
+			target.Full += "\n" + rendered
+		} else {
+			target.Full = rendered
+		}
+	} else {
+		m.addIncompleteToolEventLocked(ContentTypeToolOutput, rendered, ev.ToolCallID, ev.IsError)
+	}
+	if notify {
+		view = m.renderViewLocked()
+	}
+	m.mu.Unlock()
+	m.notify(view)
+}
+
+func (m *teaModel) handleToolResultEvent(ev AgentEvent, rendered string) {
+	var view string
+	notify := m.shouldNotify()
+	m.mu.Lock()
+	target, matched := m.toolCallGroup.lookup(ev.ToolCallID)
+	if matched {
+		m.updateToolResultStatusLocked(ev.ToolCallID, ev.IsError)
+		child := entryFor(ContentTypeToolResult, rendered, m.interactive, ev.ToolCallID)
+		child.IsError = ev.IsError
+		target.Children = append(target.Children, child)
+		m.toolCallGroup.consume(ev.ToolCallID)
+	} else {
+		m.addIncompleteToolEventLocked(ContentTypeToolResult, rendered, ev.ToolCallID, ev.IsError)
+	}
+	m.spinnerActive = m.hasRunningToolLocked()
+	if notify {
+		view = m.renderViewLocked()
+	}
+	m.mu.Unlock()
+	m.notify(view)
+}
+
+func (m *teaModel) addIncompleteToolEventLocked(contentType, rendered, toolCallID string, isError bool) {
+	out := "[incomplete]"
+	if rendered != "" {
+		out += "\n" + rendered
+	}
+	entry := entryFor(contentType, out, m.interactive, toolCallID)
+	entry.Incomplete = true
+	entry.IsError = isError
+	m.accordion.AddStandalone(entry)
 }
 
 // handleIncremental processes a streaming token chunk. On the first chunk it
@@ -1224,10 +2274,10 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 // accumulated content and re-renders the entry in place, producing a live
 // typewriter effect.
 //
-// For markdown-style content (assistant text/code streaming) the rendering goes
-// through StreamingMarkdownRenderer, which caches already-rendered stable lines
-// and re-renders only the trailing unstable lines. This avoids re-parsing the
-// full accumulated buffer on every token chunk, which was O(n²).
+// The full source remains in streamingBuf while StreamingMarkdownRenderer
+// incrementally maintains a bounded terminal tail. Completion replaces that
+// preview with one full document render so Markdown semantics and all text are
+// preserved after the provisional stream ends.
 func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 	ct := ev.ContentType
 	r, ok := m.reg.Get(ct)
@@ -1240,8 +2290,20 @@ func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 	notify := m.shouldNotify()
 
 	m.mu.Lock()
+	if m.streamingEntry == nil {
+		// The previous finalized stream is no longer the active source. A new
+		// stream starts with a clean source buffer and renderer state.
+		m.streamingBuf.Reset()
+		m.hasFinalizedStreamDigest = false
+		m.streamingHash = sha256.New()
+		if m.streamingMD != nil {
+			m.streamingMD.Reset()
+		}
+	}
 	m.streamingBuf.WriteString(ev.Content)
-	accumulated := m.streamingBuf.String()
+	if m.streamingHash != nil {
+		_, _ = m.streamingHash.Write([]byte(ev.Content))
+	}
 
 	theme := Theme(DarkTheme{})
 	if m.themeMgr != nil {
@@ -1253,28 +2315,11 @@ func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 		ContentType: ct,
 	}
 
-	// A nil streamingEntry marks the first chunk of a new streaming message.
-	// Reset the streaming markdown cache before rendering so stale rendered
-	// lines from the previous message are dropped.
-	if m.streamingEntry == nil && m.streamingMD != nil {
-		m.streamingMD.Reset()
+	if m.streamingMD == nil {
+		m.streamingMD = NewStreamingMarkdownRenderer(NewMarkdownRenderer())
 	}
-
-	// Render the accumulated content so styles wrap the full message.
-	out := accumulated
-	if ok && r != nil {
-		if m.isStreamingMarkdown(ct) {
-			// Incremental markdown rendering: cache stable lines and only
-			// re-render the unstable tail, avoiding an O(n²) full re-render
-			// per streaming token.
-			if m.streamingMD == nil {
-				m.streamingMD = NewStreamingMarkdownRenderer(NewMarkdownRenderer())
-			}
-			out = m.streamingMD.RenderIncremental(ctx, accumulated, opts)
-		} else {
-			out = r.Render(ctx, accumulated, opts)
-		}
-	}
+	window := m.streamingMD.AppendChunkLines(ctx, ev.Content, opts)
+	out := m.renderStreamingPreviewLocked(ctx, ct, r, ok, opts, window)
 
 	if m.streamingEntry == nil {
 		entry := entryFor(ct, out, m.interactive, "")
@@ -1294,6 +2339,161 @@ func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 	m.notify(view)
 }
 
+// renderStreamingPreviewLocked serializes only the visible tail of the bounded
+// renderer window. The complete event source remains in streamingBuf until the
+// final Markdown render, while offscreen live text remains recoverable there.
+func (m *teaModel) renderStreamingPreviewLocked(
+	ctx context.Context,
+	contentType string,
+	renderer Renderer,
+	rendererAvailable bool,
+	opts RenderOpts,
+	window StreamRenderLines,
+) string {
+	preview := streamingPreviewText(window, m.streamingPreviewRowsLocked())
+	if rendererAvailable && renderer != nil && !m.isStreamingMarkdown(contentType) {
+		// Non-Markdown streaming renderers (for example, thinking) retain their
+		// style, but only receive the bounded safe preview.
+		return renderer.Render(ctx, preview, opts)
+	}
+	return preview
+}
+
+func (m *teaModel) streamingPreviewRowsLocked() int {
+	if m.height <= 0 {
+		return 24
+	}
+	// Keep the live answer to the body area beneath the footer, status, and
+	// optional prompts. A marker and at least one tail row remain visible.
+	return max(2, m.height-8)
+}
+
+func (m *teaModel) refreshStreamingPreviewLocked(ctx context.Context) {
+	if m.streamingEntry == nil || m.streamingMD == nil {
+		return
+	}
+	contentType := m.streamingEntry.ContentType
+	renderer, ok := m.reg.Get(contentType)
+	if !ok || renderer == nil {
+		contentType = DefaultContentType
+		renderer, ok = m.reg.Get(DefaultContentType)
+	}
+	theme := Theme(DarkTheme{})
+	if m.themeMgr != nil {
+		theme = m.themeMgr.Get()
+	}
+	opts := RenderOpts{Theme: theme, Width: m.renderWidth(), ContentType: contentType}
+	m.streamingMD.Resize(ctx, opts)
+	m.streamingEntry.Full = m.renderStreamingPreviewLocked(ctx, contentType, renderer, ok, opts, m.streamingMD.WindowLines())
+	m.streamingEntry.Summary = summarizeFirstLine(m.streamingEntry.Full, 80)
+}
+
+// finishStreamingLocked replaces the bounded live preview with a complete
+// final render while the caller still owns the full source in streamingBuf.
+// It must be called with m.mu held.
+func (m *teaModel) finishStreamingLocked(ctx context.Context) bool {
+	if m.streamingEntry == nil {
+		return false
+	}
+
+	source := m.streamingBuf.String()
+	if m.streamingHash != nil {
+		copy(m.finalizedStreamDigest[:], m.streamingHash.Sum(nil))
+	} else {
+		m.finalizedStreamDigest = sha256.Sum256([]byte(source))
+	}
+	m.finalizedStreamSourceBytes = len(source)
+	m.hasFinalizedStreamDigest = true
+
+	contentType := m.streamingEntry.ContentType
+	renderer, ok := m.reg.Get(contentType)
+	if !ok || renderer == nil {
+		contentType = DefaultContentType
+		renderer, _ = m.reg.Get(DefaultContentType)
+	}
+	theme := Theme(DarkTheme{})
+	if m.themeMgr != nil {
+		theme = m.themeMgr.Get()
+	}
+	output := source
+	if renderer != nil {
+		output = renderer.Render(ctx, source, RenderOpts{
+			Theme: theme, Width: m.renderWidth(), ContentType: contentType,
+		})
+	}
+	m.streamingEntry.Full = output
+	m.streamingEntry.Summary = summarizeFirstLine(output, 80)
+	m.streamingEntry = nil
+	m.streamingBuf.Reset()
+	m.streamingHash = nil
+	if m.streamingMD != nil {
+		m.streamingMD.Reset()
+	}
+	return true
+}
+
+// matchesFinalizedStreamLocked consumes the optional full-message duplicate
+// that some producers emit after done. The digest keeps duplicate detection
+// constant-space rather than retaining another copy of the streamed answer.
+// It must be called with m.mu held.
+func (m *teaModel) matchesFinalizedStreamLocked(content string) bool {
+	if !m.hasFinalizedStreamDigest {
+		return false
+	}
+	matched := len(content) == m.finalizedStreamSourceBytes && sha256.Sum256([]byte(content)) == m.finalizedStreamDigest
+	m.hasFinalizedStreamDigest = false
+	return matched
+}
+
+func streamingPreviewText(window StreamRenderLines, maxLines int) string {
+	if maxLines < 2 {
+		maxLines = 2
+	}
+	lineCount := len(window.Lines)
+	if window.HasCurrentLine {
+		lineCount++
+	}
+	if window.HasNextLine {
+		lineCount++
+	}
+	hidden := window.HasHiddenPrefix || lineCount > maxLines
+	visibleLineLimit := maxLines
+	if hidden {
+		visibleLineLimit--
+	}
+	firstVisibleLine := max(0, lineCount-visibleLineLimit)
+	var preview strings.Builder
+	preview.Grow(maxLines * 80)
+	if hidden {
+		preview.WriteString("[earlier content hidden]")
+	}
+	hasLine := hidden
+	appendLine := func(line string) {
+		if hasLine {
+			preview.WriteByte('\n')
+		}
+		preview.WriteString(line)
+		hasLine = true
+	}
+	lineIndex := 0
+	for _, line := range window.Lines {
+		if lineIndex >= firstVisibleLine {
+			appendLine(line)
+		}
+		lineIndex++
+	}
+	if window.HasCurrentLine {
+		if lineIndex >= firstVisibleLine {
+			appendLine(window.CurrentLine)
+		}
+		lineIndex++
+	}
+	if window.HasNextLine && lineIndex >= firstVisibleLine {
+		appendLine(window.NextLine)
+	}
+	return preview.String()
+}
+
 // isStreamingMarkdown reports whether an incremental event of content type ct
 // should be rendered as streaming markdown via StreamingMarkdownRenderer
 // instead of the registry's renderer. Assistant text (markdown and the
@@ -1301,7 +2501,7 @@ func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 // faint plain text and keeps the registry's StreamingThinkingRenderer.
 func (m *teaModel) isStreamingMarkdown(ct string) bool {
 	switch ct {
-	case ContentTypeMarkdown, ContentTypeStreaming, ContentTypeStreamingCode:
+	case ContentTypeAssistant, ContentTypeMarkdown, ContentTypeStreaming, ContentTypeStreamingCode:
 		return true
 	}
 	return false
@@ -1428,16 +2628,17 @@ func stripANSIPlain(s string) string {
 func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.activeInteraction != nil {
+		return m.handleInteractionKeyLocked(msg)
+	}
 	if m.steerInputMode {
 		return m.handleSteerKeyLocked(msg)
 	}
 	if m.followUpInputMode {
 		return m.handleFollowUpKeyLocked(msg)
 	}
-	// When an approval request is pending, intercept y/a/n/d keys to resolve
-	// it before any other key processing.
-	if m.pendingApproval != nil {
-		return m.handleApprovalKeyLocked(msg)
+	if m.transcriptSearchMode {
+		return m.handleTranscriptSearchKeyLocked(msg)
 	}
 	// The help overlay is modal: while open only Esc or '?' close it and
 	// all other keys are ignored. It does not affect agent event flow.
@@ -1458,9 +2659,33 @@ func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case tea.KeySpace:
 		m.togglePauseLocked()
 	case tea.KeyUp:
-		m.accordion.Select(-1)
+		if m.hasTranscriptSnapshot {
+			viewport := m.selectedTranscriptViewportLocked()
+			m.selectedTranscriptKey = viewport.SelectRelative(-1)
+		} else {
+			m.accordion.Select(-1)
+		}
 	case tea.KeyDown:
-		m.accordion.Select(1)
+		if m.hasTranscriptSnapshot {
+			viewport := m.selectedTranscriptViewportLocked()
+			m.selectedTranscriptKey = viewport.SelectRelative(1)
+		} else {
+			m.accordion.Select(1)
+		}
+	case tea.KeyPgUp:
+		if m.hasTranscriptSnapshot {
+			viewport := m.selectedTranscriptViewportLocked()
+			viewport.ScrollLines(-max(1, viewport.height-1))
+		}
+	case tea.KeyPgDown:
+		if m.hasTranscriptSnapshot {
+			viewport := m.selectedTranscriptViewportLocked()
+			viewport.ScrollLines(max(1, viewport.height-1))
+		}
+	case tea.KeyEnd:
+		if m.hasTranscriptSnapshot {
+			m.selectedTranscriptViewportLocked().End()
+		}
 	case tea.KeyEnter:
 		m.accordion.Toggle()
 	case tea.KeyRunes:
@@ -1480,9 +2705,38 @@ func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.followUpInputMode = true
 			m.followUpInput = ""
 			m.followUpCursor = 0
+		case "/":
+			if m.hasTranscriptSnapshot {
+				m.transcriptSearchMode = true
+				m.transcriptSearchInput = ""
+			}
 		}
 	}
 	return nil
+}
+
+// moveInputCursorLeft moves a byte offset to the previous UTF-8 rune boundary.
+func moveInputCursorLeft(input string, cursor int) int {
+	if cursor <= 0 {
+		return 0
+	}
+	if cursor > len(input) {
+		cursor = len(input)
+	}
+	_, size := utf8.DecodeLastRuneInString(input[:cursor])
+	return cursor - size
+}
+
+// moveInputCursorRight moves a byte offset to the next UTF-8 rune boundary.
+func moveInputCursorRight(input string, cursor int) int {
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(input) {
+		return len(input)
+	}
+	_, size := utf8.DecodeRuneInString(input[cursor:])
+	return cursor + size
 }
 
 // handleSteerKeyLocked processes a key received while in steer input mode. The
@@ -1511,6 +2765,10 @@ func (m *teaModel) handleSteerKeyLocked(msg tea.KeyMsg) tea.Cmd {
 			m.steerInput = m.steerInput[:m.steerCursor-size] + m.steerInput[m.steerCursor:]
 			m.steerCursor -= size
 		}
+	case tea.KeyLeft:
+		m.steerCursor = moveInputCursorLeft(m.steerInput, m.steerCursor)
+	case tea.KeyRight:
+		m.steerCursor = moveInputCursorRight(m.steerInput, m.steerCursor)
 	case tea.KeyCtrlA:
 		m.steerCursor = 0
 	case tea.KeyCtrlE:
@@ -1521,6 +2779,9 @@ func (m *teaModel) handleSteerKeyLocked(msg tea.KeyMsg) tea.Cmd {
 		// Ctrl+U clears the steer input line.
 		m.steerInput = ""
 		m.steerCursor = 0
+	case tea.KeySpace:
+		m.steerInput = m.steerInput[:m.steerCursor] + " " + m.steerInput[m.steerCursor:]
+		m.steerCursor++
 	case tea.KeyRunes:
 		for _, r := range msg.Runes {
 			m.steerInput = m.steerInput[:m.steerCursor] + string(r) + m.steerInput[m.steerCursor:]
@@ -1558,6 +2819,10 @@ func (m *teaModel) handleFollowUpKeyLocked(msg tea.KeyMsg) tea.Cmd {
 			m.followUpInput = m.followUpInput[:m.followUpCursor-size] + m.followUpInput[m.followUpCursor:]
 			m.followUpCursor -= size
 		}
+	case tea.KeyLeft:
+		m.followUpCursor = moveInputCursorLeft(m.followUpInput, m.followUpCursor)
+	case tea.KeyRight:
+		m.followUpCursor = moveInputCursorRight(m.followUpInput, m.followUpCursor)
 	case tea.KeyCtrlA:
 		m.followUpCursor = 0
 	case tea.KeyCtrlE:
@@ -1568,6 +2833,9 @@ func (m *teaModel) handleFollowUpKeyLocked(msg tea.KeyMsg) tea.Cmd {
 		// Ctrl+U clears the follow-up input line.
 		m.followUpInput = ""
 		m.followUpCursor = 0
+	case tea.KeySpace:
+		m.followUpInput = m.followUpInput[:m.followUpCursor] + " " + m.followUpInput[m.followUpCursor:]
+		m.followUpCursor++
 	case tea.KeyRunes:
 		for _, r := range msg.Runes {
 			m.followUpInput = m.followUpInput[:m.followUpCursor] + string(r) + m.followUpInput[m.followUpCursor:]
@@ -1594,25 +2862,17 @@ func (m *teaModel) finalizeThinking() {
 	}
 }
 
-// updateToolResultStatusLocked finds the tool_call entry matching toolCallID
-// (or the last tool_call entry as fallback) and updates its status to
-// Completed (or Error if isError is true). The caller must hold m.mu.
+// updateToolResultStatusLocked updates only a uniquely associated entry in the
+// active assistant group. The caller must hold m.mu.
 func (m *teaModel) updateToolResultStatusLocked(toolCallID string, isError bool) {
-	target := m.accordion.FindByToolCallID(toolCallID)
-	if target == nil {
-		for i := len(m.accordion.entries) - 1; i >= 0; i-- {
-			e := m.accordion.entries[i]
-			if e.ContentType == ContentTypeToolCall {
-				target = e
-				break
-			}
-		}
-	}
-	if target == nil {
+	target, matched := m.toolCallGroup.lookup(toolCallID)
+	if !matched {
 		return
 	}
 	if target.ToolStatus == ToolStatusRunning || target.ToolStatus == ToolStatusPending {
-		target.ToolDuration = time.Since(target.ToolStartTime)
+		if !target.ToolStartTime.IsZero() {
+			target.ToolDuration = time.Since(target.ToolStartTime)
+		}
 		if isError {
 			target.ToolStatus = ToolStatusError
 		} else {
@@ -1632,29 +2892,341 @@ func (m *teaModel) hasRunningToolLocked() bool {
 	return false
 }
 
-// handleApprovalKeyLocked processes a key while an approval request is pending.
-// y allows once, a always allows, n denies, and d toggles the diff preview
-// (currently informational only). Any other key is ignored. The caller must
-// hold m.mu.
-func (m *teaModel) handleApprovalKeyLocked(msg tea.KeyMsg) tea.Cmd {
-	if msg.Type != tea.KeyRunes {
+// handleInteractionKeyLocked gives the active modal exclusive keyboard focus.
+// The caller must hold m.mu.
+func (m *teaModel) handleInteractionKeyLocked(msg tea.KeyMsg) tea.Cmd {
+	if m.activeInteraction == nil {
 		return nil
 	}
-	switch string(msg.Runes) {
-	case "y":
-		m.pendingApproval.ResponseCh <- ApprovalResponse{Decision: ApprovalAllow}
-		m.pendingApproval = nil
-	case "a":
-		m.pendingApproval.ResponseCh <- ApprovalResponse{Decision: ApprovalAlwaysAllow}
-		m.pendingApproval = nil
-	case "n":
-		m.pendingApproval.ResponseCh <- ApprovalResponse{Decision: ApprovalDeny}
-		m.pendingApproval = nil
-	case "d":
-		// Diff preview is always shown when available; 'd' is a no-op
-		// placeholder for future toggle behavior.
+	if m.activeInteraction.approval != nil {
+		return m.handleApprovalKeyLocked(msg)
+	}
+	if m.activeInteraction.hitl != nil {
+		return m.handleHITLKeyLocked(msg)
 	}
 	return nil
+}
+
+func (m *teaModel) approvalDetailsReviewedLocked() bool {
+	current := m.activeInteraction
+	if current == nil || current.approval == nil {
+		return false
+	}
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	total := walkApprovalDetailLines(current.approval, current.showDiff, approvalDetailWidth(width), nil)
+	return approvalDetailsReviewed(current, total)
+}
+
+// handleApprovalKeyLocked processes a key while an approval request is active.
+// y allows once, n denies, and Esc denies the active request. Reusable approval
+// remains unavailable until a trusted scope is supplied. q or Ctrl+C resolves
+// every queued waiter and cancels the turn. The caller must hold m.mu.
+func (m *teaModel) handleApprovalKeyLocked(msg tea.KeyMsg) tea.Cmd {
+	if current := m.activeInteraction; current != nil && current.approval != nil && current.approval.Context != nil {
+		if err := current.approval.Context.Err(); err != nil {
+			m.cancelInteractionLocked(current.token, err)
+			return nil
+		}
+	}
+	switch msg.Type {
+	case tea.KeyUp:
+		m.scrollApprovalDetailsLocked(-1)
+		return nil
+	case tea.KeyDown:
+		m.scrollApprovalDetailsLocked(1)
+		return nil
+	case tea.KeyPgUp:
+		if rows := approvalDetailViewportRows(m.height); rows > 0 {
+			m.scrollApprovalDetailsLocked(-max(1, rows-1))
+		}
+		return nil
+	case tea.KeyPgDown:
+		if rows := approvalDetailViewportRows(m.height); rows > 0 {
+			m.scrollApprovalDetailsLocked(max(1, rows-1))
+		}
+		return nil
+	case tea.KeyEsc:
+		m.resolveApprovalLocked(ApprovalDeny)
+	case tea.KeyCtrlC:
+		m.cancelInteractionsLocked()
+		return m.quitLocked()
+	case tea.KeyRunes:
+		switch string(msg.Runes) {
+		case "y":
+			if !m.approvalDetailsReviewedLocked() {
+				return nil
+			}
+			m.resolveApprovalLocked(ApprovalAllow)
+		case "n":
+			m.resolveApprovalLocked(ApprovalDeny)
+		case "d":
+			if m.activeInteraction != nil && m.activeInteraction.approval != nil && m.activeInteraction.approval.DiffPreview != "" {
+				m.activeInteraction.showDiff = !m.activeInteraction.showDiff
+				m.activeInteraction.detailOffset = 0
+				m.activeInteraction.reviewedDetailLines = nil
+				m.activeInteraction.reviewedDetailCount = 0
+			}
+		case "a":
+			// Reusable approval is unavailable until the caller supplies an
+			// authoritative scope that the TUI can display and the policy can
+			// enforce. Never infer that scope from the tool name or arguments.
+		case "q":
+			m.cancelInteractionsLocked()
+			return m.quitLocked()
+		}
+	}
+	return nil
+}
+
+func (m *teaModel) handleHITLKeyLocked(msg tea.KeyMsg) tea.Cmd {
+	current := m.activeInteraction
+	if current == nil || current.hitl == nil {
+		return nil
+	}
+	if current.hitl.Context != nil && current.hitl.Context.Err() != nil {
+		m.cancelInteractionLocked(current.token, current.hitl.Context.Err())
+		return nil
+	}
+	if msg.Type == tea.KeyEsc {
+		m.respondHITLLocked(HITLResponse{Err: core.ErrHITLQuestionCanceled})
+		m.finishActiveInteractionLocked()
+		return nil
+	}
+	if msg.Type == tea.KeyCtrlC {
+		m.cancelInteractionsLocked()
+		return m.quitLocked()
+	}
+
+	if len(current.hitl.Options) > 0 {
+		switch msg.Type {
+		case tea.KeyUp:
+			if current.selectedOption > 0 {
+				current.selectedOption--
+			}
+		case tea.KeyDown:
+			if current.selectedOption+1 < len(current.hitl.Options) {
+				current.selectedOption++
+			}
+		case tea.KeyEnter:
+			m.respondHITLLocked(HITLResponse{Answer: current.hitl.Options[current.selectedOption]})
+			m.finishActiveInteractionLocked()
+		case tea.KeyRunes:
+			if len(msg.Runes) == 1 && msg.Runes[0] >= '1' && msg.Runes[0] <= '9' {
+				option := int(msg.Runes[0] - '1')
+				if option < len(current.hitl.Options) {
+					m.respondHITLLocked(HITLResponse{Answer: current.hitl.Options[option]})
+					m.finishActiveInteractionLocked()
+				}
+			}
+		}
+		return nil
+	}
+
+	switch msg.Type {
+	case tea.KeyEnter:
+		m.respondHITLLocked(HITLResponse{Answer: current.answer})
+		m.finishActiveInteractionLocked()
+	case tea.KeyBackspace:
+		if current.answer != "" {
+			_, size := utf8.DecodeLastRuneInString(current.answer)
+			current.answer = current.answer[:len(current.answer)-size]
+		}
+	case tea.KeyRunes:
+		current.answer += string(msg.Runes)
+	case tea.KeySpace:
+		current.answer += " "
+	}
+	return nil
+}
+
+func (m *teaModel) enqueueApprovalLocked(req ApprovalRequest) (uint64, <-chan struct{}) {
+	if req.Context != nil && req.Context.Err() != nil {
+		respondApproval(req.ResponseCh, ApprovalDeny)
+		return 0, nil
+	}
+	interaction := pendingInteraction{approval: &req, showDiff: true, finished: make(chan struct{})}
+	token := m.enqueueInteractionLocked(interaction)
+	return token, interaction.finished
+}
+
+func (m *teaModel) enqueueHITLLocked(req HITLMessage) (uint64, <-chan struct{}) {
+	req.Options = append([]string(nil), req.Options...)
+	finished := make(chan struct{})
+	interaction := pendingInteraction{hitl: &req, finished: finished}
+	token := m.enqueueInteractionLocked(interaction)
+	return token, finished
+}
+
+func (m *teaModel) enqueueInteractionLocked(interaction pendingInteraction) uint64 {
+	m.interactionSequence++
+	interaction.token = m.interactionSequence
+	if m.activeInteraction == nil {
+		m.activeInteraction = &interaction
+		return interaction.token
+	}
+	m.queuedInteractions = append(m.queuedInteractions, interaction)
+	return interaction.token
+}
+
+func (m *teaModel) finishActiveInteractionLocked() {
+	if m.activeInteraction != nil && m.activeInteraction.finished != nil {
+		close(m.activeInteraction.finished)
+	}
+	m.activeInteraction = nil
+	if len(m.queuedInteractions) == 0 {
+		return
+	}
+	next := m.queuedInteractions[0]
+	m.queuedInteractions = m.queuedInteractions[1:]
+	m.activeInteraction = &next
+}
+
+func (m *teaModel) resolveApprovalLocked(decision ApprovalDecision) {
+	if m.activeInteraction == nil || m.activeInteraction.approval == nil {
+		return
+	}
+	if ctx := m.activeInteraction.approval.Context; ctx != nil && ctx.Err() != nil {
+		m.cancelInteractionLocked(m.activeInteraction.token, ctx.Err())
+		return
+	}
+	responseCh := m.activeInteraction.approval.ResponseCh
+	respondApproval(responseCh, decision)
+	m.finishActiveInteractionLocked()
+}
+
+func (m *teaModel) respondHITLLocked(response HITLResponse) {
+	if m.activeInteraction == nil || m.activeInteraction.hitl == nil {
+		return
+	}
+	sendHITLResponse(m.activeInteraction.hitl.ResponseCh, response)
+}
+
+func sendHITLResponse(responseCh chan HITLResponse, response HITLResponse) {
+	if responseCh == nil {
+		return
+	}
+	select {
+	case responseCh <- response:
+	default:
+	}
+}
+
+func (m *teaModel) cancelInteractionLocked(token uint64, err error) {
+	if err == nil {
+		err = context.Canceled
+	}
+	if current := m.activeInteraction; current != nil && current.token == token {
+		m.cancelPendingInteractionLocked(current, err)
+		m.finishActiveInteractionLocked()
+		return
+	}
+	for i := range m.queuedInteractions {
+		queued := &m.queuedInteractions[i]
+		if queued.token != token {
+			continue
+		}
+		m.cancelPendingInteractionLocked(queued, err)
+		m.queuedInteractions = append(m.queuedInteractions[:i], m.queuedInteractions[i+1:]...)
+		return
+	}
+}
+
+func (m *teaModel) cancelPendingInteractionLocked(interaction *pendingInteraction, err error) {
+	if interaction.approval != nil {
+		respondApproval(interaction.approval.ResponseCh, ApprovalDeny)
+	}
+	if interaction.hitl != nil {
+		sendHITLResponse(interaction.hitl.ResponseCh, HITLResponse{Err: err})
+	}
+	if interaction.finished != nil {
+		close(interaction.finished)
+		interaction.finished = nil
+	}
+}
+
+func (m *teaModel) cancelApprovalInteractionsLocked() {
+	remaining := make([]pendingInteraction, 0, len(m.queuedInteractions)+1)
+	if m.activeInteraction != nil {
+		if m.activeInteraction.approval != nil {
+			m.cancelPendingInteractionLocked(m.activeInteraction, context.Canceled)
+		} else {
+			remaining = append(remaining, *m.activeInteraction)
+		}
+		m.activeInteraction = nil
+	}
+	for i := range m.queuedInteractions {
+		interaction := &m.queuedInteractions[i]
+		if interaction.approval != nil {
+			m.cancelPendingInteractionLocked(interaction, context.Canceled)
+			continue
+		}
+		remaining = append(remaining, *interaction)
+	}
+	m.queuedInteractions = nil
+	if len(remaining) == 0 {
+		return
+	}
+	m.activeInteraction = &remaining[0]
+	if len(remaining) > 1 {
+		m.queuedInteractions = append(m.queuedInteractions, remaining[1:]...)
+	}
+}
+
+func respondApproval(responseCh chan ApprovalResponse, decision ApprovalDecision) {
+	if responseCh == nil {
+		return
+	}
+	select {
+	case responseCh <- ApprovalResponse{Decision: decision}:
+	default:
+	}
+}
+
+func (m *teaModel) cancelInteractionsLocked() {
+	if current := m.activeInteraction; current != nil {
+		m.cancelPendingInteractionLocked(current, context.Canceled)
+	}
+	for i := range m.queuedInteractions {
+		queued := &m.queuedInteractions[i]
+		m.cancelPendingInteractionLocked(queued, context.Canceled)
+	}
+	m.activeInteraction = nil
+	m.queuedInteractions = nil
+}
+
+func (m *teaModel) handleHITLMessage(msg HITLMessage) (tea.Model, tea.Cmd) {
+	if msg.Context != nil && msg.Context.Err() != nil {
+		sendHITLResponse(msg.ResponseCh, HITLResponse{Err: msg.Context.Err()})
+		return m, nil
+	}
+	m.mu.Lock()
+	token, finished := m.enqueueHITLLocked(msg)
+	view := ""
+	if m.shouldNotify() {
+		view = m.renderViewLocked()
+	}
+	m.mu.Unlock()
+	m.notify(view)
+	return m, waitForInteractionCancel(msg.Context, token, finished, m.runDone)
+}
+
+func waitForInteractionCancel(ctx context.Context, token uint64, finished, runDone <-chan struct{}) tea.Cmd {
+	if ctx == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case <-finished:
+			return nil
+		case <-ctx.Done():
+			return interactionCanceledMsg{token: token, err: ctx.Err()}
+		case <-runDone:
+			return nil
+		}
+	}
 }
 
 // togglePauseLocked flips the paused state and invokes the matching callback.
@@ -1676,6 +3248,12 @@ func (m *teaModel) togglePauseLocked() {
 // quitLocked marks the model as quitting, invokes the cancel callback, and
 // returns the tea.Quit command. The caller must hold m.mu.
 func (m *teaModel) quitLocked() tea.Cmd {
+	if m.deferQuitUntilTranscriptRefresh {
+		if m.cancelCallback != nil {
+			m.cancelCallback()
+		}
+		return nil
+	}
 	m.quitting = true
 	if m.cancelCallback != nil {
 		m.cancelCallback()

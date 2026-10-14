@@ -152,3 +152,27 @@ func TestOverflowStreamNoOverflowWorksNormally(t *testing.T) {
 	assert.Equal(t, []string{"a", "b", "c"}, contents)
 	assert.Equal(t, int32(1), callCount.Load(), "should not retry on success")
 }
+
+func TestOverflowStreamRejectsClosedStreamWithoutFinalChunk(t *testing.T) {
+	inner := &mockModel{
+		streamFn: func(context.Context, []Message, ...Option) (<-chan MessageChunk, error) {
+			ch := make(chan MessageChunk)
+			close(ch)
+			return ch, nil
+		},
+	}
+	wrapped := NewOverflowRecoveryMiddleware().WrapModel(inner)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	ch, err := wrapped.Stream(ctx, nil)
+	require.NoError(t, err)
+	var streamErr error
+	for chunk := range ch {
+		if chunk.Error != nil {
+			streamErr = chunk.Error
+		}
+	}
+	require.NoError(t, ctx.Err(), "closed input stream must terminate without waiting for cancellation")
+	require.ErrorContains(t, streamErr, "ended without a final chunk")
+}

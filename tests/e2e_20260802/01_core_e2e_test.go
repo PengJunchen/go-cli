@@ -249,16 +249,20 @@ func (b *blockingLoop) Run(ctx context.Context, _ core.Submission, _ ...core.Eve
 // ---------------------------------------------------------------------------
 func TestSubAgentDelegation(t *testing.T) {
 	conf := core.SubAgentConfig{Name: "worker", MaxTurns: 3}
-	sub := core.NewDefaultSubAgent(conf)
+	fixture := newHeldSubAgentFixture(t, conf)
+	sub := fixture.sub
 
-	ch, err := sub.Run(context.Background(), "do the work")
+	ch, err := sub.Run(fixture.ctx, "do the work")
 	require.NoError(t, err)
 	require.NotNil(t, ch)
+	waitForSubAgentRunner(t, fixture.started)
 
 	// send a follow-up
 	serr := sub.Send(context.Background(), "more info")
 	require.NoError(t, serr)
+	assert.Equal(t, []string{"more info"}, sub.Received())
 
+	fixture.release()
 	// consume events
 	var msgs []string
 	for ev := range ch {
@@ -268,9 +272,49 @@ func TestSubAgentDelegation(t *testing.T) {
 	}
 	assert.NotEmpty(t, msgs)
 
-	msg, werr := sub.Wait(context.Background())
+	msg, werr := sub.Wait(fixture.ctx)
 	require.NoError(t, werr)
 	assert.Equal(t, "assistant", string(msg.Role))
+	assert.Equal(t, core.SubAgentCompleted, sub.State())
+}
+
+func TestSimulatedSubAgentDeliversFollowUp(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conf := core.SubAgentConfig{Name: "worker", MaxTurns: 1024}
+	sub := core.NewDefaultSubAgent(conf)
+
+	ch, err := sub.Run(ctx, "do the work")
+	require.NoError(t, err)
+	require.NotNil(t, ch)
+
+	// Keep the runner live until Send: its output must fill the event buffer
+	// before it can finish. Draining starts only after the follow-up is accepted.
+	require.Greater(t, conf.MaxTurns, cap(ch))
+	require.Eventually(t, func() bool { return len(ch) == cap(ch) }, time.Second, time.Millisecond)
+	assert.Equal(t, core.SubAgentRunning, sub.(*core.DefaultSubAgent).State())
+	// send a follow-up
+	serr := sub.Send(ctx, "more info")
+	require.NoError(t, serr)
+
+	// consume events
+	var msgs []string
+	followUpSeen := false
+	for ev := range ch {
+		if ev.Kind == "user" && ev.Content == "more info" {
+			followUpSeen = true
+		}
+		if ev.Kind == "message" {
+			msgs = append(msgs, ev.Content)
+		}
+	}
+	assert.NotEmpty(t, msgs)
+	assert.True(t, followUpSeen, "accepted follow-up must reach the runner")
+
+	msg, werr := sub.Wait(ctx)
+	require.NoError(t, werr)
+	assert.Equal(t, "assistant", string(msg.Role))
+	assert.Equal(t, core.SubAgentCompleted, sub.(*core.DefaultSubAgent).State())
 }
 
 func TestSubAgentInterrupt(t *testing.T) {

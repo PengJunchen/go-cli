@@ -845,7 +845,14 @@ func Route(args []string) string {
 }
 
 func TestScanInterfaceDefaultImpl_Violation(t *testing.T) {
-	dir := t.TempDir()
+	root := t.TempDir()
+	dir := filepath.Join(root, "internal", "core")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/project\n\ngo 1.24.2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	code := `package example
 
@@ -858,7 +865,7 @@ type Service interface {
 		t.Fatal(err)
 	}
 
-	cfg := DefaultScanConfig(dir)
+	cfg := DefaultScanConfig(filepath.Join(root, "internal"))
 	report, err := Scan(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -870,7 +877,14 @@ type Service interface {
 }
 
 func TestScanInterfaceDefaultImpl_Compliant(t *testing.T) {
-	dir := t.TempDir()
+	root := t.TempDir()
+	dir := filepath.Join(root, "internal", "core")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/project\n\ngo 1.24.2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	code := `package example
 
@@ -879,6 +893,7 @@ type Service interface {
 }
 
 type defaultService struct{}
+func (*defaultService) Run() error { return nil }
 
 var _ Service = (*defaultService)(nil)
 `
@@ -887,7 +902,7 @@ var _ Service = (*defaultService)(nil)
 		t.Fatal(err)
 	}
 
-	cfg := DefaultScanConfig(dir)
+	cfg := DefaultScanConfig(filepath.Join(root, "internal"))
 	report, err := Scan(cfg)
 	if err != nil {
 		t.Fatal(err)

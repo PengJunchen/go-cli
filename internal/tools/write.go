@@ -126,7 +126,7 @@ func resolveAndValidatePath(toolName, workdir, path string, whitelist PathWhitel
 	// symlinks in intermediate directories that escape the whitelist. When
 	// no whitelist is configured this check is skipped, but the O_NOFOLLOW
 	// check above still applies.
-	if len(whitelist.paths) == 0 {
+	if whitelist.unrestricted() {
 		return abspath, nil
 	}
 
@@ -181,6 +181,19 @@ func (t *WriteTool) Description() string {
 	return "write: writes content to a file, creating parent directories. Args: path (string), content (string)."
 }
 
+// Parameters returns the JSON Schema describing the required write arguments.
+func (t *WriteTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path":    map[string]any{"type": "string"},
+			"content": map[string]any{"type": "string"},
+			"append":  map[string]any{"type": "boolean"},
+		},
+		"required": []any{"path", "content"},
+	}
+}
+
 // Execute writes content to the file at the given path. Relative paths resolve
 // against the workdir, and parent directories are created as needed. Writing to
 // an existing file fails unless Overwrite is enabled (or append is requested).
@@ -197,9 +210,11 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 		return nil, errors.New("write: missing string argument 'path'")
 	}
 
-	var content string
-	if v, ok := call.Args["content"].(string); ok {
-		content = v
+	content, ok := call.Args["content"].(string)
+	if !ok {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("write.invalid_content", "tool", "write")
+		return nil, errors.New("write: missing or non-string argument 'content'")
 	}
 
 	abspath, err := resolveAndValidatePath("write", t.Workdir, path, t.whitelist)
@@ -240,17 +255,10 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 		return nil, fmt.Errorf("write: %w", err)
 	}
 
-	// When a file tracker is configured, create a backup checkpoint before
-	// writing. Errors are logged but never block the write.
-	if t.fileTracker != nil {
-		if _, berr := t.fileTracker.Backup(abspath); berr != nil {
-			logger.Warn("write.backup_failed", "path", abspath, "err", berr)
-		}
-	}
-
 	// When a diff generator is configured and the file already exists, produce
-	// a change preview that the approval flow can surface. This never blocks
-	// execution; a generation error is silently ignored.
+	// a change preview that the approval flow can surface. Ordinary preview
+	// errors remain best effort, but unresolved helper execution must stop the
+	// mutation before it changes the file.
 	var diffPreview string
 	if t.diffGenerator != nil && exists {
 		if oldBytes, rerr := os.ReadFile(abspath); rerr == nil {
@@ -260,7 +268,19 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 			}
 			if d, derr := t.diffGenerator.Generate(ctx, string(oldBytes), newFull, path); derr == nil {
 				diffPreview = d
+			} else if unresolvedExecutionError(derr) {
+				span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+				logger.Error("write.diff_unresolved", "path", abspath, "err", derr)
+				return nil, fmt.Errorf("write: diff execution unresolved: %w", derr)
 			}
+		}
+	}
+
+	// When a file tracker is configured, create a backup checkpoint before
+	// writing. Errors are logged but never block the write.
+	if t.fileTracker != nil {
+		if _, berr := t.fileTracker.Backup(abspath); berr != nil {
+			logger.Warn("write.backup_failed", "path", abspath, "err", berr)
 		}
 	}
 

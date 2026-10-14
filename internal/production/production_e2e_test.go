@@ -3,7 +3,6 @@ package production
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -174,7 +173,7 @@ func TestAuditTelemetryEndToEnd(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
 
-	path := filepath.Join(t.TempDir(), "e2e-audit.jsonl")
+	path := auditLogTestPath(t, "e2e-audit.jsonl")
 	audit := NewDefaultAuditLog(path)
 	tel, ok := NewDefaultTelemetry().(*DefaultTelemetry)
 	require.True(t, ok)
@@ -201,7 +200,7 @@ func TestAuditTelemetryEndToEnd(t *testing.T) {
 	}
 
 	snap := tel.Snapshot()
-	assert.Equal(t, float64(n), snap["tool_run_total{tool=editor}"])
+	assert.Equal(t, float64(n), snap[metricKey("tool_run_total", map[string]string{"tool": "editor"})])
 }
 
 // TestTelemetryAndIdempotentCacheIntegration records metrics per cache
@@ -223,9 +222,9 @@ func TestTelemetryAndIdempotentCacheIntegration(t *testing.T) {
 	require.NoError(t, tel.Record(ctx, TelemetryMetric{Name: "cache_misses", Value: 0}))
 
 	snap := tel.Snapshot()
-	assert.Equal(t, 2.0, snap["cache_puts"])
-	assert.Equal(t, 1.0, snap["cache_hits"])
-	assert.Equal(t, 0.0, snap["cache_misses"])
+	assert.Equal(t, 2.0, snap[metricKey("cache_puts", nil)])
+	assert.Equal(t, 1.0, snap[metricKey("cache_hits", nil)])
+	assert.Equal(t, 0.0, snap[metricKey("cache_misses", nil)])
 }
 
 // TestLoopDetectorEndToEndWithTerminate simulates an agent stuck editing one

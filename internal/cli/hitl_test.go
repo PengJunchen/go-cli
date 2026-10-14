@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -91,6 +92,59 @@ func stopHitlProgram(t *testing.T, p *tea.Program, runDone <-chan struct{}) {
 // fails the test instead of hanging the whole suite.
 func emitCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 3*time.Second)
+}
+
+func startRealTUIHITLEmitter(t *testing.T, approvalCh <-chan tui.ApprovalRequest) (*tui.BubbleteaApp, *cliHITLEmitter, *io.PipeWriter) {
+	t.Helper()
+	inputReader, inputWriter := io.Pipe()
+	events := make(chan tui.AgentEvent)
+	appOpts := []tui.AppOption{tui.WithInputReader(inputReader)}
+	if approvalCh != nil {
+		appOpts = append(appOpts, tui.WithApprovalChannel(approvalCh))
+	}
+	app := tui.NewBubbleteaApp(events, appOpts...)
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		_ = app.Run(runCtx)
+	}()
+
+	select {
+	case <-app.ProgramReady():
+	case <-time.After(3 * time.Second):
+		cancelRun()
+		_ = inputReader.Close()
+		_ = inputWriter.Close()
+		t.Fatal("BubbleteaApp.ProgramReady did not close")
+	}
+	emitter := &cliHITLEmitter{out: io.Discard}
+	emitter.SetProgram(app.Program())
+	t.Cleanup(func() {
+		cancelRun()
+		_ = inputReader.Close()
+		_ = inputWriter.Close()
+		select {
+		case <-runDone:
+		case <-time.After(3 * time.Second):
+			t.Error("BubbleteaApp did not stop within timeout")
+		}
+	})
+	return app, emitter, inputWriter
+}
+
+func waitForTUIView(t *testing.T, app *tui.BubbleteaApp, contains string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return strings.Contains(app.View(), contains)
+	}, 2*time.Second, 5*time.Millisecond, "TUI never rendered %q", contains)
+}
+
+func sendTUIKey(t *testing.T, inputWriter *io.PipeWriter, key string) {
+	t.Helper()
+	if _, err := inputWriter.Write([]byte(key)); err != nil {
+		t.Fatalf("write key %q to TUI: %v", key, err)
+	}
 }
 
 // TestHITLEmitViaProgram verifies that when a program is wired, Emit forwards
@@ -369,6 +423,63 @@ func TestHITLProgramReadyChannelSync(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("app did not shut down within timeout")
 	}
+}
+
+// TestHITLQuestionReachesRealBubbleteaModel drives cliHITLEmitter through the
+// production BubbleteaApp model and answers the actual TUI modal with a key.
+func TestHITLQuestionReachesRealBubbleteaModel(t *testing.T) {
+	app, emitter, inputWriter := startRealTUIHITLEmitter(t, nil)
+	event := core.HITLQuestionEvent{
+		QuestionID: "real-model-q",
+		Question:   "Choose a deployment",
+		Options:    []string{"staging", "production"},
+		ResponseCh: make(chan core.HITLAnswer, 1),
+	}
+	ctx, cancel := emitCtx()
+	defer cancel()
+	emitDone := make(chan error, 1)
+	go func() { emitDone <- emitter.Emit(ctx, event) }()
+
+	waitForTUIView(t, app, "Choose a deployment")
+	sendTUIKey(t, inputWriter, "2")
+	select {
+	case answer := <-event.ResponseCh:
+		assert.Equal(t, event.QuestionID, answer.QuestionID)
+		assert.Equal(t, "production", answer.Answer)
+	case <-time.After(2 * time.Second):
+		t.Fatal("real TUI did not answer the ask_user question")
+	}
+	select {
+	case err := <-emitDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("HITL emitter did not finish after the TUI response")
+	}
+}
+
+// TestHITLQuestionCancellationRemovesRealTUIWait verifies cancellation wakes
+// cliHITLEmitter and removes its question from the production model queue.
+func TestHITLQuestionCancellationRemovesRealTUIWait(t *testing.T) {
+	app, emitter, _ := startRealTUIHITLEmitter(t, nil)
+	event := core.HITLQuestionEvent{
+		QuestionID: "cancel-model-q",
+		Question:   "This question will be canceled",
+		ResponseCh: make(chan core.HITLAnswer, 1),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	emitDone := make(chan error, 1)
+	go func() { emitDone <- emitter.Emit(ctx, event) }()
+	waitForTUIView(t, app, event.Question)
+	cancel()
+	select {
+	case err := <-emitDone:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceling ask_user did not release the emitter")
+	}
+	require.Eventually(t, func() bool {
+		return !strings.Contains(app.View(), event.Question)
+	}, 2*time.Second, 5*time.Millisecond, "canceled question remained in the TUI")
 }
 
 // TestHITLStaleProgramCleared verifies that after SetProgram(nil) is called

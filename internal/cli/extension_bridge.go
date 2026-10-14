@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
@@ -23,54 +22,107 @@ import (
 // synthesized HookEvent for each lifecycle phase. A non-pass HookResult halts
 // the run by surfacing as an error.
 type extensionHookAdapter struct {
-	extHook extension.Hook
+	registration extension.HookRegistration
+}
+
+// ExtensionHookObserverIdentity lets callers inspect which registration
+// produced a bridge error via errors.As without interpolating identity into
+// Error() output or default logs.
+type ExtensionHookObserverIdentity interface {
+	error
+	ExtensionOwner() string
+	HookName() string
+	EventName() string
+}
+
+// extensionHookObserverError preserves local registration identity without
+// putting extension-controlled names, request data, or Hook diagnostics in its
+// fixed Error string. Unwrap retains errors.Is behavior for the stable bridge
+// sentinel.
+type extensionHookObserverError struct {
+	owner     string
+	hookName  string
+	eventName string
+	cause     error
+}
+
+var _ ExtensionHookObserverIdentity = (*extensionHookObserverError)(nil)
+
+func (e *extensionHookObserverError) Error() string {
+	if e == nil || e.cause == nil {
+		return "extension: hook observer failed"
+	}
+	return e.cause.Error()
+}
+
+func (e *extensionHookObserverError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *extensionHookObserverError) ExtensionOwner() string {
+	if e == nil {
+		return ""
+	}
+	return e.owner
+}
+
+func (e *extensionHookObserverError) HookName() string {
+	if e == nil {
+		return ""
+	}
+	return e.hookName
+}
+
+func (e *extensionHookObserverError) EventName() string {
+	if e == nil {
+		return ""
+	}
+	return e.eventName
 }
 
 var _ core.Hook = (*extensionHookAdapter)(nil)
 
-// newExtensionHookAdapter wraps an extension.Hook as a core.Hook.
-func newExtensionHookAdapter(h extension.Hook) *extensionHookAdapter {
-	return &extensionHookAdapter{extHook: h}
+// newExtensionHookAdapter wraps an owner-bound extension registration as a
+// core.Hook.
+func newExtensionHookAdapter(registration extension.HookRegistration) *extensionHookAdapter {
+	return &extensionHookAdapter{registration: registration}
 }
 
 // Name delegates to the underlying extension hook.
-func (a *extensionHookAdapter) Name() string { return a.extHook.Name() }
+func (a *extensionHookAdapter) Name() string { return a.registration.Hook.Name() }
 
-// BeforeRun forwards an agent.before_run event to the extension hook. A non-pass
-// HookResult halts the run by returning an error carrying the hook name and
-// reason.
+// BeforeRun forwards a bounded, extension-owned agent.before_run snapshot. A
+// snapshot or Hook failure stops the run with a fixed-message error.
 func (a *extensionHookAdapter) BeforeRun(ctx context.Context, submission core.Submission) error {
-	event := extension.HookEvent{
-		Name:      "agent.before_run",
-		Data:      submission,
-		Source:    "extension-bridge",
-		Timestamp: time.Now(),
+	const eventName = "agent.before_run"
+	event, err := buildBeforeRunHookEvent(a.registration.Owner, submission)
+	if err != nil {
+		return a.observerError(eventName, err)
 	}
-	result := a.extHook.Handle(ctx, event)
-	if result.Action != extension.HookActionPass {
-		return fmt.Errorf("extension hook %s halted before-run: %s", a.extHook.Name(), result.Reason)
-	}
-	return nil
+	return a.observerError(eventName, translateExtensionHookResult(a.registration.Hook.Handle(ctx, event)))
 }
 
 // AfterRun forwards an agent.after_run event to the extension hook so it can
 // observe the completed run. A non-pass HookResult surfaces as an error.
 func (a *extensionHookAdapter) AfterRun(ctx context.Context, submission core.Submission, result core.Result, runErr error) error {
-	event := extension.HookEvent{
-		Name: "agent.after_run",
-		Data: map[string]any{
-			"result":     result,
-			"error":      runErr,
-			"submission": submission,
-		},
-		Source:    "extension-bridge",
-		Timestamp: time.Now(),
+	const eventName = "agent.after_run"
+	event, err := buildAfterRunHookEvent(ctx, a.registration.Owner, submission, result, runErr)
+	if err != nil {
+		return a.observerError(eventName, err)
 	}
-	hResult := a.extHook.Handle(ctx, event)
-	if hResult.Action != extension.HookActionPass {
-		return fmt.Errorf("extension hook %s halted after-run: %s", a.extHook.Name(), hResult.Reason)
+	return a.observerError(eventName, translateExtensionHookResult(a.registration.Hook.Handle(ctx, event)))
+}
+
+func (a *extensionHookAdapter) observerError(eventName string, cause error) error {
+	if cause == nil {
+		return nil
 	}
-	return nil
+	return &extensionHookObserverError{
+		owner: a.registration.Owner, hookName: a.Name(), eventName: eventName, cause: cause,
+	}
 }
 
 // extensionMiddlewareAdapter bridges an extension.Middleware (which wraps an

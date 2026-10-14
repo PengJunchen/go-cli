@@ -2,9 +2,9 @@ package core
 
 import "fmt"
 
-// NewPlanModeToolInterceptor returns a ToolInterceptor that blocks write tools
-// when plan mode is active. When the controller is nil or plan mode is
-// inactive, all tool calls are allowed.
+// NewPlanModeToolInterceptor returns a ToolInterceptor that blocks tools not
+// explicitly allowlisted as read-only when plan mode is active. When the
+// controller is nil or plan mode is inactive, all tool calls are allowed.
 //
 // This replaces the former PlanModeMiddleware. Plan-mode write blocking now
 // flows through the unified PreToolCallEvent / ToolInterceptor mechanism
@@ -15,7 +15,7 @@ func NewPlanModeToolInterceptor(controller PlanModeController) ToolInterceptor {
 			return nil
 		}
 		if controller.ShouldBlockWrite(toolName) {
-			return fmt.Errorf("plan mode: write tool %q blocked", toolName)
+			return fmt.Errorf("plan mode: tool %q blocked", toolName)
 		}
 		return nil
 	}

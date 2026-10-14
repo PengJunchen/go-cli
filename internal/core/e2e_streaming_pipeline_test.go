@@ -72,12 +72,21 @@ func TestET_streaming_bash_full_pipeline(t *testing.T) {
 	assert.Contains(t, toolResults[0], "line2")
 	assert.Contains(t, toolResults[0], "line3")
 
-	// --- final message ---
-	// Turn 1 issues tool calls with empty content, so no "message" event is
-	// emitted. Only turn 2 ("done") produces a "message" event.
-	messages := findEvents(events, "message")
-	require.Len(t, messages, 1)
-	assert.Equal(t, "done", messages[0])
+	// The first assistant message has no text but carries the bash tool call in
+	// history; the second is the single completed user-facing answer.
+	messages := filterEvents(events, "message")
+	require.Len(t, messages, 2)
+	assert.Empty(t, messages[0].Content)
+	require.Len(t, messages[0].ToolCalls, 1)
+	assert.Equal(t, "bash-1", messages[0].ToolCalls[0].ID)
+	assert.Equal(t, "done", messages[1].Content)
+	assert.Empty(t, messages[1].ToolCalls)
+
+	// This fixture uses an unguarded model. Existing streaming consumers must
+	// not receive guarded-generation lifecycle signals on the tool pipeline.
+	streamEvents := es.collected()
+	assert.Empty(t, filterEvents(streamEvents, EventKindAssistantGenerationStarted))
+	assert.Empty(t, filterEvents(streamEvents, EventKindAssistantGenerationFinished))
 }
 
 // TestET_streaming_bash_stderr_pipeline verifies that stderr output from a real

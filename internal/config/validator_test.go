@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 func TestDefaultValidatorInterfaceSatisdition(t *testing.T) {
@@ -18,6 +20,46 @@ func TestDefaultValidator_ValidDefault(t *testing.T) {
 	v := NewDefaultValidator()
 	err := v.Validate(*defaultConfig())
 	require.NoError(t, err)
+}
+
+func TestDefaultValidator_WebSearchProviderValues(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		provider string
+	}{
+		{name: "unset"},
+		{name: "mock", provider: "mock"},
+		{name: "fetch", provider: "fetch"},
+		{name: "brave", provider: "brave"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.WebSearch.Provider = testCase.provider
+			require.NoError(t, NewDefaultValidator().Validate(*cfg))
+		})
+	}
+
+	cfg := defaultConfig()
+	cfg.WebSearch.Provider = "not-a-provider"
+	err := NewDefaultValidator().Validate(*cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "web_search provider")
+}
+
+func TestDefaultValidatorLoopDetectorDisposition(t *testing.T) {
+	for _, disposition := range []string{"", "warn", "steer", "terminate"} {
+		t.Run("valid/"+disposition, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.Production.LoopDetector.Disposition = disposition
+			require.NoError(t, NewDefaultValidator().Validate(*cfg))
+		})
+	}
+
+	cfg := defaultConfig()
+	cfg.Production.LoopDetector.Disposition = "stop"
+	err := NewDefaultValidator().Validate(*cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "production.loop_detector disposition")
 }
 
 func TestDefaultValidator_ValidEmptyModel(t *testing.T) {
@@ -54,6 +96,22 @@ func TestDefaultValidator_InvalidTracing(t *testing.T) {
 	err = NewDefaultValidator().Validate(*cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tracing exporter")
+}
+
+func TestDefaultValidatorTracingExporterMatchesRuntimeSupport(t *testing.T) {
+	for _, name := range []string{"", "jsonl", "stdout", "none", "otlp", "kafka", "bogus"} {
+		t.Run(name, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.Tracing.Exporter = name
+			err := NewDefaultValidator().Validate(*cfg)
+			if tracing.IsSupportedExporter(name) {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "tracing exporter")
+		})
+	}
 }
 
 func TestDefaultValidator_InvalidCompaction(t *testing.T) {

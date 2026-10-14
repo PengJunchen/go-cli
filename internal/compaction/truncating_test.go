@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
@@ -16,21 +17,27 @@ func TestTruncatingCompactorKeepsSystem(t *testing.T) {
 	ctx, exp := newTracedCtx(t)
 	est := tracedEstimator()
 
+	system := TurnItem{
+		ID: "system", ParentID: "root", Role: RoleSystem,
+		Content: "sys-prompt", FinishReason: "configured", InputKind: "policy",
+	}
 	items := []TurnItem{
-		{Role: RoleSystem, Content: "sys-prompt"},
+		system,
 		{Role: RoleUser, Content: strings.Repeat("u", 200)},
 		{Role: RoleAssistant, Content: strings.Repeat("a", 200)},
 		{Role: RoleUser, Content: strings.Repeat("v", 200)},
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 40, est)
+	outResult, err := compactor.Compact(ctx, items, 40, est)
+	out := outResult.Items
 	require.NoError(t, err)
 
 	// The system entry is always kept.
 	require.NotEmpty(t, out)
 	assert.Equal(t, "sys-prompt", out[0].Content)
 	assert.Equal(t, RoleSystem, out[0].Role)
+	assert.Equal(t, system, out[0], "truncation must preserve the original system item metadata")
 
 	// No user/assistant entries should be retained beyond budget.
 	assert.LessOrEqual(t, estimateTokens(out, est), 40)
@@ -53,7 +60,8 @@ func TestTruncatingCompactorTruncatesOldestNonSystem(t *testing.T) {
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 20, est)
+	outResult, err := compactor.Compact(ctx, items, 20, est)
+	out := outResult.Items
 	require.NoError(t, err)
 
 	// The oldest large entry is dropped; the newest ones remain, ordered by recency.
@@ -79,7 +87,8 @@ func TestTruncatingCompactorCompressesToBudget(t *testing.T) {
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 50, est)
+	outResult, err := compactor.Compact(ctx, items, 50, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.LessOrEqual(t, estimateTokens(out, est), 50)
 	assert.NotEmpty(t, out)
@@ -92,12 +101,13 @@ func TestTruncatingCompactorEmptyInputNoPanic(t *testing.T) {
 	est := tracedEstimator()
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, nil, 100, est)
+	outResult, err := compactor.Compact(ctx, nil, 100, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Empty(t, out)
 }
 
-func TestTruncatingCompactorGracefulWhenSystemOverBudget(t *testing.T) {
+func TestTruncatingCompactorRejectsMandatorySystemOverBudget(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	ctx, _ := newTracedCtx(t)
@@ -109,11 +119,8 @@ func TestTruncatingCompactorGracefulWhenSystemOverBudget(t *testing.T) {
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 20, est)
-	require.NoError(t, err)
-	// Degrades gracefully: system entries are all we can keep.
-	assert.Equal(t, 1, len(out))
-	assert.Equal(t, RoleSystem, out[0].Role)
+	_, err := compactor.Compact(ctx, items, 20, est)
+	require.ErrorIs(t, err, ErrMandatorySystemPromptOverBudget)
 }
 
 func TestTruncatingCompactorPreservesChronologicalOrder(t *testing.T) {
@@ -133,7 +140,8 @@ func TestTruncatingCompactorPreservesChronologicalOrder(t *testing.T) {
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 200, est)
+	outResult, err := compactor.Compact(ctx, items, 200, est)
+	out := outResult.Items
 	require.NoError(t, err)
 
 	// The non-system entries must remain in their original chronological
@@ -163,7 +171,8 @@ func TestTruncatingCompactorDropsOldestKeepsOrder(t *testing.T) {
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 30, est)
+	outResult, err := compactor.Compact(ctx, items, 30, est)
+	out := outResult.Items
 	require.NoError(t, err)
 
 	expected := []string{"sys", "keep-a", "keep-b", "keep-c"}
@@ -179,7 +188,7 @@ func TestTruncatingCompactorCompileGuard(t *testing.T) {
 	assert.NotNil(t, NewTruncatingCompactor())
 }
 
-func TestTruncatingCompactorDropsDanglingToolResults(t *testing.T) {
+func TestTruncatingCompactorRejectsDanglingToolResults(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	ctx, _ := newTracedCtx(t)
@@ -189,25 +198,14 @@ func TestTruncatingCompactorDropsDanglingToolResults(t *testing.T) {
 		{Role: RoleSystem, Content: "sys"},
 		{Role: RoleUser, Content: "u1"},
 		{Role: RoleAssistant, Content: strings.Repeat("a", 200)},
-		{Role: RoleTool, ToolName: "read", ToolResult: "tr1"},
+		{Role: RoleTool, ToolCallID: "orphan", ToolName: "read", ToolResult: "tr1"},
 		{Role: RoleUser, Content: "u2"},
 		{Role: RoleAssistant, Content: "a2"},
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 30, est)
-	require.NoError(t, err)
-
-	for i, it := range out {
-		if it.Role == RoleTool {
-			assert.NotEqual(t, RoleSystem, out[i-1].Role,
-				"dangling tool result: RoleTool at index %d preceded by %s, not RoleAssistant", i, out[i-1].Role)
-			assert.NotEqual(t, RoleUser, out[i-1].Role,
-				"dangling tool result: RoleTool at index %d preceded by %s, not RoleAssistant", i, out[i-1].Role)
-			assert.Equal(t, RoleAssistant, out[i-1].Role,
-				"RoleTool at index %d must be preceded by RoleAssistant", i)
-		}
-	}
+	_, err := compactor.Compact(ctx, items, 30, est)
+	require.ErrorIs(t, err, errMalformedToolGroup, "malformed history must be rejected instead of dropping its receipt")
 }
 
 func TestTruncatingCompactorKeepsPairedToolResults(t *testing.T) {
@@ -219,12 +217,13 @@ func TestTruncatingCompactorKeepsPairedToolResults(t *testing.T) {
 	items := []TurnItem{
 		{Role: RoleSystem, Content: "sys"},
 		{Role: RoleUser, Content: "u1"},
-		{Role: RoleAssistant, Content: "a1"},
-		{Role: RoleTool, ToolName: "read", ToolResult: "tr1"},
+		{Role: RoleAssistant, Content: "a1", ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read"}}},
+		{Role: RoleTool, ToolCallID: "call-1", ToolName: "read", ToolResult: "tr1"},
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 200, est)
+	outResult, err := compactor.Compact(ctx, items, 200, est)
+	out := outResult.Items
 	require.NoError(t, err)
 
 	roles := make([]string, len(out))
@@ -234,62 +233,48 @@ func TestTruncatingCompactorKeepsPairedToolResults(t *testing.T) {
 	assert.Equal(t, []string{RoleSystem, RoleUser, RoleAssistant, RoleTool}, roles)
 }
 
-func TestRemoveDanglingToolResults(t *testing.T) {
+func TestGroupTurnItemsRejectsUnpairedLegacyToolItems(t *testing.T) {
 	tests := []struct {
 		name  string
 		input []TurnItem
-		roles []string
 	}{
 		{
-			name:  "empty",
-			input: nil,
-			roles: []string{},
-		},
-		{
-			name: "tool at start removed",
+			name: "tool at start",
 			input: []TurnItem{
-				{Role: RoleTool, ToolName: "read", ToolResult: "x"},
+				{Role: RoleTool, ToolCallID: "call-1", ToolName: "read", ToolResult: "x"},
 				{Role: RoleUser, Content: "u"},
 			},
-			roles: []string{RoleUser},
 		},
 		{
-			name: "tool after user removed",
+			name: "tool after user",
 			input: []TurnItem{
 				{Role: RoleUser, Content: "u"},
-				{Role: RoleTool, ToolName: "read", ToolResult: "x"},
+				{Role: RoleTool, ToolCallID: "call-1", ToolName: "read", ToolResult: "x"},
 				{Role: RoleUser, Content: "v"},
 			},
-			roles: []string{RoleUser, RoleUser},
 		},
 		{
-			name: "tool after assistant kept",
+			name: "tool after plain assistant",
 			input: []TurnItem{
 				{Role: RoleUser, Content: "u"},
 				{Role: RoleAssistant, Content: "a"},
-				{Role: RoleTool, ToolName: "read", ToolResult: "x"},
+				{Role: RoleTool, ToolCallID: "call-1", ToolName: "read", ToolResult: "x"},
 			},
-			roles: []string{RoleUser, RoleAssistant, RoleTool},
 		},
 		{
-			name: "consecutive tools first removed second kept",
+			name: "consecutive tools without assistant calls",
 			input: []TurnItem{
 				{Role: RoleUser, Content: "u"},
 				{Role: RoleAssistant, Content: "a"},
-				{Role: RoleTool, ToolName: "bash", ToolResult: "x"},
-				{Role: RoleTool, ToolName: "read", ToolResult: "y"},
+				{Role: RoleTool, ToolCallID: "call-1", ToolName: "bash", ToolResult: "x"},
+				{Role: RoleTool, ToolCallID: "call-2", ToolName: "read", ToolResult: "y"},
 			},
-			roles: []string{RoleUser, RoleAssistant, RoleTool, RoleTool},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out := removeDanglingToolResults(tt.input)
-			roles := make([]string, len(out))
-			for i, it := range out {
-				roles[i] = it.Role
-			}
-			assert.Equal(t, tt.roles, roles)
+			_, _, err := groupTurnItems(tt.input)
+			require.ErrorIs(t, err, errMalformedToolGroup)
 		})
 	}
 }

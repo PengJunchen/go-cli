@@ -65,6 +65,10 @@ func isPrivateIP(ip net.IP) bool {
 // private IPs. It performs a DNS lookup so that hostnames pointing at internal
 // infrastructure are caught before the request is made.
 func ValidateURL(rawURL string) error {
+	return validateURLWithLookup(rawURL, net.DefaultResolver.LookupIPAddr)
+}
+
+func validateURLWithLookup(rawURL string, lookup func(context.Context, string) ([]net.IPAddr, error)) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrBlockedHost, err)
@@ -93,9 +97,9 @@ func ValidateURL(rawURL string) error {
 	// timeout prevents hanging on unresponsive DNS servers.
 	resolveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ips, err := net.DefaultResolver.LookupIPAddr(resolveCtx, hostname)
+	ips, err := lookup(resolveCtx, hostname)
 	if err != nil {
-		return fmt.Errorf("%w: cannot resolve %s: %v", ErrBlockedHost, hostname, err)
+		return fmt.Errorf("%w: cannot resolve %s: %w", ErrBlockedHost, hostname, err)
 	}
 
 	for _, addr := range ips {

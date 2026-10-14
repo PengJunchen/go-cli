@@ -4,10 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // Validator defines the contract for validating a merged Config.
@@ -38,13 +41,18 @@ const (
 	maxTemperature = 2.0
 )
 
+func validTemperature(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= minTemperature && value <= maxTemperature
+}
+
 var (
-	validTracingLevels        = []string{"debug", "info", "warn", "error"}
-	validTracingExporter      = []string{"jsonl", "stdout", "none"}
-	validCompactionStrategies = []string{"", "unified", "micro", "micro_first", "summary", "truncating"}
-	validGitPlatforms         = []string{"", "github", "gitlab", "bitbucket"}
-	validTUIThemes            = []string{"", "dark", "light", "monokai", "solarized", "auto"}
-	validTUIDiffStyles        = []string{"", "unified", "split", "auto"}
+	validTracingLevels            = []string{"debug", "info", "warn", "error"}
+	validCompactionStrategies     = []string{"", "unified", "micro", "micro_first", "summary", "truncating"}
+	validGitPlatforms             = []string{"", "github", "gitlab", "bitbucket"}
+	validWebSearchProviders       = []string{"", "mock", "fetch", "brave"}
+	validTUIThemes                = []string{"", "dark", "light", "monokai", "solarized", "auto"}
+	validTUIDiffStyles            = []string{"", defaultTUIDiffStyle}
+	validLoopDetectorDispositions = []string{"", "warn", "steer", "terminate"}
 )
 
 // Validate evaluates the configuration and returns a combined error listing
@@ -52,24 +60,31 @@ var (
 func (v *DefaultValidator) Validate(cfg Config) error {
 	var errs []string
 
-	if cfg.Provider.Temperature < minTemperature || cfg.Provider.Temperature > maxTemperature {
+	if !validTemperature(cfg.Provider.Temperature) {
 		errs = append(errs, "provider temperature out of range")
 	}
 	if cfg.Provider.MaxTokens < 0 {
 		errs = append(errs, "provider max_tokens must be non-negative")
 	}
 
-	if cfg.Model.Temperature < minTemperature || cfg.Model.Temperature > maxTemperature {
+	if !validTemperature(cfg.Model.Temperature) {
 		errs = append(errs, "model temperature out of range")
 	}
 	if cfg.Model.MaxTokens < 0 {
 		errs = append(errs, "model max_tokens must be non-negative")
 	}
 
+	if !validTemperature(cfg.SmallModel.Temperature) {
+		errs = append(errs, "small model temperature out of range")
+	}
+	if cfg.SmallModel.MaxTokens < 0 {
+		errs = append(errs, "small model max_tokens must be non-negative")
+	}
+
 	if cfg.Tracing.Level != "" && !contains(validTracingLevels, cfg.Tracing.Level) {
 		errs = append(errs, "invalid tracing level")
 	}
-	if cfg.Tracing.Exporter != "" && !contains(validTracingExporter, cfg.Tracing.Exporter) {
+	if cfg.Tracing.Exporter != "" && !tracing.IsSupportedExporter(cfg.Tracing.Exporter) {
 		errs = append(errs, "invalid tracing exporter")
 	}
 
@@ -84,6 +99,12 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 	// supported platforms.
 	if cfg.Git.APIToken != "" && !contains(validGitPlatforms, cfg.Git.Platform) {
 		errs = append(errs, "invalid git platform (supported: github, gitlab, bitbucket) required when api_token is set")
+	}
+	if !contains(validWebSearchProviders, cfg.WebSearch.Provider) {
+		errs = append(errs, "invalid web_search provider (supported: fetch, brave; empty and mock remain unavailable)")
+	}
+	if !contains(validLoopDetectorDispositions, cfg.Production.LoopDetector.Disposition) {
+		errs = append(errs, "invalid production.loop_detector disposition (supported: warn, steer, terminate)")
 	}
 
 	// LSP config: when ServerCommand is non-empty, WorkspaceRoot (if set)
@@ -105,7 +126,7 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 		errs = append(errs, "invalid tui theme (supported: dark, light, monokai, solarized, auto)")
 	}
 	if !contains(validTUIDiffStyles, cfg.TUI.DiffStyle) {
-		errs = append(errs, "invalid tui diff_style (supported: unified, split, auto)")
+		errs = append(errs, "invalid tui diff_style (supported: unified)")
 	}
 	if cfg.TUI.WordWrap < 0 {
 		errs = append(errs, "tui word_wrap must be non-negative")

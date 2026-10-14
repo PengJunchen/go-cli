@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/mcp"
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -48,6 +49,10 @@ type DoctorRunner struct {
 
 // NewDoctorRunner returns a DoctorRunner with all default checkers registered.
 func NewDoctorRunner() *DoctorRunner {
+	return newDoctorRunner(approval.GetTrustManager())
+}
+
+func newDoctorRunner(manager approval.TrustManager) *DoctorRunner {
 	return &DoctorRunner{checks: []DoctorChecker{
 		NewGoVersionChecker(),
 		NewGoModChecker(""),
@@ -57,11 +62,21 @@ func NewDoctorRunner() *DoctorRunner {
 		NewPermissionsChecker(nil),
 		NewNetworkChecker("", 0),
 		NewAPIConnectivityChecker(),
-		NewMCPServersChecker(),
+		newMCPServersChecker(manager),
 		NewLSPChecker(),
 		NewDiskSpaceChecker("", 0),
 		NewOSInfoChecker(),
 	}}
+}
+
+func doctorRunnerForConfig(cfg Config) *DoctorRunner {
+	var manager approval.TrustManager
+	if source, ok := cfg.(interface {
+		ProjectTrustManager() approval.TrustManager
+	}); ok {
+		manager = source.ProjectTrustManager()
+	}
+	return newDoctorRunner(manager)
 }
 
 // WithCheckers replaces the checker list. Intended for testing.
@@ -559,18 +574,59 @@ const mcpConnectTimeout = 5 * time.Second
 // MCPServersChecker connects to each configured MCP server, calls ListTools,
 // and reports a summary of which servers are available and which failed.
 type MCPServersChecker struct {
-	configLoader func() (*config.Config, error)
+	configLoader        func() (*config.Config, error)
+	trustedConfigLoader func(context.Context) (*config.Config, error)
+	trustManager        approval.TrustManager
 }
 
 // NewMCPServersChecker returns a checker that probes configured MCP servers.
 func NewMCPServersChecker() *MCPServersChecker {
-	return &MCPServersChecker{configLoader: config.Load}
+	return newMCPServersChecker(approval.GetTrustManager())
+}
+
+func newMCPServersChecker(manager approval.TrustManager) *MCPServersChecker {
+	if manager == nil {
+		manager = approval.GetTrustManager()
+	}
+	return &MCPServersChecker{
+		trustedConfigLoader: func(ctx context.Context) (*config.Config, error) {
+			return config.LoadTrustedWithManager(ctx, manager)
+		},
+		trustManager: manager,
+	}
 }
 
 // Check implements DoctorChecker.
 func (c *MCPServersChecker) Check(ctx context.Context) DoctorCheck {
-	cfg, _ := c.configLoader()
-	servers := loadMCPServers(ctx, cfg)
+	var cfg *config.Config
+	var loadErr error
+	if c.trustedConfigLoader != nil {
+		cfg, loadErr = c.trustedConfigLoader(ctx)
+	} else if c.configLoader != nil {
+		cfg, loadErr = c.configLoader()
+	}
+	if loadErr != nil {
+		return DoctorCheck{Name: "mcp-servers", Status: doctorWarn,
+			Message: "MCP configuration could not be loaded. Advice: verify the selected configuration source."}
+	}
+	source, sourceErr := selectMCPServerSource(ctx, cfg, c.trustManager)
+	if sourceErr != nil {
+		return DoctorCheck{Name: "mcp-servers", Status: doctorWarn,
+			Message: "MCP source is unavailable or has ambiguous provenance. Advice: use a verified project source or user-global configuration."}
+	}
+	if source == nil || source.kind == mcpServerSourceNone {
+		return DoctorCheck{Name: "mcp-servers", Status: doctorPass,
+			Message: "no MCP servers configured"}
+	}
+	if source.initialErr != nil {
+		return DoctorCheck{Name: "mcp-servers", Status: doctorWarn,
+			Message: "selected MCP source was rejected. Advice: verify source trust and configuration syntax."}
+	}
+	servers, _, sourceErr := source.loadCurrent(ctx)
+	if sourceErr != nil {
+		return DoctorCheck{Name: "mcp-servers", Status: doctorWarn,
+			Message: "selected MCP source could not be verified or parsed. Advice: verify source trust and configuration syntax."}
+	}
 	if len(servers) == 0 {
 		return DoctorCheck{Name: "mcp-servers", Status: doctorPass,
 			Message: "no MCP servers configured"}
@@ -585,15 +641,20 @@ func (c *MCPServersChecker) Check(ctx context.Context) DoctorCheck {
 		connectErr := client.Connect(connectCtx)
 		if connectErr != nil {
 			cancel()
-			failed = append(failed, fmt.Sprintf("%s: connect failed: %s", srv.Name, connectErr))
+			_ = disconnectAssemblyMCPClient(context.Background(), client)
+			failed = append(failed, fmt.Sprintf("%s: connect failed", srv.Name))
 			continue
 		}
 
 		tools, listErr := client.ListTools(connectCtx)
 		cancel()
-		_ = client.Disconnect(ctx) //nolint:errcheck
+		disconnectErr := disconnectAssemblyMCPClient(context.Background(), client)
 		if listErr != nil {
-			failed = append(failed, fmt.Sprintf("%s: list tools failed: %s", srv.Name, listErr))
+			failed = append(failed, fmt.Sprintf("%s: list tools failed", srv.Name))
+			continue
+		}
+		if disconnectErr != nil {
+			failed = append(failed, fmt.Sprintf("%s: disconnect did not complete", srv.Name))
 			continue
 		}
 		ok = append(ok, fmt.Sprintf("%s (%d tools)", srv.Name, len(tools)))
@@ -610,7 +671,7 @@ func (c *MCPServersChecker) Check(ctx context.Context) DoctorCheck {
 
 // toMCPConfig converts a config.MCPServerConfig into the mcp.MCPServerConfig
 // expected by the MCP client adapters. The transport is inferred from whether
-// Command (stdio) or URL (SSE/HTTP) is set.
+// Command (stdio) or URL (Streamable HTTP) is set.
 func toMCPConfig(srv config.MCPServerConfig) mcp.MCPServerConfig {
 	cfg := mcp.MCPServerConfig{
 		Name: srv.Name,
@@ -624,7 +685,7 @@ func toMCPConfig(srv config.MCPServerConfig) mcp.MCPServerConfig {
 			cfg.Env = append(cfg.Env, k+"="+v)
 		}
 	} else if srv.URL != "" {
-		cfg.Transport = mcp.MCPTransportSSE
+		cfg.Transport = mcp.MCPTransportStreamableHTTP
 	}
 	return cfg
 }
@@ -632,7 +693,7 @@ func toMCPConfig(srv config.MCPServerConfig) mcp.MCPServerConfig {
 // newMCPClientForDoctor creates an MCPClient appropriate for the transport
 // mode in cfg.
 func newMCPClientForDoctor(cfg mcp.MCPServerConfig) mcp.MCPClient {
-	if cfg.Transport == mcp.MCPTransportSSE {
+	if cfg.Transport == mcp.MCPTransportStreamableHTTP {
 		return mcp.NewHTTPClientAdapter(cfg)
 	}
 	return mcp.NewOfficialSDKAdapter(cfg)
@@ -868,7 +929,7 @@ func (c *doctorCmd) Synopsis() string { return "Run diagnostic checks" }
 // Run implements Command. It runs all doctor checks and prints the results.
 // A non-zero number of failed checks returns an ExecutionError.
 func (c *doctorCmd) Run(ctx context.Context, cfg Config, args []string) error {
-	runner := NewDoctorRunner()
+	runner := doctorRunnerForConfig(cfg)
 	checks := runner.Run(ctx)
 	fmt.Fprint(c.out, Format(checks)) //nolint:errcheck
 	for _, ch := range checks {

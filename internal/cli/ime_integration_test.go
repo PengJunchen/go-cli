@@ -94,7 +94,6 @@ func TestIntegration_SkillDescriptionOmittedWhenEmpty(t *testing.T) {
 // This tests the fix for the issue where skills were silently skipped when
 // the config didn't explicitly set skill.dir.
 func TestIntegration_SkillAutoDiscovery(t *testing.T) {
-	setupTestTrust(t)
 	ctx := context.Background()
 	tempDir := t.TempDir()
 
@@ -138,8 +137,8 @@ Flat skill body.
 
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
-	// Pass a config with no skill.dir — the auto-discovery should kick in.
-	rc := &config.Config{}
+	// Load a verified project snapshot before auto-discovery consumes project skills.
+	rc := trustedMCPTestConfig(t)
 	infos := registerSkillTools(ctx, rc, tr)
 
 	require.Len(t, infos, 2, "both auto-discovered skills should be registered")
@@ -196,14 +195,9 @@ func TestIntegration_MCPAutoDiscovery_ArrayFormat(t *testing.T) {
 
 	// Start a mock MCP HTTP server.
 	srv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPost {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"search","description":"Search the web"}]}}`)) //nolint:errcheck
-		} else {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
-		}
+		writeMockMCPResult(w, r, map[string]any{
+			"tools": []map[string]any{{"name": "search", "description": "Search the web", "inputSchema": mockMCPInputSchema()}},
+		})
 	}))
 	defer srv.Close()
 
@@ -226,7 +220,7 @@ func TestIntegration_MCPAutoDiscovery_ArrayFormat(t *testing.T) {
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
 	// Pass a config with no MCP servers - auto-discovery should find mcp.json.
-	rc := &config.Config{}
+	rc := trustedMCPTestConfig(t)
 	require.NoError(t, registerMCPTools(ctx, rc, tr))
 
 	// The tool from the auto-discovered MCP server should be registered.
@@ -245,14 +239,9 @@ func TestIntegration_MCPAutoDiscovery_MapFormat(t *testing.T) {
 	ctx := context.Background()
 
 	srv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPost {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"echo","description":"Echo tool"}]}}`)) //nolint:errcheck
-		} else {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
-		}
+		writeMockMCPResult(w, r, map[string]any{
+			"tools": []map[string]any{{"name": "echo", "description": "Echo tool", "inputSchema": mockMCPInputSchema()}},
+		})
 	}))
 	defer srv.Close()
 
@@ -275,7 +264,7 @@ func TestIntegration_MCPAutoDiscovery_MapFormat(t *testing.T) {
 	t.Chdir(tempDir)
 
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
-	rc := &config.Config{}
+	rc := trustedMCPTestConfig(t)
 	require.NoError(t, registerMCPTools(ctx, rc, tr))
 
 	tool, err := tr.Get(ctx, mcp.NormalizeToolName("echo-server", "echo"))
@@ -291,26 +280,16 @@ func TestIntegration_MCPConfigOverridesAutoDiscovery(t *testing.T) {
 
 	// Two mock servers: one for config, one for auto-discovery.
 	configSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPost {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"config-tool","description":"From config"}]}}`)) //nolint:errcheck
-		} else {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
-		}
+		writeMockMCPResult(w, r, map[string]any{
+			"tools": []map[string]any{{"name": "config-tool", "description": "From config", "inputSchema": mockMCPInputSchema()}},
+		})
 	}))
 	defer configSrv.Close()
 
 	autoSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPost {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"auto-tool","description":"From auto-discovery"}]}}`)) //nolint:errcheck
-		} else {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
-		}
+		writeMockMCPResult(w, r, map[string]any{
+			"tools": []map[string]any{{"name": "auto-tool", "description": "From auto-discovery", "inputSchema": mockMCPInputSchema()}},
+		})
 	}))
 	defer autoSrv.Close()
 
@@ -332,13 +311,7 @@ func TestIntegration_MCPConfigOverridesAutoDiscovery(t *testing.T) {
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
 	// Config has its own MCP server - should take priority over mcp.json.
-	rc := &config.Config{
-		MCP: config.MCPConfig{
-			Servers: []config.MCPServerConfig{
-				{Name: "config-server", URL: configSrv.URL},
-			},
-		},
-	}
+	rc := trustedGlobalMCPTestConfig(t, []config.MCPServerConfig{{Name: "config-server", URL: configSrv.URL}})
 	require.NoError(t, registerMCPTools(ctx, rc, tr))
 
 	// Config server's tool should be registered.
@@ -370,7 +343,6 @@ func TestIntegration_LoadMCPServers_NoFiles(t *testing.T) {
 // SkillInfo into the DefaultSystemPromptBuilder to verify the full pipeline
 // produces a system prompt containing the skill name and description.
 func TestIntegration_FullSystemPromptWithAutoDiscoveredSkills(t *testing.T) {
-	setupTestTrust(t)
 	ctx := context.Background()
 	tempDir := t.TempDir()
 
@@ -396,7 +368,7 @@ This skill guides integration test execution.
 
 	// Step 1: Auto-discover and register skills (no skill.dir in config).
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
-	rc := &config.Config{}
+	rc := trustedMCPTestConfig(t)
 	infos := registerSkillTools(ctx, rc, tr)
 	require.Len(t, infos, 1)
 

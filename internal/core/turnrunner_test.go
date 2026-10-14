@@ -90,6 +90,10 @@ func TestTurnRunnerSteerAndFollowUp(t *testing.T) {
 
 	bl := newBlockingTurnLoop()
 	runner := NewEinoTurnRunner(bl)
+	steerCh := make(chan string, 1)
+	followUpCh := make(chan string, 1)
+	runner.SetSteerChannel(steerCh)
+	runner.SetFollowUpChannel(followUpCh)
 
 	var runErr error
 	done := make(chan struct{})
@@ -104,6 +108,8 @@ func TestTurnRunnerSteerAndFollowUp(t *testing.T) {
 
 	require.NoError(t, runner.Steer(context.Background(), id, "reassess the plan"))
 	require.NoError(t, runner.FollowUp(context.Background(), id, "clarify the budget"))
+	assert.Equal(t, "reassess the plan", <-steerCh)
+	assert.Equal(t, "clarify the budget", <-followUpCh)
 
 	turn, err := runner.Get(context.Background(), id)
 	require.NoError(t, err)

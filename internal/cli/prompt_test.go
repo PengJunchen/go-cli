@@ -204,11 +204,11 @@ func TestForkSession_EmptyStore(t *testing.T) {
 	assert.Contains(t, err.Error(), "empty")
 }
 
-// TestPromptCmd_NoForkNoPersistence verifies AC-5: without --fork, the prompt
-// command does not enable session persistence — no session file is created even
-// when a store path is configured.
-func TestPromptCmd_NoForkNoPersistence(t *testing.T) {
+// TestPromptCmd_ConfiguredStoreUsesDurableSession verifies that a configured
+// store path activates the durable session protocol for ordinary prompts.
+func TestPromptCmd_ConfiguredStoreUsesDurableSession(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
+	configureDurableCLISessionTest(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -217,7 +217,7 @@ func TestPromptCmd_NoForkNoPersistence(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	storePath := filepath.Join(dir, "session.jsonl")
+	storePath := filepath.Join(dir, "sessions")
 
 	var out bytes.Buffer
 	cmd := newPromptCmd(&out)
@@ -226,10 +226,9 @@ func TestPromptCmd_NoForkNoPersistence(t *testing.T) {
 
 	err := cmd.Run(t.Context(), cfg, []string{"hello"})
 	require.NoError(t, err)
-	assert.Equal(t, "ok\n", out.String())
+	assert.Contains(t, out.String(), "ok\n")
+	physicalID := physicalSessionIDFromOutput(t, out.String())
 
-	// Without --fork, session persistence is not enabled, so no session file
-	// should have been created.
-	_, statErr := os.Stat(storePath)
-	assert.True(t, os.IsNotExist(statErr), "session file should not exist without --fork")
+	_, statErr := os.Stat(filepath.Join(storePath, "sessions", physicalID+".jsonl"))
+	assert.NoError(t, statErr, "configured prompt storage should create a durable physical session")
 }

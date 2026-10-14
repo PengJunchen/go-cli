@@ -74,7 +74,8 @@ func TestOpenAIProviderGenerateCannedCompletion(t *testing.T) {
 		var req openAIRequest
 		require.NoError(t, json.Unmarshal(body, &req))
 		assert.Equal(t, "gpt-4o", req.Model)
-		assert.Equal(t, 0.5, req.Temperature)
+		require.NotNil(t, req.Temperature)
+		assert.Equal(t, 0.5, *req.Temperature)
 		require.Len(t, req.Messages, 1)
 		assert.Equal(t, "user", req.Messages[0].Role)
 		assert.Equal(t, "hello", req.Messages[0].Content)
@@ -126,7 +127,7 @@ func TestClaudeProviderGenerateCannedCompletion(t *testing.T) {
 		assert.Equal(t, "hello", req.Messages[0].Content[0].Text)
 
 		w.Header().Set("Content-Type", "application/json")
-		writeResponse(t, w, `{"content":[{"type":"text","text":"bonjour"}],"usage":{"input_tokens":4,"output_tokens":2}}`)
+		writeResponse(t, w, `{"role":"assistant","content":[{"type":"text","text":"bonjour"}],"stop_reason":"end_turn","usage":{"input_tokens":4,"output_tokens":2}}`)
 	}))
 	defer srv.Close()
 
@@ -159,7 +160,7 @@ func TestClaudeProviderGenerateSystemOnly(t *testing.T) {
 		assert.Equal(t, "sys A\nsys B", req.System)
 		require.Len(t, req.Messages, 0)
 		w.Header().Set("Content-Type", "application/json")
-		writeResponse(t, w, `{"content":[]}`)
+		writeResponse(t, w, `{"role":"assistant","content":[],"stop_reason":"end_turn"}`)
 	}))
 	defer srv.Close()
 
@@ -229,7 +230,7 @@ func TestNativeChatModelStreamSingleChunk(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		writeResponse(t, w, "data: {\"choices\":[{\"delta\":{\"content\":\"streamed\"}}]}\n\ndata: [DONE]\n\n")
+		writeResponse(t, w, "data: {\"choices\":[{\"delta\":{\"content\":\"streamed\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 	}))
 	defer srv.Close()
 
@@ -264,5 +265,9 @@ func TestNativeChatModelHTTP500(t *testing.T) {
 	require.NoError(t, err)
 	_, err = model.Generate(context.Background(), nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "boom")
+	assert.NotContains(t, err.Error(), "boom")
+	assert.Contains(t, err.Error(), "HTTP 500")
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Contains(t, providerErr.Message, "boom")
 }

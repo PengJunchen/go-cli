@@ -20,7 +20,24 @@ func TestAppRunRestartable(t *testing.T) {
 	close(first)
 
 	app := NewBubbleteaApp(first)
-	require.NoError(t, app.Run(context.Background()))
+	run := func(wantEvents int64) {
+		runErr := make(chan error, 1)
+		go func() { runErr <- app.Run(context.Background()) }() //nolint:errcheck
+		select {
+		case <-app.ProgramReady():
+		case <-time.After(time.Second):
+			t.Fatal("program did not start")
+		}
+		require.Eventually(t, func() bool { return app.EventsProcessed() == wantEvents }, time.Second, time.Millisecond)
+		app.Quit()
+		select {
+		case err := <-runErr:
+			require.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("app did not stop after explicit Quit")
+		}
+	}
+	run(1)
 	require.Equal(t, int64(1), app.EventsProcessed())
 	require.Contains(t, app.View(), "one")
 	require.False(t, app.running.Load(), "running flag should be released after Run returns")
@@ -33,7 +50,7 @@ func TestAppRunRestartable(t *testing.T) {
 	// sync for inspection) and run again.
 	app.model.events = second
 	app.events = second
-	require.NoError(t, app.Run(context.Background()))
+	run(2)
 	require.Equal(t, int64(2), app.EventsProcessed(), "a fresh run should keep consuming")
 	require.Contains(t, app.View(), "two")
 }

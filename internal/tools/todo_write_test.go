@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -169,4 +170,71 @@ func TestTodoWriteNilStore(t *testing.T) {
 		Args: map[string]any{"action": "list"},
 	})
 	assert.Error(t, err)
+}
+
+func TestTodoWriteEmitsRevisionedSnapshotsAfterSuccessfulMutations(t *testing.T) {
+	store := NewTodoStore()
+	var snapshots []TodoSnapshot
+	tool := NewTodoWriteTool(store, WithTodoWriteChangeHandler(func(snapshot TodoSnapshot) error {
+		snapshots = append(snapshots, snapshot)
+		return nil
+	}))
+
+	_, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{
+		"action": "add", "content": "ship the change",
+	}})
+	require.NoError(t, err)
+	_, err = tool.Execute(context.Background(), ToolCall{Args: map[string]any{
+		"action": "update", "id": "todo-1", "status": "completed",
+	}})
+	require.NoError(t, err)
+	_, err = tool.Execute(context.Background(), ToolCall{Args: map[string]any{
+		"action": "update", "id": "todo-1", "status": "completed",
+	}})
+	require.NoError(t, err)
+	_, err = tool.Execute(context.Background(), ToolCall{Args: map[string]any{
+		"action": "update", "id": "missing", "status": "completed",
+	}})
+	require.NoError(t, err)
+	require.Len(t, snapshots, 2, "unchanged and unknown updates should not emit snapshots")
+	_, err = tool.Execute(context.Background(), ToolCall{Args: map[string]any{
+		"action": "remove", "id": "todo-1",
+	}})
+	require.NoError(t, err)
+	_, err = tool.Execute(context.Background(), ToolCall{Args: map[string]any{
+		"action": "remove", "id": "missing",
+	}})
+	require.NoError(t, err)
+
+	_, err = tool.Execute(context.Background(), ToolCall{Args: map[string]any{
+		"action": "add",
+	}})
+	assert.Error(t, err)
+	_, err = tool.Execute(context.Background(), ToolCall{Args: map[string]any{
+		"action": "bogus",
+	}})
+	assert.Error(t, err)
+
+	require.Len(t, snapshots, 3)
+	assert.Equal(t, []uint64{1, 2, 3}, []uint64{
+		snapshots[0].Revision, snapshots[1].Revision, snapshots[2].Revision,
+	})
+	assert.Equal(t, "ship the change", snapshots[0].Items[0].Content)
+	assert.Equal(t, "completed", snapshots[1].Items[0].Status)
+	assert.Empty(t, snapshots[2].Items)
+}
+
+func TestTodoWriteChangeHandlerFailureDoesNotFailCommittedMutation(t *testing.T) {
+	store := NewTodoStore()
+	tool := NewTodoWriteTool(store, WithTodoWriteChangeHandler(func(TodoSnapshot) error {
+		return errors.New("TUI is stopping")
+	}))
+
+	result, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{
+		"action": "add", "content": "committed task",
+	}})
+	require.NoError(t, err, "observer failure must not make an already committed tool call retryable")
+	require.NotNil(t, result)
+	assert.Contains(t, result.Output, "added todo todo-1")
+	assert.Equal(t, "committed task", store.Snapshot().Items[0].Content)
 }

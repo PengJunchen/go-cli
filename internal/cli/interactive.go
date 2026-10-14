@@ -4,17 +4,22 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/compaction"
+	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
+	"github.com/pengjunchen/go-cli/internal/tui"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -32,6 +37,25 @@ const (
 	// exitCommand is the user input that terminates the interactive session.
 	exitCommand = "exit"
 )
+
+// ErrInteractiveRemoteModeUnsupported indicates that interactive remote mode
+// has no prompt-and-dispatch protocol in the current CLI.
+var ErrInteractiveRemoteModeUnsupported = errors.New("cli: interactive remote mode is unsupported")
+
+// UnsupportedInteractiveRemoteModeError identifies an unsupported TUI mode.
+type UnsupportedInteractiveRemoteModeError struct {
+	Mode string
+}
+
+// Error implements error.
+func (e *UnsupportedInteractiveRemoteModeError) Error() string {
+	return fmt.Sprintf("interactive: tui.mode %q is unsupported; set tui.mode to local", e.Mode)
+}
+
+// Unwrap identifies the unsupported interactive capability.
+func (e *UnsupportedInteractiveRemoteModeError) Unwrap() error {
+	return ErrInteractiveRemoteModeUnsupported
+}
 
 // interactiveCmd implements Command and runs an interactive multi-turn agent
 // session with TUI rendering, MCP tool support, skill execution, and automatic
@@ -62,6 +86,10 @@ func (c *interactiveCmd) Synopsis() string {
 // First-run onboarding is handled inside REPLSession.start() after flag
 // parsing so that invalid flags produce a UsageError before the wizard runs.
 func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) error {
+	if rc, ok := cfg.(*config.Config); ok && rc.TUI.Mode == "remote" {
+		return &UnsupportedInteractiveRemoteModeError{Mode: rc.TUI.Mode}
+	}
+
 	rs := &REPLSession{
 		cmd:             c,
 		out:             c.out,
@@ -76,15 +104,20 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 // messagesToTurnItems converts core.AgentMessage slice to compaction.TurnItem
 // slice for the compaction pipeline.
 func messagesToTurnItems(msgs []core.AgentMessage) []compaction.TurnItem {
-	items := make([]compaction.TurnItem, len(msgs))
-	for i, m := range msgs {
+	cloned := core.CloneAgentMessages(msgs)
+	items := make([]compaction.TurnItem, len(cloned))
+	for i, m := range cloned {
 		item := compaction.TurnItem{
-			ID:            fmt.Sprintf("msg-%d", i),
-			Role:          m.Role,
-			ContentBlocks: m.ContentBlocks,
-			ToolCalls:     m.ToolCalls,
-			ToolCallID:    m.ToolCallID,
-			ToolName:      m.ToolName,
+			ID:             fmt.Sprintf("msg-%d", i),
+			Role:           m.Role,
+			Usage:          m.Usage,
+			ContentBlocks:  m.ContentBlocks,
+			ToolCalls:      m.ToolCalls,
+			ToolCallID:     m.ToolCallID,
+			ToolName:       m.ToolName,
+			InputKind:      m.InputKind,
+			ReceiptOutcome: m.ReceiptOutcome,
+			Runtime:        m.Runtime,
 		}
 		if m.Role == compaction.RoleTool {
 			item.ToolResult = m.Content
@@ -102,11 +135,15 @@ func turnItemsToMessages(items []compaction.TurnItem) []core.AgentMessage {
 	msgs := make([]core.AgentMessage, len(items))
 	for i, it := range items {
 		msg := core.AgentMessage{
-			Role:          it.Role,
-			ContentBlocks: it.ContentBlocks,
-			ToolCalls:     it.ToolCalls,
-			ToolCallID:    it.ToolCallID,
-			ToolName:      it.ToolName,
+			Role:           it.Role,
+			Usage:          it.Usage,
+			ContentBlocks:  it.ContentBlocks,
+			ToolCalls:      it.ToolCalls,
+			ToolCallID:     it.ToolCallID,
+			ToolName:       it.ToolName,
+			InputKind:      it.InputKind,
+			ReceiptOutcome: it.ReceiptOutcome,
+			Runtime:        it.Runtime,
 		}
 		if it.Role == compaction.RoleTool {
 			msg.Content = it.ToolResult
@@ -118,7 +155,7 @@ func turnItemsToMessages(items []compaction.TurnItem) []core.AgentMessage {
 		}
 		msgs[i] = msg
 	}
-	return msgs
+	return core.CloneAgentMessages(msgs)
 }
 
 // loadSessionHistory reads a JSONL session file and reconstructs the message
@@ -168,42 +205,145 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 	messages := assembly.Agent.Messages()
 
 	var inputTokens, outputTokens int
+	var unknownUsageAttempts, unknownCostAttempts int
+	var attemptUsageAvailable bool
+	usageSource := core.TokenUsageSourceUnknown
+	providerModels := make(map[core.TokenUsageProviderModel]struct{})
+	costSources := make(map[core.TokenUsageCostSource]struct{})
+	priceSources := make(map[core.TokenUsagePriceSource]struct{})
+	cost := 0.0
+	var costSummary production.AttemptCostSummary
+	if assembly.CostTracker != nil {
+		attempts, summary := assembly.CostTracker.AttemptCostSnapshot()
+		costSummary = summary
+		if summary.Attempts > 0 {
+			attemptUsageAvailable = true
+			inputTokens = summary.KnownInputTokens
+			outputTokens = summary.KnownOutputTokens
+			unknownUsageAttempts = summary.UnknownUsageAttempts
+			unknownCostAttempts = summary.UnknownCostAttempts
+			if summary.UnknownUsageAttempts < summary.Attempts {
+				usageSource = core.TokenUsageSourceReported
+			}
+			for _, attempt := range attempts {
+				providerModels[core.TokenUsageProviderModel{
+					ProviderID: attempt.Result.Identity.ProviderID,
+					ModelID:    attempt.Result.Identity.ModelID,
+				}] = struct{}{}
+				costSources[tokenUsageCostSource(attempt.Status)] = struct{}{}
+				priceSources[tokenUsagePriceSource(attempt.PriceSource)] = struct{}{}
+			}
+		}
+		if summary.LegacyCalls > 0 {
+			unknownUsageAttempts += summary.LegacyCalls
+			costSources[core.TokenUsageCostEstimated] = struct{}{}
+			priceSources[tokenUsagePriceSource(summary.LegacyPriceSource)] = struct{}{}
+		}
+	}
 
 	// Prefer API-reported usage from the last assistant message that has it.
 	// API usage reflects the actual token consumption for the full
 	// conversation (input = prompt tokens, output = completion tokens).
-	if usage := lastAssistantAPIUsage(messages); usage != nil {
-		inputTokens = usage.InputTokens
-		outputTokens = usage.OutputTokens
-	} else {
-		// Fall back to local estimation when the API did not report usage.
-		if assembly.Estimator == nil {
-			return
-		}
-		for _, msg := range messages {
-			n, _ := assembly.Estimator.Estimate(msg.Content) //nolint:errcheck
-			if msg.Role == "assistant" {
-				outputTokens += n
-			} else {
-				inputTokens += n
+	if !attemptUsageAvailable {
+		if usage := lastAssistantAPIUsage(messages); usage != nil {
+			inputTokens = usage.InputTokens
+			outputTokens = usage.OutputTokens
+			usageSource = core.TokenUsageSourceReported
+		} else {
+			// Fall back to local estimation when neither the operation ledger nor
+			// the latest assistant response reported authoritative usage.
+			if assembly.Estimator != nil {
+				usageSource = core.TokenUsageSourceEstimated
+				for _, msg := range messages {
+					n, _ := assembly.Estimator.Estimate(msg.Content) //nolint:errcheck
+					if msg.Role == "assistant" {
+						outputTokens += n
+					} else {
+						inputTokens += n
+					}
+				}
 			}
 		}
 	}
 
-	cost := 0.0
 	if assembly.CostTracker != nil {
-		cost = assembly.CostTracker.Total()
+		cost = costSummary.CombinedKnownCostSubtotal
 	}
+	if len(costSources) == 0 {
+		costSources[core.TokenUsageCostUnknown] = struct{}{}
+	}
+	contextWindow := assembly.ContextWindow
+	if assembly.ModelSelector != nil {
+		contextWindow = assembly.ModelSelector.ActiveModelSnapshot().ContextWindow
+	}
+	providerModelList := make([]core.TokenUsageProviderModel, 0, len(providerModels))
+	for providerModel := range providerModels {
+		providerModelList = append(providerModelList, providerModel)
+	}
+	sort.Slice(providerModelList, func(i, j int) bool {
+		if providerModelList[i].ProviderID != providerModelList[j].ProviderID {
+			return providerModelList[i].ProviderID < providerModelList[j].ProviderID
+		}
+		return providerModelList[i].ModelID < providerModelList[j].ModelID
+	})
 	_ = stream.Send(core.AgentEvent{ //nolint:errcheck
 		Kind:      "token_usage",
 		Timestamp: time.Now(),
 		TokenUsage: &core.TokenUsage{
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			MaxTokens:    assembly.ContextWindow,
-			Cost:         cost,
+			InputTokens:          inputTokens,
+			OutputTokens:         outputTokens,
+			MaxTokens:            contextWindow,
+			Cost:                 cost,
+			UnknownUsageAttempts: unknownUsageAttempts,
+			UnknownCostAttempts:  unknownCostAttempts,
+			UsageSource:          usageSource,
+			CostSources:          sortedTokenUsageCostSources(costSources),
+			PriceSources:         sortedTokenUsagePriceSources(priceSources),
+			ProviderModels:       providerModelList,
 		},
 	})
+}
+
+func tokenUsageCostSource(status production.AttemptCostStatus) core.TokenUsageCostSource {
+	switch status {
+	case production.AttemptCostProviderReported:
+		return core.TokenUsageCostReported
+	case production.AttemptCostEstimated:
+		return core.TokenUsageCostEstimated
+	default:
+		return core.TokenUsageCostUnknown
+	}
+}
+
+func tokenUsagePriceSource(source production.AttemptCostPriceSource) core.TokenUsagePriceSource {
+	switch source {
+	case production.AttemptCostFromProvider:
+		return core.TokenUsagePriceProvider
+	case production.AttemptCostFromDefaultTier:
+		return core.TokenUsagePriceDefaultTier
+	case production.AttemptCostFromConfiguredTier:
+		return core.TokenUsagePriceConfiguredTier
+	default:
+		return core.TokenUsagePriceUnknown
+	}
+}
+
+func sortedTokenUsageCostSources(sources map[core.TokenUsageCostSource]struct{}) []core.TokenUsageCostSource {
+	result := make([]core.TokenUsageCostSource, 0, len(sources))
+	for source := range sources {
+		result = append(result, source)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
+}
+
+func sortedTokenUsagePriceSources(sources map[core.TokenUsagePriceSource]struct{}) []core.TokenUsagePriceSource {
+	result := make([]core.TokenUsagePriceSource, 0, len(sources))
+	for source := range sources {
+		result = append(result, source)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
 }
 
 // lastAssistantAPIUsage scans messages from the end and returns the Usage from
@@ -243,21 +383,11 @@ func (e *cliHITLEmitter) SetProgram(p *tea.Program) {
 	e.program = p
 }
 
-// HITLMessage is a bubbletea message carrying a HITL question to the TUI. The
-// TUI renders the question, collects the user's answer, and sends a single
-// HITLResponse on ResponseCh so the emitter can deliver it to the agent.
-type HITLMessage struct {
-	QuestionID string
-	Question   string
-	Options    []string
-	ResponseCh chan HITLResponse
-}
+// HITLMessage is retained as an alias for compatibility with cli callers.
+type HITLMessage = tui.HITLMessage
 
-// HITLResponse is the user's answer to a HITLMessage, sent back by the TUI.
-type HITLResponse struct {
-	Answer string
-	Err    error
-}
+// HITLResponse is retained as an alias for compatibility with cli callers.
+type HITLResponse = tui.HITLResponse
 
 func (e *cliHITLEmitter) Emit(ctx context.Context, event core.HITLQuestionEvent) error {
 	// TUI mode: route the question through the bubbletea program so it renders
@@ -272,6 +402,7 @@ func (e *cliHITLEmitter) Emit(ctx context.Context, event core.HITLQuestionEvent)
 			Question:   event.Question,
 			Options:    event.Options,
 			ResponseCh: respCh,
+			Context:    ctx,
 		})
 		select {
 		case resp := <-respCh:

@@ -3,9 +3,11 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
@@ -16,6 +18,14 @@ import (
 // the oldest entries are evicted.
 const eventHistorySize = 256
 
+// eventSubscriberBufferSize bounds each live session subscription. A slow
+// subscriber is detached with an explicit gap instead of blocking publishers.
+const eventSubscriberBufferSize = 64
+
+// ErrEventCursorAhead indicates that a replay cursor is newer than the
+// session's current event sequence.
+var ErrEventCursorAhead = errors.New("acp: event cursor is ahead of the session")
+
 // EventEntry pairs an AgentEvent with its monotonically increasing sequence
 // ID for Last-Event-ID reconnection support.
 type EventEntry struct {
@@ -23,9 +33,71 @@ type EventEntry struct {
 	Event core.AgentEvent
 }
 
+// EventGap reports events that an ACP session event stream could not provide
+// contiguously. It describes transport projection loss, not a run-level
+// EventGapCount or durable transcript gap.
+type EventGap struct {
+	Layer            string `json:"layer"`
+	Reason           string `json:"reason"`
+	Cursor           uint64 `json:"cursor"`
+	MissingFrom      uint64 `json:"missing_from"`
+	MissingThrough   uint64 `json:"missing_through"`
+	MissingCount     uint64 `json:"missing_count"`
+	FirstAvailableID uint64 `json:"first_available_id,omitempty"`
+	LastEventID      uint64 `json:"last_event_id"`
+}
+
+// EventSubscription is a task/session-local replay snapshot plus a bounded
+// live stream registered atomically with that snapshot. Call Close when the
+// consumer is done; no per-subscription goroutine is created.
+type EventSubscription struct {
+	Replay     []EventEntry
+	LastSeq    uint64
+	HistoryGap *EventGap
+
+	session      *Session
+	subscriberID uint64
+	subscriber   *eventSubscriber
+}
+
+// Events returns entries published after the subscription snapshot.
+func (sub *EventSubscription) Events() <-chan EventEntry { return sub.subscriber.events }
+
+// Done is closed when the session closes or the bounded live stream overflows.
+func (sub *EventSubscription) Done() <-chan struct{} { return sub.subscriber.done }
+
+// Close unregisters the subscriber and returns any live-overflow gap. Buffered
+// entries remain readable from Events after Close, allowing consumers to drain
+// the contiguous prefix before reporting the gap.
+func (sub *EventSubscription) Close() *EventGap {
+	if sub == nil || sub.session == nil || sub.subscriber == nil {
+		return nil
+	}
+
+	s := sub.session
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.subscribers[sub.subscriberID] == sub.subscriber {
+		delete(s.subscribers, sub.subscriberID)
+	}
+	s.closeSubscriberLocked(sub.subscriber)
+	return cloneEventGap(sub.subscriber.gap)
+}
+
+type eventSubscriber struct {
+	events       chan EventEntry
+	done         chan struct{}
+	gap          *EventGap
+	doneSignaled bool
+	eventsClosed bool
+	closed       bool
+}
+
 // Session represents a connected ACP client's state. Each session tracks
-// pending messages queued for delivery via the /stream endpoint and an events
-// channel for streaming core.AgentEvents to SSE clients via /events.
+// pending messages queued for delivery via /stream and a bounded event
+// projection for /events. Use SubscribeAfter for replay/live streaming; Events
+// remains as a legacy best-effort channel for existing in-process consumers.
 type Session struct {
 	id      string
 	mu      sync.Mutex
@@ -40,14 +112,17 @@ type Session struct {
 	// entries whose ID exceeds that value.
 	eventSeq     uint64
 	eventHistory []EventEntry
+	nextSubID    uint64
+	subscribers  map[uint64]*eventSubscriber
 }
 
 // NewSession creates a Session with the given id (typically the client's
 // SenderID).
 func NewSession(id string) *Session {
 	return &Session{
-		id:     id,
-		events: make(chan core.AgentEvent, 128),
+		id:          id,
+		events:      make(chan core.AgentEvent, 128),
+		subscribers: make(map[uint64]*eventSubscriber),
 	}
 }
 
@@ -79,7 +154,7 @@ func (s *Session) Drain() []ACPMessage {
 }
 
 // Close marks the session as closed. Subsequent Enqueue calls are no-ops.
-// The events channel is closed so SSE consumers unblock.
+// Legacy and replay/live event consumers are unblocked.
 func (s *Session) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -88,6 +163,34 @@ func (s *Session) Close() {
 	}
 	s.closed = true
 	close(s.events)
+	for id, subscriber := range s.subscribers {
+		s.closeSubscriberLocked(subscriber)
+		delete(s.subscribers, id)
+	}
+}
+
+// closeSubscriberLocked freezes any overflow gap and closes the subscriber's
+// channels. Caller must hold s.mu.
+func (s *Session) closeSubscriberLocked(subscriber *eventSubscriber) {
+	if subscriber.closed {
+		return
+	}
+	if subscriber.gap != nil {
+		subscriber.gap.MissingThrough = s.eventSeq
+		if subscriber.gap.MissingThrough >= subscriber.gap.MissingFrom {
+			subscriber.gap.MissingCount = subscriber.gap.MissingThrough - subscriber.gap.MissingFrom + 1
+		}
+		subscriber.gap.LastEventID = s.eventSeq
+	}
+	if !subscriber.eventsClosed {
+		close(subscriber.events)
+		subscriber.eventsClosed = true
+	}
+	if !subscriber.doneSignaled {
+		close(subscriber.done)
+		subscriber.doneSignaled = true
+	}
+	subscriber.closed = true
 }
 
 // IsClosed reports whether the session has been closed.
@@ -102,10 +205,10 @@ func (s *Session) Events() <-chan core.AgentEvent {
 	return s.events
 }
 
-// PublishEvent sends an event to the events channel. Non-blocking: if the
-// channel is full, the event is dropped. The event is always recorded in the
-// ring buffer with a monotonically increasing ID so that Last-Event-ID
-// reconnection can replay it even if the channel delivery was dropped.
+// PublishEvent records one entry with a monotonically increasing ID and performs
+// non-blocking delivery to legacy and replay/live consumers. A full legacy channel drops
+// only that legacy delivery; a full replay/live subscriber is terminated with
+// explicit gap evidence while the ring retains the event for reconnection.
 func (s *Session) PublishEvent(event core.AgentEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -113,12 +216,35 @@ func (s *Session) PublishEvent(event core.AgentEvent) {
 		return
 	}
 	s.eventSeq++
-	s.appendHistory(EventEntry{ID: s.eventSeq, Event: event})
+	entry := EventEntry{ID: s.eventSeq, Event: event}
+	s.appendHistory(entry)
 	select {
 	case s.events <- event:
 	default:
 		// Channel full, drop event from live stream. It remains in the
 		// ring buffer for Last-Event-ID reconnection.
+	}
+	for _, subscriber := range s.subscribers {
+		if subscriber.closed || subscriber.gap != nil {
+			continue
+		}
+		select {
+		case subscriber.events <- entry:
+		default:
+			subscriber.gap = &EventGap{
+				Layer:          "acp_session_transport",
+				Reason:         "subscriber_overflow",
+				Cursor:         entry.ID - 1,
+				MissingFrom:    entry.ID,
+				MissingThrough: entry.ID,
+				MissingCount:   1,
+				LastEventID:    entry.ID,
+			}
+			if !subscriber.doneSignaled {
+				close(subscriber.done)
+				subscriber.doneSignaled = true
+			}
+		}
 	}
 }
 
@@ -134,21 +260,88 @@ func (s *Session) appendHistory(entry EventEntry) {
 	s.eventHistory[eventHistorySize-1] = entry
 }
 
-// EventHistorySince returns all entries with ID greater than afterID, plus
-// the current last event sequence number. Both reads are atomic with respect
-// to PublishEvent (protected by the same mutex), so callers can safely use
-// the returned lastSeq to assign IDs to subsequent live-stream reads without
-// gaps or duplicates.
+// EventHistorySince returns a snapshot of retained entries with ID greater
+// than afterID and the current last sequence. It does not register a live
+// consumer; callers that need replay-to-live continuity must use
+// SubscribeAfter.
 func (s *Session) EventHistorySince(afterID uint64) ([]EventEntry, uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	entries, _ := s.historySinceLocked(afterID)
+	return entries, s.eventSeq
+}
+
+// SubscribeAfter atomically validates the cursor, snapshots retained events,
+// and registers a bounded live subscriber under the same mutex used by
+// PublishEvent. Each publication is therefore present in Replay or Events,
+// unless the bounded live queue overflows, in which case Done closes and Close
+// returns an explicit EventGap.
+func (s *Session) SubscribeAfter(afterID uint64) (*EventSubscription, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if afterID > s.eventSeq {
+		return nil, fmt.Errorf("%w: requested %d, current %d", ErrEventCursorAhead, afterID, s.eventSeq)
+	}
+
+	replay, historyGap := s.historySinceLocked(afterID)
+	s.nextSubID++
+	subscriber := &eventSubscriber{
+		events: make(chan EventEntry, eventSubscriberBufferSize),
+		done:   make(chan struct{}),
+	}
+	subscription := &EventSubscription{
+		Replay:       replay,
+		LastSeq:      s.eventSeq,
+		HistoryGap:   historyGap,
+		session:      s,
+		subscriberID: s.nextSubID,
+		subscriber:   subscriber,
+	}
+	if s.closed {
+		s.closeSubscriberLocked(subscriber)
+		return subscription, nil
+	}
+	s.subscribers[s.nextSubID] = subscriber
+	return subscription, nil
+}
+
+// historySinceLocked returns a copy of the retained suffix and an explicit
+// retention gap when afterID predates the oldest retained EventEntry. Caller
+// must hold s.mu.
+func (s *Session) historySinceLocked(afterID uint64) ([]EventEntry, *EventGap) {
 	var entries []EventEntry
 	for _, e := range s.eventHistory {
 		if e.ID > afterID {
 			entries = append(entries, e)
 		}
 	}
-	return entries, s.eventSeq
+	var gap *EventGap
+	if len(s.eventHistory) > 0 {
+		firstAvailableID := s.eventHistory[0].ID
+		if afterID < firstAvailableID-1 {
+			missingFrom := afterID + 1
+			missingThrough := firstAvailableID - 1
+			gap = &EventGap{
+				Layer:            "acp_session_transport",
+				Reason:           "retention",
+				Cursor:           missingThrough,
+				MissingFrom:      missingFrom,
+				MissingThrough:   missingThrough,
+				MissingCount:     missingThrough - missingFrom + 1,
+				FirstAvailableID: firstAvailableID,
+				LastEventID:      s.eventSeq,
+			}
+		}
+	}
+	return entries, gap
+}
+
+func cloneEventGap(gap *EventGap) *EventGap {
+	if gap == nil {
+		return nil
+	}
+	copy := *gap
+	return &copy
 }
 
 // CoreHandler processes inbound ACP messages by dispatching them to a
@@ -163,9 +356,26 @@ type CoreHandler struct {
 
 	// bridgeOnce ensures the event forwarder is installed at most once.
 	bridgeOnce sync.Once
-	// sessions maps taskID -> *Session for event routing during dispatch.
+	// sessions maps taskID -> dispatch route for event routing during dispatch.
 	sessions sync.Map
 }
+
+type dispatchIdentityContextKey struct{}
+
+type dispatchIdentity struct {
+	principalID string
+	sessionID   string
+	session     *Session
+}
+
+type dispatchSessionRoute struct {
+	taskID      string
+	principalID string
+	sessionID   string
+	session     *Session
+}
+
+var nextACPDispatchID atomic.Uint64
 
 // NewCoreHandler creates a CoreHandler with the given dispatchers. Either
 // or both may be nil; nil dispatchers cause the corresponding message types
@@ -198,7 +408,9 @@ func (h *CoreHandler) ensureBridge() {
 		}
 		d.SetEventForwarder(func(taskID string, ev core.AgentEvent) {
 			if val, ok := h.sessions.Load(taskID); ok {
-				val.(*Session).PublishEvent(ev) //nolint:errcheck // best-effort event forwarding
+				if route, ok := val.(*dispatchSessionRoute); ok && route.taskID == taskID && route.session != nil && route.session.ID() == route.sessionID {
+					route.session.PublishEvent(ev) //nolint:errcheck // best-effort event forwarding
+				}
 			}
 			if h.eventBus != nil {
 				h.eventBus.Publish(ev)
@@ -241,18 +453,29 @@ func (h *CoreHandler) handleMessage(ctx context.Context, msg ACPMessage, session
 	}
 
 	task := core.SubagentTask{
-		ID:     fmt.Sprintf("acp-%s", msg.SenderID),
+		ID:     fmt.Sprintf("acp-dispatch-%d", nextACPDispatchID.Add(1)),
 		Prompt: msg.Content,
 	}
 	if role, ok := msg.Metadata["role"]; ok {
 		task.Role = role
 	}
 
-	// Register the session so the event forwarder can route events by
-	// taskID, then ensure the forwarder is installed. The bridge is
-	// idempotent (sync.Once) and nil-safe.
-	h.sessions.Store(task.ID, session)
-	defer h.sessions.Delete(task.ID)
+	identity := dispatchIdentity{sessionID: session.ID(), session: session}
+	if value, ok := ctx.Value(dispatchIdentityContextKey{}).(dispatchIdentity); ok && value.session == session && value.sessionID == session.ID() {
+		identity = value
+	}
+	route := &dispatchSessionRoute{
+		taskID:      task.ID,
+		principalID: identity.principalID,
+		sessionID:   identity.sessionID,
+		session:     identity.session,
+	}
+
+	// Register the exact session/principal binding for this dispatch, then
+	// ensure the forwarder is installed. CompareAndDelete ensures completion
+	// removes only the route installed for this task ID.
+	h.sessions.Store(task.ID, route)
+	defer h.sessions.CompareAndDelete(task.ID, route)
 	h.ensureBridge()
 
 	result, err := h.dispatcher.Dispatch(ctx, task)

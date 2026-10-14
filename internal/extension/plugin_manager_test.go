@@ -126,7 +126,8 @@ func TestPluginManagerInitPassesRegistry(t *testing.T) {
 	require.NoError(t, pm.Init(context.Background()))
 
 	require.NotNil(t, ext.Registry())
-	assert.Same(t, pm.Registry(), ext.Registry())
+	assert.NotSame(t, pm.Registry(), ext.Registry(), "Init receives a private staging registry")
+	assert.IsType(t, &DefaultExtensionRegistry{}, ext.Registry())
 }
 
 // Init with no extensions is a no-op.
@@ -225,7 +226,7 @@ func TestPluginManagerInitPartialFailure(t *testing.T) {
 
 	pm := NewPluginManager(loader)
 	require.NoError(t, pm.Load(context.Background(), []string{"p"}))
-	require.NoError(t, pm.Init(context.Background()))
+	require.Error(t, pm.Init(context.Background()))
 
 	// ext2 should still have been initialized even though ext1 failed.
 	assert.True(t, ext2.InitCalled())

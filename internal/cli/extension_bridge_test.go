@@ -1,7 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"math"
+	"strings"
 	"sync"
 	"testing"
 
@@ -10,6 +16,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/extension"
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 // bridgeTestHook is an extension.Hook that records the events it handles and
@@ -20,23 +27,45 @@ type bridgeTestHook struct {
 	calls  []string
 	action extension.HookAction
 	reason string
+	result extension.HookResult
+	handle func(context.Context, extension.HookEvent) extension.HookResult
+	events []extension.HookEvent
 }
 
 var _ extension.Hook = (*bridgeTestHook)(nil)
 
 func (h *bridgeTestHook) Name() string { return h.name }
 
-func (h *bridgeTestHook) Handle(_ context.Context, event extension.HookEvent) extension.HookResult {
+func (h *bridgeTestHook) Handle(ctx context.Context, event extension.HookEvent) extension.HookResult {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.calls = append(h.calls, event.Name)
-	return extension.HookResult{Action: h.action, Reason: h.reason}
+	h.events = append(h.events, event)
+	handle := h.handle
+	result := h.result
+	if result.Action == "" {
+		result = extension.HookResult{Action: h.action, Reason: h.reason}
+	}
+	h.mu.Unlock()
+	if handle != nil {
+		return handle(ctx, event)
+	}
+	return result
 }
 
 func (h *bridgeTestHook) Calls() []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]string(nil), h.calls...)
+}
+
+func (h *bridgeTestHook) Events() []extension.HookEvent {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]extension.HookEvent(nil), h.events...)
+}
+
+func bridgeHookAdapter(hook extension.Hook) *extensionHookAdapter {
+	return newExtensionHookAdapter(extension.HookRegistration{Owner: "registered-owner", Hook: hook})
 }
 
 // bridgeTestMiddleware is an extension.Middleware that prefixes the wrapped
@@ -78,7 +107,7 @@ func (l *bridgeStubLoop) Run(_ context.Context, _ core.Submission, _ ...core.Eve
 // the agent.before_run event.
 func TestExtensionHookAdapterBeforeRunPass(t *testing.T) {
 	hook := &bridgeTestHook{name: "pass-hook", action: extension.HookActionPass}
-	adapter := newExtensionHookAdapter(hook)
+	adapter := bridgeHookAdapter(hook)
 
 	err := adapter.BeforeRun(context.Background(), core.Submission{Content: "hi"})
 	require.NoError(t, err)
@@ -86,24 +115,37 @@ func TestExtensionHookAdapterBeforeRunPass(t *testing.T) {
 	calls := hook.Calls()
 	require.Len(t, calls, 1)
 	assert.Equal(t, "agent.before_run", calls[0])
+	event := hook.Events()[0]
+	assert.Equal(t, "registered-owner", event.Source)
+	_, ok := event.Data.(extension.HookBeforeRunSnapshot)
+	assert.True(t, ok, "the event data must be the documented concrete snapshot")
 }
 
-// A non-pass action hook adapter halts BeforeRun with an error carrying the
-// hook name and reason.
+// A block halts BeforeRun with a fixed-message error whose typed fields
+// retain registration identity without exposing request or reason content.
 func TestExtensionHookAdapterBeforeRunBlock(t *testing.T) {
-	hook := &bridgeTestHook{name: "block-hook", action: "block", reason: "denied"}
-	adapter := newExtensionHookAdapter(hook)
+	const reasonCanary = "hook-reason-secret-71f6"
+	hook := &bridgeTestHook{name: "block-hook", action: extension.HookActionBlock, reason: reasonCanary}
+	adapter := bridgeHookAdapter(hook)
 
-	err := adapter.BeforeRun(context.Background(), core.Submission{Content: "hi"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "block-hook")
-	assert.Contains(t, err.Error(), "denied")
+	err := adapter.BeforeRun(context.Background(), core.Submission{Content: "private request canary"})
+	require.ErrorIs(t, err, extension.ErrHookBlocked)
+	assert.Equal(t, extension.ErrHookBlocked.Error(), err.Error())
+	assert.Equal(t, err.Error(), fmt.Sprintf("%+v", err), "formatting must not implicitly expose typed identity fields")
+	assert.NotContains(t, err.Error(), reasonCanary)
+	assert.NotContains(t, err.Error(), "block-hook")
+	assert.NotContains(t, err.Error(), "private request canary")
+	var observerErr ExtensionHookObserverIdentity
+	require.ErrorAs(t, err, &observerErr)
+	assert.Equal(t, "registered-owner", observerErr.ExtensionOwner())
+	assert.Equal(t, "block-hook", observerErr.HookName())
+	assert.Equal(t, "agent.before_run", observerErr.EventName())
 }
 
 // AfterRun forwards the agent.after_run event and does not error on pass.
 func TestExtensionHookAdapterAfterRun(t *testing.T) {
 	hook := &bridgeTestHook{name: "after-hook", action: extension.HookActionPass}
-	adapter := newExtensionHookAdapter(hook)
+	adapter := bridgeHookAdapter(hook)
 
 	err := adapter.AfterRun(context.Background(), core.Submission{Content: "hi"}, core.Result{Success: true, Message: "done"}, nil)
 	require.NoError(t, err)
@@ -116,7 +158,7 @@ func TestExtensionHookAdapterAfterRun(t *testing.T) {
 // Name delegates to the underlying extension hook.
 func TestExtensionHookAdapterName(t *testing.T) {
 	hook := &bridgeTestHook{name: "named-hook", action: extension.HookActionPass}
-	adapter := newExtensionHookAdapter(hook)
+	adapter := bridgeHookAdapter(hook)
 	assert.Equal(t, "named-hook", adapter.Name())
 }
 
@@ -137,11 +179,347 @@ func TestExtensionMiddlewareAdapterWrap(t *testing.T) {
 	assert.True(t, mw.used, "WrapAgent should have been invoked")
 }
 
+type invocationCountingExtensionMiddleware struct{ calls int }
+
+func (*invocationCountingExtensionMiddleware) Name() string { return "invocation-counting" }
+
+func (m *invocationCountingExtensionMiddleware) WrapAgent(next extension.AgentFunc) extension.AgentFunc {
+	return func(ctx context.Context, input extension.AgentInput) (extension.AgentOutput, error) {
+		m.calls++
+		return next(ctx, input)
+	}
+}
+
+func TestExtensionMiddlewareFailsClosedBeforeCanonicalLoopExecution(t *testing.T) {
+	middleware := &invocationCountingExtensionMiddleware{}
+	base := &canonicalAssemblyTestLoop{}
+	wrapped := core.NewMiddlewareChain(newExtensionMiddlewareAdapter(middleware)).Wrap(base)
+
+	canonical, ok := wrapped.(core.CanonicalLoop)
+	require.True(t, ok)
+	result, err := canonical.RunCanonical(context.Background(), core.Submission{Content: "request"})
+
+	require.ErrorIs(t, err, core.ErrCanonicalMiddlewareUnsupported)
+	require.Len(t, result.Transcript, 1)
+	assert.Equal(t, core.InputKindUser, result.Transcript[0].Message.InputKind)
+	assert.Zero(t, base.calls, "the wrapped loop must not start under event-only extension middleware")
+	assert.Zero(t, middleware.calls, "unsupported extension middleware must not run")
+}
+
 // Name delegates to the underlying extension middleware.
 func TestExtensionMiddlewareAdapterName(t *testing.T) {
 	mw := &bridgeTestMiddleware{name: "named-mw"}
 	adapter := newExtensionMiddlewareAdapter(mw)
 	assert.Equal(t, "named-mw", adapter.Name())
+}
+
+func TestHookSnapshotDeepCopyIsolatedPerObserver(t *testing.T) {
+	submission := core.Submission{
+		Content:  "request",
+		Metadata: map[string]any{"nested": map[string]any{"items": []any{"original", int64(7)}}},
+		History: []core.AgentMessage{{
+			Role: "assistant", Content: "history",
+			ContentBlocks: []llm.ContentBlock{{Type: "image_url", ImageURL: &llm.ImageURL{URL: "https://image.invalid/a", Detail: "high"}}},
+			Usage:         &llm.Usage{InputTokens: 2, OutputTokens: 3, TotalTokens: 5},
+			ToolCalls:     []llm.ToolCall{{ID: "call-1", Name: "lookup", Args: map[string]any{"nested": []any{true, "before"}}}},
+			ToolCallID:    "call-1", ToolName: "lookup", InputKind: "followup", ReceiptOutcome: "success",
+		}},
+	}
+	first := &bridgeTestHook{name: "first", action: extension.HookActionPass, handle: func(_ context.Context, event extension.HookEvent) extension.HookResult {
+		before := event.Data.(extension.HookBeforeRunSnapshot)
+		before.Submission.Metadata["nested"].(map[string]any)["items"].([]any)[0] = "mutated"
+		before.Submission.Messages[0].ContentBlocks[0].ImageURL.URL = "mutated-url"
+		before.Submission.Messages[0].Usage.InputTokens = 999
+		before.Submission.Messages[0].ToolCalls[0].Args.(map[string]any)["nested"].([]any)[1] = "mutated-args"
+		return extension.HookResult{Action: extension.HookActionPass}
+	}}
+	second := &bridgeTestHook{name: "second", action: extension.HookActionPass}
+	require.NoError(t, bridgeHookAdapter(first).BeforeRun(context.Background(), submission))
+	require.NoError(t, bridgeHookAdapter(second).BeforeRun(context.Background(), submission))
+
+	secondSnapshot := second.Events()[0].Data.(extension.HookBeforeRunSnapshot).Submission
+	assert.Equal(t, "original", secondSnapshot.Metadata["nested"].(map[string]any)["items"].([]any)[0])
+	assert.Equal(t, "https://image.invalid/a", secondSnapshot.Messages[0].ContentBlocks[0].ImageURL.URL)
+	assert.Equal(t, 2, secondSnapshot.Messages[0].Usage.InputTokens)
+	assert.Equal(t, "before", secondSnapshot.Messages[0].ToolCalls[0].Args.(map[string]any)["nested"].([]any)[1])
+	assert.Equal(t, "original", submission.Metadata["nested"].(map[string]any)["items"].([]any)[0])
+	assert.Equal(t, "https://image.invalid/a", submission.History[0].ContentBlocks[0].ImageURL.URL)
+	assert.Equal(t, 2, submission.History[0].Usage.InputTokens)
+	assert.Equal(t, "before", submission.History[0].ToolCalls[0].Args.(map[string]any)["nested"].([]any)[1])
+}
+
+type bridgeUnsupportedValue struct{ secret string }
+
+type bridgeCanaryError struct {
+	secret string
+	calls  int
+}
+
+func (e *bridgeCanaryError) Error() string {
+	e.calls++
+	return e.secret
+}
+
+type bridgeWrappedCanaryError struct{ cause error }
+
+func (e bridgeWrappedCanaryError) Error() string { return "provider-secret-error-canary" }
+func (e bridgeWrappedCanaryError) Unwrap() error { return e.cause }
+
+func TestHookSnapshotRejectsUnsupportedPayload(t *testing.T) {
+	const canary = "unsupported-payload-canary-882a"
+	cycle := map[string]any{}
+	cycle["self"] = cycle
+	canaryErr := &bridgeCanaryError{secret: canary}
+	cases := []struct {
+		name  string
+		value any
+	}{
+		{name: "cycle", value: cycle},
+		{name: "struct", value: bridgeUnsupportedValue{secret: canary}},
+		{name: "pointer", value: &bridgeUnsupportedValue{secret: canary}},
+		{name: "error", value: canaryErr},
+		{name: "non-string map key", value: map[any]any{canary: true}},
+		{name: "non-finite number", value: math.NaN()},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			hook := &bridgeTestHook{name: "rejecting", action: extension.HookActionPass}
+			err := bridgeHookAdapter(hook).BeforeRun(context.Background(), core.Submission{Metadata: map[string]any{"secret": testCase.value}})
+			require.ErrorIs(t, err, extension.ErrHookPayloadUnsupported)
+			assert.NotContains(t, err.Error(), canary)
+			assert.Empty(t, hook.Calls(), "the observer must not be called for an unsupported payload")
+		})
+	}
+	assert.Zero(t, canaryErr.calls, "the bridge must reject error values without calling Error")
+
+	var logs bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+	hook := &bridgeTestHook{name: "rejecting", action: extension.HookActionPass}
+	_, err := core.NewHookChain(bridgeHookAdapter(hook)).Before(context.Background(), core.Submission{Metadata: map[string]any{"secret": &bridgeUnsupportedValue{secret: canary}}})
+	require.ErrorIs(t, err, extension.ErrHookPayloadUnsupported)
+	assert.NotContains(t, logs.String(), canary)
+}
+
+func nestedHookMaps(count int) map[string]any {
+	var value any = "leaf"
+	for range count {
+		value = map[string]any{"k": value}
+	}
+	return value.(map[string]any)
+}
+
+func TestHookSnapshotEnforcesPayloadLimits(t *testing.T) {
+	t.Run("depth exact and one over", func(t *testing.T) {
+		exactHook := &bridgeTestHook{name: "exact-depth", action: extension.HookActionPass}
+		require.NoError(t, bridgeHookAdapter(exactHook).BeforeRun(context.Background(), core.Submission{Metadata: nestedHookMaps(60)}))
+		assert.Len(t, exactHook.Calls(), 1)
+		overHook := &bridgeTestHook{name: "over-depth", action: extension.HookActionPass}
+		err := bridgeHookAdapter(overHook).BeforeRun(context.Background(), core.Submission{Metadata: nestedHookMaps(61)})
+		require.ErrorIs(t, err, extension.ErrHookPayloadLimitExceeded)
+		assert.Empty(t, overHook.Calls())
+	})
+
+	t.Run("node exact and one over", func(t *testing.T) {
+		makeMetadata := func(extraItems int) map[string]any {
+			metadata := make(map[string]any, 32762)
+			for index := 0; index < 32761; index++ {
+				metadata[fmt.Sprintf("k%05d", index)] = true
+			}
+			items := make([]any, extraItems)
+			for index := range items {
+				items[index] = true
+			}
+			metadata["extra"] = items
+			return metadata
+		}
+		exactHook := &bridgeTestHook{name: "exact-nodes", action: extension.HookActionPass}
+		require.NoError(t, bridgeHookAdapter(exactHook).BeforeRun(context.Background(), core.Submission{Metadata: makeMetadata(2)}))
+		assert.Len(t, exactHook.Calls(), 1)
+		overHook := &bridgeTestHook{name: "over-nodes", action: extension.HookActionPass}
+		err := bridgeHookAdapter(overHook).BeforeRun(context.Background(), core.Submission{Metadata: makeMetadata(3)})
+		require.ErrorIs(t, err, extension.ErrHookPayloadLimitExceeded)
+		assert.Empty(t, overHook.Calls())
+	})
+
+	t.Run("aggregate bytes exact and one over", func(t *testing.T) {
+		contentLength := hookPayloadMaxBytes - len("agent.before_run") - len("user")
+		exactHook := &bridgeTestHook{name: "exact-bytes", action: extension.HookActionPass}
+		exactAdapter := newExtensionHookAdapter(extension.HookRegistration{Hook: exactHook})
+		require.NoError(t, exactAdapter.BeforeRun(context.Background(), core.Submission{Content: strings.Repeat("x", contentLength)}))
+		assert.Len(t, exactHook.Calls(), 1)
+		overHook := &bridgeTestHook{name: "over-bytes", action: extension.HookActionPass}
+		overAdapter := newExtensionHookAdapter(extension.HookRegistration{Hook: overHook})
+		err := overAdapter.BeforeRun(context.Background(), core.Submission{Content: strings.Repeat("x", contentLength+1)})
+		require.ErrorIs(t, err, extension.ErrHookPayloadLimitExceeded)
+		assert.Empty(t, overHook.Calls())
+	})
+}
+
+func TestHookSnapshotRejectsWideContainersBeforeObserver(t *testing.T) {
+	largeMap := make(map[string]any, hookPayloadMaxNodes/2+1)
+	for index := 0; index < hookPayloadMaxNodes/2+1; index++ {
+		largeMap[fmt.Sprintf("key-%05d", index)] = true
+	}
+
+	tests := []struct {
+		name       string
+		submission core.Submission
+	}{
+		{
+			name:       "history slice",
+			submission: core.Submission{History: make([]core.AgentMessage, hookPayloadMaxNodes+1)},
+		},
+		{
+			name: "content block slice",
+			submission: core.Submission{History: []core.AgentMessage{{
+				ContentBlocks: make([]llm.ContentBlock, hookPayloadMaxNodes+1),
+			}}},
+		},
+		{
+			name: "tool call slice",
+			submission: core.Submission{History: []core.AgentMessage{{
+				ToolCalls: make([]llm.ToolCall, hookPayloadMaxNodes+1),
+			}}},
+		},
+		{
+			name:       "metadata map keys and values",
+			submission: core.Submission{Metadata: largeMap},
+		},
+		{
+			name:       "nested metadata slice",
+			submission: core.Submission{Metadata: map[string]any{"wide": make([]any, hookPayloadMaxNodes+1)}},
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			hook := &bridgeTestHook{name: "wide-container", action: extension.HookActionPass}
+			err := bridgeHookAdapter(hook).BeforeRun(context.Background(), testCase.submission)
+			require.ErrorIs(t, err, extension.ErrHookPayloadLimitExceeded)
+			assert.Empty(t, hook.Calls(), "the observer must not be called for an over-wide container")
+		})
+	}
+}
+
+func TestHookPayloadBudgetRejectsContainerWidthsBeforeAllocation(t *testing.T) {
+	t.Run("slice entries", func(t *testing.T) {
+		budget := &hookPayloadBudget{}
+		require.ErrorIs(t, budget.requireEntries(hookPayloadMaxNodes+1, 1), extension.ErrHookPayloadLimitExceeded)
+		require.NoError(t, budget.requireEntries(hookPayloadMaxNodes, 1))
+	})
+
+	t.Run("map key and value entries", func(t *testing.T) {
+		budget := &hookPayloadBudget{}
+		require.ErrorIs(t, budget.requireEntries(hookPayloadMaxNodes/2+1, 2), extension.ErrHookPayloadLimitExceeded)
+		require.NoError(t, budget.requireEntries(hookPayloadMaxNodes/2, 2))
+	})
+
+	t.Run("container plus entries", func(t *testing.T) {
+		budget := &hookPayloadBudget{}
+		require.ErrorIs(t, budget.requireContainer(hookPayloadMaxNodes, 1), extension.ErrHookPayloadLimitExceeded)
+		require.NoError(t, budget.requireContainer(hookPayloadMaxNodes-1, 1))
+	})
+}
+
+func TestHookErrorSnapshotOmitsRawError(t *testing.T) {
+	const errorCanary = "provider-secret-error-canary-2049"
+	secretErr := &bridgeCanaryError{secret: errorCanary}
+	runErr := &bridgeWrappedCanaryError{cause: secretErr}
+	first := &bridgeTestHook{name: "observer-one", action: extension.HookActionPass, handle: func(_ context.Context, event extension.HookEvent) extension.HookResult {
+		if event.Name == "agent.after_run" {
+			snapshot := event.Data.(extension.HookAfterRunSnapshot)
+			assert.True(t, snapshot.Error.Present)
+			assert.Equal(t, extension.HookErrorClassUnknown, snapshot.Error.Class)
+		}
+		if event.Name == "agent.after_run" {
+			return extension.HookResult{Action: extension.HookActionBlock, Reason: errorCanary}
+		}
+		return extension.HookResult{Action: extension.HookActionPass}
+	}}
+	second := &bridgeTestHook{name: "observer-two", action: extension.HookActionPass}
+	var logs bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+	baseEvents := []core.AgentEvent{{Kind: "message", Content: "original result"}}
+	wrapped := core.NewHookMiddleware(core.NewHookChain(bridgeHookAdapter(first), bridgeHookAdapter(second))).Wrap(&bridgeStubLoop{events: baseEvents, err: runErr})
+	gotEvents, gotErr := wrapped.Run(context.Background(), core.Submission{Content: "original request"})
+	require.Same(t, runErr, gotErr, "AfterRun observer errors must preserve the original run error")
+	assert.Equal(t, baseEvents, gotEvents, "AfterRun observer errors must preserve the original run result")
+	assert.Equal(t, []string{"agent.before_run", "agent.after_run"}, first.Calls())
+	assert.Equal(t, []string{"agent.before_run", "agent.after_run"}, second.Calls(), "later observers still run after a failure")
+	assert.Zero(t, secretErr.calls, "error classification must not call Error")
+	assert.NotContains(t, logs.String(), errorCanary)
+	assert.NotContains(t, logs.String(), "provider-secret-error-canary")
+}
+
+func TestHookErrorClassesUseStableAllowlist(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want extension.HookErrorClass
+	}{
+		{name: "canceled", err: context.Canceled, want: extension.HookErrorClassCanceled},
+		{name: "deadline", err: context.DeadlineExceeded, want: extension.HookErrorClassDeadline},
+		{name: "blocked sentinel", err: extension.ErrHookBlocked, want: extension.HookErrorClassBlocked},
+		{name: "blocked typed family", err: &core.AgentHarnessError{Code: core.ErrCodeHookRejected, Message: "ignored"}, want: extension.HookErrorClassBlocked},
+		{name: "deadline typed family", err: &core.AgentHarnessError{Code: core.ErrCodeTimeout, Message: "ignored"}, want: extension.HookErrorClassDeadline},
+		{name: "action", err: extension.ErrUnsupportedHookAction, want: extension.HookErrorClassUnsupportedAction},
+		{name: "payload", err: extension.ErrHookPayloadUnsupported, want: extension.HookErrorClassUnsupported},
+		{name: "limit", err: extension.ErrHookPayloadLimitExceeded, want: extension.HookErrorClassUnsupported},
+		{name: "unknown", err: errors.New("not exposed"), want: extension.HookErrorClassUnknown},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := classifyHookError(testCase.err)
+			assert.True(t, got.Present)
+			assert.Equal(t, testCase.want, got.Class)
+		})
+	}
+	assert.Equal(t, extension.HookErrorSnapshot{}, classifyHookError(nil))
+}
+
+func TestHookActionsAreBounded(t *testing.T) {
+	for _, action := range []extension.HookAction{"terminate", "replace", "future"} {
+		t.Run(string(action), func(t *testing.T) {
+			hook := &bridgeTestHook{name: "unsupported-action", result: extension.HookResult{Action: action}}
+			err := bridgeHookAdapter(hook).BeforeRun(context.Background(), core.Submission{})
+			require.ErrorIs(t, err, extension.ErrUnsupportedHookAction)
+		})
+	}
+	t.Run("pass with replacement", func(t *testing.T) {
+		hook := &bridgeTestHook{name: "replacement", result: extension.HookResult{Action: extension.HookActionPass, Replacement: "ignored"}}
+		err := bridgeHookAdapter(hook).BeforeRun(context.Background(), core.Submission{})
+		require.ErrorIs(t, err, extension.ErrUnsupportedHookAction)
+	})
+	t.Run("block with replacement", func(t *testing.T) {
+		hook := &bridgeTestHook{name: "replacement", result: extension.HookResult{Action: extension.HookActionBlock, Replacement: "ignored"}}
+		err := bridgeHookAdapter(hook).BeforeRun(context.Background(), core.Submission{})
+		require.ErrorIs(t, err, extension.ErrUnsupportedHookAction)
+	})
+}
+
+func TestHookRunSnapshotReportsOnlyAvailableRunFields(t *testing.T) {
+	ctx := context.Background()
+	hook := &bridgeTestHook{name: "run-snapshot", action: extension.HookActionPass, handle: func(_ context.Context, event extension.HookEvent) extension.HookResult {
+		if event.Name != "agent.after_run" {
+			return extension.HookResult{Action: extension.HookActionPass}
+		}
+		run := event.Data.(extension.HookAfterRunSnapshot).Run
+		assert.Empty(t, run.RunID, "result.RunID is not a source of owner identity")
+		assert.False(t, run.RunIDAvailable)
+		assert.Equal(t, extension.HookRunOutcome("success"), run.Outcome)
+		assert.True(t, run.OutcomeAvailable)
+		assert.Equal(t, extension.HookRunExecutionState("quiescent"), run.ExecutionState)
+		assert.True(t, run.ExecutionStateAvailable)
+		return extension.HookResult{Action: extension.HookActionPass}
+	}}
+	adapter := bridgeHookAdapter(hook)
+	require.NoError(t, adapter.AfterRun(ctx, core.Submission{}, core.Result{
+		RunID: "must-not-copy-result-run-id", Outcome: core.RunOutcomeSuccess, ExecutionState: core.RunExecutionQuiescent, Success: true,
+	}, nil))
 }
 
 // --- stubs for bridge preservation tests ---

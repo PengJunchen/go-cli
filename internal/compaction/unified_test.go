@@ -2,6 +2,7 @@ package compaction
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
@@ -20,8 +22,14 @@ func largeToolItems() []TurnItem {
 		{Role: RoleAssistant, Content: "let me read it"},
 	}
 	for i := 0; i < 30; i++ {
+		callID := fmt.Sprintf("call-%d", i)
+		items = append(items, TurnItem{
+			Role:      RoleAssistant,
+			ToolCalls: []llm.ToolCall{{ID: callID, Name: "read"}},
+		})
 		items = append(items, TurnItem{
 			Role:       RoleTool,
+			ToolCallID: callID,
 			ToolName:   "read",
 			ToolResult: strings.Repeat("x", 200),
 		})
@@ -38,7 +46,8 @@ func TestUnifiedCompactorMicroFirst(t *testing.T) {
 
 	// Micro succeeds on its own (large tool results are placeholdered).
 	uni := NewUnifiedCompactor(WithTriggerReason("threshold"))
-	out, err := uni.Compact(ctx, items, 300, est)
+	outResult, err := uni.Compact(ctx, items, 300, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategyMicro, uni.LastStrategy())
 	assert.LessOrEqual(t, estimateTokens(out, est), 300)
@@ -66,7 +75,8 @@ func TestUnifiedCompactorEscalatesMicroToSummary(t *testing.T) {
 		WithSummary(summary),
 		WithTruncating(truncating),
 	)
-	out, err := uni.Compact(ctx, items, 100, est)
+	outResult, err := uni.Compact(ctx, items, 100, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategySummary, uni.LastStrategy())
 	assert.Equal(t, []string{"micro"}, micro.Called(), "micro was tried first and escalated")
@@ -94,7 +104,8 @@ func TestUnifiedCompactorEscalatesToTruncatingWhenNoSummarizer(t *testing.T) {
 		WithMicro(micro),
 		WithTruncating(truncating),
 	)
-	out, err := uni.Compact(ctx, items, 100, est)
+	outResult, err := uni.Compact(ctx, items, 100, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategyTruncating, uni.LastStrategy())
 	assert.Equal(t, []string{"micro"}, micro.Called(), "micro escalates")
@@ -114,7 +125,8 @@ func TestUnifiedCompactorAlwaysWithinBudgetWithRealCompactors(t *testing.T) {
 	// Real micro + no summary + real truncating: the fallback guarantees the
 	// result never exceeds the tiny budget.
 	uni := NewUnifiedCompactor()
-	out, err := uni.Compact(ctx, items, 40, est)
+	outResult, err := uni.Compact(ctx, items, 40, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategyTruncating, uni.LastStrategy())
 	assert.LessOrEqual(t, estimateTokens(out, est), 40)
@@ -125,6 +137,54 @@ func TestUnifiedCompactorAlwaysWithinBudgetWithRealCompactors(t *testing.T) {
 	}
 }
 
+func TestUnifiedCompactorPropagatesMalformedToolGroupWithoutFallback(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx, _ := newTracedCtx(t)
+	est := tracedEstimator()
+	summarizer := &fakeSummarizer{summary: "must not run"}
+	micro := NewRecordingCompactor("micro").WithError(ErrRequiresTruncating)
+	truncating := NewRecordingCompactor("truncating").WithResult([]TurnItem{{Role: RoleUser, Content: "incorrect fallback"}})
+	uni := NewUnifiedCompactor(
+		WithMicro(micro),
+		WithSummary(NewSummaryCompactor(summarizer)),
+		WithTruncating(truncating),
+	)
+
+	items := []TurnItem{{
+		Role:       RoleTool,
+		ToolCallID: "orphan",
+		ToolName:   "read",
+		ToolResult: "orphan result",
+	}}
+	_, err := uni.Compact(ctx, items, 20, est)
+	require.ErrorIs(t, err, errMalformedToolGroup)
+	assert.Empty(t, summarizer.conversations())
+	assert.Empty(t, truncating.Called(), "malformed transcript is not a strategy escalation reason")
+}
+
+func TestUnifiedCompactorRejectsMandatorySystemOverBudgetBeforeStrategies(t *testing.T) {
+	ctx, _ := newTracedCtx(t)
+	est := runeCountEstimator{}
+	micro := NewRecordingCompactor("micro").WithResult([]TurnItem{{Role: RoleUser, Content: "unsafe"}})
+	summary := NewRecordingCompactor("summary").WithResult([]TurnItem{{Role: RoleUser, Content: "unsafe"}})
+	truncating := NewRecordingCompactor("truncating").WithResult([]TurnItem{{Role: RoleUser, Content: "unsafe"}})
+	uni := NewUnifiedCompactor(
+		WithMicro(micro),
+		WithSummary(summary),
+		WithTruncating(truncating),
+	)
+	items := []TurnItem{
+		{Role: RoleSystem, Content: "mandatory-system"},
+		{Role: RoleUser, Content: "question"},
+	}
+
+	_, err := uni.Compact(ctx, items, 5, est)
+	require.ErrorIs(t, err, ErrMandatorySystemPromptOverBudget)
+	assert.Empty(t, micro.Called())
+	assert.Empty(t, summary.Called())
+	assert.Empty(t, truncating.Called())
+}
+
 func TestUnifiedCompactorEmptyInput(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -132,7 +192,8 @@ func TestUnifiedCompactorEmptyInput(t *testing.T) {
 	est := tracedEstimator()
 
 	uni := NewUnifiedCompactor()
-	out, err := uni.Compact(ctx, nil, 100, est)
+	outResult, err := uni.Compact(ctx, nil, 100, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Empty(t, out)
 	assert.Equal(t, StrategyMicro, uni.LastStrategy())
@@ -180,7 +241,9 @@ func TestQualityAutoEvaluate(t *testing.T) {
 	rec := &recordingEvaluator{}
 	uni := NewUnifiedCompactor(WithQualityEvaluator(rec))
 
-	out, err := uni.Compact(ctx, items, 300, est)
+	outResult, err := uni.Compact(ctx, items, 300, est)
+
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategyMicro, uni.LastStrategy())
 	assert.LessOrEqual(t, estimateTokens(out, est), 300)
@@ -205,7 +268,8 @@ func TestQualityAutoEvaluateWithDefaultEvaluator(t *testing.T) {
 	uni := NewUnifiedCompactor(
 		WithQualityEvaluator(NewDefaultQualityEvaluator(est, WithQualityStrategy(StrategyMicro))),
 	)
-	out, err := uni.Compact(ctx, items, 300, est)
+	outResult, err := uni.Compact(ctx, items, 300, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategyMicro, uni.LastStrategy())
 

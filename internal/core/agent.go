@@ -3,9 +3,13 @@ package core
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -20,7 +24,7 @@ type AgentOption func(*agentConfig)
 
 // WithHistory presets the agent's initial message history.
 func WithHistory(history []AgentMessage) AgentOption {
-	return func(c *agentConfig) { c.history = append(c.history, history...) }
+	return func(c *agentConfig) { c.history = append(c.history, cloneAgentMessages(history)...) }
 }
 
 // eventSource is satisfied by Agent implementations that can expose the events
@@ -33,16 +37,31 @@ type eventSource interface {
 
 var _ eventSource = (*AgentImpl)(nil)
 
+// ErrCanonicalTranscriptRequired is returned when a legacy AgentLoop exposes
+// tool execution or injected inputs that it cannot represent in typed history.
+var ErrCanonicalTranscriptRequired = errors.New("core: canonical transcript required for tool or injected input run")
+
+// ErrCanonicalTranscriptInvalid indicates a CanonicalLoop returned a delta
+// that does not contain a valid current-run user input and closed tool-call
+// groups.
+var ErrCanonicalTranscriptInvalid = errors.New("core: invalid canonical transcript")
+
+// ErrDurableCompactionUnsupported reports a durable compaction shape or entry
+// point that cannot be represented by the existing source projection schema.
+var ErrDurableCompactionUnsupported = errors.New("core: durable compaction is unsupported")
+
 // AgentImpl is a stateful wrapper around an AgentLoop. It maintains message
 // history across Run calls and records its name so the runtime can address it.
 type AgentImpl struct {
-	name           string
-	loop           AgentLoop
-	mu             sync.RWMutex
-	history        []AgentMessage
-	events         []AgentEvent
-	compactionHook CompactionHook
-	state          AgentState
+	name             string
+	loop             AgentLoop
+	mu               sync.RWMutex
+	history          []AgentMessage
+	events           []AgentEvent
+	compactionHook   CompactionHook
+	durableBound     bool
+	priorSourceCount uint64
+	state            AgentState
 }
 
 var _ Agent = (*AgentImpl)(nil)
@@ -65,7 +84,7 @@ func NewAgentImpl(name string, loop AgentLoop, opts ...AgentOption) *AgentImpl {
 	a := &AgentImpl{
 		name:           name,
 		loop:           loop,
-		history:        append([]AgentMessage{}, cfg.history...),
+		history:        cloneAgentMessages(cfg.history),
 		compactionHook: cfg.compactionHook,
 		state:          StateCreated,
 	}
@@ -104,14 +123,22 @@ func (a *AgentImpl) transitionState(to AgentState) error {
 	return nil
 }
 
-// Run appends the submission to the agent's history, executes the loop, records
-// the events it fired, and returns the final result. It is thread-safe. Success
-// is derived from the loop error: a successful run yields Success == true.
+// Run executes one loop invocation and records its result. CanonicalLoop
+// implementations commit their typed per-call transcript; legacy loops retain
+// the simple user/final-assistant projection. It is thread-safe.
 func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...EventStream) (Result, error) {
 	span, spanCtx := tracing.SpanFromContext(ctx, "agent.run", tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, nil)
 	logger.Info("core.agent.run", "name", a.name, "type", submission.Type, "content", submission.Content)
+
+	a.mu.RLock()
+	durableBound := a.durableBound
+	priorSourceCount := a.priorSourceCount
+	a.mu.RUnlock()
+	if durableBound && RunIDFromContext(spanCtx) == "" {
+		return Result{}, fmt.Errorf("%w: bound Agent run requires an owned run ID", ErrDurableCompactionUnsupported)
+	}
 
 	// Mark the agent as running before dispatching to the loop. If the
 	// state transition is rejected (e.g. the agent is in an incompatible
@@ -121,16 +148,60 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 		slog.Warn("core.agent.run_state_transition_failed", "name", a.name, "err", err)
 	}
 
-	a.mu.Lock()
-	a.history = append(a.history, AgentMessage{Role: "user", Content: submission.Content})
-	historyCopy := append([]AgentMessage{}, a.history...)
-	a.mu.Unlock()
+	canonicalLoop, hasCanonicalTranscript := a.loop.(CanonicalLoop)
+	if durableBound && !hasCanonicalTranscript {
+		return Result{}, fmt.Errorf("%w: bound Agent requires a canonical loop", ErrDurableCompactionUnsupported)
+	}
+	if hasCanonicalTranscript {
+		a.mu.RLock()
+		history := cloneAgentMessages(a.history)
+		a.mu.RUnlock()
+		input := AgentMessage{
+			Role:      "user",
+			Content:   submission.Content,
+			InputKind: InputKindUser,
+		}
+		if durableBound {
+			input.Runtime.Source = llm.SourceRef{
+				Kind: llm.SourcePendingRunInput, RunID: RunIDFromContext(spanCtx), PriorSourceCount: priorSourceCount,
+			}
+		}
+		submission.History = append(history, input)
+		submission.History = cloneAgentMessages(submission.History)
+	} else {
+		// Legacy AgentLoop implementations keep the previous simple-run
+		// projection: retain the user input before invoking the loop.
+		a.mu.Lock()
+		a.history = append(a.history, AgentMessage{Role: "user", Content: submission.Content})
+		submission.History = cloneAgentMessages(a.history)
+		a.mu.Unlock()
+	}
 
-	// Propagate the full history to the loop so the LLM receives the complete
-	// conversation context (prior user/assistant turns).
-	submission.History = historyCopy
-
-	events, err := a.loop.Run(spanCtx, submission, stream...)
+	var events []AgentEvent
+	var err error
+	var canonicalDelta []AgentMessage
+	var canonicalDeltaErr error
+	legacyRequiresCanonical := false
+	if hasCanonicalTranscript {
+		runResult, runErr := canonicalLoop.RunCanonical(spanCtx, submission, stream...)
+		events = runResult.Events
+		err = runErr
+		canonicalDelta = make([]AgentMessage, 0, len(runResult.Transcript))
+		for _, entry := range runResult.Transcript {
+			canonicalDelta = append(canonicalDelta, entry.Message)
+		}
+		canonicalDelta = cloneAgentMessages(canonicalDelta)
+		canonicalDeltaErr = validateCanonicalDelta(submission.Content, canonicalDelta)
+		if canonicalDeltaErr != nil {
+			err = errors.Join(err, canonicalDeltaErr)
+		}
+	} else {
+		events, err = a.loop.Run(spanCtx, submission, stream...)
+		legacyRequiresCanonical = requiresCanonicalTranscript(events, submission.History)
+		if legacyRequiresCanonical {
+			err = errors.Join(err, ErrCanonicalTranscriptRequired)
+		}
+	}
 	if err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 	}
@@ -140,24 +211,35 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 		evs = []AgentEvent{}
 	}
 	lastAssistant := lastAssistantMessage(evs)
+	finalMsg := ""
+	if hasCanonicalTranscript {
+		if canonicalDeltaErr == nil {
+			finalMsg = lastAssistantTranscriptContent(canonicalDelta)
+		}
+	} else if lastAssistant != nil {
+		finalMsg = lastAssistant.Content
+	}
 
 	a.mu.Lock()
 	a.events = evs
-	if lastAssistant != nil {
+	if hasCanonicalTranscript {
+		if canonicalDeltaErr == nil {
+			a.history = append(a.history, canonicalDelta...)
+		}
+	} else if !legacyRequiresCanonical && lastAssistant != nil && len(lastAssistant.ToolCalls) == 0 {
 		a.history = append(a.history, AgentMessage{
-			Role:      "assistant",
-			Content:   lastAssistant.Content,
-			Usage:     lastAssistant.Usage,
-			ToolCalls: lastAssistant.ToolCalls,
+			Role:    "assistant",
+			Content: lastAssistant.Content,
+			Usage:   cloneUsage(lastAssistant.Usage),
 		})
 	}
 	a.mu.Unlock()
 
 	// Apply compaction hook if set: the hook may trim or summarize the
 	// history to keep it within the token budget.
-	if a.compactionHook != nil {
+	if a.compactionHook != nil && !durableBound {
 		a.mu.RLock()
-		historyCopy := append([]AgentMessage{}, a.history...)
+		historyCopy := cloneAgentMessages(a.history)
 		a.mu.RUnlock()
 
 		compacted, compErr := a.compactionHook(spanCtx, historyCopy)
@@ -165,7 +247,7 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 			logger.Warn("core.agent.compaction_failed", "err", compErr)
 		} else {
 			a.mu.Lock()
-			a.history = compacted
+			a.history = cloneAgentMessages(compacted)
 			a.mu.Unlock()
 			logger.Info("core.agent.compacted", "before", len(historyCopy), "after", len(compacted))
 		}
@@ -184,10 +266,6 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 		}
 	}
 
-	finalMsg := ""
-	if lastAssistant != nil {
-		finalMsg = lastAssistant.Content
-	}
 	return Result{Message: finalMsg, Success: err == nil}, err
 }
 
@@ -202,7 +280,7 @@ func (a *AgentImpl) Events() []AgentEvent {
 func (a *AgentImpl) Messages() []AgentMessage {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return append([]AgentMessage{}, a.history...)
+	return cloneAgentMessages(a.history)
 }
 
 // ClearHistory resets the agent's conversation history. It is used by the
@@ -211,6 +289,8 @@ func (a *AgentImpl) ClearHistory() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.history = nil
+	a.durableBound = false
+	a.priorSourceCount = 0
 	slog.Info("core.agent.history_cleared", "name", a.name)
 }
 
@@ -219,19 +299,54 @@ func (a *AgentImpl) ClearHistory() {
 func (a *AgentImpl) SetHistory(messages []AgentMessage) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.history = append([]AgentMessage{}, messages...)
+	a.history = cloneAgentMessages(messages)
+	a.durableBound = false
+	a.priorSourceCount = 0
 	slog.Info("core.agent.history_set", "name", a.name, "messages", len(messages))
+}
+
+// SetHistoryFromSourceSnapshot hydrates one run-bound durable history view and
+// records the immutable source count captured by the run sink.
+func (a *AgentImpl) SetHistoryFromSourceSnapshot(snapshot CompactionSourceSnapshot) error {
+	if err := snapshot.Validate(); err != nil {
+		return err
+	}
+	history := snapshot.Clone().Messages
+	for i := range history {
+		if history[i].Runtime.ReceiptOutcome != "" && history[i].Runtime.ReceiptOutcome != history[i].ReceiptOutcome {
+			return fmt.Errorf("%w: runtime receipt differs from canonical history at ordinal %d", ErrDurableCompactionUnsupported, i)
+		}
+		history[i].Runtime = llm.RuntimeMetadata{
+			Source: llm.SourceRef{
+				Kind: llm.SourcePriorPublished, HistoryRevision: snapshot.Revision,
+				BranchID: snapshot.BranchID, SourceEntryID: snapshot.SourceEntryIDs[i], PriorOrdinal: uint64(i),
+			},
+			ReceiptOutcome: history[i].ReceiptOutcome,
+		}
+	}
+	a.mu.Lock()
+	a.history = cloneAgentMessages(history)
+	a.durableBound = true
+	a.priorSourceCount = uint64(len(snapshot.SourceEntryIDs))
+	a.mu.Unlock()
+	return nil
 }
 
 // Compact manually triggers the compaction hook on the current history.
 // It is used by the /compact slash command. When no compaction hook is
 // configured, it is a no-op.
 func (a *AgentImpl) Compact(ctx context.Context) error {
+	a.mu.RLock()
+	durableBound := a.durableBound
+	a.mu.RUnlock()
+	if durableBound {
+		return ErrDurableCompactionUnsupported
+	}
 	if a.compactionHook == nil {
 		return nil
 	}
 	a.mu.RLock()
-	historyCopy := append([]AgentMessage{}, a.history...)
+	historyCopy := cloneAgentMessages(a.history)
 	a.mu.RUnlock()
 
 	compacted, err := a.compactionHook(ctx, historyCopy)
@@ -239,7 +354,7 @@ func (a *AgentImpl) Compact(ctx context.Context) error {
 		return err
 	}
 	a.mu.Lock()
-	a.history = compacted
+	a.history = cloneAgentMessages(compacted)
 	a.mu.Unlock()
 	slog.Info("core.agent.manual_compact", "name", a.name, "before", len(historyCopy), "after", len(compacted))
 	return nil
@@ -270,4 +385,115 @@ func lastAssistantMessage(events []AgentEvent) *AgentEvent {
 		}
 	}
 	return last
+}
+
+func lastAssistantTranscriptContent(messages []AgentMessage) string {
+	final := ""
+	for _, message := range messages {
+		if message.Role == "assistant" {
+			final = message.Content
+		}
+	}
+	return final
+}
+
+func validateCanonicalDelta(currentUserContent string, delta []AgentMessage) error {
+	if len(delta) == 0 {
+		return fmt.Errorf("%w: delta is empty", ErrCanonicalTranscriptInvalid)
+	}
+	first := delta[0]
+	if first.Role != "user" || first.InputKind != InputKindUser || first.Content != currentUserContent {
+		return fmt.Errorf("%w: first entry must be the current user submission", ErrCanonicalTranscriptInvalid)
+	}
+	openCalls := make(map[string]string)
+	userInputs := 0
+	for i, message := range delta {
+		switch message.Role {
+		case "user":
+			if len(openCalls) > 0 {
+				return fmt.Errorf("%w: user input at entry %d precedes tool receipts", ErrCanonicalTranscriptInvalid, i)
+			}
+			if len(message.ToolCalls) > 0 || message.ToolCallID != "" || message.ToolName != "" || message.ReceiptOutcome != "" {
+				return fmt.Errorf("%w: user input at entry %d contains tool fields", ErrCanonicalTranscriptInvalid, i)
+			}
+			switch message.InputKind {
+			case InputKindUser:
+				userInputs++
+				if i != 0 {
+					return fmt.Errorf("%w: current user submission must be the first entry", ErrCanonicalTranscriptInvalid)
+				}
+			case InputKindSteering, InputKindFollowUp:
+			default:
+				return fmt.Errorf("%w: user input at entry %d has invalid input kind %q", ErrCanonicalTranscriptInvalid, i, message.InputKind)
+			}
+		case "assistant":
+			if len(openCalls) > 0 {
+				return fmt.Errorf("%w: assistant entry %d precedes tool receipts", ErrCanonicalTranscriptInvalid, i)
+			}
+			if message.InputKind != "" || message.ToolCallID != "" || message.ToolName != "" || message.ReceiptOutcome != "" {
+				return fmt.Errorf("%w: assistant entry %d contains input or receipt fields", ErrCanonicalTranscriptInvalid, i)
+			}
+			for _, call := range message.ToolCalls {
+				if strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Name) == "" {
+					return fmt.Errorf("%w: assistant entry %d has a tool call without an id or name", ErrCanonicalTranscriptInvalid, i)
+				}
+				if _, exists := openCalls[call.ID]; exists {
+					return fmt.Errorf("%w: assistant entry %d repeats tool call id %q", ErrCanonicalTranscriptInvalid, i, call.ID)
+				}
+				openCalls[call.ID] = call.Name
+			}
+		case "tool":
+			if message.InputKind != "" || len(message.ToolCalls) > 0 {
+				return fmt.Errorf("%w: tool receipt at entry %d contains input or call fields", ErrCanonicalTranscriptInvalid, i)
+			}
+			toolName, exists := openCalls[message.ToolCallID]
+			if !exists {
+				return fmt.Errorf("%w: tool receipt at entry %d has no open assistant call", ErrCanonicalTranscriptInvalid, i)
+			}
+			if message.ToolName != toolName {
+				return fmt.Errorf("%w: tool receipt at entry %d names %q, expected %q", ErrCanonicalTranscriptInvalid, i, message.ToolName, toolName)
+			}
+			if !validReceiptOutcome(message.ReceiptOutcome) {
+				return fmt.Errorf("%w: tool receipt at entry %d has invalid outcome %q", ErrCanonicalTranscriptInvalid, i, message.ReceiptOutcome)
+			}
+			delete(openCalls, message.ToolCallID)
+		default:
+			return fmt.Errorf("%w: entry %d has unsupported role %q", ErrCanonicalTranscriptInvalid, i, message.Role)
+		}
+	}
+	if userInputs != 1 {
+		return fmt.Errorf("%w: expected exactly one current user submission, got %d", ErrCanonicalTranscriptInvalid, userInputs)
+	}
+	if len(openCalls) > 0 {
+		return fmt.Errorf("%w: transcript ended with %d unreceipted tool calls", ErrCanonicalTranscriptInvalid, len(openCalls))
+	}
+	return nil
+}
+
+func validReceiptOutcome(outcome string) bool {
+	switch outcome {
+	case ReceiptOutcomeSuccess, ReceiptOutcomeError, ReceiptOutcomeInterrupted, ReceiptOutcomeUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func requiresCanonicalTranscript(events []AgentEvent, history []AgentMessage) bool {
+	for _, message := range history {
+		if message.InputKind == InputKindSteering || message.InputKind == InputKindFollowUp {
+			return true
+		}
+	}
+	for _, event := range events {
+		switch event.Kind {
+		case EventKindPreToolCall, "tool_call", "tool_result", "tool_canceled", "tool_output":
+			return true
+		case "message":
+			if len(event.ToolCalls) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -256,43 +256,56 @@ func (e *p4TestExtension) Init(_ context.Context, reg extension.ExtensionRegistr
 
 func (e *p4TestExtension) Shutdown(context.Context) error { return nil }
 
-// p4SubAgentSpawn spawns a real DefaultSubAgent via the default factory, runs a
-// prompt, delivers a follow-up message and reads the final result.
+// p4SubAgentSpawn uses the default factory with a full event buffer as a
+// bounded barrier, so the follow-up is accepted and delivered during a live run.
 func p4SubAgentSpawn(ctx context.Context, t *testing.T) {
 	t.Helper()
+	runCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	t.Cleanup(cancel)
 
-	factory := core.GetSubAgentFactory()
-	sub, err := factory.Create(ctx, "e2e-sub", core.SubAgentConfig{
+	factory := core.NewSubAgentFactory()
+	const maxTurns = 1024
+	sub, err := factory.Create(runCtx, "e2e-sub", core.SubAgentConfig{
 		SystemPrompt: "you are a helper",
 		Model:        "test-model",
-		MaxTurns:     2,
+		MaxTurns:     maxTurns,
 	})
 	require.NoError(t, err)
 	require.Equal(t, "e2e-sub", sub.Name())
+	concrete, ok := sub.(*core.DefaultSubAgent)
+	require.True(t, ok, "factory must build a *core.DefaultSubAgent")
 
-	events, err := sub.Run(ctx, "do the work")
+	events, err := sub.Run(runCtx, "do the work")
 	require.NoError(t, err)
+	require.Greater(t, maxTurns, cap(events), "the run must outlast the event buffer to create a live barrier")
+	require.Eventually(t, func() bool { return len(events) == cap(events) }, time.Second, time.Millisecond,
+		"runner must block on the full event buffer before the follow-up is sent")
+	assert.Equal(t, core.SubAgentRunning, concrete.State(), "the event-buffer barrier must keep the runner live")
+	require.NoError(t, sub.Send(runCtx, "focus on tests"))
+	assert.Equal(t, []string{"focus on tests"}, concrete.Received(), "accepted follow-up must enter the inbox")
 
-	// Drain the event stream until it closes.
 	var userSeen, msgSeen int
+	var followUpSeen bool
 	for ev := range events {
 		switch ev.Kind {
 		case "user":
 			userSeen++
+			if ev.Content == "focus on tests" {
+				followUpSeen = true
+			}
 		case "message":
 			msgSeen++
 		}
 	}
-	require.GreaterOrEqual(t, userSeen, 1, "run must emit an initial user event")
+	require.GreaterOrEqual(t, userSeen, 2, "the run must emit its prompt and accepted follow-up")
 	require.GreaterOrEqual(t, msgSeen, 1, "run must emit at least one message event")
+	assert.True(t, followUpSeen, "accepted follow-up must be delivered to the running runner")
 
-	require.NoError(t, sub.Send(ctx, "focus on tests"))
-	res, err := sub.Wait(ctx)
+	res, err := sub.Wait(runCtx)
 	require.NoError(t, err)
-	assert.NotEmpty(t, res.Content)
-	concrete, ok := sub.(*core.DefaultSubAgent)
-	require.True(t, ok, "factory must build a *core.DefaultSubAgent")
+	assert.Equal(t, "response-1024", res.Content)
 	assert.Equal(t, core.SubAgentCompleted, concrete.State())
+	assert.Equal(t, []string{"focus on tests"}, concrete.Received())
 }
 
 // p4TUIRender feeds agent events into a BubbleteaApp backed by the default
@@ -530,9 +543,10 @@ func p4ACPStdio(ctx context.Context, t *testing.T) {
 }
 
 // p4ACPPeer reads newline-delimited ACP JSON frames from r and, for every
-// TypeMessage, writes a TypeResponse echoing the content back to w. It stops
-// when the reader hits end-of-stream or an error (e.g. the pipe is closed).
-func p4ACPPeer(r io.Reader, w io.Writer, done chan<- struct{}) {
+// TypeMessage, writes a TypeResponse echoing the content back to w. It closes
+// its owned output after acknowledging TypeDisconnect so the adapter observes
+// EOF and can join its caller-owned reader before Disconnect returns.
+func p4ACPPeer(r io.Reader, w io.WriteCloser, done chan<- struct{}) {
 	defer close(done)
 	sc := newLineScanner(r)
 	for sc.Scan() {
@@ -555,6 +569,10 @@ func p4ACPPeer(r io.Reader, w io.Writer, done chan<- struct{}) {
 			ack := acp.ACPMessage{Type: acp.TypeAck, SenderID: msg.ReceiverID, ReceiverID: msg.SenderID}
 			data, _ := json.Marshal(ack)       //nolint:errcheck // fixed shape.
 			_, _ = w.Write(append(data, '\n')) //nolint:errcheck // best-effort peer write.
+			if msg.Type == acp.TypeDisconnect {
+				_ = w.Close()
+				return
+			}
 		}
 	}
 }

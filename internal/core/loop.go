@@ -2,9 +2,11 @@ package core //exempt:scan009
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -21,41 +23,67 @@ import (
 // legitimately need many turns, so the default is generous.
 const defaultMaxIterations = 200
 
+const toolInterceptorCanceledOutput = "Tool call canceled by interceptor"
+
 // maxContinuationAttempts bounds the number of automatic continuation
 // requests the loop issues when the model output is truncated by max_tokens
-// (finish_reason == "length"). After this many attempts the loop proceeds
-// with whatever content has been accumulated and logs a warning.
+// (finish_reason == "length"). If that budget is exhausted, the incomplete
+// candidate is rejected rather than returned as a complete assistant turn.
 const maxContinuationAttempts = 3
 
 // errNilModel reports that a LoopAgent has no chat model wired up.
 var errNilModel = errors.New("core: agent loop has no chat model")
 
+// ErrLoopDetected is returned when an active tool attempt reaches the
+// configured repeated-action threshold with terminate disposition.
+var ErrLoopDetected = errors.New("core: active loop detected")
+
 // errMaxIterations reports that a LoopAgent exhausted its iteration budget.
 var errMaxIterations = errors.New("core: agent loop exceeded max iterations")
+
+var errCurrentSubmissionNotPreserved = errors.New("core: compaction did not preserve the current submission")
 
 // loopConfig holds the configurable dependencies of a LoopAgent. All
 // dependencies are interface types.
 type loopConfig struct {
-	model                llm.BaseChatModel
-	tools                tools.ToolRegistry
-	maxIterations        int
-	modelWrapper         ModelWrapper
-	executionMode        ExecutionMode
-	systemPromptOverride string
-	promptBuilder        SystemPromptBuilder
-	promptOpts           SystemPromptOptions
-	tracer               *tracing.Tracer
-	steerCh              chan string
-	followUpCh           chan string
-	thinkingConfig       *llm.ThinkingConfig
-	midTurnCompactor     *compaction.MidTurnCompact
-	compactor            compaction.Compactor
-	estimator            compaction.TokenEstimator
-	maxTokens            int
+	model                          llm.BaseChatModel
+	providerAttemptRecorder        func(llm.ProviderAttemptResult) error
+	providerRetryPolicy            llm.RetryPolicy
+	tools                          tools.ToolRegistry
+	maxIterations                  int
+	modelWrapper                   ModelWrapper
+	executionMode                  ExecutionMode
+	toolInterceptors               []ToolInterceptor
+	contextToolInterceptors        []ContextToolInterceptor
+	systemPromptOverride           string
+	promptBuilder                  SystemPromptBuilder
+	promptOpts                     SystemPromptOptions
+	tracer                         *tracing.Tracer
+	steerCh                        chan string
+	followUpCh                     chan string
+	thinkingConfig                 *llm.ThinkingConfig
+	midTurnCompactor               *compaction.MidTurnCompact
+	compactor                      compaction.Compactor
+	estimator                      compaction.TokenEstimator
+	maxTokens                      int
+	multimodalTokensPerItemReserve int
 }
 
 // LoopOption configures a LoopAgent at construction time.
 type LoopOption func(*loopConfig)
+
+// WithProviderAttemptRecorder installs the run-scoped sink for immutable
+// provider results produced by resolver-built models.
+func WithProviderAttemptRecorder(record func(llm.ProviderAttemptResult) error) LoopOption {
+	return func(c *loopConfig) { c.providerAttemptRecorder = record }
+}
+
+// WithProviderRetryPolicy installs the policy used by the Loop-owned provider
+// operation scheduler. Active middleware dispatches only the candidate chosen
+// by Core and does not make retry decisions.
+func WithProviderRetryPolicy(policy llm.RetryPolicy) LoopOption {
+	return func(c *loopConfig) { c.providerRetryPolicy = policy }
+}
 
 // WithLLM sets the chat model the loop drives.
 func WithLLM(m llm.BaseChatModel) LoopOption {
@@ -91,12 +119,52 @@ func WithTools(tr tools.ToolRegistry) LoopOption {
 	return func(c *loopConfig) { c.tools = tr }
 }
 
+// WithToolInterceptor adds an interceptor scoped to the LoopAgent being
+// constructed. A nil interceptor is ignored.
+func WithToolInterceptor(f ToolInterceptor) LoopOption {
+	return func(c *loopConfig) {
+		if f != nil {
+			c.toolInterceptors = append(c.toolInterceptors, f)
+		}
+	}
+}
+
+// WithContextToolInterceptor adds a run-context-aware interceptor to the
+// LoopAgent being constructed. A nil interceptor is ignored.
+func WithContextToolInterceptor(f ContextToolInterceptor) LoopOption {
+	return func(c *loopConfig) {
+		if f != nil {
+			c.contextToolInterceptors = append(c.contextToolInterceptors, f)
+		}
+	}
+}
+
 // WithMaxIterations bounds the number of ReAct turns. A value of -1
 // disables the iteration limit entirely. Zero falls back to the default.
 func WithMaxIterations(n int) LoopOption {
 	return func(c *loopConfig) {
 		c.maxIterations = n
 	}
+}
+
+// WithMidTurnCompaction wires the request estimator and compaction dependencies
+// into a LoopAgent at construction time. It is especially useful for nested
+// LoopAgents, such as real sub-agents, that need the same fail-closed request
+// envelope preflight as the top-level loop.
+func WithMidTurnCompaction(mtc *compaction.MidTurnCompact, compactor compaction.Compactor, estimator compaction.TokenEstimator, maxTokens int) LoopOption {
+	return func(c *loopConfig) {
+		c.midTurnCompactor = mtc
+		c.compactor = compactor
+		c.estimator = estimator
+		c.maxTokens = maxTokens
+	}
+}
+
+// WithMultimodalTokenReserve configures a finite conservative token reserve
+// for each non-text content block in resolver-backed request preflight. A
+// non-positive value leaves multimodal requests unbounded and fail-closed.
+func WithMultimodalTokenReserve(tokensPerItem int) LoopOption {
+	return func(c *loopConfig) { c.multimodalTokensPerItemReserve = tokensPerItem }
 }
 
 // WithSteeringChannel sets the channel the loop drains for steering
@@ -131,29 +199,34 @@ func WithThinkingConfig(cfg llm.ThinkingConfig) LoopOption {
 // the injected chat model, servicing any tool calls the model requests, and
 // returns the events it fired.
 type LoopAgent struct {
-	model                llm.BaseChatModel
-	tools                tools.ToolRegistry
-	maxIterations        int
-	modelWrapper         ModelWrapper
-	executionMode        ExecutionMode
-	systemPromptOverride string
-	promptBuilder        SystemPromptBuilder
-	promptOpts           SystemPromptOptions
-	tracer               *tracing.Tracer
-	steerCh              chan string
-	followUpCh           chan string
-	thinkingConfig       *llm.ThinkingConfig
-	midTurnCompactor     *compaction.MidTurnCompact
-	compactor            compaction.Compactor
-	estimator            compaction.TokenEstimator
-	maxTokens            int
+	model                          llm.BaseChatModel
+	providerAttemptRecorder        func(llm.ProviderAttemptResult) error
+	providerRetryPolicy            llm.RetryPolicy
+	tools                          tools.ToolRegistry
+	maxIterations                  int
+	modelWrapper                   ModelWrapper
+	executionMode                  ExecutionMode
+	toolInterceptors               []ToolInterceptor
+	contextToolInterceptors        []ContextToolInterceptor
+	systemPromptOverride           string
+	promptBuilder                  SystemPromptBuilder
+	promptOpts                     SystemPromptOptions
+	tracer                         *tracing.Tracer
+	steerCh                        chan string
+	followUpCh                     chan string
+	thinkingConfig                 *llm.ThinkingConfig
+	midTurnCompactor               *compaction.MidTurnCompact
+	compactor                      compaction.Compactor
+	estimator                      compaction.TokenEstimator
+	maxTokens                      int
+	multimodalTokensPerItemReserve int
 	// toolSearchThreshold is the maximum number of tools to expose to the LLM
 	// without filtering. When the tool count exceeds this, tools are
 	// dynamically scored and filtered by relevance to the current query.
 	// Zero means no filtering (all tools exposed).
 	toolSearchThreshold int
 	// mu protects runtime mutable fields (model, midTurnCompactor, compactor,
-	// estimator, maxTokens, toolSearchThreshold) from data races between
+	// estimator, maxTokens, multimodalTokensPerItemReserve, toolSearchThreshold) from data races between
 	// concurrent setter calls and Run.
 	mu      sync.RWMutex
 	pauseMu sync.Mutex
@@ -227,22 +300,27 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		cfg.maxIterations = defaultMaxIterations
 	}
 	la := &LoopAgent{
-		model:                cfg.model,
-		tools:                cfg.tools,
-		maxIterations:        cfg.maxIterations,
-		modelWrapper:         cfg.modelWrapper,
-		executionMode:        cfg.executionMode,
-		systemPromptOverride: cfg.systemPromptOverride,
-		promptBuilder:        cfg.promptBuilder,
-		promptOpts:           cfg.promptOpts,
-		tracer:               cfg.tracer,
-		steerCh:              cfg.steerCh,
-		followUpCh:           cfg.followUpCh,
-		thinkingConfig:       cfg.thinkingConfig,
-		midTurnCompactor:     cfg.midTurnCompactor,
-		compactor:            cfg.compactor,
-		estimator:            cfg.estimator,
-		maxTokens:            cfg.maxTokens,
+		model:                          cfg.model,
+		providerAttemptRecorder:        cfg.providerAttemptRecorder,
+		providerRetryPolicy:            cfg.providerRetryPolicy,
+		tools:                          cfg.tools,
+		maxIterations:                  cfg.maxIterations,
+		modelWrapper:                   cfg.modelWrapper,
+		executionMode:                  cfg.executionMode,
+		toolInterceptors:               append([]ToolInterceptor(nil), cfg.toolInterceptors...),
+		contextToolInterceptors:        append([]ContextToolInterceptor(nil), cfg.contextToolInterceptors...),
+		systemPromptOverride:           cfg.systemPromptOverride,
+		promptBuilder:                  cfg.promptBuilder,
+		promptOpts:                     cfg.promptOpts,
+		tracer:                         cfg.tracer,
+		steerCh:                        cfg.steerCh,
+		followUpCh:                     cfg.followUpCh,
+		thinkingConfig:                 cfg.thinkingConfig,
+		midTurnCompactor:               cfg.midTurnCompactor,
+		compactor:                      cfg.compactor,
+		estimator:                      cfg.estimator,
+		maxTokens:                      cfg.maxTokens,
+		multimodalTokensPerItemReserve: cfg.multimodalTokensPerItemReserve,
 	}
 	slog.Info("core.loop.new",
 		"max_iterations", la.maxIterations,
@@ -250,6 +328,22 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		"tools_set", la.tools != nil,
 	)
 	return la
+}
+
+func (l *LoopAgent) newPreToolCallEvent(ctx context.Context, toolName, toolCallID string, args map[string]any) *PreToolCallEvent {
+	l.mu.RLock()
+	interceptors := append([]ToolInterceptor(nil), l.toolInterceptors...)
+	contextInterceptors := append([]ContextToolInterceptor(nil), l.contextToolInterceptors...)
+	l.mu.RUnlock()
+
+	return &PreToolCallEvent{
+		ToolName:            toolName,
+		ToolCallID:          toolCallID,
+		Args:                cloneStringAnyMap(args),
+		ctx:                 ctx,
+		interceptors:        interceptors,
+		contextInterceptors: contextInterceptors,
+	}
 }
 
 // WithToolSearchThreshold sets the maximum number of tools exposed to the
@@ -321,6 +415,15 @@ func (l *LoopAgent) SetMidTurnCompaction(mtc *compaction.MidTurnCompact, compact
 	l.mu.Unlock()
 }
 
+// SetMultimodalTokenReserve changes the finite per-content-block reserve used
+// by subsequent resolver-backed request preflight runs. Non-positive values
+// disable the reserve and preserve fail-closed behavior for multimodal input.
+func (l *LoopAgent) SetMultimodalTokenReserve(tokensPerItem int) {
+	l.mu.Lock()
+	l.multimodalTokensPerItemReserve = tokensPerItem
+	l.mu.Unlock()
+}
+
 // SetModel replaces the LLM model at runtime. The next Run call will use the
 // new model. This is used by the /model slash command to switch models
 // without restarting the process.
@@ -335,6 +438,21 @@ func (l *LoopAgent) SetModel(m llm.BaseChatModel) {
 // they happen (streaming mode); otherwise they are collected into the returned
 // slice (batch mode, for backward compatibility).
 func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...EventStream) ([]AgentEvent, error) {
+	result, err := l.RunCanonical(ctx, submission, stream...)
+	return result.Events, err
+}
+
+// RunCanonical executes one ReAct run and returns a typed transcript delta
+// owned by this invocation. Prior submission history remains model context
+// only and is never copied into Transcript.
+func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, stream ...EventStream) (runResult CanonicalRunResult, runErr error) {
+	events := make([]AgentEvent, 0)
+	transcript := []TranscriptEntry{{Message: AgentMessage{
+		Role:      string(llm.RoleUser),
+		Content:   submission.Content,
+		InputKind: InputKindUser,
+	}}}
+
 	// Snapshot runtime mutable fields under a read lock to avoid data races
 	// with concurrent setter calls (SetModel, SetMidTurnCompaction,
 	// WithToolSearchThreshold). The local copies are used throughout Run.
@@ -345,6 +463,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	compactor := l.compactor
 	estimator := l.estimator
 	maxTokens := l.maxTokens
+	multimodalTokensPerItemReserve := l.multimodalTokensPerItemReserve
 	l.mu.RUnlock()
 
 	// Inject the Tracer into the context so that all downstream
@@ -357,6 +476,10 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 
 	span, spanCtx := tracing.SpanFromContext(ctx, "loop.run", tracing.SpanKindInternal)
 	defer span.End()
+	spanCtx = llm.WithRunOperationFactory(spanCtx, &providerOperationFactory{
+		record:      l.providerAttemptRecorder,
+		retryPolicy: l.providerRetryPolicy,
+	})
 	logger := tracing.NewTraceLogger(span, nil)
 	logger.Info("core.loop.run", "type", submission.Type, "iterations", l.maxIterations)
 
@@ -364,11 +487,63 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	if len(stream) > 0 {
 		es = stream[0]
 	}
+	consumer, commitErr := newRunCommitConsumer(spanCtx)
+	if commitErr != nil {
+		span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+		return CanonicalRunResult{Transcript: transcript}, commitErr
+	}
+	if consumer == nil && midTurnCompactor != nil {
+		midTurnCompactor = midTurnCompactor.NewRun()
+	}
+	if consumer != nil {
+		spanCtx = withRunCommitLoopScope(spanCtx)
+	}
+	terminalEligible := false
+	if consumer != nil {
+		input := pendingRunInput(submission.History, submission.Content, consumer)
+		submission.History = input.history
+		transcript[0].Message = input.message
+		provisional := agentMessagesToTurnItems(submission.History)
+		for i := range provisional {
+			if provisional[i].Runtime.Source.Kind == llm.SourcePendingRunInput {
+				provisional[i].Runtime.Source = consumer.transcriptMetadata(0, provisional[i].Runtime.ReceiptOutcome).Source
+			}
+		}
+		if commitErr = validateDurableRequestSource(provisional, consumer.source, consumer.runID); commitErr != nil {
+			span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+			return CanonicalRunResult{Transcript: transcript}, commitErr
+		}
+		if commitErr = consumer.commitInput(0, transcript[0].Message); commitErr != nil {
+			span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+			markRunOutcomeUnknown(spanCtx)
+			return CanonicalRunResult{Transcript: transcript}, commitErr
+		}
+		transcript[0].Message.Runtime = consumer.transcriptMetadata(0, transcript[0].Message.ReceiptOutcome)
+		terminalEligible = true
+		defer func() {
+			if !terminalEligible {
+				return
+			}
+			runErr = normalizeLoopDetectedCause(spanCtx, runErr)
+			terminalErr := consumer.commitTerminal(runResult.Transcript, consumer.projections, terminalOutcome(runErr))
+			if terminalErr != nil {
+				markRunOutcomeUnknown(spanCtx)
+				runErr = errors.Join(runErr, terminalErr)
+				runResult.Events = append(runResult.Events, errEvent(terminalErr))
+			}
+		}()
+		defer func() {
+			if errors.Is(context.Cause(spanCtx), ErrLoopDetected) {
+				runErr = normalizeLoopDetectedCause(spanCtx, runErr)
+			}
+		}()
+	}
 
 	if model == nil {
 		span.SetStatus(tracing.SpanStatusError, errNilModel.Error())
-		return nil, errNilModel
+		return CanonicalRunResult{Transcript: transcript}, errNilModel
 	}
+	selectionSource, _ := llm.CandidateSelectionSourceFromModel(model)
 
 	// Apply the model wrapper (if any) before the first LLM call. The
 	// wrapper may add middleware such as retry, cost tracking, etc.
@@ -380,6 +555,10 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			}
 		}
 	}
+	if selectionSource == nil {
+		selectionSource, _ = llm.CandidateSelectionSourceFromModel(model)
+	}
+	resolverBacked := len(llm.ProviderCandidatesFromModel(model)) > 0
 
 	// Build tool definitions for the model from the tool registry so the LLM
 	// knows what tools it can invoke. The raw tool definitions are cached in
@@ -389,7 +568,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	// version-based cache and is left untouched.
 	var toolDefs []tools.ToolDefinition
 	var toolOpts []llm.Option
-	var searchTool *tools.ToolSearchTool
+	var searchTool tools.TopToolsProvider
 	needToolFiltering := false
 	if l.tools != nil {
 		if defs, err := l.tools.List(spanCtx); err == nil {
@@ -408,7 +587,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			// threshold, score and filter to reduce context bloat.
 			if toolSearchThreshold > 0 && len(llmTools) > toolSearchThreshold {
 				for _, d := range toolDefs {
-					if st, ok := d.(*tools.ToolSearchTool); ok {
+					if st, ok := d.(tools.TopToolsProvider); ok {
 						searchTool = st
 						needToolFiltering = true
 						break
@@ -424,15 +603,23 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		toolOpts = append(toolOpts, llm.WithThinking(*l.thinkingConfig))
 	}
 
-	var events []AgentEvent
+	eventCoordinates := agentEventCoordinates{runID: RunIDFromContext(spanCtx)}
 
 	// sendEvent emits an event both to the local events slice and (when
 	// streaming) to the EventStream in real time.
 	sendEvent := func(ev AgentEvent) {
-		events = append(events, ev)
+		ev = stampAgentEvent(eventCoordinates, ev)
+		events = append(events, cloneAgentEvent(ev))
 		if es != nil {
-			_ = es.Send(ev) //nolint:errcheck
+			_ = es.Send(cloneAgentEvent(ev)) //nolint:errcheck
 		}
+	}
+	sendToolResultEvent := func(content string, isError bool, toolCallID, outcome string, sourceTruncated *bool) {
+		sendEvent(AgentEvent{
+			Kind: "tool_result", Content: content, Timestamp: time.Now(), IsError: isError,
+			ToolCallID: toolCallID, ReceiptOutcome: outcome,
+			SourceTruncated: cloneOptionalBool(sourceTruncated),
+		})
 	}
 
 	// Build the conversation from history (if any) plus the current
@@ -458,13 +645,24 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			sysPrompt = systemPromptFromDefs(toolDefs)
 		}
 	}
-	messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: sysPrompt})
+	messages = append(messages, llm.Message{
+		Role: llm.RoleSystem, Content: sysPrompt,
+		Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{Kind: llm.SourceEphemeral}},
+	})
 
 	for _, hm := range submission.History {
+		runtime := hm.Runtime
+		if consumer != nil && runtime.Source.Kind == llm.SourcePendingRunInput {
+			runtime = consumer.transcriptMetadata(0, hm.ReceiptOutcome)
+		}
+		if runtime.ReceiptOutcome == "" {
+			runtime.ReceiptOutcome = hm.ReceiptOutcome
+		}
 		msg := llm.Message{
 			Role:          llm.Role(hm.Role),
 			Content:       hm.Content,
 			ContentBlocks: hm.ContentBlocks,
+			Runtime:       runtime,
 		}
 		// Forward ToolCalls from assistant messages so the LLM can
 		// correlate tool calls with tool results across turns.
@@ -479,9 +677,17 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		}
 		messages = append(messages, msg)
 	}
-	if len(messages) == 0 || messages[len(messages)-1].Role != llm.RoleUser {
-		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: submission.Content})
+	if len(messages) == 0 || messages[len(messages)-1].Role != llm.RoleUser || messages[len(messages)-1].Content != submission.Content {
+		message := llm.Message{Role: llm.RoleUser, Content: submission.Content}
+		if resolverBacked {
+			// Resolver-backed requests are compacted only after the final filtered
+			// tools and the active candidate's protocol envelope are known.
+		} else if consumer != nil {
+			message.Runtime = consumer.transcriptMetadata(0, "")
+		}
+		messages = append(messages, message)
 	}
+	currentSubmissionIndex := len(messages) - 1
 
 	// emitCanceledToolResults synthesizes error tool_result messages for any
 	// tool calls in the last assistant message that lack a matching
@@ -496,13 +702,8 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			errMsg = canceledErr.Error()
 		}
 		for _, tc := range synthCalls {
-			sendEvent(AgentEvent{
-				Kind:       "tool_result",
-				Content:    "Error: " + errMsg,
-				Timestamp:  time.Now(),
-				IsError:    true,
-				ToolCallID: tc.ID,
-			})
+			appendTranscriptToolReceipt(&transcript, tc, "Error: "+errMsg, ReceiptOutcomeInterrupted, consumer)
+			sendToolResultEvent("Error: "+errMsg, true, tc.ID, ReceiptOutcomeInterrupted, nil)
 		}
 	}
 
@@ -511,7 +712,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("core.loop.canceled", "iteration", iter, "err", err)
 			sendEvent(errEvent(err))
-			return events, err
+			return CanonicalRunResult{Events: events, Transcript: transcript}, err
 		}
 
 		// Block here if the loop has been paused via Pause(). This allows
@@ -520,7 +721,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			span.SetStatus(tracing.SpanStatusError, perr.Error())
 			logger.Error("core.loop.canceled_during_pause", "iteration", iter, "err", perr)
 			sendEvent(errEvent(perr))
-			return events, perr
+			return CanonicalRunResult{Events: events, Transcript: transcript}, perr
 		}
 
 		// Drain any pending steering messages from the steer channel.
@@ -529,14 +730,68 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		// operation. Each steering message is injected as a user message
 		// so the model sees it on the next iteration.
 		if l.steerCh != nil {
-			drainSteerMessages(l.steerCh, &messages, logger)
+			for _, instruction := range drainSteerMessages(l.steerCh, &messages, logger) {
+				entry := TranscriptEntry{Message: AgentMessage{Role: string(llm.RoleUser), Content: instruction, InputKind: InputKindSteering}}
+				entry.Message.Runtime = consumer.transcriptMetadata(uint64(len(transcript)), "")
+				if consumer != nil {
+					if commitErr := consumer.commitInput(uint64(len(transcript)), entry.Message); commitErr != nil {
+						span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+						sendEvent(errEvent(commitErr))
+						return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
+					}
+				}
+				messages[len(messages)-1].Runtime = entry.Message.Runtime
+				transcript = append(transcript, entry)
+			}
 		}
 
 		// Drain any pending follow-up messages from the follow-up channel.
 		// Follow-ups are injected as user messages after steering so the
 		// model sees steering context first, then the follow-up.
 		if l.followUpCh != nil {
-			drainFollowUpMessages(l.followUpCh, &messages, logger)
+			for _, content := range drainFollowUpMessages(l.followUpCh, &messages, logger) {
+				entry := TranscriptEntry{Message: AgentMessage{Role: string(llm.RoleUser), Content: content, InputKind: InputKindFollowUp}}
+				entry.Message.Runtime = consumer.transcriptMetadata(uint64(len(transcript)), "")
+				if consumer != nil {
+					if commitErr := consumer.commitInput(uint64(len(transcript)), entry.Message); commitErr != nil {
+						span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+						sendEvent(errEvent(commitErr))
+						return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
+					}
+				}
+				messages[len(messages)-1].Runtime = entry.Message.Runtime
+				transcript = append(transcript, entry)
+			}
+		}
+
+		if consumer != nil {
+			compacted, compactErr := preflightDurableRequest(spanCtx, messages, consumer, compactor, estimator, maxTokens)
+			if compactErr != nil {
+				span.SetStatus(tracing.SpanStatusError, compactErr.Error())
+				sendEvent(errEvent(compactErr))
+				return CanonicalRunResult{Events: events, Transcript: transcript}, compactErr
+			}
+			messages = compacted
+		} else if midTurnCompactor != nil && compactor != nil && estimator != nil && maxTokens > 0 {
+			compacted, compactedSubmissionIndex, compactResult, compactErr := preflightNonDurableRequest(
+				spanCtx, messages, currentSubmissionIndex, midTurnCompactor, compactor, estimator, maxTokens,
+			)
+			if compactErr != nil {
+				logger.Warn("core.loop.midturn_compact_error", "err", compactErr)
+				span.SetStatus(tracing.SpanStatusError, compactErr.Error())
+				sendEvent(errEvent(compactErr))
+				return CanonicalRunResult{Events: events, Transcript: transcript}, compactErr
+			}
+			if compactResult.Triggered {
+				messagesBefore := len(messages)
+				messages = compacted
+				currentSubmissionIndex = compactedSubmissionIndex
+				logger.Info("core.loop.midturn_compact",
+					"reason", compactResult.Reason.String(),
+					"messages_before", messagesBefore,
+					"messages_after", len(messages),
+				)
+			}
 		}
 
 		// ---- LLM call (streaming) ----
@@ -559,27 +814,80 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			}
 		}
 
-		resp, err := l.generateWithContinuation(spanCtx, model, messages, iterOpts, es, logger)
+		assistantIndex := uint64(len(transcript))
+		assistantOrdinal := uint64(iter + 1)
+		iterationCoordinates := agentEventCoordinates{runID: RunIDFromContext(spanCtx)}
+		if iterationCoordinates.runID != "" {
+			iterationCoordinates.canonicalTranscriptIndex = &assistantIndex
+		}
+		eventCoordinates = iterationCoordinates
+		iterationCtx := withAgentEventCoordinates(spanCtx, iterationCoordinates)
+		if selectionSource != nil {
+			iterationCtx = llm.WithCandidateSelectionSource(iterationCtx, selectionSource)
+		}
+		var resp *llm.Message
+		var err error
+		if resolverBacked {
+			var compactedMessages []llm.Message
+			resp, compactedMessages, currentSubmissionIndex, err = l.generateWithPreparedContinuation(
+				iterationCtx, model, messages, currentSubmissionIndex, iterOpts, es, logger,
+				consumer, midTurnCompactor, compactor, estimator, maxTokens,
+				multimodalTokensPerItemReserve,
+			)
+			if compactedMessages != nil {
+				messages = compactedMessages
+			}
+		} else {
+			resp, err = l.generateWithContinuationAndCompaction(iterationCtx, model, messages, iterOpts, es, logger, consumer, compactor, estimator, maxTokens)
+		}
 		if err != nil {
+			var providerErr *llm.ProviderError
+			if errors.As(err, &providerErr) && providerErr != nil {
+				span.SetAttributes(
+					tracing.Attribute{Key: "error_type", Value: string(providerErr.ErrorType)},
+					tracing.Attribute{Key: "http_status_code", Value: providerErr.StatusCode},
+				)
+			}
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("core.loop.generate_error", "iteration", iter, "err", err)
 			sendEvent(errEvent(err))
-			return events, err
+			return CanonicalRunResult{Events: events, Transcript: transcript}, err
 		}
 		if resp == nil {
 			err := errors.New("core: model returned a nil response")
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("core.loop.nil_response", "iteration", iter)
 			sendEvent(errEvent(err))
-			return events, err
+			return CanonicalRunResult{Events: events, Transcript: transcript}, err
 		}
+		if err := validateCompleteToolCalls(resp.ToolCalls); err != nil {
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			sendEvent(errEvent(err))
+			return CanonicalRunResult{Events: events, Transcript: transcript}, err
+		}
+		if len(resp.ToolCalls) > 0 && iterationCoordinates.runID != "" {
+			iterationCoordinates.assistantTranscriptOrdinal = &assistantOrdinal
+			eventCoordinates = iterationCoordinates
+			iterationCtx = withAgentEventCoordinates(iterationCtx, iterationCoordinates)
+		}
+		assistantEntry, err := transcriptAssistantEntry(resp)
+		if err != nil {
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			sendEvent(errEvent(err))
+			return CanonicalRunResult{Events: events, Transcript: transcript}, err
+		}
+		assistantEntry.Message.Runtime = consumer.transcriptMetadata(assistantIndex, "")
+		transcript = append(transcript, assistantEntry)
 
 		logger.Info("core.loop.turn",
 			"iteration", iter,
 			"tool_calls", len(resp.ToolCalls),
 			"content", resp.Content,
 		)
-		messages = append(messages, llm.Message{Role: llm.RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls})
+		messages = append(messages, llm.Message{
+			Role: llm.RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls,
+			Runtime: assistantEntry.Message.Runtime,
+		})
 
 		// Emit the complete assistant message as a non-incremental event for
 		// every LLM response. Downstream consumers (harness result,
@@ -594,147 +902,516 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 
 		if len(resp.ToolCalls) == 0 {
 			logger.Info("core.loop.finish", "iterations", iter+1, "messages", len(messages))
-			return events, nil
+			return CanonicalRunResult{Events: events, Transcript: transcript}, nil
 		}
-
 		if l.executionMode == ExecutionModeParallel && len(resp.ToolCalls) > 1 {
 			// Parallel mode: emit pre-tool-call events, then execute
 			// non-canceled tools concurrently, matching results by
 			// ToolCallID (not positional index) so that out-of-order
 			// completion does not cause mismatched results.
 			var activeCalls []llm.ToolCall
+			canceledCalls := make(map[string]string)
 			for _, tc := range resp.ToolCalls {
-				preEv := &PreToolCallEvent{
-					ToolName:   tc.Name,
-					ToolCallID: tc.ID,
-					Args:       toToolsCall(tc).Args,
-				}
+				preEv := l.newPreToolCallEvent(iterationCtx, tc.Name, tc.ID, toToolsCall(tc).Args)
 				sendEvent(AgentEvent{Kind: EventKindPreToolCall, Timestamp: time.Now(), PreToolCall: preEv})
 				if preEv.IsCancelled() {
 					logger.Info("core.loop.tool_canceled", "tool", tc.Name, "id", tc.ID)
 					sendEvent(AgentEvent{Kind: "tool_canceled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
-					messages = append(messages, llm.Message{
-						Role:       llm.RoleTool,
-						ToolCallID: tc.ID,
-						Name:       tc.Name,
-						Content:    "Tool call canceled by interceptor",
-					})
+					canceledCalls[tc.ID] = toolInterceptionCancellationReceipt(preEv.CancellationError())
 					continue
 				}
 				activeCalls = append(activeCalls, tc)
 				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name, "mode", "parallel")
 			}
-			if len(activeCalls) > 0 {
-				results, perr := executeToolsParallel(spanCtx, l.tools, activeCalls, es)
-				if perr == nil {
-					results, perr = matchToolResultsByID(activeCalls, results)
+			if consumer != nil {
+				startIndex := len(transcript)
+				commitErr := consumer.executeParallelGroup(iterationCtx, l.tools, assistantOrdinal, assistantEntry.Message, resp.ToolCalls, canceledCalls, es, &transcript, &messages)
+				for index := startIndex; index < len(transcript); index++ {
+					entry := transcript[index]
+					message := entry.Message
+					if message.Role != string(llm.RoleTool) {
+						continue
+					}
+					sendToolResultEvent(message.Content, message.ReceiptOutcome != ReceiptOutcomeSuccess, message.ToolCallID, message.ReceiptOutcome, entry.SourceTruncated)
 				}
-				for _, res := range results {
+				if commitErr != nil {
+					span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+					sendEvent(errEvent(commitErr))
+					return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
+				}
+			} else {
+				var parallelErr error
+				var unknownToolErr error
+				resultsByID := make(map[string]ParallelToolResult, len(activeCalls))
+				if len(activeCalls) > 0 {
+					results, execErr := executeToolsParallel(iterationCtx, l.tools, activeCalls, es)
+					parallelErr = execErr
+					matched, matchErr := matchToolResultsByID(activeCalls, results)
+					if matchErr != nil {
+						parallelErr = errors.Join(parallelErr, matchErr)
+					} else {
+						for _, res := range matched {
+							resultsByID[res.ID] = res
+						}
+					}
+				}
+				for _, tc := range resp.ToolCalls {
+					if canceledOutput, canceled := canceledCalls[tc.ID]; canceled {
+						sendToolResultEvent(canceledOutput, true, tc.ID, ReceiptOutcomeInterrupted, nil)
+						appendToolReceipt(&messages, &transcript, tc, canceledOutput, ReceiptOutcomeInterrupted, consumer)
+						continue
+					}
+					res, ok := resultsByID[tc.ID]
+					if !ok {
+						missingErr := fmt.Errorf("core: missing or uncorrelated result for tool call %q", tc.ID)
+						parallelErr = errors.Join(parallelErr, missingErr)
+						unknownToolErr = errors.Join(unknownToolErr, markUnknownToolOutcome(missingErr))
+						output := "Error: " + missingErr.Error()
+						sendToolResultEvent(output, true, tc.ID, ReceiptOutcomeUnknown, nil)
+						appendToolReceipt(&messages, &transcript, tc, output, ReceiptOutcomeUnknown, consumer)
+						continue
+					}
 					if res.Err != nil {
 						logger.Warn("core.loop.tool_error", "tool", res.Name, "err", res.Err)
 						res.Output = "Error: " + res.Err.Error()
-						if spanCtx.Err() != nil {
-							span.SetStatus(tracing.SpanStatusError, res.Err.Error())
-							emitCanceledToolResults(res.Err)
-							sendEvent(errEvent(res.Err))
-							return events, res.Err
-						}
+						res.IsError = true
 					}
-					sendEvent(AgentEvent{Kind: "tool_result", Content: res.Output, Timestamp: time.Now(), IsError: res.IsError, ToolCallID: res.ID})
-					messages = append(messages, llm.Message{
-						Role:       llm.RoleTool,
-						ToolCallID: res.ID,
-						Name:       res.Name,
-						Content:    res.Output,
-					})
+					outcome := toolReceiptOutcome(iterationCtx, res.Err, res.IsError)
+					sendToolResultEvent(res.Output, res.IsError, res.ID, outcome, nil)
+					appendToolReceipt(&messages, &transcript, tc, res.Output, outcome, consumer)
+					if outcome == ReceiptOutcomeUnknown && unknownToolErr == nil {
+						unknownToolErr = markUnknownToolOutcome(res.Err)
+					}
 				}
-				if perr != nil {
-					emitCanceledToolResults(perr)
-					return events, perr
+				if parallelErr != nil || unknownToolErr != nil {
+					runErr := errors.Join(parallelErr, unknownToolErr)
+					span.SetStatus(tracing.SpanStatusError, runErr.Error())
+					sendEvent(errEvent(runErr))
+					return CanonicalRunResult{Events: events, Transcript: transcript}, runErr
 				}
 			}
 		} else {
 			// Sequential mode: execute one tool at a time.
-			for _, tc := range resp.ToolCalls {
+			for callIndex, tc := range resp.ToolCalls {
 				if err := spanCtx.Err(); err != nil {
 					logger.Error("core.loop.canceled", "err", err)
+					if consumer != nil {
+						for _, undispatched := range resp.ToolCalls[callIndex:] {
+							const skippedOutput = "Tool call canceled before dispatch"
+							if commitErr := consumer.commitKnownCall(assistantOrdinal, assistantEntry.Message, "batch-"+newClaimID(), undispatched, uint64(len(transcript)), skippedOutput, ReceiptOutcomeInterrupted, &transcript, &messages); commitErr != nil {
+								span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+								sendEvent(errEvent(commitErr))
+								return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
+							}
+							sendToolResultEvent(skippedOutput, true, undispatched.ID, ReceiptOutcomeInterrupted, nil)
+						}
+						sendEvent(errEvent(err))
+						return CanonicalRunResult{Events: events, Transcript: transcript}, err
+					}
 					emitCanceledToolResults(err)
 					sendEvent(errEvent(err))
-					return events, err
+					return CanonicalRunResult{Events: events, Transcript: transcript}, err
 				}
 
 				// Emit a pre-tool-call event so external interceptors
 				// can cancel the tool call before it executes.
-				preEv := &PreToolCallEvent{
-					ToolName:   tc.Name,
-					ToolCallID: tc.ID,
-					Args:       toToolsCall(tc).Args,
-				}
+				preEv := l.newPreToolCallEvent(iterationCtx, tc.Name, tc.ID, toToolsCall(tc).Args)
 				sendEvent(AgentEvent{Kind: EventKindPreToolCall, Timestamp: time.Now(), PreToolCall: preEv})
 				if preEv.IsCancelled() {
 					logger.Info("core.loop.tool_canceled", "tool", tc.Name, "id", tc.ID)
-					sendEvent(AgentEvent{Kind: "tool_canceled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
-					messages = append(messages, llm.Message{
-						Role:       llm.RoleTool,
-						ToolCallID: tc.ID,
-						Name:       tc.Name,
-						Content:    "Tool call canceled by interceptor",
-					})
+					sendEvent(AgentEvent{Kind: "tool_canceled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID, ReceiptOutcome: ReceiptOutcomeInterrupted})
+					canceledOutput := toolInterceptionCancellationReceipt(preEv.CancellationError())
+					if consumer != nil {
+						if commitErr := consumer.commitKnownCall(assistantOrdinal, assistantEntry.Message, "batch-"+newClaimID(), tc, uint64(len(transcript)), canceledOutput, ReceiptOutcomeInterrupted, &transcript, &messages); commitErr != nil {
+							span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+							sendEvent(errEvent(commitErr))
+							return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
+						}
+					} else {
+						appendToolReceipt(&messages, &transcript, tc, canceledOutput, ReceiptOutcomeInterrupted, consumer)
+					}
 					continue
 				}
 
 				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name)
 
-				resultText, isErr, execErr := l.executeTool(spanCtx, toToolsCall(tc), es)
+				if consumer != nil {
+					result, commitErr := consumer.executeSequentialCall(iterationCtx, l.tools, assistantOrdinal, assistantEntry.Message, tc, es, &transcript, &messages)
+					sendToolResultEvent(result.output, result.isError, tc.ID, result.outcome, result.sourceTruncated)
+					if commitErr != nil {
+						if !hasUnknownToolOutcome(commitErr) && callIndex+1 < len(resp.ToolCalls) && (errors.Is(commitErr, context.Canceled) || errors.Is(commitErr, context.DeadlineExceeded) || errors.Is(commitErr, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(commitErr, ErrRunCommitChildUnsupported) || errors.Is(commitErr, ErrRunCommitStreamingUnsupported)) {
+							for _, undispatched := range resp.ToolCalls[callIndex+1:] {
+								const skippedOutput = "Tool call not dispatched because a prior tool call stopped the group"
+								if suffixErr := consumer.commitKnownCall(assistantOrdinal, assistantEntry.Message, "batch-"+newClaimID(), undispatched, uint64(len(transcript)), skippedOutput, ReceiptOutcomeInterrupted, &transcript, &messages); suffixErr != nil {
+									commitErr = errors.Join(commitErr, suffixErr)
+									break
+								}
+								sendToolResultEvent(skippedOutput, true, undispatched.ID, ReceiptOutcomeInterrupted, nil)
+							}
+						}
+						span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+						sendEvent(errEvent(commitErr))
+						return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
+					}
+					continue
+				}
+				resultText, isErr, execErr := l.executeTool(iterationCtx, toToolsCall(tc), es)
 				isError := isErr
 				if execErr != nil {
 					logger.Warn("core.loop.tool_error", "tool", tc.Name, "err", execErr)
 					resultText = "Error: " + execErr.Error()
 					isError = true
-					if spanCtx.Err() != nil {
-						span.SetStatus(tracing.SpanStatusError, execErr.Error())
-						emitCanceledToolResults(execErr)
-						sendEvent(errEvent(execErr))
-						return events, execErr
-					}
 				}
-				sendEvent(AgentEvent{Kind: "tool_result", Content: resultText, Timestamp: time.Now(), IsError: isError, ToolCallID: tc.ID})
-				messages = append(messages, llm.Message{
-					Role:       llm.RoleTool,
-					ToolCallID: tc.ID,
-					Name:       tc.Name,
-					Content:    resultText,
-				})
+				outcome := toolReceiptOutcome(iterationCtx, execErr, isError)
+				sendToolResultEvent(resultText, isError, tc.ID, outcome, nil)
+				appendToolReceipt(&messages, &transcript, tc, resultText, outcome, consumer)
+				if outcome == ReceiptOutcomeUnknown {
+					for _, undispatched := range resp.ToolCalls[callIndex+1:] {
+						skippedOutput := "Tool call not dispatched because a prior tool outcome is unknown"
+						if spanCtx.Err() != nil {
+							skippedOutput = "Tool call canceled because a prior tool outcome is unknown"
+						}
+						sendToolResultEvent(skippedOutput, true, undispatched.ID, ReceiptOutcomeInterrupted, nil)
+						appendToolReceipt(&messages, &transcript, undispatched, skippedOutput, ReceiptOutcomeInterrupted, consumer)
+					}
+					unknownErr := markUnknownToolOutcome(execErr)
+					span.SetStatus(tracing.SpanStatusError, unknownErr.Error())
+					sendEvent(errEvent(unknownErr))
+					return CanonicalRunResult{Events: events, Transcript: transcript}, unknownErr
+				}
+				if execErr != nil && spanCtx.Err() != nil {
+					span.SetStatus(tracing.SpanStatusError, execErr.Error())
+					emitCanceledToolResults(execErr)
+					sendEvent(errEvent(execErr))
+					return CanonicalRunResult{Events: events, Transcript: transcript}, execErr
+				}
+				if callIndex+1 < len(resp.ToolCalls) && spanCtx.Err() != nil {
+					cancelErr := spanCtx.Err()
+					emitCanceledToolResults(cancelErr)
+					sendEvent(errEvent(cancelErr))
+					return CanonicalRunResult{Events: events, Transcript: transcript}, cancelErr
+				}
 			}
 		}
 
-		// Mid-turn compaction: if the context has grown beyond the
-		// threshold fraction of the token budget, compact before the
-		// next LLM call to avoid overflowing the context window
-		// mid-turn.
-		if midTurnCompactor != nil && compactor != nil && estimator != nil && maxTokens > 0 {
-			items := messagesToTurnItems(messages)
-			compacted, result, cerr := midTurnCompactor.CompactIfNeeded(spanCtx, items, maxTokens, estimator, compactor)
-			if cerr != nil {
-				logger.Warn("core.loop.midturn_compact_error", "err", cerr)
-			} else if result.Triggered {
-				messages = turnItemsToMessages(compacted)
-				logger.Info("core.loop.midturn_compact",
-					"reason", result.Reason.String(),
-					"messages_before", len(items),
-					"messages_after", len(compacted),
-				)
-			}
-		}
 	}
 
 	// Iteration budget exhausted.
 	span.SetStatus(tracing.SpanStatusError, errMaxIterations.Error())
 	logger.Error("core.loop.max_iterations", "max", l.maxIterations)
 	sendEvent(errEvent(errMaxIterations))
-	return events, errMaxIterations
+	return CanonicalRunResult{Events: events, Transcript: transcript}, errMaxIterations
+}
+
+func toolInterceptionCancellationReceipt(err error) string {
+	if message, ok := SafeToolInterceptionMessage(err); ok {
+		return message
+	}
+	return toolInterceptorCanceledOutput
+}
+
+func preflightDurableRequest(
+	ctx context.Context,
+	messages []llm.Message,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+) ([]llm.Message, error) {
+	items := messagesToTurnItems(messages)
+	if err := validateDurableRequestSource(items, consumer.source, consumer.runID); err != nil {
+		return nil, err
+	}
+	if maxTokens <= 0 || estimator == nil || compaction.EstimateTokens(items, estimator) <= maxTokens {
+		return messages, nil
+	}
+	if err := compaction.ValidateCompactionEligible(items); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrDurableCompactionUnsupported, err)
+	}
+	if consumer.source == nil || compactor == nil {
+		return nil, ErrRunCommitCompactionProjectionUnavailable
+	}
+	currentInput, err := captureDurableCurrentInput(items, consumer.source, consumer.runID)
+	if err != nil {
+		return nil, err
+	}
+	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), maxTokens, estimator)
+	if err != nil {
+		return nil, err
+	}
+	projection, err := validateDurableCompactionResult(items, result, consumer.source, consumer.runID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateDurableCurrentInputPreserved(currentInput, result.Items); err != nil {
+		return nil, err
+	}
+	if err := consumer.commitCompaction(projection); err != nil {
+		markRunOutcomeUnknown(ctx)
+		return nil, err
+	}
+	return turnItemsToMessages(result.Items), nil
+}
+
+func preflightDurableRequestAt(
+	ctx context.Context,
+	messages []llm.Message,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+	currentSubmissionIndex int,
+) ([]llm.Message, int, error) {
+	items := messagesToTurnItems(messages)
+	if err := validateDurableRequestSource(items, consumer.source, consumer.runID); err != nil {
+		return nil, currentSubmissionIndex, err
+	}
+	if currentSubmissionIndex < 0 || currentSubmissionIndex >= len(items) {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "current submission cannot be preserved during compaction"}
+	}
+	currentID := items[currentSubmissionIndex].ID
+	if maxTokens <= 0 || estimator == nil {
+		return messages, currentSubmissionIndex, nil
+	}
+	if err := compaction.ValidateCompactionEligible(items); err != nil {
+		return nil, currentSubmissionIndex, fmt.Errorf("%w: %v", ErrDurableCompactionUnsupported, err)
+	}
+	if consumer.source == nil || compactor == nil {
+		return nil, currentSubmissionIndex, ErrRunCommitCompactionProjectionUnavailable
+	}
+	currentInput, err := captureDurableCurrentInput(items, consumer.source, consumer.runID)
+	if err != nil {
+		return nil, currentSubmissionIndex, err
+	}
+	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), maxTokens, estimator)
+	if err != nil {
+		return nil, currentSubmissionIndex, err
+	}
+	projection, err := validateDurableCompactionResult(items, result, consumer.source, consumer.runID)
+	if err != nil {
+		return nil, currentSubmissionIndex, err
+	}
+	if err := validateDurableCurrentInputPreserved(currentInput, result.Items); err != nil {
+		return nil, currentSubmissionIndex, err
+	}
+	compactedSubmissionIndex := -1
+	for index, item := range result.Items {
+		if item.ID != currentID {
+			continue
+		}
+		if compactedSubmissionIndex >= 0 {
+			return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "compactor duplicated the current submission"}
+		}
+		compactedSubmissionIndex = index
+	}
+	if compactedSubmissionIndex < 0 {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "compactor removed the current submission"}
+	}
+	if err := consumer.commitCompaction(projection); err != nil {
+		markRunOutcomeUnknown(ctx)
+		return nil, currentSubmissionIndex, err
+	}
+	return turnItemsToMessages(result.Items), compactedSubmissionIndex, nil
+}
+
+func preflightNonDurableRequest(
+	ctx context.Context,
+	messages []llm.Message,
+	currentSubmissionIndex int,
+	midTurnCompactor *compaction.MidTurnCompact,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+) ([]llm.Message, int, compaction.CompactResult, error) {
+	if currentSubmissionIndex < 0 || currentSubmissionIndex >= len(messages) {
+		return nil, currentSubmissionIndex, compaction.CompactResult{}, errCurrentSubmissionNotPreserved
+	}
+	items := messagesToTurnItems(messages)
+	items, err := compaction.NormalizeToolCallGroups(items)
+	if err != nil {
+		return nil, currentSubmissionIndex, compaction.CompactResult{}, err
+	}
+	currentSubmissionID := items[currentSubmissionIndex].ID
+	currentSubmission := cloneLLMMessage(messages[currentSubmissionIndex])
+	compacted, result, err := midTurnCompactor.CompactIfNeeded(ctx, items, maxTokens, estimator, withIsolatedCompactorInput(compactor))
+	if err != nil {
+		return nil, currentSubmissionIndex, result, err
+	}
+	if !result.Triggered {
+		return messages, currentSubmissionIndex, result, nil
+	}
+	compactedItems, err := compaction.NormalizeToolCallGroups(compacted.Items)
+	if err != nil {
+		return nil, currentSubmissionIndex, result, err
+	}
+	compactedSubmissionIndex := -1
+	for index, item := range compactedItems {
+		if item.ID != currentSubmissionID {
+			continue
+		}
+		if compactedSubmissionIndex >= 0 {
+			return nil, currentSubmissionIndex, result, errCurrentSubmissionNotPreserved
+		}
+		compactedSubmissionIndex = index
+	}
+	if compactedSubmissionIndex < 0 {
+		return nil, currentSubmissionIndex, result, errCurrentSubmissionNotPreserved
+	}
+	compactedMessages := turnItemsToMessages(compactedItems)
+	if !reflect.DeepEqual(currentSubmission, compactedMessages[compactedSubmissionIndex]) {
+		return nil, currentSubmissionIndex, result, errCurrentSubmissionNotPreserved
+	}
+	return compactedMessages, compactedSubmissionIndex, result, nil
+}
+
+type pendingInput struct {
+	history []AgentMessage
+	message AgentMessage
+}
+
+func pendingRunInput(history []AgentMessage, content string, consumer *runCommitConsumer) pendingInput {
+	history = cloneAgentMessages(history)
+	priorCount := uint64(0)
+	if consumer.source != nil {
+		priorCount = uint64(len(consumer.source.SourceEntryIDs))
+	}
+	runID := consumer.runID
+	index := -1
+	if len(history) > 0 {
+		last := history[len(history)-1]
+		if last.Role == string(llm.RoleUser) && last.Content == content {
+			switch last.Runtime.Source.Kind {
+			case llm.SourcePendingRunInput:
+				index = len(history) - 1
+			case llm.SourceNone:
+				if last.InputKind == InputKindUser {
+					index = len(history) - 1
+				}
+			}
+		}
+	}
+	if index < 0 {
+		message := AgentMessage{Role: string(llm.RoleUser), Content: content, InputKind: InputKindUser}
+		history = append(history, message)
+		index = len(history) - 1
+	}
+	message := history[index]
+	message.Runtime.Source = llm.SourceRef{
+		Kind: llm.SourcePendingRunInput, RunID: runID, PriorSourceCount: priorCount,
+	}
+	message.Runtime.ReceiptOutcome = message.ReceiptOutcome
+	history[index] = message
+	return pendingInput{history: history, message: message}
+}
+
+func transcriptAssistantEntry(resp *llm.Message) (TranscriptEntry, error) {
+	entry := AgentMessage{Role: string(llm.RoleAssistant), Content: resp.Content}
+	if resp.Usage != nil {
+		usage := *resp.Usage
+		entry.Usage = &usage
+	}
+	if resp.ContentBlocks != nil {
+		entry.ContentBlocks = append([]llm.ContentBlock(nil), resp.ContentBlocks...)
+		for i := range entry.ContentBlocks {
+			if resp.ContentBlocks[i].ImageURL != nil {
+				imageURL := *resp.ContentBlocks[i].ImageURL
+				entry.ContentBlocks[i].ImageURL = &imageURL
+			}
+		}
+	}
+	if len(resp.ToolCalls) > 0 {
+		encoded, err := json.Marshal(resp.ToolCalls)
+		if err != nil {
+			return TranscriptEntry{}, fmt.Errorf("core: clone assistant tool calls for transcript: %w", err)
+		}
+		if err := json.Unmarshal(encoded, &entry.ToolCalls); err != nil {
+			return TranscriptEntry{}, fmt.Errorf("core: decode cloned assistant tool calls: %w", err)
+		}
+	}
+	return TranscriptEntry{Message: entry}, nil
+}
+
+func validateCompleteToolCalls(calls []llm.ToolCall) error {
+	if len(calls) > guardedStreamMaxToolCalls {
+		return fmt.Errorf("core: response contains more than %d tool calls", guardedStreamMaxToolCalls)
+	}
+	seen := make(map[string]struct{}, len(calls))
+	var payloadBytes int
+	for _, call := range calls {
+		if call.ID == "" || call.Name == "" {
+			return errors.New("core: tool call is missing its ID or name")
+		}
+		if _, exists := seen[call.ID]; exists {
+			return fmt.Errorf("core: response contains duplicate tool call ID %q", call.ID)
+		}
+		seen[call.ID] = struct{}{}
+		if call.Args != nil {
+			if _, ok := call.Args.(map[string]any); !ok {
+				return fmt.Errorf("core: tool call %q has invalid arguments", call.ID)
+			}
+		}
+		encoded, err := json.Marshal(call)
+		if err != nil {
+			return fmt.Errorf("core: encode tool call %q: %w", call.ID, err)
+		}
+		if len(encoded) > guardedStreamMaxBytes-payloadBytes {
+			return fmt.Errorf("core: tool calls exceed %d-byte payload limit", guardedStreamMaxBytes)
+		}
+		payloadBytes += len(encoded)
+	}
+	return nil
+}
+
+func appendToolReceipt(messages *[]llm.Message, transcript *[]TranscriptEntry, call llm.ToolCall, content, outcome string, consumer *runCommitConsumer) {
+	metadata := consumer.transcriptMetadata(uint64(len(*transcript)), outcome)
+	*messages = append(*messages, llm.Message{
+		Role:       llm.RoleTool,
+		ToolCallID: call.ID,
+		Name:       call.Name,
+		Content:    content,
+		Runtime:    metadata,
+	})
+	appendTranscriptToolReceipt(transcript, call, content, outcome, consumer)
+}
+
+func appendTranscriptToolReceipt(transcript *[]TranscriptEntry, call llm.ToolCall, content, outcome string, consumer *runCommitConsumer) {
+	*transcript = append(*transcript, TranscriptEntry{Message: AgentMessage{
+		Role:           string(llm.RoleTool),
+		Content:        content,
+		ToolCallID:     call.ID,
+		ToolName:       call.Name,
+		ReceiptOutcome: outcome,
+		Runtime:        consumer.transcriptMetadata(uint64(len(*transcript)), outcome),
+	}})
+}
+
+func toolReceiptOutcome(ctx context.Context, err error, isError bool) string {
+	if err != nil {
+		if hasUnknownToolOutcome(err) {
+			return ReceiptOutcomeUnknown
+		}
+		var outcome interface{ OutcomeUnknown() bool }
+		if errors.As(err, &outcome) {
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return ReceiptOutcomeInterrupted
+			}
+		}
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ReceiptOutcomeUnknown
+		}
+		return ReceiptOutcomeError
+	}
+	if isError {
+		return ReceiptOutcomeError
+	}
+	return ReceiptOutcomeSuccess
+}
+
+func hasUnknownToolOutcome(err error) bool {
+	var outcome interface{ OutcomeUnknown() bool }
+	return errors.As(err, &outcome) && outcome.OutcomeUnknown()
 }
 
 // messagesToTurnItems converts []llm.Message to []compaction.TurnItem for the
@@ -742,50 +1419,130 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 // TurnItem.ToolResult field so compactors (e.g. MicroCompactor) can replace
 // them with placeholders.
 func messagesToTurnItems(msgs []llm.Message) []compaction.TurnItem {
-	items := make([]compaction.TurnItem, len(msgs))
-	for i, m := range msgs {
-		item := compaction.TurnItem{
-			ID:            fmt.Sprintf("msg-%d", i),
-			Role:          string(m.Role),
-			ContentBlocks: m.ContentBlocks,
-			ToolCalls:     m.ToolCalls,
-			ToolCallID:    m.ToolCallID,
-			ToolName:      m.Name,
+	canonical := make([]AgentMessage, len(msgs))
+	finishReasons := make([]string, len(msgs))
+	for i, message := range msgs {
+		canonical[i] = AgentMessage{
+			Role:           string(message.Role),
+			Content:        message.Content,
+			ContentBlocks:  message.ContentBlocks,
+			Usage:          message.Usage,
+			ToolCalls:      message.ToolCalls,
+			ToolCallID:     message.ToolCallID,
+			ToolName:       message.Name,
+			ReceiptOutcome: message.Runtime.ReceiptOutcome,
+			Runtime:        message.Runtime,
 		}
-		if m.Role == llm.RoleTool {
-			item.ToolResult = m.Content
+		finishReasons[i] = message.FinishReason
+	}
+	return agentMessagesToTurnItemsWithFinish(canonical, finishReasons)
+}
+
+func cloneLLMMessage(message llm.Message) llm.Message {
+	cloned := cloneAgentMessage(AgentMessage{
+		Role: string(message.Role), Content: message.Content, ContentBlocks: message.ContentBlocks,
+		Usage: message.Usage, ToolCalls: message.ToolCalls, ToolCallID: message.ToolCallID,
+		ToolName: message.Name, Runtime: message.Runtime,
+	})
+	message.ContentBlocks = cloned.ContentBlocks
+	message.Usage = cloned.Usage
+	message.ToolCalls = cloned.ToolCalls
+	return message
+}
+
+// agentMessagesToTurnItems retains source metadata while preparing the
+// canonical Agent history for a durable request preflight.
+func agentMessagesToTurnItems(messages []AgentMessage) []compaction.TurnItem {
+	return agentMessagesToTurnItemsWithFinish(messages, nil)
+}
+
+func agentMessagesToTurnItemsWithFinish(messages []AgentMessage, finishReasons []string) []compaction.TurnItem {
+	canonical := cloneAgentMessages(messages)
+	items := make([]compaction.TurnItem, len(canonical))
+	for i, message := range canonical {
+		item := compaction.TurnItem{
+			ID:             fmt.Sprintf("msg-%d", i),
+			Role:           string(message.Role),
+			ContentBlocks:  message.ContentBlocks,
+			Usage:          message.Usage,
+			ToolCalls:      message.ToolCalls,
+			ToolCallID:     message.ToolCallID,
+			ToolName:       message.ToolName,
+			ReceiptOutcome: message.ReceiptOutcome,
+			Runtime:        message.Runtime,
+		}
+		if i < len(finishReasons) {
+			item.FinishReason = finishReasons[i]
+		}
+		if message.Role == compaction.RoleTool {
+			item.ToolResult = message.Content
 		} else {
-			item.Content = m.Content
+			item.Content = message.Content
+		}
+		if message.Role == compaction.RoleUser {
+			sourceKind := message.Runtime.Source.Kind
+			if sourceKind == llm.SourceRunSummary {
+				item.IsCompaction = true
+			} else if sourceKind == llm.SourcePriorPublished {
+				if raw, ok := compaction.UnwrapUntrustedSummaryContext(item.Content); ok {
+					item.Content = raw
+					item.IsCompaction = true
+				}
+			}
+			if item.IsCompaction {
+				if raw, ok := compaction.UnwrapUntrustedSummaryContext(item.Content); ok {
+					item.Content = raw
+				}
+			}
 		}
 		items[i] = item
 	}
 	return items
 }
 
-// turnItemsToMessages converts []compaction.TurnItem back to []llm.Message
-// after mid-turn compaction. Compaction summary entries with empty content are
-// replaced with "[compacted]" so the model sees a non-empty placeholder.
+// turnItemsToMessages converts compacted items back to model history. Summary
+// markers are projected as untrusted user content exactly once; runtime source
+// coordinates remain private to this invocation and are not provider JSON.
 func turnItemsToMessages(items []compaction.TurnItem) []llm.Message {
-	msgs := make([]llm.Message, len(items))
-	for i, it := range items {
-		msg := llm.Message{
-			Role:          llm.Role(it.Role),
-			ContentBlocks: it.ContentBlocks,
-			ToolCalls:     it.ToolCalls,
-			ToolCallID:    it.ToolCallID,
-			Name:          it.ToolName,
+	messages := make([]llm.Message, len(items))
+	for i, item := range items {
+		message := llm.Message{
+			Role:          llm.Role(item.Role),
+			ContentBlocks: item.ContentBlocks,
+			ToolCalls:     item.ToolCalls,
+			ToolCallID:    item.ToolCallID,
+			Name:          item.ToolName,
+			Usage:         item.Usage,
+			FinishReason:  item.FinishReason,
+			Runtime:       item.Runtime,
 		}
-		if it.Role == compaction.RoleTool {
-			msg.Content = it.ToolResult
-		} else {
-			msg.Content = it.Content
-			if it.IsCompaction && it.Content == "" {
-				msg.Content = "[compacted]"
+		if message.Runtime.ReceiptOutcome == "" {
+			message.Runtime.ReceiptOutcome = item.ReceiptOutcome
+		}
+		if item.IsCompaction {
+			content := item.Content
+			if content == "" {
+				content = "[compacted]"
 			}
+			if raw, ok := compaction.UnwrapUntrustedSummaryContext(content); ok {
+				content = raw
+			}
+			message.Role = llm.RoleUser
+			message.Content = compaction.UntrustedSummaryContext(content)
+			message.ContentBlocks = nil
+			message.ToolCalls = nil
+			message.ToolCallID = ""
+			message.Name = ""
+			message.Usage = nil
+			message.FinishReason = ""
+		} else if item.Role == compaction.RoleTool {
+			message.Content = item.ToolResult
+		} else {
+			message.Content = item.Content
 		}
-		msgs[i] = msg
+		messages[i] = message
 	}
-	return msgs
+	return messages
 }
 
 // streamGenerate calls the LLM in streaming mode. It consumes chunks from
@@ -793,44 +1550,136 @@ func turnItemsToMessages(items []compaction.TurnItem) []llm.Message {
 // EventStream so the TUI can render tokens as they arrive. The complete
 // response (with accumulated tool calls) is returned.
 func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream) (*llm.Message, error) {
-	ch, err := model.Stream(ctx, messages, toolOpts...)
+	return l.streamGenerateWithBudget(ctx, model, messages, toolOpts, es, &guardedStreamBudget{}, true)
+}
+
+func (l *LoopAgent) streamGenerateWithPreparedBudget(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	plan *llm.PreparedRequestPlan,
+	es EventStream,
+	budget *guardedStreamBudget,
+	publishIncremental bool,
+) (*llm.Message, error) {
+	if plan == nil {
+		return nil, &RequestEnvelopeError{Reason: "prepared request plan is missing"}
+	}
+	option, err := llm.OptionFromGenerationOptions(plan.Options())
 	if err != nil {
+		return nil, &RequestEnvelopeError{Reason: "prepared generation options cannot be copied for dispatch", Cause: err}
+	}
+	ctx = llm.WithPreparedRequestPlan(ctx, plan)
+	return l.streamGenerateWithBudget(ctx, model, plan.Messages(), []llm.Option{option}, es, budget, publishIncremental)
+}
+
+func (l *LoopAgent) streamGenerateWithBudget(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream, budget *guardedStreamBudget, publishIncremental bool) (*llm.Message, error) {
+	streamCtx, cancel := context.WithCancelCause(ctx)
+	ch, err := model.Stream(streamCtx, messages, toolOpts...)
+	if err != nil {
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cancel(llm.NewLocalStreamAbortCause(err))
+		} else {
+			cancel(cause)
+		}
+		if ch != nil {
+			for range ch {
+			}
+		}
 		// Stream failed — propagate the error directly rather than falling
 		// back to Generate, because Generate would advance the model's
 		// call index a second time and return a different result.
 		return nil, err
 	}
 	if ch == nil {
-		return nil, fmt.Errorf("streamGenerate: nil channel from model")
+		err = fmt.Errorf("streamGenerate: nil channel from model")
+		cancel(llm.NewLocalStreamAbortCause(err))
+		return nil, err
+	}
+	abortAndDrain := func(failure error) {
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cancel(llm.NewLocalStreamAbortCause(failure))
+		} else {
+			cancel(cause)
+		}
+		for range ch {
+		}
 	}
 
 	var contentBuf strings.Builder
 	var toolCalls []llm.ToolCall
 	var finishReason string
 	var usage *llm.Usage
-	gotChunk := false
+	finalSeen := false
 
-	for chunk := range ch {
+	for {
+		var chunk llm.MessageChunk
+		var ok bool
+		select {
+		case <-streamCtx.Done():
+			cause := context.Cause(ctx)
+			if cause == nil {
+				cause = context.Cause(streamCtx)
+			}
+			if cause == nil {
+				cause = streamCtx.Err()
+			}
+			abortAndDrain(cause)
+			return nil, fmt.Errorf("core: stream canceled: %w", cause)
+		case chunk, ok = <-ch:
+		}
+		if !ok {
+			break
+		}
 		if chunk.Error != nil {
+			abortAndDrain(chunk.Error)
 			return nil, chunk.Error
 		}
-		gotChunk = true
+		if ctx.Err() != nil {
+			cause := context.Cause(ctx)
+			if cause == nil {
+				cause = ctx.Err()
+			}
+			abortAndDrain(cause)
+			return nil, fmt.Errorf("core: stream canceled: %w", cause)
+		}
+		if finalSeen {
+			err = errors.New("core: stream emitted data after its final chunk")
+			abortAndDrain(err)
+			return nil, err
+		}
+		if budget != nil {
+			if err := budget.accountChunk(chunk); err != nil {
+				abortAndDrain(err)
+				return nil, err
+			}
+		}
+		if !chunk.Final && len(chunk.ToolCalls) > 0 {
+			err = errors.New("core: stream emitted tool calls before the final chunk")
+			abortAndDrain(err)
+			return nil, err
+		}
 		if chunk.Content != "" {
 			contentBuf.WriteString(chunk.Content)
 			// Send incremental events only to the EventStream (real-time
 			// streaming for TUI consumers), not to the returned events slice.
 			// The complete non-incremental "message" event is emitted by the
 			// loop once the response finishes.
-			if es != nil {
-				_ = es.Send(AgentEvent{ //nolint:errcheck
+			if publishIncremental && es != nil {
+				if budget != nil {
+					budget.visible = true
+				}
+				_ = es.Send(stampAgentEvent(agentEventCoordinatesFromContext(ctx), AgentEvent{ //nolint:errcheck
 					Kind:        "message",
 					Content:     chunk.Content,
 					Timestamp:   time.Now(),
 					Incremental: true,
-				})
+				}))
 			}
 		}
 		if chunk.Final {
+			finalSeen = true
 			if len(chunk.ToolCalls) > 0 {
 				toolCalls = chunk.ToolCalls
 			}
@@ -845,19 +1694,41 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 		}
 	}
 
-	// No chunks at all indicates the model returned an empty response.
-	// Return nil so the loop's nil-response guard fires.
-	if !gotChunk {
-		return nil, nil
+	if ctx.Err() != nil {
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cause = ctx.Err()
+		}
+		abortAndDrain(cause)
+		return nil, fmt.Errorf("core: stream canceled: %w", cause)
+	}
+	if !finalSeen {
+		err = errors.New("core: stream ended without a final chunk")
+		abortAndDrain(err)
+		return nil, err
 	}
 
-	return &llm.Message{
+	response := &llm.Message{
 		Role:         llm.RoleAssistant,
 		Content:      contentBuf.String(),
 		ToolCalls:    toolCalls,
 		FinishReason: finishReason,
 		Usage:        usage,
-	}, nil
+	}
+	if budget != nil {
+		candidateBytes, sizeErr := candidatePayloadBytes(response)
+		if sizeErr != nil {
+			cancel(llm.NewLocalStreamAbortCause(sizeErr))
+			return nil, sizeErr
+		}
+		if candidateBytes > guardedStreamMaxBytes {
+			err = fmt.Errorf("core: response segment exceeds %d-byte candidate limit", guardedStreamMaxBytes)
+			cancel(llm.NewLocalStreamAbortCause(err))
+			return nil, err
+		}
+	}
+	cancel(nil)
+	return response, nil
 }
 
 // generateWithContinuation wraps streamGenerate with automatic truncation
@@ -868,12 +1739,95 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 // response are partial (JSON args cut off) and are dropped before execution;
 // only tool calls from a non-truncated (finish_reason != "length") response
 // are kept. At most maxContinuationAttempts retries are issued; if the output
-// is still truncated after that, a warning is logged, any remaining partial
-// tool calls are dropped, and the accumulated content is returned.
+// is still truncated after that, the candidate is rejected and no complete
+// assistant turn is returned.
 func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream, logger *slog.Logger) (*llm.Message, error) {
-	resp, err := l.streamGenerate(ctx, model, messages, toolOpts, es)
-	if err != nil || resp == nil {
-		return resp, err
+	return l.generateWithContinuationAndCompaction(ctx, model, messages, toolOpts, es, logger, nil, nil, nil, 0)
+}
+
+func (l *LoopAgent) generateWithContinuationAndCompaction(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	messages []llm.Message,
+	toolOpts []llm.Option,
+	es EventStream,
+	logger *slog.Logger,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+) (*llm.Message, error) {
+	return l.generateWithContinuationAndCompactionState(ctx, model, messages, len(messages)-1, toolOpts, es, logger, consumer, nil, compactor, estimator, maxTokens, 0, nil)
+}
+
+type preparedLoopRequestState struct {
+	messages               []llm.Message
+	currentSubmissionIndex int
+}
+
+func (l *LoopAgent) generateWithPreparedContinuation(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	messages []llm.Message,
+	currentSubmissionIndex int,
+	toolOpts []llm.Option,
+	es EventStream,
+	logger *slog.Logger,
+	consumer *runCommitConsumer,
+	midTurnCompactor *compaction.MidTurnCompact,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+	multimodalTokensPerItemReserve int,
+) (*llm.Message, []llm.Message, int, error) {
+	state := &preparedLoopRequestState{messages: messages, currentSubmissionIndex: currentSubmissionIndex}
+	response, err := l.generateWithContinuationAndCompactionState(ctx, model, messages, currentSubmissionIndex, toolOpts, es, logger, consumer, midTurnCompactor, compactor, estimator, maxTokens, multimodalTokensPerItemReserve, state)
+	return response, state.messages, state.currentSubmissionIndex, err
+}
+
+func (l *LoopAgent) generateWithContinuationAndCompactionState(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	messages []llm.Message,
+	currentSubmissionIndex int,
+	toolOpts []llm.Option,
+	es EventStream,
+	logger *slog.Logger,
+	consumer *runCommitConsumer,
+	midTurnCompactor *compaction.MidTurnCompact,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+	multimodalTokensPerItemReserve int,
+	state *preparedLoopRequestState,
+) (*llm.Message, error) {
+	guard, guarded := model.(CompleteResponseGuard)
+	if guarded {
+		if guard.MaxCandidateBytes() != guardedStreamMaxBytes {
+			return nil, fmt.Errorf("core: complete-response guard must advertise the %d-byte candidate limit", guardedStreamMaxBytes)
+		}
+		ctx = llm.WithLoopOwnedContinuation(ctx)
+		sendAssistantGenerationLifecycleEvent(ctx, es, EventKindAssistantGenerationStarted)
+		defer sendAssistantGenerationLifecycleEvent(ctx, es, EventKindAssistantGenerationFinished)
+	}
+	mainCtx, operationActive, operationErr := providerOperationContext(ctx, model, llm.OperationMainRequest)
+	if operationErr != nil {
+		return nil, operationErr
+	}
+	resp, messages, currentSubmissionIndex, budget, err := l.runMainProviderOperation(
+		mainCtx, model, messages, toolOpts, es, guarded, operationActive,
+		consumer, midTurnCompactor, compactor, estimator, maxTokens,
+		multimodalTokensPerItemReserve, currentSubmissionIndex,
+	)
+	if state != nil {
+		state.messages = messages
+		state.currentSubmissionIndex = currentSubmissionIndex
+	}
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, errors.New("core: provider operation returned a nil response")
 	}
 
 	// Lazily create a continuation span only when the response is truncated.
@@ -930,9 +1884,17 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 
 		logger.Info("core.loop.continuation", "attempt", attempt+1)
 
-		contResp, contErr := l.streamGenerate(ctx, model, contMsgs, toolOpts, es)
-		if contErr != nil || contResp == nil {
-			break
+		contCtx := llm.WithContinuationNoReplay(ctx)
+		contCtx, _, operationErr = providerOperationContext(contCtx, model, llm.OperationContinuation)
+		if operationErr != nil {
+			return nil, operationErr
+		}
+		contResp, contErr := l.streamGenerateWithBudget(contCtx, model, contMsgs, toolOpts, es, budget, !guarded)
+		if contErr != nil {
+			return nil, fmt.Errorf("core: continuation %d failed: %w", attempt+1, contErr)
+		}
+		if contResp == nil {
+			return nil, fmt.Errorf("core: continuation %d returned a nil response", attempt+1)
 		}
 
 		// Merge the continuation into the original response. Content is
@@ -950,26 +1912,618 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 				resp.Usage.TotalTokens += contResp.Usage.TotalTokens
 			}
 		}
+		candidateBytes, candidateErr := candidatePayloadBytes(resp)
+		if candidateErr != nil {
+			return nil, candidateErr
+		}
+		if candidateBytes > guardedStreamMaxBytes {
+			return nil, fmt.Errorf("core: complete response exceeds %d-byte candidate limit", guardedStreamMaxBytes)
+		}
 	}
 
-	// If the output is still truncated after exhausting all continuation
-	// attempts, drop any remaining partial tool calls so they are not
-	// executed, and log a warning.
+	// A still-truncated response is not a complete assistant turn and must not
+	// be exposed as a successful answer or dispatched as a tool call.
 	if resp.FinishReason == "length" {
-		if len(resp.ToolCalls) > 0 {
-			logger.Warn("partial_tool_calls_dropped", "count", len(resp.ToolCalls))
-			if contSpan != nil {
-				contSpan.AddEvent("partial_tool_calls_dropped",
-					tracing.Attribute{Key: "count", Value: len(resp.ToolCalls)})
-			}
-			droppedCount += len(resp.ToolCalls)
-			resp.ToolCalls = nil
-		}
 		slog.WarnContext(ctx, "core.loop.truncation_max_attempts",
 			"max_attempts", maxContinuationAttempts)
+		return nil, fmt.Errorf("core: response remains truncated after %d continuation attempts", maxContinuationAttempts)
+	}
+
+	candidateBytes, candidateErr := candidatePayloadBytes(resp)
+	if candidateErr != nil {
+		return nil, candidateErr
+	}
+	if candidateBytes > guardedStreamMaxBytes {
+		return nil, fmt.Errorf("core: complete response exceeds %d-byte candidate limit", guardedStreamMaxBytes)
+	}
+	if guarded {
+		if err := validateCompleteToolCalls(resp.ToolCalls); err != nil {
+			return nil, fmt.Errorf("core: reject invalid guarded tool candidate: %w", err)
+		}
+		checked, checkErr := guard.CheckCandidate(ctx, resp.Content)
+		if checkErr != nil {
+			return nil, fmt.Errorf("core: check complete response: %w", checkErr)
+		}
+		if checked == nil {
+			return nil, errors.New("core: complete-response guard returned nil result")
+		}
+		if checked.Sanitized != "" {
+			resp.Content = checked.Sanitized
+		} else if !checked.Allowed {
+			return nil, errors.New("core: complete-response guard denied candidate")
+		}
+		if len(resp.Content) > guard.MaxCandidateBytes() {
+			return nil, fmt.Errorf("core: guarded response exceeds %d-byte candidate limit", guard.MaxCandidateBytes())
+		}
+		candidateBytes, candidateErr = candidatePayloadBytes(resp)
+		if candidateErr != nil {
+			return nil, candidateErr
+		}
+		if candidateBytes > guard.MaxCandidateBytes() {
+			return nil, fmt.Errorf("core: guarded response payload exceeds %d-byte candidate limit", guard.MaxCandidateBytes())
+		}
+		if es != nil && resp.Content != "" {
+			budget.visible = true
+			_ = es.Send(stampAgentEvent(agentEventCoordinatesFromContext(ctx), AgentEvent{Kind: "message", Content: resp.Content, Timestamp: time.Now(), Incremental: true})) //nolint:errcheck
+		}
 	}
 
 	return resp, nil
+}
+
+func sendAssistantGenerationLifecycleEvent(ctx context.Context, es EventStream, kind string) {
+	if es == nil {
+		return
+	}
+	event := AgentEvent{Kind: kind, Timestamp: time.Now()}
+	_ = es.Send(stampAgentEvent(agentEventCoordinatesFromContext(ctx), event)) //nolint:errcheck
+}
+
+func (l *LoopAgent) runMainProviderOperation(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	messages []llm.Message,
+	toolOpts []llm.Option,
+	es EventStream,
+	guarded bool,
+	operationActive bool,
+	consumer *runCommitConsumer,
+	midTurnCompactor *compaction.MidTurnCompact,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+	multimodalTokensPerItemReserve int,
+	currentSubmissionIndex int,
+) (*llm.Message, []llm.Message, int, *guardedStreamBudget, error) {
+	currentMessages := messages
+	var response *llm.Message
+	var successfulBudget *guardedStreamBudget
+	var requestBase preparedRequestBase
+	var requestPlan *llm.PreparedRequestPlan
+	var selectionSource llm.CandidateSelectionSource
+	var staleSelectionRetries int
+	if operationActive {
+		var err error
+		requestBase, err = newPreparedRequestBase(toolOpts)
+		if err != nil {
+			return nil, currentMessages, currentSubmissionIndex, nil, err
+		}
+		requestBase.multimodalTokensPerItemReserve = multimodalTokensPerItemReserve
+		proposal, proposalErr := initialMainCandidateProposal(ctx, model)
+		if proposalErr != nil {
+			return nil, currentMessages, currentSubmissionIndex, nil, proposalErr
+		}
+		selectionSource, _ = llm.CandidateSelectionSourceFromContext(ctx)
+		requestPlan, currentMessages, currentSubmissionIndex, err = prepareAdmittedRequestPlan(
+			ctx, proposal, currentMessages, currentSubmissionIndex, requestBase, consumer,
+			midTurnCompactor, compactor, estimator, maxTokens,
+		)
+		if err != nil {
+			return nil, currentMessages, currentSubmissionIndex, nil, err
+		}
+		ctx = llm.WithPreparedRequestPlan(ctx, requestPlan)
+	}
+	runSchedule := func(operationCtx context.Context, dispatchModel llm.BaseChatModel) error {
+		for {
+			attemptBudget := &guardedStreamBudget{}
+			var candidate *llm.Message
+			var callErr error
+			if requestPlan != nil {
+				candidate, callErr = l.streamGenerateWithPreparedBudget(operationCtx, dispatchModel, requestPlan, es, attemptBudget, !guarded)
+			} else {
+				candidate, callErr = l.streamGenerateWithBudget(operationCtx, dispatchModel, currentMessages, toolOpts, es, attemptBudget, !guarded)
+			}
+			if callErr == nil {
+				if candidate == nil {
+					return errors.New("core: provider returned a nil response")
+				}
+				response = candidate
+				successfulBudget = attemptBudget
+				return nil
+			}
+
+			var denied *llm.DispatchDeniedError
+			if requestPlan != nil && errors.As(callErr, &denied) && denied.Code == llm.DeniedStaleSelectionLease {
+				if selectionSource == nil || staleSelectionRetries >= 8 {
+					return callErr
+				}
+				proposal, peekErr := selectionSource.PeekCandidate(operationCtx)
+				if peekErr != nil {
+					return errors.Join(callErr, peekErr)
+				}
+				staleSelectionRetries++
+				requestPlan, currentMessages, currentSubmissionIndex, callErr = prepareAdmittedRequestPlan(
+					operationCtx, proposal, currentMessages, currentSubmissionIndex, requestBase, consumer,
+					midTurnCompactor, compactor, estimator, maxTokens,
+				)
+				if callErr != nil {
+					return errors.Join(denied, callErr)
+				}
+				operationCtx = llm.WithPreparedRequestPlan(operationCtx, requestPlan)
+				continue
+			}
+
+			var recovered *llm.Message
+			var compactedMessages []llm.Message
+			var compactedSubmissionIndex = currentSubmissionIndex
+			var recoveryBudget *guardedStreamBudget
+			var recoveredOK bool
+			var recoveryErr error
+			if requestPlan != nil {
+				recovered, compactedMessages, compactedSubmissionIndex, recoveryBudget, recoveredOK, recoveryErr = l.recoverPreparedOverflowAttempt(
+					operationCtx, dispatchModel, currentMessages, requestPlan, requestBase, currentSubmissionIndex,
+					es, attemptBudget, guarded, consumer, compactor, estimator, maxTokens, callErr,
+				)
+			} else {
+				recovered, compactedMessages, recoveryBudget, recoveredOK, recoveryErr = l.recoverOverflowAttempt(
+					operationCtx, dispatchModel, currentMessages, toolOpts, es, attemptBudget, guarded, operationActive,
+					consumer, compactor, estimator, maxTokens, callErr,
+				)
+			}
+			if recoveryErr != nil {
+				return errors.Join(callErr, recoveryErr)
+			}
+			if recoveredOK {
+				if recovered == nil {
+					return errors.New("core: overflow recovery returned a nil response")
+				}
+				response = recovered
+				currentMessages = compactedMessages
+				currentSubmissionIndex = compactedSubmissionIndex
+				successfulBudget = recoveryBudget
+				return nil
+			}
+			if !operationActive || attemptBudget.visible || llm.ContinuationNoReplay(operationCtx) {
+				return callErr
+			}
+
+			authority, ok := llm.OperationDispatchAuthorityFromContext(operationCtx)
+			if !ok {
+				return callErr
+			}
+			owner, ok := authority.(*providerOperationAuthority)
+			if !ok {
+				return callErr
+			}
+			proposal, backoff, planned := owner.nextCandidateProposal(operationCtx, callErr)
+			if !planned {
+				return callErr
+			}
+			if waitErr := waitProviderRetry(operationCtx, backoff); waitErr != nil {
+				return errors.Join(callErr, waitErr)
+			}
+			if requestPlan != nil {
+				var prepareErr error
+				requestPlan, currentMessages, currentSubmissionIndex, prepareErr = prepareAdmittedRequestPlan(
+					operationCtx, proposal, currentMessages, currentSubmissionIndex, requestBase, consumer,
+					midTurnCompactor, compactor, estimator, maxTokens,
+				)
+				if prepareErr != nil {
+					return errors.Join(callErr, prepareErr)
+				}
+				operationCtx = llm.WithPreparedRequestPlan(operationCtx, requestPlan)
+			} else {
+				operationCtx = llm.WithCandidateProposal(operationCtx, proposal)
+			}
+		}
+	}
+
+	var runErr error
+	if operationActive {
+		if runner, ok := model.(llm.ProviderOperationRunner); ok {
+			runErr = runner.RunProviderOperation(ctx, runSchedule)
+		} else {
+			runErr = runSchedule(ctx, model)
+		}
+	} else {
+		runErr = runSchedule(ctx, model)
+	}
+	if runErr != nil {
+		return nil, currentMessages, currentSubmissionIndex, nil, runErr
+	}
+	return response, currentMessages, currentSubmissionIndex, successfulBudget, nil
+}
+
+func waitProviderRetry(ctx context.Context, delay time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (l *LoopAgent) recoverOverflowAttempt(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	messages []llm.Message,
+	toolOpts []llm.Option,
+	es EventStream,
+	failedBudget *guardedStreamBudget,
+	guarded bool,
+	operationActive bool,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+	callErr error,
+) (*llm.Message, []llm.Message, *guardedStreamBudget, bool, error) {
+	if !guarded || !operationActive || failedBudget == nil || failedBudget.visible || failedBudget.bytes != 0 || failedBudget.chunks != 0 {
+		return nil, nil, nil, false, nil
+	}
+	attempt, finished := llm.FinishedProviderAttemptFromError(callErr)
+	if !finished || attempt.Failure != llm.FailureOverflow || attempt.AttemptID == "" {
+		return nil, nil, nil, false, nil
+	}
+	authority, ok := llm.OperationDispatchAuthorityFromContext(ctx)
+	if !ok {
+		return nil, nil, nil, false, nil
+	}
+	recoveryOwner, ok := authority.(llm.OverflowRecoveryAuthority)
+	if !ok {
+		return nil, nil, nil, false, nil
+	}
+	var candidate llm.ResolvedCandidateHandle
+	for _, resolved := range llm.ProviderCandidatesFromModel(model) {
+		if resolved != nil && resolved.CandidateID() == attempt.Identity.Candidate && resolved.Identity() == attempt.Identity {
+			candidate = resolved
+			break
+		}
+	}
+	if candidate == nil {
+		return nil, nil, nil, false, nil
+	}
+	if err := recoveryOwner.BeginOverflowRecovery(ctx, attempt.AttemptID); err != nil {
+		return nil, nil, nil, false, nil
+	}
+
+	compacted, err := compactOverflowRequest(ctx, messages, consumer, compactor, estimator, maxTokens)
+	if err != nil {
+		return nil, nil, nil, false, err
+	}
+	proposal := llm.CandidateProposal{
+		OperationID: authority.ID(),
+		Candidate:   candidate,
+		Reason:      llm.CandidateOverflow,
+		Antecedent: llm.CandidateAntecedent{
+			Kind:      llm.AntecedentFinishedOverflow,
+			AttemptID: attempt.AttemptID,
+		},
+	}
+	owner, ok := authority.(*providerOperationAuthority)
+	if !ok {
+		return nil, nil, nil, false, errors.New("core: overflow recovery requires the Loop-owned dispatch authority")
+	}
+	if err := owner.planCandidateProposal(proposal); err != nil {
+		return nil, nil, nil, false, err
+	}
+	recoveryCtx := llm.WithCandidateProposal(ctx, proposal)
+	recoveryBudget := &guardedStreamBudget{}
+	response, err := l.streamGenerateWithBudget(recoveryCtx, model, compacted, toolOpts, es, recoveryBudget, false)
+	if err != nil {
+		return nil, nil, nil, false, err
+	}
+	if response == nil {
+		return nil, nil, nil, false, errors.New("core: overflow recovery returned a nil response")
+	}
+	return response, compacted, recoveryBudget, true, nil
+}
+
+func (l *LoopAgent) recoverPreparedOverflowAttempt(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	messages []llm.Message,
+	failedPlan *llm.PreparedRequestPlan,
+	requestBase preparedRequestBase,
+	currentSubmissionIndex int,
+	es EventStream,
+	failedBudget *guardedStreamBudget,
+	guarded bool,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+	callErr error,
+) (*llm.Message, []llm.Message, int, *guardedStreamBudget, bool, error) {
+	if !guarded || failedBudget == nil || failedBudget.visible || failedBudget.bytes != 0 || failedBudget.chunks != 0 {
+		return nil, nil, currentSubmissionIndex, nil, false, nil
+	}
+	attempt, finished := llm.FinishedProviderAttemptFromError(callErr)
+	if !finished || attempt.Failure != llm.FailureOverflow || attempt.AttemptID == "" {
+		return nil, nil, currentSubmissionIndex, nil, false, nil
+	}
+	authority, ok := llm.OperationDispatchAuthorityFromContext(ctx)
+	if !ok {
+		return nil, nil, currentSubmissionIndex, nil, false, nil
+	}
+	recoveryOwner, ok := authority.(llm.OverflowRecoveryAuthority)
+	if !ok {
+		return nil, nil, currentSubmissionIndex, nil, false, nil
+	}
+	var candidate llm.ResolvedCandidateHandle
+	for _, resolved := range llm.ProviderCandidatesFromModel(model) {
+		if resolved != nil && resolved.CandidateID() == attempt.Identity.Candidate && resolved.Identity() == attempt.Identity {
+			candidate = resolved
+			break
+		}
+	}
+	if candidate == nil || failedPlan == nil || failedPlan.Proposal().Candidate != candidate {
+		return nil, nil, currentSubmissionIndex, nil, false, nil
+	}
+	if err := recoveryOwner.BeginOverflowRecovery(ctx, attempt.AttemptID); err != nil {
+		return nil, nil, currentSubmissionIndex, nil, false, nil
+	}
+	proposal := llm.CandidateProposal{
+		OperationID: authority.ID(),
+		Candidate:   candidate,
+		Reason:      llm.CandidateOverflow,
+		Antecedent: llm.CandidateAntecedent{
+			Kind:      llm.AntecedentFinishedOverflow,
+			AttemptID: attempt.AttemptID,
+		},
+	}
+	owner, ok := authority.(*providerOperationAuthority)
+	if !ok {
+		return nil, nil, currentSubmissionIndex, nil, false, errors.New("core: overflow recovery requires the Loop-owned dispatch authority")
+	}
+	if err := owner.planCandidateProposal(proposal); err != nil {
+		return nil, nil, currentSubmissionIndex, nil, false, err
+	}
+	compacted, compactedIndex, err := compactPreparedOverflowRequest(
+		ctx, messages, currentSubmissionIndex, consumer, compactor, estimator, failedPlan.Estimate().MessageBudget,
+	)
+	if err != nil {
+		return nil, nil, currentSubmissionIndex, nil, false, err
+	}
+	recoveryCtx := llm.WithCandidateProposal(ctx, proposal)
+	requestPlan, compacted, compactedIndex, err := prepareAdmittedRequestPlan(
+		recoveryCtx, proposal, compacted, compactedIndex, requestBase, consumer,
+		compaction.NewMidTurnCompact(), compactor, estimator, maxTokens,
+	)
+	if err != nil {
+		return nil, compacted, compactedIndex, nil, false, err
+	}
+	recoveryCtx = llm.WithPreparedRequestPlan(recoveryCtx, requestPlan)
+	recoveryBudget := &guardedStreamBudget{}
+	response, err := l.streamGenerateWithPreparedBudget(recoveryCtx, model, requestPlan, es, recoveryBudget, false)
+	if err != nil {
+		return nil, nil, currentSubmissionIndex, nil, false, err
+	}
+	if response == nil {
+		return nil, nil, currentSubmissionIndex, nil, false, errors.New("core: overflow recovery returned a nil response")
+	}
+	return response, compacted, compactedIndex, recoveryBudget, true, nil
+}
+
+func compactOverflowRequest(
+	ctx context.Context,
+	messages []llm.Message,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+) ([]llm.Message, error) {
+	if compactor == nil || estimator == nil || maxTokens <= 0 {
+		return nil, errors.New("core: overflow recovery requires a configured compactor, estimator, and token budget")
+	}
+	items := messagesToTurnItems(messages)
+	if consumer != nil {
+		if consumer.source == nil {
+			return nil, ErrRunCommitCompactionProjectionUnavailable
+		}
+		if err := validateDurableRequestSource(items, consumer.source, consumer.runID); err != nil {
+			return nil, err
+		}
+	}
+	if err := compaction.ValidateCompactionEligible(items); err != nil {
+		return nil, fmt.Errorf("core: overflow recovery cannot compact this request: %w", err)
+	}
+	var currentInput compaction.TurnItem
+	if consumer != nil {
+		var err error
+		currentInput, err = captureDurableCurrentInput(items, consumer.source, consumer.runID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), maxTokens, estimator)
+	if err != nil {
+		return nil, fmt.Errorf("core: compact overflow request: %w", err)
+	}
+	if reflect.DeepEqual(items, result.Items) {
+		return nil, errors.New("core: overflow compactor made no progress")
+	}
+	if consumer != nil {
+		projection, err := validateDurableCompactionResult(items, result, consumer.source, consumer.runID)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateDurableCurrentInputPreserved(currentInput, result.Items); err != nil {
+			return nil, err
+		}
+		if err := consumer.commitCompaction(projection); err != nil {
+			markRunOutcomeUnknown(ctx)
+			return nil, err
+		}
+	}
+	return turnItemsToMessages(result.Items), nil
+}
+
+func initialMainCandidateProposal(ctx context.Context, model llm.BaseChatModel) (llm.CandidateProposal, error) {
+	authority, ok := llm.OperationDispatchAuthorityFromContext(ctx)
+	if !ok {
+		return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "provider operation authority is unavailable"}
+	}
+	candidates := llm.ProviderCandidatesFromModel(model)
+	if source, exists := llm.CandidateSelectionSourceFromContext(ctx); exists {
+		proposal, err := source.PeekCandidate(ctx)
+		if err != nil {
+			return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "active candidate cannot be pinned before estimation", Cause: err}
+		}
+		if proposal.OperationID != authority.ID() || proposal.Antecedent.Kind != llm.AntecedentInitial {
+			return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "candidate selector returned an invalid initial proposal"}
+		}
+		switch proposal.Reason {
+		case llm.CandidateCyclerSelected:
+			if proposal.SelectionLease == nil {
+				return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "cycler selector omitted its selection lease"}
+			}
+		case llm.CandidateInitial:
+			if proposal.SelectionLease != nil {
+				return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "fixed initial candidate unexpectedly carries a selection lease"}
+			}
+		default:
+			return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "candidate selector returned an unsupported initial reason"}
+		}
+		for _, candidate := range candidates {
+			if candidate == proposal.Candidate {
+				return proposal, nil
+			}
+		}
+		return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "selected candidate is outside the provider operation set"}
+	}
+	if len(candidates) != 1 {
+		return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "active provider candidate cannot be pinned unambiguously"}
+	}
+	return llm.CandidateProposal{
+		OperationID: authority.ID(),
+		Candidate:   candidates[0],
+		Reason:      llm.CandidateInitial,
+		Antecedent:  llm.CandidateAntecedent{Kind: llm.AntecedentInitial},
+	}, nil
+}
+
+func compactPreparedOverflowRequest(
+	ctx context.Context,
+	messages []llm.Message,
+	currentSubmissionIndex int,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	messageBudget int,
+) ([]llm.Message, int, error) {
+	if compactor == nil || estimator == nil || messageBudget <= 0 {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow recovery requires a positive prepared message budget and compactor"}
+	}
+	textBudget, err := preparedCompactionTextBudget(messages, estimator, messageBudget, 0)
+	if err != nil {
+		return nil, currentSubmissionIndex, err
+	}
+	items := messagesToTurnItems(messages)
+	if currentSubmissionIndex < 0 || currentSubmissionIndex >= len(items) {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "current submission cannot be preserved during overflow recovery"}
+	}
+	currentID := items[currentSubmissionIndex].ID
+	currentMessage := cloneLLMMessage(messages[currentSubmissionIndex])
+	if consumer != nil {
+		if consumer.source == nil {
+			return nil, currentSubmissionIndex, ErrRunCommitCompactionProjectionUnavailable
+		}
+		if err := validateDurableRequestSource(items, consumer.source, consumer.runID); err != nil {
+			return nil, currentSubmissionIndex, err
+		}
+	}
+	if err := compaction.ValidateCompactionEligible(items); err != nil {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow request contains non-compaction-safe content", Cause: err}
+	}
+	var durableCurrentInput compaction.TurnItem
+	if consumer != nil {
+		var err error
+		durableCurrentInput, err = captureDurableCurrentInput(items, consumer.source, consumer.runID)
+		if err != nil {
+			return nil, currentSubmissionIndex, err
+		}
+	}
+	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), textBudget, estimator)
+	if err != nil {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow request compaction failed", Cause: err}
+	}
+	if reflect.DeepEqual(items, result.Items) {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow request compaction made no progress"}
+	}
+	compactedItems, err := compaction.NormalizeToolCallGroups(result.Items)
+	if err != nil {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow compactor returned invalid tool-call groups", Cause: err}
+	}
+	var durableProjection CompactionProjection
+	if consumer != nil {
+		result.Items = compactedItems
+		durableProjection, err = validateDurableCompactionResult(items, result, consumer.source, consumer.runID)
+		if err != nil {
+			return nil, currentSubmissionIndex, err
+		}
+		if err := validateDurableCurrentInputPreserved(durableCurrentInput, compactedItems); err != nil {
+			return nil, currentSubmissionIndex, err
+		}
+	}
+	compactedSubmissionIndex := -1
+	for index, item := range compactedItems {
+		if item.ID != currentID {
+			continue
+		}
+		if compactedSubmissionIndex >= 0 {
+			return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow compactor duplicated the current submission"}
+		}
+		compactedSubmissionIndex = index
+	}
+	if compactedSubmissionIndex < 0 {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow compactor removed the current submission"}
+	}
+	compactedMessages := turnItemsToMessages(compactedItems)
+	if !reflect.DeepEqual(currentMessage, compactedMessages[compactedSubmissionIndex]) {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow compactor changed the current submission"}
+	}
+	if consumer != nil {
+		if err := consumer.commitCompaction(durableProjection); err != nil {
+			markRunOutcomeUnknown(ctx)
+			return nil, currentSubmissionIndex, err
+		}
+	}
+	return compactedMessages, compactedSubmissionIndex, nil
+}
+
+func providerOperationContext(ctx context.Context, model llm.BaseChatModel, kind llm.ProviderOperationKind) (context.Context, bool, error) {
+	candidates := llm.ProviderCandidatesFromModel(model)
+	if len(candidates) == 0 {
+		return ctx, false, nil
+	}
+	factory, ok := llm.RunOperationFactoryFromContext(ctx)
+	if !ok {
+		return nil, false, llm.ErrOperationAuthorityRequired
+	}
+	authority, err := factory.NewOperation(ctx, kind, defaultProviderOperationAttempts, candidates)
+	if err != nil {
+		return nil, false, fmt.Errorf("core: create provider operation: %w", err)
+	}
+	return llm.WithOperationDispatchAuthority(ctx, authority), true, nil
 }
 
 // eventStreamSink adapts a core.EventStream to satisfy tools.StreamSink.
@@ -978,19 +2532,20 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 // "tool_output" AgentEvent carrying the ToolCallID and Stream ("stdout"/
 // "stderr") so consumers can associate the line with its originating call.
 type eventStreamSink struct {
-	es EventStream
+	es          EventStream
+	coordinates agentEventCoordinates
 }
 
 // Send wraps content as a "tool_output" AgentEvent and forwards it to the
 // underlying EventStream.
 func (s *eventStreamSink) Send(content, toolCallID, stream string) error {
-	return s.es.Send(AgentEvent{
+	return s.es.Send(stampAgentEvent(s.coordinates, AgentEvent{
 		Kind:       "tool_output",
 		Content:    content,
 		Timestamp:  time.Now(),
 		ToolCallID: toolCallID,
 		Stream:     stream,
-	})
+	}))
 }
 
 // executeTool looks up the tool and runs its definition against the registry.
@@ -999,33 +2554,7 @@ func (s *eventStreamSink) Send(content, toolCallID, stream string) error {
 // returned isError flag is propagated from ToolResult.IsError so callers can
 // detect tool errors via a structured marker instead of string matching.
 func (l *LoopAgent) executeTool(ctx context.Context, call tools.ToolCall, es EventStream) (string, bool, error) {
-	if l.tools == nil {
-		return "", false, errors.New("core: agent loop has no tool registry")
-	}
-	def, err := l.tools.Get(ctx, call.Name)
-	if err != nil {
-		return "", false, err
-	}
-	// Check if the tool supports streaming output.
-	if st, ok := def.(tools.StreamingBashTool); ok && es != nil {
-		sink := &eventStreamSink{es: es}
-		result, err := st.ExecuteStreaming(ctx, call, sink)
-		if err != nil {
-			return "", false, err
-		}
-		if result == nil {
-			return "", false, nil
-		}
-		return result.Output, result.IsError, nil
-	}
-	result, err := def.Execute(ctx, call)
-	if err != nil {
-		return "", false, err
-	}
-	if result == nil {
-		return "", false, nil
-	}
-	return result.Output, result.IsError, nil
+	return executeSingleTool(ctx, l.tools, call, es)
 }
 
 // toToolsCall converts an llm.ToolCall (Args is `any`) into a tools.ToolCall
@@ -1033,7 +2562,7 @@ func (l *LoopAgent) executeTool(ctx context.Context, call tools.ToolCall, es Eve
 func toToolsCall(tc llm.ToolCall) tools.ToolCall {
 	call := tools.ToolCall{ID: tc.ID, Name: tc.Name}
 	if m, ok := tc.Args.(map[string]any); ok {
-		call.Args = m
+		call.Args = cloneStringAnyMap(m)
 	}
 	return call
 }
@@ -1047,14 +2576,19 @@ func errEvent(err error) AgentEvent {
 // ch and appends each as a user message to *msgs. This is how steering
 // instructions are injected between LLM iterations: the loop drains the
 // channel at the top of each iteration, before calling the LLM.
-func drainSteerMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger) {
+func drainSteerMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger) []string {
+	var consumed []string
 	for {
 		select {
-		case instruction := <-ch:
+		case instruction, ok := <-ch:
+			if !ok {
+				return consumed
+			}
 			*msgs = append(*msgs, llm.Message{Role: llm.RoleUser, Content: instruction})
+			consumed = append(consumed, instruction)
 			logger.Info("core.loop.steer_injected", "instruction", instruction)
 		default:
-			return
+			return consumed
 		}
 	}
 }
@@ -1063,14 +2597,19 @@ func drainSteerMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger
 // from ch and appends each as a user message to *msgs. This mirrors
 // drainSteerMessages but is called after it so the model sees steering
 // context first, then the follow-up.
-func drainFollowUpMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger) {
+func drainFollowUpMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger) []string {
+	var consumed []string
 	for {
 		select {
-		case content := <-ch:
+		case content, ok := <-ch:
+			if !ok {
+				return consumed
+			}
 			*msgs = append(*msgs, llm.Message{Role: llm.RoleUser, Content: content})
+			consumed = append(consumed, content)
 			logger.Info("core.loop.followup_injected", "content_len", len(content))
 		default:
-			return
+			return consumed
 		}
 	}
 }

@@ -78,6 +78,7 @@ type ACPMiddlewareAdapter struct {
 }
 
 var _ core.Middleware = (*ACPMiddlewareAdapter)(nil)
+var _ core.CanonicalMiddleware = (*ACPMiddlewareAdapter)(nil)
 
 // NewACPMiddlewareAdapter creates a bridge that wraps the given ACPMiddleware
 // for use in a core.MiddlewareChain. dispatcher and client may be nil to
@@ -121,6 +122,10 @@ func (a *ACPMiddlewareAdapter) Wrap(loop core.AgentLoop) core.AgentLoop {
 	return &acpBridgeLoop{adapter: a, next: loop}
 }
 
+func (a *ACPMiddlewareAdapter) WrapCanonical(loop core.CanonicalLoop) core.CanonicalLoop {
+	return &canonicalACPBridgeLoop{adapter: a, next: loop}
+}
+
 // acpBridgeLoop is the concrete wrapped loop produced by
 // ACPMiddlewareAdapter.
 type acpBridgeLoop struct {
@@ -133,6 +138,16 @@ type acpBridgeLoop struct {
 func (l *acpBridgeLoop) Run(ctx context.Context, submission core.Submission, stream ...core.EventStream) ([]core.AgentEvent, error) {
 	l.adapter.startRouter()
 	return l.next.Run(ctx, submission, stream...)
+}
+
+type canonicalACPBridgeLoop struct {
+	adapter *ACPMiddlewareAdapter
+	next    core.CanonicalLoop
+}
+
+func (l *canonicalACPBridgeLoop) RunCanonical(ctx context.Context, submission core.Submission, stream ...core.EventStream) (core.CanonicalRunResult, error) {
+	l.adapter.startRouter()
+	return l.next.RunCanonical(ctx, submission, stream...)
 }
 
 // startRouter starts the background goroutine that reads inbound ACP messages

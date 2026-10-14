@@ -507,3 +507,160 @@ func TestAdapter_Concurrent(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, list)
 }
+
+func TestDeferredListTakesDTRSnapshotBeforeBackingSnapshot(t *testing.T) {
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
+	adapter := NewDeferredToolRegistryAdapter(base)
+	oldOne := newMCPGenerationTestTool("mcp__srv__old_one")
+	oldTwo := newMCPGenerationTestTool("mcp__srv__old_two")
+	first, err := adapter.BeginMCPGenerationUpdate(context.Background(), "list-snapshot", 1, []MCPToolCandidate{
+		newMCPGenerationTestCandidate(t, oldOne),
+		newMCPGenerationTestCandidate(t, oldTwo),
+	})
+	require.NoError(t, err)
+	require.NoError(t, first.Publish())
+	_, err = adapter.Get(context.Background(), oldOne.Name())
+	require.NoError(t, err)
+
+	barrier := &deferredListSnapshotBarrier{DefaultToolRegistry: base}
+	adapter.underlying = barrier
+	snapshotReached := make(chan struct{})
+	resumeSnapshot := make(chan struct{})
+	var snapshotOnce sync.Once
+	var resumeOnce sync.Once
+	defer resumeOnce.Do(func() { close(resumeSnapshot) })
+	barrier.afterSnapshot = func() {
+		snapshotOnce.Do(func() {
+			close(snapshotReached)
+			<-resumeSnapshot
+		})
+	}
+
+	type listResult struct {
+		defs []ToolDefinition
+		err  error
+	}
+	listDone := make(chan listResult, 1)
+	go func() {
+		defs, err := adapter.List(context.Background())
+		listDone <- listResult{defs: defs, err: err}
+	}()
+	<-snapshotReached
+	assert.False(t, adapter.mu.TryLock(), "the concrete generation path must hold the DTR read lock before backing List snapshots")
+
+	newOne := newMCPGenerationTestTool("mcp__srv__new_one")
+	newTwo := newMCPGenerationTestTool("mcp__srv__new_two")
+	newOneCandidate := newMCPGenerationTestCandidate(t, newOne)
+	newTwoCandidate := newMCPGenerationTestCandidate(t, newTwo)
+	updateStarted := make(chan struct{})
+	updateDone := make(chan error, 1)
+	go func() {
+		close(updateStarted)
+		update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "list-snapshot", 2, []MCPToolCandidate{
+			newOneCandidate,
+			newTwoCandidate,
+		})
+		if err == nil {
+			err = update.Publish()
+		}
+		updateDone <- err
+	}()
+	<-updateStarted
+	select {
+	case err := <-updateDone:
+		t.Fatalf("generation replacement crossed the backing snapshot barrier: %v", err)
+	default:
+	}
+	resumeOnce.Do(func() { close(resumeSnapshot) })
+
+	got := <-listDone
+	require.NoError(t, got.err)
+	assert.ElementsMatch(t, []string{oldOne.Name(), oldTwo.Name()}, deferredToolNames(got.defs), "List must return the complete old generation")
+	require.NoError(t, <-updateDone)
+
+	current, err := adapter.List(context.Background())
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{newOne.Name(), newTwo.Name()}, deferredToolNames(current))
+}
+
+func TestDeferredListRetriesGenericBackingWhenOverlayChanges(t *testing.T) {
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
+	backing := &genericDeferredListBarrier{registry: base}
+	adapter := NewDeferredToolRegistryAdapter(backing)
+	old := &fakeTool{name: "old", description: "old"}
+	require.NoError(t, adapter.RegisterDeferred(context.Background(), old.Name(), func() (ToolDefinition, error) { return old, nil }))
+	_, err := adapter.Load(context.Background(), old.Name())
+	require.NoError(t, err)
+
+	backing.afterSnapshot = func() {
+		replaceDeferredGenerationForTest(adapter, base, old.Name(), "new")
+	}
+	got, err := adapter.List(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"new"}, deferredToolNames(got))
+}
+
+type deferredListSnapshotBarrier struct {
+	*DefaultToolRegistry
+	afterSnapshot func()
+}
+
+func (r *deferredListSnapshotBarrier) List(ctx context.Context) ([]ToolDefinition, error) {
+	defs, err := r.DefaultToolRegistry.List(ctx)
+	if err == nil && r.afterSnapshot != nil {
+		r.afterSnapshot()
+	}
+	return defs, err
+}
+
+func replaceDeferredGenerationForTest(adapter *DeferredToolRegistryAdapter, registry *DefaultToolRegistry, oldName, newName string) {
+	adapter.mu.Lock()
+	delete(adapter.loaders, oldName)
+	delete(adapter.loaded, oldName)
+	adapter.loaders[newName] = func() (ToolDefinition, error) {
+		return &fakeTool{name: newName, description: "new"}, nil
+	}
+	registry.mu.Lock()
+	delete(registry.tools, oldName)
+	delete(registry.metadata, oldName)
+	for i, name := range registry.order {
+		if name == oldName {
+			registry.order = append(registry.order[:i], registry.order[i+1:]...)
+			break
+		}
+	}
+	registry.mu.Unlock()
+	adapter.revision++
+	adapter.mu.Unlock()
+}
+
+func deferredToolNames(defs []ToolDefinition) []string {
+	names := make([]string, 0, len(defs))
+	for _, def := range defs {
+		names = append(names, def.Name())
+	}
+	return names
+}
+
+type genericDeferredListBarrier struct {
+	registry      *DefaultToolRegistry
+	afterSnapshot func()
+}
+
+func (r *genericDeferredListBarrier) Register(ctx context.Context, def ToolDefinition) error {
+	return r.registry.Register(ctx, def)
+}
+
+func (r *genericDeferredListBarrier) Get(ctx context.Context, name string) (ToolDefinition, error) {
+	return r.registry.Get(ctx, name)
+}
+
+func (r *genericDeferredListBarrier) List(ctx context.Context) ([]ToolDefinition, error) {
+	defs, err := r.registry.List(ctx)
+	if err == nil && r.afterSnapshot != nil {
+		afterSnapshot := r.afterSnapshot
+		r.afterSnapshot = nil
+		afterSnapshot()
+	}
+	return defs, err
+}

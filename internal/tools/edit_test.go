@@ -160,6 +160,65 @@ func TestEditMissingArgs(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestEditMissingNewStringDoesNotChangeFile(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "existing.txt")
+	require.NoError(t, os.WriteFile(path, []byte("before target after"), 0o600))
+	tool := NewEditFileTool()
+	tool.Workdir = dir
+
+	res, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"file_path": "existing.txt", "old_string": "target"},
+	})
+	require.Error(t, err)
+	assert.Nil(t, res)
+
+	data, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, []byte("before target after"), data)
+}
+
+func TestEditWrongNewStringTypeDoesNotChangeFile(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "existing.txt")
+	require.NoError(t, os.WriteFile(path, []byte("before target after"), 0o600))
+	tool := NewEditFileTool()
+	tool.Workdir = dir
+
+	res, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"file_path": "existing.txt", "old_string": "target", "new_string": 42},
+	})
+	require.Error(t, err)
+	assert.Nil(t, res)
+
+	data, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, []byte("before target after"), data)
+}
+
+func TestEditParametersRequireNewString(t *testing.T) {
+	ctx := context.Background()
+	reg := NewDefaultToolRegistry()
+	require.NoError(t, reg.Register(ctx, NewEditFileTool()))
+	validator := NewSchemaValidator(reg)
+
+	_, err := validator.PrepareArguments(ctx, ToolCall{
+		Name: "edit",
+		Args: map[string]any{"file_path": "existing.txt", "old_string": "target"},
+	})
+	require.Error(t, err)
+
+	_, err = validator.PrepareArguments(ctx, ToolCall{
+		Name: "edit",
+		Args: map[string]any{"file_path": "existing.txt", "old_string": "target", "new_string": 42},
+	})
+	require.Error(t, err)
+}
+
 func TestEditName(t *testing.T) {
 	assert.Equal(t, "edit", NewEditFileTool().Name())
 	assert.Contains(t, NewEditFileTool().Description(), "file_path")

@@ -120,6 +120,16 @@ func (m *MidTurnCompact) Reset() {
 	m.runningTotal = 0
 }
 
+// NewRun returns a fresh guard with the same threshold ratio and no cached
+// estimates. Callers can reuse the configured guard while keeping incremental
+// estimation state local to each conversation run.
+func (m *MidTurnCompact) NewRun() *MidTurnCompact {
+	if m == nil {
+		return nil
+	}
+	return &MidTurnCompact{thresholdRatio: m.thresholdRatio}
+}
+
 // estimateIncremental returns the total token estimate for items without
 // re-scanning items that were already estimated in a previous call. It appends
 // the estimate of each new item (items[lastIdx:]) to runningTotal, caching the
@@ -150,10 +160,10 @@ func (m *MidTurnCompact) estimateIncremental(items []TurnItem, estimator TokenEs
 // Estimation is incremental: only items new since the last call are estimated,
 // avoiding the O(n²) full-scan that would otherwise occur when the guard is
 // called on every loop iteration with a growing conversation.
-func (m *MidTurnCompact) CompactIfNeeded(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator, compactor Compactor) ([]TurnItem, CompactResult, error) {
+func (m *MidTurnCompact) CompactIfNeeded(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator, compactor Compactor) (CompactionResult, CompactResult, error) {
 	current := m.estimateIncremental(items, estimator)
 	if current <= m.thresholdTokens(maxTokens) {
-		return items, CompactResult{Triggered: false, Reason: TriggerNone}, nil
+		return CompactionResult{Items: items}, CompactResult{Triggered: false, Reason: TriggerNone}, nil
 	}
 	// Compaction will replace items; reset incremental state so the next
 	// call re-estimates from scratch.
@@ -165,7 +175,7 @@ func (m *MidTurnCompact) CompactIfNeeded(ctx context.Context, items []TurnItem, 
 // shape as CompactIfNeeded. It is the entry point for explicit compactions
 // (manual, or an already-observed overflow) and reports Reason TriggerManual; a
 // caller that knows the overflow source may replace the reason as needed.
-func (m *MidTurnCompact) CompactTriggered(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator, compactor Compactor) ([]TurnItem, CompactResult, error) {
+func (m *MidTurnCompact) CompactTriggered(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator, compactor Compactor) (CompactionResult, CompactResult, error) {
 	// Compaction will replace items; reset incremental state.
 	m.Reset()
 	return compactWithReason(ctx, items, maxTokens, estimator, compactor, TriggerManual)
@@ -174,9 +184,9 @@ func (m *MidTurnCompact) CompactTriggered(ctx context.Context, items []TurnItem,
 // compactWithReason emits a `compaction.trigger` span annotating why compaction
 // ran, then delegates the rewrite to compactor. The CompactResult always reports
 // Triggered=true with the given reason when a compactor is present.
-func compactWithReason(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator, compactor Compactor, reason TriggerReason) ([]TurnItem, CompactResult, error) {
+func compactWithReason(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator, compactor Compactor, reason TriggerReason) (CompactionResult, CompactResult, error) {
 	if compactor == nil {
-		return items, CompactResult{Triggered: false, Reason: TriggerNone}, ErrCompactorRequired
+		return CompactionResult{Items: items}, CompactResult{Triggered: false, Reason: TriggerNone}, ErrCompactorRequired
 	}
 
 	span, sctx := tracing.SpanFromContext(ctx, "compaction.trigger", tracing.SpanKindInternal)

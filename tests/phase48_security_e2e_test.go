@@ -1,17 +1,19 @@
 package tests
 
 import (
-	"bufio"
-	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -153,31 +155,27 @@ func TestET_Phase48_PromptInjection_FailClosed(t *testing.T) {
 		"output must be replaced with blocked message on guard error")
 }
 
-// TestET_Phase48_SSRF_BlocksPrivateIPs verifies that the default plugin
-// loader blocks HTTP requests to private IP addresses.
-func TestET_Phase48_SSRF_BlocksPrivateIPs(t *testing.T) {
+// TestET_Phase48_RemotePluginDescriptorsUnavailable verifies that remote
+// extension descriptors are rejected before transport access. SSRF behavior
+// remains covered at the shared HTTP-client boundary in internal/tools.
+func TestET_Phase48_RemotePluginDescriptorsUnavailable(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	loader := extension.NewDefaultPluginLoader()
-
-	// HTTPS to a private IP should be blocked by validateHost/checkBlockedIP.
-	_, err := loader.Load(ctx, "https://10.0.0.1/extensions.json")
-	require.Error(t, err)
-	assert.Contains(t, strings.ToLower(err.Error()), "blocked",
-		"private IP should be blocked")
-
-	// HTTPS to link-local address should also be blocked.
-	_, err = loader.Load(ctx, "https://169.254.169.254/latest/meta-data")
-	require.Error(t, err)
-	assert.Contains(t, strings.ToLower(err.Error()), "blocked",
-		"link-local IP should be blocked")
+	for _, endpoint := range []string{"https://10.0.0.1/extensions.json", "https://169.254.169.254/latest/meta-data"} {
+		_, err := loader.Load(ctx, endpoint)
+		if errors.Is(err, extension.ErrUnsupportedRPC) { // Entire loader disabled by -tags no_plugin.
+			continue
+		}
+		require.ErrorIs(t, err, extension.ErrRemoteExtensionUnsupported)
+	}
 }
 
-// TestET_Phase48_SSRF_RequiresHTTPS verifies that the default plugin loader
-// rejects non-HTTPS endpoints except for localhost.
-func TestET_Phase48_SSRF_RequiresHTTPS(t *testing.T) {
+// TestET_Phase48_HTTPPluginDescriptorsUnavailable verifies that HTTP is an
+// unavailable extension capability regardless of host or TLS scheme.
+func TestET_Phase48_HTTPPluginDescriptorsUnavailable(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -185,9 +183,9 @@ func TestET_Phase48_SSRF_RequiresHTTPS(t *testing.T) {
 	loader := extension.NewDefaultPluginLoader()
 
 	_, err := loader.Load(ctx, "http://example.com/extensions.json")
-	require.Error(t, err)
-	assert.Contains(t, strings.ToLower(err.Error()), "https",
-		"non-HTTPS non-localhost endpoint should be rejected")
+	if !errors.Is(err, extension.ErrUnsupportedRPC) { // Entire loader disabled by -tags no_plugin.
+		require.ErrorIs(t, err, extension.ErrRemoteExtensionUnsupported)
+	}
 }
 
 // TestET_Phase48_BashSandbox_SubstitutionBypass verifies that the command
@@ -209,18 +207,50 @@ func TestET_Phase48_BashSandbox_SubstitutionBypass(t *testing.T) {
 	require.Error(t, err, "curl inside backticks should be blocked")
 }
 
-// TestET_Phase48_Onboarding_YAMLEscaping verifies that the onboarding wizard
-// single-quote-escapes API keys containing YAML special characters.
+// TestET_Phase48_Onboarding_YAMLEscaping verifies onboarding writes valid YAML
+// without embedding the API key and that a fresh auth chain can resolve the
+// scoped credential after the onboarding process has completed.
 func TestET_Phase48_Onboarding_YAMLEscaping(t *testing.T) {
-	t.Skip("API key is now stored in auth.json (JSON), not config.yaml (YAML)")
 	defer verify.AssertNoGoroutineLeak(t)()
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = phase48RegistryTransport(func(*http.Request) (*http.Response, error) {
+		body := io.NopCloser(strings.NewReader(`{}`))
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Status:        "200 OK",
+			Header:        http.Header{"Content-Type": []string{"application/json"}},
+			Body:          body,
+			ContentLength: 2,
+		}, nil
+	})
+	defer func() { http.DefaultTransport = previousTransport }()
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "xdg-config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmpDir, "xdg-cache"))
+	t.Setenv("GO_CLI_NO_ONBOARDING", "")
+	// An empty PATH makes the macOS keychain backend unavailable, forcing the
+	// normal private auth-file fallback without touching the developer's OS
+	// keychain.
+	securityPath := filepath.Join(tmpDir, "bin")
+	require.NoError(t, os.Mkdir(securityPath, 0o700))
+	t.Setenv("PATH", securityPath)
+	for _, item := range os.Environ() {
+		name, _, _ := strings.Cut(item, "=")
+		if strings.HasPrefix(name, "GO_CLI_CREDENTIAL_") {
+			t.Setenv(name, "")
+		}
+	}
+	t.Setenv("EINO_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
 	t.Chdir(tmpDir)
 
-	// API key with a single quote — must be doubled in YAML single-quoted strings.
-	apiKey := "sk-test'or'1='1"
+	// Keep YAML-special characters in the canary so the assertion also guards
+	// against accidentally moving the auth value back into config serialization.
+	apiKey := phase48AuthCanary(t) + "'#="
 	input := apiKey + "\n1\n1\n"
 
 	cfg := &config.Config{}
@@ -228,17 +258,58 @@ func TestET_Phase48_Onboarding_YAMLEscaping(t *testing.T) {
 	err := cli.RunOnboarding(cfg, strings.NewReader(input), &out)
 	require.NoError(t, err)
 
-	// Read the saved config file.
 	configPath := filepath.Join(tmpDir, ".go-cli", "config.yaml")
 	data, err := os.ReadFile(configPath)
 	require.NoError(t, err)
+	assert.NotContains(t, string(data), apiKey)
+	assert.NotContains(t, string(data), "api_key")
+	parsed, err := config.NewLoader().WithEnvPrefix("PHASE48_ISOLATED").WithFile(configPath).Load(context.Background())
+	require.NoError(t, err, "onboarding output must remain valid YAML")
+	require.NotEmpty(t, cfg.Model.Name)
+	assert.Equal(t, cfg.Model.Name, parsed.Model.Name)
+	assert.Equal(t, cfg.TUI.Theme, parsed.TUI.Theme)
+	assert.NotContains(t, out.String(), apiKey)
 
-	yamlStr := string(data)
-	// The single quote should be doubled: '' not just '
-	assert.Contains(t, yamlStr, "api_key: '"+strings.ReplaceAll(apiKey, "'", "''")+"'")
-	// Verify no unescaped injection is possible — the key should be wrapped in
-	// single quotes.
-	assert.Contains(t, yamlStr, "api_key: '")
+	authPath := filepath.Join(tmpDir, ".config", "go-cli", "auth.json")
+	authData, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+	var auth struct {
+		Credentials []struct {
+			Provider string `json:"provider"`
+			Protocol string `json:"protocol"`
+			Origin   string `json:"origin"`
+			APIKey   string `json:"api_key"`
+		} `json:"credentials"`
+	}
+	require.NoError(t, json.Unmarshal(authData, &auth))
+	require.Len(t, auth.Credentials, 1)
+	assert.Equal(t, apiKey, auth.Credentials[0].APIKey)
+
+	// A newly constructed chain simulates a restarted CLI. The saved scope is
+	// the authority for lookup; no provider-only legacy fallback is used.
+	resolved, found, err := config.NewAuthChain().ResolveCredential(
+		context.Background(),
+		auth.Credentials[0].Provider,
+		auth.Credentials[0].Protocol,
+		auth.Credentials[0].Origin,
+	)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, apiKey, resolved)
+}
+
+func phase48AuthCanary(t *testing.T) string {
+	t.Helper()
+	var value [16]byte
+	_, err := rand.Read(value[:])
+	require.NoError(t, err)
+	return "phase48-auth-" + hex.EncodeToString(value[:])
+}
+
+type phase48RegistryTransport func(*http.Request) (*http.Response, error)
+
+func (transport phase48RegistryTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
 }
 
 // TestET_Phase48_ApprovalCache_FilePermissions verifies that SaveToFile
@@ -406,27 +477,23 @@ func TestET_Phase48_BashEnvFilter_AndLLMTimeout(t *testing.T) {
 // P1 Security Tests (48-18)
 // ---------------------------------------------------------------------------
 
-// TestET_Phase48_MCP_OAuthCSRF verifies that the MCP OAuth flow generates a
-// random CSRF state and the callback handler rejects requests with missing
-// or mismatched state parameters.
-func TestET_Phase48_MCP_OAuthCSRF(t *testing.T) {
+// TestET_Phase48_MCP_OAuthUnsupportedBeforeNetwork verifies that the current
+// Streamable HTTP adapter rejects OAuth before making a network request or
+// starting a browser authorization flow.
+func TestET_Phase48_MCP_OAuthUnsupportedBeforeNetwork(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	// MCP test server: returns 200 for GET (SSE connect), 401 for POST (initialize).
+	var requests atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		w.Header().Set("WWW-Authenticate", `Bearer realm="mcp"`)
-		w.WriteHeader(http.StatusUnauthorized)
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer ts.Close()
 
 	cfg := mcp.MCPServerConfig{
 		Name:      "test-oauth",
 		URL:       ts.URL,
-		Transport: "sse",
+		Transport: mcp.MCPTransportStreamableHTTP,
 		OAuthConfig: &mcp.OAuthConfig{
 			AuthorizationURL: "https://auth.example.com/authorize",
 			TokenURL:         ts.URL + "/token",
@@ -436,70 +503,9 @@ func TestET_Phase48_MCP_OAuthCSRF(t *testing.T) {
 	}
 	adapter := mcp.NewHTTPClientAdapter(cfg)
 
-	// Capture stderr to extract the authorization URL printed by doOAuthFlow.
-	oldStderr := os.Stderr
-	rPipe, wPipe, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stderr = wPipe
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() { errCh <- adapter.Connect(ctx) }()
-
-	// Read the authorization URL from captured stderr (synchronous scan).
-	scanner := bufio.NewScanner(rPipe)
-	var authURLStr string
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "http") {
-			authURLStr = line
-			break
-		}
-	}
-	os.Stderr = oldStderr
-	_ = wPipe.Close()
-
-	require.NotEmpty(t, authURLStr, "authorization URL should have been printed to stderr")
-
-	// Parse the URL to get the state and redirect_uri.
-	parsed, err := url.Parse(authURLStr)
-	require.NoError(t, err)
-
-	state := parsed.Query().Get("state")
-	require.NotEmpty(t, state, "state parameter must be present")
-
-	redirectURI := parsed.Query().Get("redirect_uri")
-	require.NotEmpty(t, redirectURI, "redirect_uri must be present")
-
-	// 1. Callback with no state → 400
-	resp, err := http.Get(redirectURI + "?code=test-code")
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode,
-		"callback without state should be rejected")
-	_ = resp.Body.Close()
-
-	// 2. Callback with wrong state → 400
-	resp, err = http.Get(redirectURI + "?code=test-code&state=wrong")
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode,
-		"callback with wrong state should be rejected")
-	_ = resp.Body.Close()
-
-	// 3. Callback with correct state → 200
-	resp, err = http.Get(redirectURI + "?code=test-code&state=" + url.QueryEscape(state))
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, resp.StatusCode,
-		"callback with correct state should be accepted")
-	_ = resp.Body.Close()
-
-	// Wait for Connect to finish (token exchange will fail — that's OK).
-	select {
-	case <-errCh:
-	case <-time.After(5 * time.Second):
-		t.Log("Connect did not return (token exchange may be hanging)")
-	}
+	err := adapter.Connect(t.Context())
+	require.ErrorIs(t, err, mcp.ErrUnsupportedOAuth)
+	assert.Zero(t, requests.Load(), "unsupported OAuth must fail before HTTP or browser authorization")
 }
 
 // TestET_Phase48_MCP_ResponseSizeLimit verifies that the MCP HTTP adapter
@@ -524,7 +530,7 @@ func TestET_Phase48_MCP_ResponseSizeLimit(t *testing.T) {
 	cfg := mcp.MCPServerConfig{
 		Name:      "test-size-limit",
 		URL:       ts.URL,
-		Transport: "sse",
+		Transport: mcp.MCPTransportStreamableHTTP,
 	}
 	adapter := mcp.NewHTTPClientAdapter(cfg)
 
@@ -553,27 +559,27 @@ func TestET_Phase48_ACPHTTP_ConstantTimeAuth(t *testing.T) {
 	base := "http://" + srv.Addr()
 
 	// 1. No auth header → 401
-	resp, err := http.Post(base+"/connect", "application/json", strings.NewReader(`{}`))
+	req := newACPHTTPConnectRequest(t, base+"/connect", acpHTTPConnectBody(t, "client-48"))
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	_ = resp.Body.Close()
 
 	// 2. Wrong token → 401
-	req, _ := http.NewRequest(http.MethodPost, base+"/connect", strings.NewReader(`{}`))
+	req = newACPHTTPConnectRequest(t, base+"/connect", acpHTTPConnectBody(t, "client-48"))
 	req.Header.Set("Authorization", "Bearer wrong-token")
-	req.Header.Set("Content-Type", "application/json")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	_ = resp.Body.Close()
 
 	// 3. Correct token → 200
-	req, _ = http.NewRequest(http.MethodPost, base+"/connect", strings.NewReader(`{}`))
+	req = newACPHTTPConnectRequest(t, base+"/connect", acpHTTPConnectBody(t, "client-48"))
 	req.Header.Set("Authorization", "Bearer secret-token-xyz")
-	req.Header.Set("Content-Type", "application/json")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	decodeACPHTTPConnectSession(t, resp)
 	_ = resp.Body.Close()
 }
 
@@ -593,19 +599,21 @@ func TestET_Phase48_ACPHTTP_SessionFixation(t *testing.T) {
 	base := "http://" + srv.Addr()
 
 	// Client tries to fix the session ID to "attacker-fixed-id".
-	body, _ := json.Marshal(map[string]string{
-		"sender_id": "attacker-fixed-id",
-		"type":      "connect",
-	})
-	resp, err := http.Post(base+"/connect", "application/json", bytes.NewReader(body))
+	body := acpHTTPConnectBody(t, "attacker-fixed-id")
+	request := newACPHTTPConnectRequest(t, base+"/connect", body)
+	resp, err := http.DefaultClient.Do(request)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	var result map[string]string
+	var result struct {
+		Version   string `json:"version"`
+		SessionID string `json:"session_id"`
+	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
 
-	sessionID := result["session_id"]
+	assert.Equal(t, acp.ACPHTTPProfileV1, result.Version)
+	sessionID := result.SessionID
 	require.NotEmpty(t, sessionID, "server must return a session_id")
 	assert.NotEqual(t, "attacker-fixed-id", sessionID,
 		"server must not use client-provided sender ID as session ID")
@@ -712,7 +720,7 @@ func TestET_Phase48_Audit_StreamingAndTelemetryLabels(t *testing.T) {
 
 		tel := production.NewDefaultTelemetry()
 
-		// Record metrics with different labels — they should get separate keys.
+		// Different label tuples should have distinct canonical, length-framed keys.
 		require.NoError(t, tel.Record(ctx, production.TelemetryMetric{
 			Name: "tool.duration", Value: 1.5,
 			Labels: map[string]string{"tool": "bash", "status": "ok"},
@@ -729,12 +737,14 @@ func TestET_Phase48_Audit_StreamingAndTelemetryLabels(t *testing.T) {
 		dtel, ok := tel.(*production.DefaultTelemetry)
 		require.True(t, ok, "should be *DefaultTelemetry")
 		snap := dtel.Snapshot()
-		// bash+ok should be summed: 1.5 + 2.0 = 3.5
-		assert.Contains(t, snap, "tool.duration{status=ok,tool=bash}")
-		assert.InDelta(t, 3.5, snap["tool.duration{status=ok,tool=bash}"], 0.001)
-		// grep+ok should be 0.5
-		assert.Contains(t, snap, "tool.duration{status=ok,tool=grep}")
-		assert.InDelta(t, 0.5, snap["tool.duration{status=ok,tool=grep}"], 0.001)
+		bashKey := "metric-v1|13:tool.duration|2|6:status|2:ok|4:tool|4:bash|"
+		grepKey := "metric-v1|13:tool.duration|2|6:status|2:ok|4:tool|4:grep|"
+		// bash+ok should be summed: 1.5 + 2.0 = 3.5.
+		assert.Contains(t, snap, bashKey)
+		assert.InDelta(t, 3.5, snap[bashKey], 0.001)
+		// grep+ok should be 0.5.
+		assert.Contains(t, snap, grepKey)
+		assert.InDelta(t, 0.5, snap[grepKey], 0.001)
 	})
 }
 

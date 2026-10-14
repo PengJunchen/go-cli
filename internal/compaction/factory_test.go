@@ -75,11 +75,15 @@ func TestFactoryWithSummarizer(t *testing.T) {
 		{Role: RoleUser, Content: strings.Repeat("u", 300)},
 		{Role: RoleUser, Content: "keep"},
 	}
-	out, err := sc.Compact(ctx, items, 30, est)
+	outResult, err := sc.Compact(ctx, items, 30, est)
+	out := outResult.Items
 	require.NoError(t, err, "SummaryCompactor with injected summarizer must succeed")
 	require.NotEmpty(t, sum.conversations(), "injected summarizer must be invoked")
 	require.NotEmpty(t, out)
-	assert.Equal(t, "factory-injected summary", out[0].Content)
+	require.Len(t, out, 3)
+	assert.Equal(t, RoleSystem, out[0].Role)
+	assert.True(t, out[1].IsCompaction)
+	assert.Equal(t, "factory-injected summary", out[1].Content)
 
 	// AC-3: "unified" strategy wires the same summarizer into the
 	// UnifiedCompactor, so it routes to summary for large user content.
@@ -94,7 +98,8 @@ func TestFactoryWithSummarizer(t *testing.T) {
 		{Role: RoleUser, Content: "recent question"},
 		{Role: RoleAssistant, Content: "recent answer"},
 	}
-	out2, err := uni.Compact(ctx, largeItems, 30, est)
+	out2Result, err := uni.Compact(ctx, largeItems, 30, est)
+	out2 := out2Result.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategySummary, uni.LastStrategy(),
 		"unified compactor should use summary when summarizer is wired via factory")

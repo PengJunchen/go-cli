@@ -1,7 +1,45 @@
 # typos spell checker configuration
 # https://github.com/crate-ci/typos
 
+[default]
+extend-ignore-re = [
+  # Keep opaque trace IDs and abbreviated commit hashes out of the word checker.
+  "(?i)(?:^|[^A-Za-z0-9])[0-9a-f]{7,64}(?:$|[^A-Za-z0-9])",
+  # Preserve the exact truncated fixture value and technical operation phrase.
+  'want: "hel", wantCell',
+  "approval: restat trust store",
+  # ERROR is an established status token in pluralized historical notes.
+  "(?i)\\bERRORs?\\b",
+  # These are clipped strings from preserved PTY/network evidence.
+  "PTY cancel queu",
+  "PTY cancel activ",
+  "R8 activ",
+  "run retur\\.\\.\\.",
+  # This exact synthetic PTY frame intentionally starts mid-word.
+  "afe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-012345678",
+  # Short commit IDs in historical source-to-main mappings.
+  "4ba→8a9101c",
+  "ba01→778eec5",
+]
+
 [default.extend-identifiers]
+# Plural file-format abbreviation, not the misspelled word PN.
+PNGs = "PNGs"
 # Short variable names in Go code that trigger false positives
 typ = "typ"
 ue = "ue"
+
+[default.extend-words]
+# Valid variant used in provider documentation.
+unparseable = "unparseable"
+
+# Preserve partial terminal writes in these two immutable QA captures only.
+[type.qa-pty-fragments]
+extend-glob = ["pty-followup-space-red.jsonl", "pty-preview-marker-false-positive-red.jsonl"]
+extend-ignore-re = [
+  '''report the resul\\\\r\\\\x1b\[J\\u003e ''',
+  '''printf 'FO\\\\x1b\[K\\\\r\\\\nLLOWUP_SIDE_EFFECT''',
+  '''wait fo\\\\r\\\\x1b\[J\\u003e ''',
+  '''⠹ workin"\}''',
+  '''\[tool\] bash\(comman"\}''',
+]
