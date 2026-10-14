@@ -99,11 +99,12 @@ func TestUnifiedCompactorProducesTypedProjectionForDurableHistory(t *testing.T) 
 			}, ""),
 		},
 	}
-	summarizer := &fakeSummarizer{summary: "typed summary of the prior write"}
+	const summaryText = "typed summary of the prior write"
+	summarizer := &fakeSummarizer{summary: summaryText}
 	microResult, err := NewMicroCompactor().Compact(ctx, items, 1000, runeCountEstimator{})
 	require.NoError(t, err, "the micro strategy can fit this history by shrinking the receipt")
 	assert.LessOrEqual(t, EstimateTokens(microResult.Items, runeCountEstimator{}), 1000)
-	compactor := NewUnifiedCompactor(WithSummary(NewSummaryCompactor(summarizer)))
+	compactor := NewUnifiedCompactor(WithSummary(NewSummaryCompactor(summarizer, WithMaxSummaryTokens(len(summaryText)))))
 
 	result, err := compactor.Compact(ctx, items, 1000, runeCountEstimator{})
 	require.NoError(t, err)
@@ -173,10 +174,11 @@ func TestUnifiedCompactorReestimatesDurableHistoryInsteadOfTrustingOldCache(t *t
 		current,
 	}
 	micro := NewRecordingCompactor("micro").WithError(ErrRequiresTruncating)
-	summarizer := &fakeSummarizer{summary: "summary of prior context"}
+	const summaryText = "summary of prior context"
+	summarizer := &fakeSummarizer{summary: summaryText}
 	compactor := NewUnifiedCompactor(
 		WithMicro(micro),
-		WithSummary(NewSummaryCompactor(summarizer)),
+		WithSummary(NewSummaryCompactor(summarizer, WithMaxSummaryTokens(len(summaryText)))),
 	)
 
 	result, err := compactor.Compact(ctx, items, 119, runeCountEstimator{})
