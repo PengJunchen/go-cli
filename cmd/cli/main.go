@@ -82,7 +82,7 @@ func runWithContextLoader(
 	producerWaitBudget time.Duration,
 ) int {
 	previousLogger := slog.Default()
-	logHandler := previousLogger.Handler()
+	logHandler := slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
 	var logFile *os.File
 	var invocationLogger *slog.Logger
 	ownershipTransferred := false
@@ -102,9 +102,9 @@ func runWithContextLoader(
 	defer cancel()
 
 	// Redirect slog output to a log file so the console stays clean for TUI
-	// and user interaction. Logs are written to .go-cli/logs/go-cli.log by
-	// default. This runs before config loading so even config_load spans are
-	// captured in the file.
+	// and user interaction. If the log file is unavailable, logs fall back to
+	// stderr. This runs before config loading so even config_load spans are
+	// captured in the file when available.
 	logDir := filepath.Join(".go-cli", "logs")
 	if err := os.MkdirAll(logDir, 0o750); err == nil {
 		var fErr error
