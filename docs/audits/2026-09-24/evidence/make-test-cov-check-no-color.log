@@ -1,0 +1,26 @@
+ok  	github.com/pengjunchen/go-cli/cmd/cli	0.107s	coverage: 82.8% of statements
+ok  	github.com/pengjunchen/go-cli/internal/acp	4.837s	coverage: 85.8% of statements
+ok  	github.com/pengjunchen/go-cli/internal/approval	0.060s	coverage: 89.3% of statements
+ok  	github.com/pengjunchen/go-cli/internal/cli	13.645s	coverage: 70.6% of statements
+ok  	github.com/pengjunchen/go-cli/internal/compaction	0.090s	coverage: 91.1% of statements
+ok  	github.com/pengjunchen/go-cli/internal/config	0.055s	coverage: 88.9% of statements
+ok  	github.com/pengjunchen/go-cli/internal/core	2.371s	coverage: 87.5% of statements
+ok  	github.com/pengjunchen/go-cli/internal/extension	0.200s	coverage: 86.1% of statements
+ok  	github.com/pengjunchen/go-cli/internal/llm	1.529s	coverage: 81.4% of statements
+ok  	github.com/pengjunchen/go-cli/internal/mcp	1.129s	coverage: 85.1% of statements
+ok  	github.com/pengjunchen/go-cli/internal/memory	0.022s	coverage: 82.7% of statements
+ok  	github.com/pengjunchen/go-cli/internal/mock	0.012s	coverage: 92.8% of statements
+ok  	github.com/pengjunchen/go-cli/internal/production	0.446s	coverage: 91.9% of statements
+ok  	github.com/pengjunchen/go-cli/internal/session	0.356s	coverage: 89.7% of statements
+ok  	github.com/pengjunchen/go-cli/internal/skill	0.044s	coverage: 98.7% of statements
+	github.com/pengjunchen/go-cli/internal/term		coverage: 0.0% of statements
+ok  	github.com/pengjunchen/go-cli/internal/tools	31.889s	coverage: 85.9% of statements
+ok  	github.com/pengjunchen/go-cli/internal/tracing	0.293s	coverage: 91.8% of statements
+ok  	github.com/pengjunchen/go-cli/internal/tui	0.587s	coverage: 85.9% of statements
+ok  	github.com/pengjunchen/go-cli/internal/verify	7.516s	coverage: 95.8% of statements
+ok  	github.com/pengjunchen/go-cli/internal/verify/cmd/scanner	0.012s	coverage: 95.7% of statements
+ok  	github.com/pengjunchen/go-cli/internal/web	0.013s	coverage: 79.3% of statements
+ok  	github.com/pengjunchen/go-cli/tests	23.465s	coverage: [no statements]
+ok  	github.com/pengjunchen/go-cli/tests/e2e_20260802	2.514s	coverage: [no statements]
+Total coverage: 84.2%
+Coverage check passed: 84.2% >= 65%

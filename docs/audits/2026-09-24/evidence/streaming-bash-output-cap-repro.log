@@ -1,0 +1,24 @@
+Execution:
+  Archived source: docs/audits/2026-09-24/evidence/streaming-bash-output-cap-repro.go.txt
+  A temporary copy under internal/tools was run with:
+    rtk proxy go test ./internal/tools -run '^TestAuditStreamingBashOutputCapRepro$' -count=1 -v -timeout 10s
+  The temporary Go test was deleted after the reproduction. The archive source
+  is plain .go.txt so `go test ./...` will not discover it as a package.
+
+The repro uses a Bash builtin only (no child process), emits a finite 200,000-byte
+stream, sets MaxOutput=20 bytes, and applies a 1.2-second tool deadline. Because
+readPipe stops reading as soon as the output cap is reached, the producer blocks
+on the OS pipe; the tool returns only when its timeout kills the shell.
+
+Observed:
+  2026/09/24 22:25:16 ERROR streaming_bash.timeout tool=bash duration_ms=1202 timeout=1.2s trace_id="" span_id=""
+  audit_streaming_bash_output_cap_repro_test.go:14: elapsed=1.204s err=bash: timed out after 1.2s: context deadline exceeded
+  audit_streaming_bash_output_cap_repro_test.go:16: output_bytes=39 output="x\nx\nx\nx\nx\nx\nx\nx\nx\nx\n\n[output truncated]" metadata=map[duration_ms:1202 error:timed out exit_code:-1]
+  --- PASS: TestAuditStreamingBashOutputCapRepro (1.20s)
+  PASS
+  ok github.com/pengjunchen/go-cli/internal/tools 1.220s
+
+Expected behavior for a finite command is to drain/discard bytes after the
+retained-output cap and finish promptly, while keeping the returned output
+bounded. The finite builtin process is killed with Bash at timeout; no child
+process is started by this reproduction.

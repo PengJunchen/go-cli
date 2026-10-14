@@ -140,11 +140,9 @@ func TestHelpOverlayDoesNotInterfereWithFollowUp(t *testing.T) {
 // approval, '?' does not trigger the help overlay.
 func TestHelpOverlayDoesNotInterfereWithApproval(t *testing.T) {
 	m := newTestModel(make(chan AgentEvent, 1))
-	m.mu.Lock()
-	m.pendingApproval = &ApprovalRequest{
+	m.Update(approvalRequestMsg{req: ApprovalRequest{
 		ResponseCh: make(chan ApprovalResponse, 1),
-	}
-	m.mu.Unlock()
+	}})
 
 	// '?' should be intercepted by the approval handler, not open the overlay.
 	m.handleKey(runeKey('?'))

@@ -1,0 +1,135 @@
+2026/09/25 00:37:55 INFO llm_generate_complete op=llm.generate provider=claude model=claude-test-model err=false trace_id="" span_id=""
+2026/09/25 00:37:55 INFO llm_generate_complete op=llm.generate provider=anthropic model=anthropic-test-model err=false trace_id="" span_id=""
+2026/09/25 00:37:55 INFO llm_generate_complete op=llm.generate provider=gemini model=gemini-test-model err=false trace_id="" span_id=""
+2026/09/25 00:37:55 INFO llm_generate_complete op=llm.generate provider=Claude model=Claude-test-model err=false trace_id="" span_id=""
+2026/09/25 00:37:55 INFO llm_registry_register provider_name=eino
+--- FAIL: TestProviderCredentialNeverSentToWrongOrigin (0.00s)
+    --- FAIL: TestProviderCredentialNeverSentToWrongOrigin/claude_explicit_endpoint (0.00s)
+        provider_resolution_test.go:78: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:78
+            	Error:      	An error is expected but got nil.
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/claude_explicit_endpoint
+            	Messages:   	the CLI must reject native provider identities until their protocol adapters are enabled
+        provider_resolution_test.go:79: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:79
+            	Error:      	An error is expected but got nil.
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/claude_explicit_endpoint
+        provider_resolution_test.go:81: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:81
+            	Error:      	Should be zero, but was 1
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/claude_explicit_endpoint
+            	Messages:   	rejected provider configuration must not contact its configured origin
+        provider_resolution_test.go:82: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:82
+            	Error:      	"Bearer provider-canary-do-not-forward" should not contain "provider-canary-do-not-forward"
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/claude_explicit_endpoint
+    --- FAIL: TestProviderCredentialNeverSentToWrongOrigin/claude_API_key_without_endpoint (0.00s)
+        provider_resolution_test.go:92: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:92
+            	Error:      	An error is expected but got nil.
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/claude_API_key_without_endpoint
+            	Messages:   	a native provider credential must not create an OpenAI-compatible model with the default OpenAI origin
+        provider_resolution_test.go:93: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:93
+            	Error:      	Expected nil, but got: &llm.HTTPChatModel{provider:(*llm.EinoProvider)(0x63778a222660), cfg:llm.ModelConfig{Model:"claude-test-model", Temperature:0, MaxTokens:0, APIKey:"", BaseURL:""}, client:(*http.Client)(0x104301e00)}
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/claude_API_key_without_endpoint
+    --- FAIL: TestProviderCredentialNeverSentToWrongOrigin/anthropic_explicit_endpoint (0.00s)
+        provider_resolution_test.go:78: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:78
+            	Error:      	An error is expected but got nil.
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/anthropic_explicit_endpoint
+            	Messages:   	the CLI must reject native provider identities until their protocol adapters are enabled
+        provider_resolution_test.go:79: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:79
+            	Error:      	An error is expected but got nil.
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/anthropic_explicit_endpoint
+        provider_resolution_test.go:81: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:81
+            	Error:      	Should be zero, but was 1
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/anthropic_explicit_endpoint
+            	Messages:   	rejected provider configuration must not contact its configured origin
+        provider_resolution_test.go:82: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:82
+            	Error:      	"Bearer provider-canary-do-not-forward" should not contain "provider-canary-do-not-forward"
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/anthropic_explicit_endpoint
+    --- FAIL: TestProviderCredentialNeverSentToWrongOrigin/anthropic_API_key_without_endpoint (0.00s)
+        provider_resolution_test.go:92: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:92
+            	Error:      	An error is expected but got nil.
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/anthropic_API_key_without_endpoint
+            	Messages:   	a native provider credential must not create an OpenAI-compatible model with the default OpenAI origin
+        provider_resolution_test.go:93: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:93
+            	Error:      	Expected nil, but got: &llm.HTTPChatModel{provider:(*llm.EinoProvider)(0x63778a222840), cfg:llm.ModelConfig{Model:"anthropic-test-model", Temperature:0, MaxTokens:0, APIKey:"", BaseURL:""}, client:(*http.Client)(0x104301e00)}
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/anthropic_API_key_without_endpoint
+    --- FAIL: TestProviderCredentialNeverSentToWrongOrigin/gemini_explicit_endpoint (0.00s)
+        provider_resolution_test.go:78: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:78
+            	Error:      	An error is expected but got nil.
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/gemini_explicit_endpoint
+            	Messages:   	the CLI must reject native provider identities until their protocol adapters are enabled
+        provider_resolution_test.go:79: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:79
+            	Error:      	An error is expected but got nil.
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/gemini_explicit_endpoint
+        provider_resolution_test.go:81: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:81
+            	Error:      	Should be zero, but was 1
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/gemini_explicit_endpoint
+            	Messages:   	rejected provider configuration must not contact its configured origin
+        provider_resolution_test.go:82: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:82
+            	Error:      	"Bearer provider-canary-do-not-forward" should not contain "provider-canary-do-not-forward"
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/gemini_explicit_endpoint
+    --- FAIL: TestProviderCredentialNeverSentToWrongOrigin/gemini_API_key_without_endpoint (0.00s)
+        provider_resolution_test.go:92: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:92
+            	Error:      	An error is expected but got nil.
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/gemini_API_key_without_endpoint
+            	Messages:   	a native provider credential must not create an OpenAI-compatible model with the default OpenAI origin
+        provider_resolution_test.go:93: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:93
+            	Error:      	Expected nil, but got: &llm.HTTPChatModel{provider:(*llm.EinoProvider)(0x63778a222480), cfg:llm.ModelConfig{Model:"gemini-test-model", Temperature:0, MaxTokens:0, APIKey:"", BaseURL:""}, client:(*http.Client)(0x104301e00)}
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/gemini_API_key_without_endpoint
+    --- FAIL: TestProviderCredentialNeverSentToWrongOrigin/Claude_explicit_endpoint (0.00s)
+        provider_resolution_test.go:78: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:78
+            	Error:      	An error is expected but got nil.
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/Claude_explicit_endpoint
+            	Messages:   	the CLI must reject native provider identities until their protocol adapters are enabled
+        provider_resolution_test.go:79: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:79
+            	Error:      	An error is expected but got nil.
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/Claude_explicit_endpoint
+        provider_resolution_test.go:81: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:81
+            	Error:      	Should be zero, but was 1
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/Claude_explicit_endpoint
+            	Messages:   	rejected provider configuration must not contact its configured origin
+        provider_resolution_test.go:82: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:82
+            	Error:      	"Bearer provider-canary-do-not-forward" should not contain "provider-canary-do-not-forward"
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/Claude_explicit_endpoint
+    --- FAIL: TestProviderCredentialNeverSentToWrongOrigin/Claude_API_key_without_endpoint (0.00s)
+        provider_resolution_test.go:92: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:92
+            	Error:      	An error is expected but got nil.
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/Claude_API_key_without_endpoint
+            	Messages:   	a native provider credential must not create an OpenAI-compatible model with the default OpenAI origin
+        provider_resolution_test.go:93: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:93
+            	Error:      	Expected nil, but got: &llm.HTTPChatModel{provider:(*llm.EinoProvider)(0x63778a222780), cfg:llm.ModelConfig{Model:"Claude-test-model", Temperature:0, MaxTokens:0, APIKey:"", BaseURL:""}, client:(*http.Client)(0x104301e00)}
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/Claude_API_key_without_endpoint
+    --- FAIL: TestProviderCredentialNeverSentToWrongOrigin/unknown_provider_API_key_without_endpoint_is_rejected (0.00s)
+        provider_resolution_test.go:103: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:103
+            	Error:      	An error is expected but got nil.
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/unknown_provider_API_key_without_endpoint_is_rejected
+        provider_resolution_test.go:104: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider/internal/cli/provider_resolution_test.go:104
+            	Error:      	Expected nil, but got: &llm.HTTPChatModel{provider:(*llm.EinoProvider)(0x63778a222a80), cfg:llm.ModelConfig{Model:"test-model", Temperature:0, MaxTokens:0, APIKey:"", BaseURL:""}, client:(*http.Client)(0x104301e00)}
+            	Test:       	TestProviderCredentialNeverSentToWrongOrigin/unknown_provider_API_key_without_endpoint_is_rejected
+2026/09/25 00:37:55 INFO llm_generate_complete op=llm.generate provider=custom-gateway model=custom-test-model err=false trace_id="" span_id=""
+FAIL
+FAIL	github.com/pengjunchen/go-cli/internal/cli	0.018s
+FAIL

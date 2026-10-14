@@ -1,0 +1,230 @@
+startup_prompt=observed at 80x24
+seed_turns=24 deterministic user turns, including one real read-tool receipt cycle
+active_stream=provider confirmed first partial chunk and held response; driver proceeded without waiting for rendered text
+active_scroll_away=PageUp; visible anchor token='R8-ANSWER-18'; newest seeded row not visible
+resize=60x24; anchor preserved; split=False
+resize=80x24; anchor preserved; split=False
+resize=120x24; anchor preserved; split=True
+resize=200x24; anchor preserved; split=True
+follow_tail_during_stream=End did not reveal latest answer
+follow_tail_after_completion=End during active run; final streamed answer and read-tool pane visible
+exit=/exit status=0; ICANON/ECHO/ISIG restored
+provider=26 requests; all local/canary authenticated/streamed; one read tool cycle
+source_commit=587be07e6d0961e72bf7261fb6148b0caae8f963
+binary_sha256=6f45cca23a012ec9243002a186627754be19d0213e97af683a6a53abd1411ce0
+pty=Darwin native openpty; TERM=xterm-256color; LANG/LC_CTYPE=en_US.UTF-8; NO_COLOR=1
+geometry=60x24, 80x24, 120x24, 200x24; real SIGWINCH resize and key input
+memory_scope=bounded 25-turn REPL fixture; 1MiB/1000-chunk workload measured separately by actual App.Update/View benchmark
+unsupported=R8-BLD-02 capability/help/doctor/persistence promises not exercised or claimed
+provider_requests=[
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 00",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 01",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 02",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 03",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 04",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 05",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 06",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 07",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 08",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 09",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 10",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 11",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 tool receipt",
+    "tool_results_after_latest_user": 0,
+    "response_tools": [
+      "read"
+    ]
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 tool receipt",
+    "tool_results_after_latest_user": 1,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 13",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 14",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 15",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 16",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 17",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 18",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 19",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 20",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 21",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 22",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 seed 23",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "R8 active stream",
+    "tool_results_after_latest_user": 0,
+    "response_tools": []
+  }
+]

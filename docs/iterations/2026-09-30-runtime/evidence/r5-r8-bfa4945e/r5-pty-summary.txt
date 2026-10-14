@@ -1,0 +1,631 @@
+startup_prompt=observed
+deny_modal_resize=80x24_to_20x4; compact scope row visible
+> P> PT> PTY> PTY > PTY d> PTY de> PTY den> PTY deny
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main | Loaded rows: 0 | lo
+[assistant · live]
+[tool call_deny]
+write
+pty-review-model | turn #1 | interact | chat[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  details 1-7/7
+  args:
+    content: DENY_MUST_NOT_BE_WRITTEN
+    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-r5-pty-35zmy
+xv0/workspace/denied.txt
+  diff:
+    +DENY_MUST_NOT_BE_WRITTEN
+
+  [y] once [n] reject [Esc] cancel [d] diff[approval] write
+  local interaction 
+scope unknown · resi
+[y] locked [n] no
+deny_first_key=n was handled
+approval_deny=n; denied file absent
+> P> PT> PTY> PTY > PTY o> PTY on> PTY onc> PTY once
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main | Loaded rows: 4 | lo
+[user]
+PTY deny
+[assistant]
+[tool: write]
+Error: tool call denied by approval policy
+[receipt: error]
+[assistant]
+PTY fixture completed the requested interaction.
+[assistant · live]
+[tool call_once]
+write
+pty-review-model | turn #2 | interact | chat[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-19/23 · ↑/↓ PgUp/PgDn
+  args:
+    content: PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review-row-0123456
+789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-0123
+456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-0
+123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-ro
+w-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review
+-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-rev
+iew-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-
+review-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-sa
+fe-review-row-0123456789-safe-review-row-0123456789- PTY_ONCE_END
+    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-r5-pty-35zmy
+xv0/workspace/once.txt
+  diff:
+    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review-row-0123456789-safe
+-review-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-s
+afe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-012345678
+9-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-012345
+6789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-012
+3456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-
+  [y] review details [n] reject [d] diff[approval] write
+  local interaction 
+scope unknown · resi
+[y] locked [n] no
+once_first_key=y sent while details were not reviewed
+one_or_two_early_y_attempts=still_locked; no once.txt and no follow-up provider request
+resize=20x4_to-80x24; approval details visible
+[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-19/23 · ↑/↓ PgUp/PgDn
+  args:
+    content: PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review-row-0123456
+789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-0123
+456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-0
+123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-ro
+w-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review
+-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-rev
+iew-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-
+review-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-sa
+fe-review-row-0123456789-safe-review-row-0123456789- PTY_ONCE_END
+    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-r5-pty-35zmy
+xv0/workspace/once.txt
+  d
+resize=80x24-to-120x30; approval remains active
+iff:
+    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review-row-0123456789-safe
+-review-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-s
+afe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-012345678
+9-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-012345
+6789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-012
+3456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-
+  [y] review details [n] reject [d] diff
+approval_scroll=last visible row 29/29
+approval_once=y after scrolling; once.txt exactly matches synthetic payload
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+[assistant]
+[tool: write]
+Error: tool call denied by approval policy
+[receipt: error]
+[assistant]
+PTY fixture completed the requested interaction.
+[assistant · live]
+[tool call_once]
+write
+pty-review-model | turn #2 | interact | chat
+
+
+
+
+
+
+
+
+[receipt: success]
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+
+
+wrote 676 bytes to /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0
+000gn/T/go-cli-r5-pty-35zmyxv0/workspace/once.txt
+[receipt: success]
+[assistant]
+PTY fixture completed the requested interaction.
+pty-review-model | turn #2 | interact | chat
+Tokens: 76/8000 (0%) | Cost: $0.0000
+[saved: success]> 
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+[assistant]
+[tool: write]
+Error: tool call denied by approval policy
+[receipt: error]
+[assistant]
+PTY fixture completed the requested interaction.
+[assistant · live]
+[tool call_once]
+write
+pty-review-model | turn #2 | interact | chat
+
+
+
+
+
+
+
+
+[receipt: success]
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+
+
+wrote 676 bytes to /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0
+000gn/T/go-cli-r5-pty-35zmyxv0/workspace/once.txt
+[receipt: success]
+[assistant]
+PTY fixture completed the requested interaction.
+pty-review-model | turn #2 | interact | chat
+Tokens: 76/8000 (0%) | Cost: $0.0000
+[saved: success]> > 
+tool_receipt=success displayed in the durable session transcript after approval
+ask_user_tool_approval=first y accepted
+> P> PT> PTY> PTY > PTY a> PTY as> PTY ask
+[approval] ask_user
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  details 1-2/2
+  args:
+    question: 请用中文确认临时测试方案。
+  [y] once [n] reject [Esc] cancelSession: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+[receipt: success]
+[assistant]
+PTY fixture completed the requested interaction.
+[assistant · live]
+[tool call_ask]
+ask_user
+[ask_user] 请用中文确认临时测试方案。
+  answer: █
+  [Enter] submit  [Esc] cancel
+pty-review-model | turn #3 | interact | chat
+ask_user_answer=provider received exact 'X保留队列：交互通过 ✅ 🙂'
+utf8_caret=left/insert/left/backspace submitted exact '测试XB'
+
+⚠ IME (input method editor) detected. CJK input may not work correctly in raw mode.
+Press Ctrl+\ to switch to cooked mode for better IME support.
+> 测> 测试> 测试🙂> 测试🙂B> 测试🙂XB> 测试XB
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+PTY ask
+[assistant]
+[tool: ask_user]
+X保留队列：交互通过 ✅ 🙂
+[receipt: success]
+[assistant]
+PTY fixture completed the requested interaction.
+[assistant · live]
+PTY fixture received the input.
+pty-review-model | turn #4 | interact | chatSession: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+[receipt: success]
+
+PTY fixture completed the requested interaction.
+[user]
+测试XB
+
+PTY fixture received the input.
+pty-review-model | turn #4 | interact | chat
+Tokens: 126/8000 (1%) | Cost: $0.0000
+[saved: success]> 
+multiline_bracketed_paste=exact two-line payload submitted at 120x30
+> PTY multiline first line
+PTY multiline second line
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main | Loaded rows: 14 | loaded projection only
+[user]                                                      │[tool: write]                                              
+PTY deny                                                     Error: tool call denied by approval policy                 
+[assistant]                                                  [receipt: error]                                           
+[assistant]                                                  [tool: write]                                              
+PTY fixture completed the requested interaction.             wrote 676 bytes to /var/folders/md/b0sr21q97jsg2gfn9lymdw3h
+[user]                                                       0000gn/T/go-cli-r5-pty-35zmyxv0/workspace/once.txt         
+PTY once                                                     [receipt: success]                                         
+[assistant]                                                  [tool: ask_user]                                           
+[assistant]                                                  X保留队列：交互通过 ✅ 🙂                                  
+PTY fixture completed the requested interaction.             [receipt: success]                                         
+[user]                                                                                                                  
+PTY ask                                                                                                                 
+[assistant]                                                                                                             
+[assistant]                                                                                                             
+PTY fixture completed the requested interaction.                                                                        
+[user]                                                                                                                  
+测试XB                                                                                                                  
+[assistant]                                                                                                             
+PTY fixture received the input.                                                                                         
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+pty-review-model | turn #5 | interact | chatSession: s_b5499a2ef4240570e409c75609e361cd | Branch: main | Loaded rows: 16 | loaded projection only
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[user]                                                                                                                  
+PTY multiline first line                                                                                                
+PTY multiline second line                                                                                               
+[assistant]                                                                                                             
+PTY fixture received the input.                                                                                         
+
+pty-review-model | turn #5 | interact | chat
+Tokens: 149/8000 (1%) | Cost: $0.0000
+[saved: success]> 
+> 
+durable_session_file=s_b5499a2ef4240570e409c75609e361cd.jsonl; entries=27 user=5 assistant=8 successful_tool_receipts=2
+exit=/exit returned status 0
+tty_lflag_samples_after_exit=[('pump-data', 'slave', 536872395), ('pump-data', 'master', 1483)]; before=392 after=392
+tty_restore=true
+tty_restore=ICANON/ECHO/ISIG match original PTY state
+cancel_pty=active approval canceled before write dispatch; terminal restored
+fake_provider_requests=9; all local; all canary-authenticated
+provider_requests=[
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY deny",
+    "tool_results": [],
+    "response_tools": [
+      "write"
+    ]
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY deny",
+    "tool_results": [
+      "Error: tool call denied by approval policy"
+    ],
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY once",
+    "tool_results": [],
+    "response_tools": [
+      "write"
+    ]
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY once",
+    "tool_results": [
+      "wrote 676 bytes to /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-r5-pty-35zmyxv0/workspace/once.txt"
+    ],
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY ask",
+    "tool_results": [],
+    "response_tools": [
+      "ask_user"
+    ]
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY ask",
+    "tool_results": [
+      "X保留队列：交互通过 ✅ 🙂"
+    ],
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "测试XB",
+    "tool_results": [],
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY multiline first line\nPTY multiline second line",
+    "tool_results": [],
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY cancel active",
+    "tool_results": [],
+    "response_tools": [
+      "write"
+    ]
+  }
+]
+source_commit=bfa4945e30ca50549abda89c4c86d6d2415600c0
+execution_limits=HOME/XDG/CWD/PATH isolated; only writes under temporary workspace
+limitation=two Darwin PTYs with local fake provider; no R2 crash/restart or cross-platform claim
+--- deny-modal-20x4 ---
+> P> PT> PTY> PTY > PTY d> PTY de> PTY den> PTY deny
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main | Loaded rows: 0 | lo
+[assistant · live]
+[tool call_deny]
+write
+pty-review-model | turn #1 | interact | chat[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  details 1-7/7
+  args:
+    content: DENY_MUST_NOT_BE_WRITTEN
+    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-r5-pty-35zmy
+xv0/workspace/denied.txt
+  diff:
+    +DENY_MUST_NOT_BE_WRITTEN
+
+  [y] once [n] reject [Esc] cancel [d] diff[approval] write
+  local interaction 
+scope unknown · resi
+[y] locked [n] no
+
+--- once-modal-20x4 ---
+> P> PT> PTY> PTY > PTY o> PTY on> PTY onc> PTY once
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main | Loaded rows: 4 | lo
+[user]
+PTY deny
+[assistant]
+[tool: write]
+Error: tool call denied by approval policy
+[receipt: error]
+[assistant]
+PTY fixture completed the requested interaction.
+[assistant · live]
+[tool call_once]
+write
+pty-review-model | turn #2 | interact | chat[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-19/23 · ↑/↓ PgUp/PgDn
+  args:
+    content: PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review-row-0123456
+789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-0123
+456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-0
+123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-ro
+w-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review
+-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-rev
+iew-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-
+review-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-sa
+fe-review-row-0123456789-safe-review-row-0123456789- PTY_ONCE_END
+    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-r5-pty-35zmy
+xv0/workspace/once.txt
+  diff:
+    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review-row-0123456789-safe
+-review-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-s
+afe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-012345678
+9-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-012345
+6789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-012
+3456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-
+  [y] review details [n] reject [d] diff[approval] write
+  local interaction 
+scope unknown · resi
+[y] locked [n] no
+
+--- once-modal-resized-80x24 ---
+[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-19/23 · ↑/↓ PgUp/PgDn
+  args:
+    content: PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review-row-0123456
+789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-0123
+456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-0
+123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-ro
+w-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review
+-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-rev
+iew-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-
+review-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-sa
+fe-review-row-0123456789-safe-review-row-0123456789- PTY_ONCE_END
+    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-r5-pty-35zmy
+xv0/workspace/once.txt
+  d
+
+--- once-modal-resized-120x30 ---
+iff:
+    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review-row-0123456789-safe
+-review-row-0123456789-safe-review-row-0123456789-safe-review-row-0123456789-s
+afe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-012345678
+9-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-012345
+6789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-012
+3456789-safe-review-row-0123456789-safe-review-row-0123456789-safe-review-row-
+  [y] review details [n] reject [d] diff
+
+--- once-approved-and-completed ---
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+[assistant]
+[tool: write]
+Error: tool call denied by approval policy
+[receipt: error]
+[assistant]
+PTY fixture completed the requested interaction.
+[assistant · live]
+[tool call_once]
+write
+pty-review-model | turn #2 | interact | chat
+
+
+
+
+
+
+
+
+[receipt: success]
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+
+
+wrote 676 bytes to /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0
+000gn/T/go-cli-r5-pty-35zmyxv0/workspace/once.txt
+[receipt: success]
+[assistant]
+PTY fixture completed the requested interaction.
+pty-review-model | turn #2 | interact | chat
+Tokens: 76/8000 (0%) | Cost: $0.0000
+[saved: success]> 
+
+--- transcript-end-after-durable-refresh ---
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+[assistant]
+[tool: write]
+Error: tool call denied by approval policy
+[receipt: error]
+[assistant]
+PTY fixture completed the requested interaction.
+[assistant · live]
+[tool call_once]
+write
+pty-review-model | turn #2 | interact | chat
+
+
+
+
+
+
+
+
+[receipt: success]
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+
+
+wrote 676 bytes to /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0
+000gn/T/go-cli-r5-pty-35zmyxv0/workspace/once.txt
+[receipt: success]
+[assistant]
+PTY fixture completed the requested interaction.
+pty-review-model | turn #2 | interact | chat
+Tokens: 76/8000 (0%) | Cost: $0.0000
+[saved: success]> > 
+
+--- ask-user-before-answer ---
+> P> PT> PTY> PTY > PTY a> PTY as> PTY ask
+[approval] ask_user
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  details 1-2/2
+  args:
+    question: 请用中文确认临时测试方案。
+  [y] once [n] reject [Esc] cancelSession: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+[receipt: success]
+[assistant]
+PTY fixture completed the requested interaction.
+[assistant · live]
+[tool call_ask]
+ask_user
+[ask_user] 请用中文确认临时测试方案。
+  answer: █
+  [Enter] submit  [Esc] cancel
+pty-review-model | turn #3 | interact | chat
+
+--- utf8-caret-input ---
+
+⚠ IME (input method editor) detected. CJK input may not work correctly in raw mode.
+Press Ctrl+\ to switch to cooked mode for better IME support.
+> 测> 测试> 测试🙂> 测试🙂B> 测试🙂XB> 测试XB
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+PTY ask
+[assistant]
+[tool: ask_user]
+X保留队列：交互通过 ✅ 🙂
+[receipt: success]
+[assistant]
+PTY fixture completed the requested interaction.
+[assistant · live]
+PTY fixture received the input.
+pty-review-model | turn #4 | interact | chatSession: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+[receipt: success]
+
+PTY fixture completed the requested interaction.
+[user]
+测试XB
+
+PTY fixture received the input.
+pty-review-model | turn #4 | interact | chat
+Tokens: 126/8000 (1%) | Cost: $0.0000
+[saved: success]> 
+
+--- multiline-input-120x30 ---
+> PTY multiline first line
+PTY multiline second line
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main | Loaded rows: 14 | loaded projection only
+[user]                                                      │[tool: write]                                              
+PTY deny                                                     Error: tool call denied by approval policy                 
+[assistant]                                                  [receipt: error]                                           
+[assistant]                                                  [tool: write]                                              
+PTY fixture completed the requested interaction.             wrote 676 bytes to /var/folders/md/b0sr21q97jsg2gfn9lymdw3h
+[user]                                                       0000gn/T/go-cli-r5-pty-35zmyxv0/workspace/once.txt         
+PTY once                                                     [receipt: success]                                         
+[assistant]                                                  [tool: ask_user]                                           
+[assistant]                                                  X保留队列：交互通过 ✅ 🙂                                  
+PTY fixture completed the requested interaction.             [receipt: success]                                         
+[user]                                                                                                                  
+PTY ask                                                                                                                 
+[assistant]                                                                                                             
+[assistant]                                                                                                             
+PTY fixture completed the requested interaction.                                                                        
+[user]                                                                                                                  
+测试XB                                                                                                                  
+[assistant]                                                                                                             
+PTY fixture received the input.                                                                                         
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+pty-review-model | turn #5 | interact | chatSession: s_b5499a2ef4240570e409c75609e361cd | Branch: main | Loaded rows: 16 | loaded projection only
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[user]                                                                                                                  
+PTY multiline first line                                                                                                
+PTY multiline second line                                                                                               
+[assistant]                                                                                                             
+PTY fixture received the input.                                                                                         
+
+pty-review-model | turn #5 | interact | chat
+Tokens: 149/8000 (1%) | Cost: $0.0000
+[saved: success]> 
+> 
+

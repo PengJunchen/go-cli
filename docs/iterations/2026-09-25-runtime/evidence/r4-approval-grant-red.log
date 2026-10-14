@@ -1,0 +1,9 @@
+--- FAIL: TestPreparedPositiveGrantsDoNotInvalidateSiblingSnapshots (0.00s)
+    prepared_policy_fence_test.go:21: 
+        	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/r4-approval/internal/approval/prepared_policy_fence_test.go:21
+        	Error:      	Received unexpected error:
+        	            	tools: prepared dispatch state changed
+        	Test:       	TestPreparedPositiveGrantsDoNotInvalidateSiblingSnapshots
+FAIL
+FAIL	github.com/pengjunchen/go-cli/internal/approval	0.014s
+FAIL

@@ -14,8 +14,7 @@ import (
 // TestE2EMarkdownRender tests a complete Markdown document through the full
 // parse-render pipeline, verifying every supported block and inline element.
 func TestE2EMarkdownRender(t *testing.T) {
-	hl := &mockMarkdownHighlighter{}
-	r := NewMarkdownRenderer(hl)
+	r := NewMarkdownRenderer()
 
 	doc := `# Heading 1
 
@@ -64,8 +63,8 @@ This paragraph has **bold**, *italic*, and ~~strikethrough~~ text.
 	})
 	plain := stripEscape(out)
 
-	// --- Headings 1-6: bold ANSI code ---
-	assert.Contains(t, out, "\x1b[1m", "headings should produce bold ANSI code")
+	// --- Headings 1-6: bold ANSI styling ---
+	assert.Contains(t, out, ";1m", "headings should produce bold ANSI styling")
 	for _, h := range []string{"Heading 1", "Heading 2", "Heading 3", "Heading 4", "Heading 5", "Heading 6"} {
 		assert.Contains(t, plain, h, "heading %q should appear in output", h)
 	}
@@ -74,15 +73,16 @@ This paragraph has **bold**, *italic*, and ~~strikethrough~~ text.
 	assert.Contains(t, plain, "bold")
 
 	// --- Italic inline ---
-	assert.Contains(t, out, "\x1b[3m", "italic should produce italic ANSI code")
+	assert.Contains(t, out, ";3m", "italic should produce italic ANSI styling")
 	assert.Contains(t, plain, "italic")
 
 	// --- Strikethrough inline ---
-	assert.Contains(t, out, "\x1b[9m", "strikethrough should produce strikethrough ANSI code")
+	assert.Contains(t, out, ";9m", "strikethrough should produce strikethrough ANSI styling")
 	assert.Contains(t, plain, "strikethrough")
 
-	// --- Code blocks with 5 languages: highlighter invoked ---
-	require.True(t, hl.called, "highlighter should have been called")
+	// --- Code blocks with 5 languages: source content survives rendering ---
+	// TestE2EMultiLanguageHighlight separately verifies Glamour's Chroma
+	// highlighting through the public renderer output.
 	for _, code := range []string{"func main() {}", "def main():", "function main() {}", "fn main() {}", "echo hello"} {
 		assert.Contains(t, plain, code, "code from language block should appear in output: %q", code)
 	}
@@ -97,29 +97,44 @@ This paragraph has **bold**, *italic*, and ~~strikethrough~~ text.
 	assert.Contains(t, plain, "• Bullet two")
 	assert.Contains(t, plain, "• Bullet three")
 
-	// --- Table: | separators ---
-	assert.Contains(t, plain, "| Name |")
-	assert.Contains(t, plain, "| Value |")
+	// --- Table: header cells and column separator ---
+	tableHeaderRendered := false
+	for _, line := range strings.Split(plain, "\n") {
+		if strings.Contains(line, "Name") && strings.Contains(line, "Value") && strings.Contains(line, "│") {
+			tableHeaderRendered = true
+			break
+		}
+	}
+	assert.True(t, tableHeaderRendered, "table should render both header cells with a column separator")
 
 	// --- Blockquote: │ prefix ---
 	assert.Contains(t, out, "│", "blockquote should have │ prefix")
 
-	// --- Horizontal rule: ─ characters ---
-	assert.Contains(t, plain, "─", "horizontal rule should contain ─ characters")
+	// --- Horizontal rule: a standalone divider survives formatting ---
+	horizontalRuleRendered := false
+	for _, line := range strings.Split(plain, "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) >= 3 && strings.Trim(line, "-") == "" {
+			horizontalRuleRendered = true
+			break
+		}
+	}
+	assert.True(t, horizontalRuleRendered, "horizontal rule should render as a standalone divider")
 
-	// --- Link: [text](url) format with underline ---
-	assert.Contains(t, out, "\x1b[4;4m", "link should have underline ANSI code")
-	assert.Contains(t, plain, "[link text](https://example.com)")
+	// --- Link: visible text, target URL, and underline styling ---
+	assert.Contains(t, out, ";4m", "link should have underline ANSI styling")
+	assert.Contains(t, plain, "link text")
+	assert.Contains(t, plain, "https://example.com")
 
-	// --- Image: [image: alt] format ---
-	assert.Contains(t, plain, "[image: alt text]")
+	// --- Image: alternative text and target URL ---
+	assert.Contains(t, plain, "Image: alt text")
+	assert.Contains(t, plain, "https://example.com/image.png")
 }
 
-// TestE2EMarkdownANSICodes verifies that a rich Markdown document produces at
-// least 4 distinct ANSI style codes from the set: bold (1), italic (3),
-// underline (4), strikethrough (9), color (30-107), reset (0).
+// TestE2EMarkdownANSICodes verifies that a rich Markdown document produces
+// bold, italic, underline, strikethrough, color, and reset styling.
 func TestE2EMarkdownANSICodes(t *testing.T) {
-	r := NewMarkdownRenderer(NewDefaultCodeHighlighter())
+	r := NewMarkdownRenderer()
 
 	doc := `# Title
 
@@ -135,15 +150,16 @@ This has **bold**, *italic*, ~~strikethrough~~, and a [link](https://x.com).
 		ContentType: ContentTypeMarkdown,
 	})
 
-	// Target ANSI codes to detect under the forced truecolor profile.
+	// Check style attributes within combined SGR sequences emitted by Glamour.
+	// The selected standard style owns the actual color palette.
 	targets := map[string]string{
-		"bold(1)":          "\x1b[1m",
-		"italic(3)":        "\x1b[3m",
-		"underline(4)":     "\x1b[4;4m",
-		"strikethrough(9)": "\x1b[9m",
-		"reset(0)":         "\x1b[0m",
-		"color(primary)":   "38;2;125;86;244",  // #7D56F4 (DarkTheme Primary)
-		"color(secondary)": "38;2;108;112;134", // #6C7086 (DarkTheme Secondary)
+		"bold(1)":           ";1m",
+		"italic(3)":         ";3m",
+		"underline(4)":      ";4m",
+		"strikethrough(9)":  ";9m",
+		"reset(0)":          "\x1b[0m",
+		"color(foreground)": "\x1b[38;",
+		"color(background)": "\x1b[48;",
 	}
 
 	found := 0
@@ -193,24 +209,24 @@ func TestE2EBoxSpinnerComponents(t *testing.T) {
 // applies syntax coloring to language-specific keywords.
 func TestE2EMultiLanguageHighlight(t *testing.T) {
 	cases := []struct {
-		lang    string
-		code    string
-		keyword string
+		lang       string
+		code       string
+		keyword    string
+		plainToken string
 	}{
-		{"go", "func main() {}", "func"},
-		{"python", "def main():\n    pass", "def"},
-		{"javascript", "function main() {}", "function"},
-		{"typescript", "interface Foo {}", "interface"},
-		{"rust", "fn main() {}", "fn"},
-		{"java", "public class Main {}", "public"},
-		{"bash", "if true; then echo hi; fi", "if"},
-		{"json", `{"active": true}`, "true"},
-		{"yaml", "enabled: true", "true"},
-		{"sql", "SELECT * FROM users", "SELECT"},
+		{"go", "func main() {}", "func", "main"},
+		{"python", "def main():\n    pass", "def", "main"},
+		{"javascript", "function main() {}", "function", "main"},
+		{"typescript", "interface Foo {}", "interface", "Foo"},
+		{"rust", "fn main() {}", "fn", "main"},
+		{"java", "public class Main {}", "public", "Main"},
+		{"bash", "if true; then echo hi; fi", "if", "echo"},
+		{"json", `{"active": true}`, "true", "active"},
+		{"yaml", "enabled: true", "true", "enabled"},
+		{"sql", "SELECT * FROM users", "SELECT", "users"},
 	}
 
-	h := NewDefaultCodeHighlighter()
-	r := NewMarkdownRenderer(h)
+	r := NewMarkdownRenderer()
 
 	for _, tc := range cases {
 		t.Run(tc.lang, func(t *testing.T) {
@@ -226,13 +242,31 @@ func TestE2EMultiLanguageHighlight(t *testing.T) {
 			assert.Contains(t, plain, tc.keyword,
 				"keyword %q should appear in rendered %s code block", tc.keyword, tc.lang)
 
-			// Verify highlighting is applied (via direct highlightCode call,
-			// since Highlight() returns raw code in non-TTY environments).
-			highlighted := h.highlightCode(tc.code, tc.lang)
-			assert.Contains(t, highlighted, hlBlue+tc.keyword+hlReset,
-				"keyword %q in %s should be colored blue", tc.keyword, tc.lang)
+			keywordStyle := ansiStyleImmediatelyBefore(out, tc.keyword)
+			plainStyle := ansiStyleImmediatelyBefore(out, tc.plainToken)
+			assert.NotEmpty(t, keywordStyle,
+				"%s keyword %q should have ANSI styling in the rendered code block", tc.lang, tc.keyword)
+			assert.NotEqual(t, plainStyle, keywordStyle,
+				"%s keyword %q should have a different style from ordinary token %q in the same code block",
+				tc.lang, tc.keyword, tc.plainToken)
 		})
 	}
+}
+
+func ansiStyleImmediatelyBefore(rendered, text string) string {
+	textIndex := strings.Index(rendered, text)
+	if textIndex < 0 {
+		return ""
+	}
+	styleStart := strings.LastIndex(rendered[:textIndex], "\x1b[")
+	if styleStart < 0 {
+		return ""
+	}
+	styleEnd := strings.IndexByte(rendered[styleStart:textIndex], 'm')
+	if styleEnd < 0 || styleStart+styleEnd+1 != textIndex {
+		return ""
+	}
+	return rendered[styleStart:textIndex]
 }
 
 // TestE2EOldVsNewRendering compares the old simple rendering (uniform Primary
@@ -243,8 +277,8 @@ func TestE2EOldVsNewRendering(t *testing.T) {
 	// Old rendering: simple Primary() color wrap.
 	oldOut := DarkTheme{}.Primary().Render(content)
 
-	// New rendering: AST-based with varied styling per node type.
-	r := NewMarkdownRenderer(NewDefaultCodeHighlighter())
+	// New rendering: Glamour-based Markdown formatting and syntax highlighting.
+	r := NewMarkdownRenderer()
 	newOut := r.Render(context.Background(), content, RenderOpts{
 		Theme:       DarkTheme{},
 		Width:       80,
@@ -254,13 +288,13 @@ func TestE2EOldVsNewRendering(t *testing.T) {
 	// Outputs must be different.
 	assert.NotEqual(t, oldOut, newOut, "old and new rendering should produce different output")
 
-	// New output contains heading bold codes that old doesn't.
-	assert.Contains(t, newOut, "\x1b[1m", "new output should contain bold ANSI code from heading")
-	assert.NotContains(t, oldOut, "\x1b[1m", "old output should not contain bold ANSI code")
+	// New output contains heading bold styling that old doesn't.
+	assert.Contains(t, newOut, ";1m", "new output should contain bold ANSI styling from heading")
+	assert.NotContains(t, oldOut, ";1m", "old output should not contain bold ANSI styling")
 
-	// New output contains italic codes that old doesn't.
-	assert.Contains(t, newOut, "\x1b[3m", "new output should contain italic ANSI code")
-	assert.NotContains(t, oldOut, "\x1b[3m", "old output should not contain italic ANSI code")
+	// New output contains italic styling that old doesn't.
+	assert.Contains(t, newOut, ";3m", "new output should contain italic ANSI styling")
+	assert.NotContains(t, oldOut, ";3m", "old output should not contain italic ANSI styling")
 
 	// Count ANSI escape sequences: new should have more than old.
 	oldCount := strings.Count(oldOut, "\x1b[")

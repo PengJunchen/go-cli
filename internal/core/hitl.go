@@ -2,11 +2,17 @@ package core
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
+
+// ErrHITLQuestionCanceled identifies an explicit user decision to decline an
+// ask_user question. It is distinct from context.Canceled so callers can
+// record the known tool error without treating unrelated work as interrupted.
+var ErrHITLQuestionCanceled = errors.New("user canceled question")
 
 // HITLQuestionEvent is emitted when the agent needs user input. The caller
 // (UI / HITL layer) receives the event and delivers a HITLAnswer on

@@ -1,0 +1,129 @@
+Main source snapshot: 10064fb
+Command: go run ./internal/verify/cmd/test-gate -go-arg=-race -go-arg=-p=2 -package=./internal/verify/cmd/...
+=== RUN   TestGateCaptureProcessFixture
+--- PASS: TestGateCaptureProcessFixture (0.00s)
+=== RUN   TestRunCapturesOutputWithinHardLimit
+=== RUN   TestRunCapturesOutputWithinHardLimit/stdout
+--- PASS: TestRunCapturesOutputWithinHardLimit/stdout (0.00s)
+=== RUN   TestRunCapturesOutputWithinHardLimit/stderr
+--- PASS: TestRunCapturesOutputWithinHardLimit/stderr (0.00s)
+--- PASS: TestRunCapturesOutputWithinHardLimit (0.01s)
+=== RUN   TestRunReturnsWithinWaitDelayWhenDescendantHoldsPipes
+=== RUN   TestRun_TextFormatClean
+--- PASS: TestRun_TextFormatClean (0.00s)
+=== RUN   TestRun_JSONFormatClean
+--- PASS: TestRun_JSONFormatClean (0.00s)
+=== RUN   TestRun_ErrorFinding_NonZeroExit
+--- PASS: TestRun_ErrorFinding_NonZeroExit (0.00s)
+=== RUN   TestRun_JSONErrorFinding_NonZeroExit
+--- PASS: TestRun_JSONErrorFinding_NonZeroExit (0.00s)
+=== RUN   TestRun_InvalidPath
+--- PASS: TestRun_InvalidPath (0.00s)
+=== RUN   TestRun_UnknownFormat
+--- PASS: TestRun_UnknownFormat (0.00s)
+=== RUN   TestRun_InvalidFlag
+flag provided but not defined: -bogus-flag
+Usage of verify-scanner:
+  -dir string
+    	directory to scan (default ".")
+  -format string
+    	output format: text or json (default "text")
+  -include-tests
+    	include _test.go files in scan
+--- PASS: TestRun_InvalidFlag (0.00s)
+=== RUN   TestRun_IncludeTests
+--- PASS: TestRun_IncludeTests (0.00s)
+=== RUN   TestRun_DefaultDir
+--- PASS: TestRun_DefaultDir (0.01s)
+=== RUN   TestRun_EmptyOutputNoStderrOnSuccess
+--- PASS: TestRun_EmptyOutputNoStderrOnSuccess (0.00s)
+=== RUN   TestScannerProcessFailureFailsGate
+--- PASS: TestRunReturnsWithinWaitDelayWhenDescendantHoldsPipes (0.25s)
+=== RUN   TestRunReturnsAfterContextTimeout
+--- PASS: TestRunReturnsAfterContextTimeout (0.10s)
+PASS
+--- PASS: TestScannerProcessFailureFailsGate (0.19s)
+=== RUN   TestScannerInvalidJSONFailsGate
+ok  	github.com/pengjunchen/go-cli/internal/verify/cmd/gatecapture	1.373s
+--- PASS: TestScannerInvalidJSONFailsGate (1.06s)
+=== RUN   TestScannerErrorFindingFailsGate
+=== RUN   TestScannerGateProcessFixture
+--- PASS: TestScannerGateProcessFixture (0.00s)
+=== RUN   TestRunRejectsInvalidScannerResults
+=== RUN   TestRunRejectsInvalidScannerResults/nonzero_subprocess
+--- PASS: TestRunRejectsInvalidScannerResults/nonzero_subprocess (0.01s)
+=== RUN   TestRunRejectsInvalidScannerResults/malformed_JSON
+--- PASS: TestRunRejectsInvalidScannerResults/malformed_JSON (0.01s)
+=== RUN   TestRunRejectsInvalidScannerResults/partial_report
+--- PASS: TestRunRejectsInvalidScannerResults/partial_report (0.01s)
+=== RUN   TestRunRejectsInvalidScannerResults/summary_mismatch
+--- PASS: TestRunRejectsInvalidScannerResults/summary_mismatch (0.00s)
+=== RUN   TestRunRejectsInvalidScannerResults/ERROR_finding
+--- PASS: TestRunRejectsInvalidScannerResults/ERROR_finding (0.01s)
+=== RUN   TestRunRejectsInvalidScannerResults/valid_report
+--- PASS: TestRunRejectsInvalidScannerResults/valid_report (0.01s)
+--- PASS: TestRunRejectsInvalidScannerResults (0.03s)
+=== RUN   TestRunRejectsOutputBeyondCaptureLimit
+=== RUN   TestRunRejectsOutputBeyondCaptureLimit/stdout
+--- PASS: TestRunRejectsOutputBeyondCaptureLimit/stdout (0.00s)
+=== RUN   TestRunRejectsOutputBeyondCaptureLimit/stderr
+--- PASS: TestRunRejectsOutputBeyondCaptureLimit/stderr (0.00s)
+--- PASS: TestRunRejectsOutputBeyondCaptureLimit (0.01s)
+=== RUN   TestRunTimeoutReturnsWhenScannerDescendantHoldsPipes
+--- PASS: TestScannerErrorFindingFailsGate (1.07s)
+PASS
+--- PASS: TestRunTimeoutReturnsWhenScannerDescendantHoldsPipes (1.17s)
+=== RUN   TestRunReturnsAfterScannerTimeout
+--- PASS: TestRunReturnsAfterScannerTimeout (0.10s)
+PASS
+ok  	github.com/pengjunchen/go-cli/internal/verify/cmd/scanner	3.356s
+=== RUN   TestRunExecutesRealBehaviorTests
+ok  	github.com/pengjunchen/go-cli/internal/verify/cmd/scanner-gate	2.323s
+--- PASS: TestRunExecutesRealBehaviorTests (0.10s)
+=== RUN   TestRunRepeatsFreshTestsByDefault
+--- PASS: TestRunRepeatsFreshTestsByDefault (0.19s)
+=== RUN   TestRunRejectsZeroMatchingTests
+--- PASS: TestRunRejectsZeroMatchingTests (0.10s)
+=== RUN   TestRunRejectsPackageWithoutTestFiles
+--- PASS: TestRunRejectsPackageWithoutTestFiles (0.02s)
+=== RUN   TestRunPreservesGoTestExitCodeAndFailureOutput
+--- PASS: TestRunPreservesGoTestExitCodeAndFailureOutput (0.11s)
+=== RUN   TestRunPreservesNonstandardChildExitCode
+--- PASS: TestRunPreservesNonstandardChildExitCode (0.08s)
+=== RUN   TestRunRejectsFailureEventsWhenChildExitsZero
+--- PASS: TestRunRejectsFailureEventsWhenChildExitsZero (0.08s)
+=== RUN   TestRunRejectsStartedTestWithoutTerminalEvent
+--- PASS: TestRunRejectsStartedTestWithoutTerminalEvent (0.08s)
+=== RUN   TestRunRejectsMalformedEventShapesAmongPassingEvents
+=== RUN   TestRunRejectsMalformedEventShapesAmongPassingEvents/unknown_action
+--- PASS: TestRunRejectsMalformedEventShapesAmongPassingEvents/unknown_action (0.08s)
+=== RUN   TestRunRejectsMalformedEventShapesAmongPassingEvents/missing_package
+--- PASS: TestRunRejectsMalformedEventShapesAmongPassingEvents/missing_package (0.08s)
+=== RUN   TestRunRejectsMalformedEventShapesAmongPassingEvents/test_action_without_test_name
+--- PASS: TestRunRejectsMalformedEventShapesAmongPassingEvents/test_action_without_test_name (0.08s)
+--- PASS: TestRunRejectsMalformedEventShapesAmongPassingEvents (0.25s)
+=== RUN   TestRunRejectsInvalidPackageEventOrder
+=== RUN   TestRunRejectsInvalidPackageEventOrder/test_before_package_start
+--- PASS: TestRunRejectsInvalidPackageEventOrder/test_before_package_start (0.08s)
+=== RUN   TestRunRejectsInvalidPackageEventOrder/package_terminal_before_test
+--- PASS: TestRunRejectsInvalidPackageEventOrder/package_terminal_before_test (0.08s)
+=== RUN   TestRunRejectsInvalidPackageEventOrder/event_after_package_terminal
+--- PASS: TestRunRejectsInvalidPackageEventOrder/event_after_package_terminal (0.08s)
+--- PASS: TestRunRejectsInvalidPackageEventOrder (0.25s)
+=== RUN   TestRunAcceptsBenchmarkTerminalAction
+--- PASS: TestRunAcceptsBenchmarkTerminalAction (0.08s)
+=== RUN   TestRunDoesNotCountBenchmarkAsPassingTestEvidence
+--- PASS: TestRunDoesNotCountBenchmarkAsPassingTestEvidence (0.08s)
+=== RUN   TestRunRejectsOutputBeyondCaptureLimit
+=== RUN   TestRunRejectsOutputBeyondCaptureLimit/stdout
+--- PASS: TestRunRejectsOutputBeyondCaptureLimit/stdout (0.08s)
+=== RUN   TestRunRejectsOutputBeyondCaptureLimit/stderr
+--- PASS: TestRunRejectsOutputBeyondCaptureLimit/stderr (0.09s)
+--- PASS: TestRunRejectsOutputBeyondCaptureLimit (0.18s)
+=== RUN   TestRunTimeoutReturnsWhenDescendantHoldsPipes
+--- PASS: TestRunTimeoutReturnsWhenDescendantHoldsPipes (0.23s)
+PASS
+ok  	github.com/pengjunchen/go-cli/internal/verify/cmd/test-gate	2.857s
+go test gate passed: 54 test function(s) started, 54 passed, 0 benchmarked, 0 failed, 0 skipped across 4 package(s)
+
+Exit: 0; duration: 6.91s

@@ -99,8 +99,16 @@ func (v *validateModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 // Otherwise the first chunk and all subsequent chunks are forwarded to the
 // caller.
 func (v *validateModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
-	ch, err := v.next.Stream(ctx, msgs, opts...)
+	streamCtx, cancel := context.WithCancelCause(ctx)
+	ch, err := v.next.Stream(streamCtx, msgs, opts...)
 	if err != nil {
+		cancelStreamAttempt(ctx, cancel, err)
+		drainMessageChunks(ch)
+		return nil, err
+	}
+	if ch == nil {
+		err = errors.New("validate: model returned a nil stream")
+		cancelStreamAttempt(ctx, cancel, err)
 		return nil, err
 	}
 
@@ -111,15 +119,42 @@ func (v *validateModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 	var ok bool
 	select {
 	case first, ok = <-ch:
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	case <-streamCtx.Done():
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cause = context.Cause(streamCtx)
+		}
+		cancelStreamAttempt(ctx, cancel, cause)
+		drainMessageChunks(ch)
+		if cause == nil {
+			cause = ctx.Err()
+		}
+		return nil, cause
 	}
 	if !ok {
+		cancelStreamAttempt(ctx, cancel, errValidateEmptyStream)
 		v.logger.Debug("middleware.validate",
 			"status", "fail",
 			"reason", "empty_stream",
 		)
 		return nil, errValidateEmptyStream
+	}
+	if first.Error != nil {
+		cancelStreamAttempt(ctx, cancel, first.Error)
+		drainMessageChunks(ch)
+		return nil, first.Error
+	}
+	if streamCtx.Err() != nil {
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cause = context.Cause(streamCtx)
+		}
+		cancelStreamAttempt(ctx, cancel, cause)
+		drainMessageChunks(ch)
+		if cause == nil {
+			cause = ctx.Err()
+		}
+		return nil, cause
 	}
 
 	v.logger.Debug("middleware.validate", "status", "pass")
@@ -129,10 +164,39 @@ func (v *validateModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 
 	go func() {
 		defer close(out)
-		for chunk := range ch {
+		for {
+			var chunk MessageChunk
+			var ok bool
+			select {
+			case <-streamCtx.Done():
+				cause := context.Cause(ctx)
+				if cause == nil {
+					cause = context.Cause(streamCtx)
+				}
+				cancelStreamAttempt(ctx, cancel, cause)
+				drainMessageChunks(ch)
+				return
+			case chunk, ok = <-ch:
+			}
+			if !ok {
+				cancel(nil)
+				return
+			}
+			if chunk.Error != nil {
+				sendStreamError(streamCtx, out, chunk.Error)
+				cancelStreamAttempt(ctx, cancel, chunk.Error)
+				drainMessageChunks(ch)
+				return
+			}
 			select {
 			case out <- chunk:
-			case <-ctx.Done():
+			case <-streamCtx.Done():
+				cause := context.Cause(ctx)
+				if cause == nil {
+					cause = context.Cause(streamCtx)
+				}
+				cancelStreamAttempt(ctx, cancel, cause)
+				drainMessageChunks(ch)
 				return
 			}
 		}

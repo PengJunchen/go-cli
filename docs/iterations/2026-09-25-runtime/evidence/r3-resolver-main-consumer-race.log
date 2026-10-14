@@ -1,0 +1,8 @@
+source_snapshot=138c4c42686e23a03a2f02f60c7c01cb368ab1eb
+command=go test -race -p 2 -count=1 ./internal/llm ./internal/config ./internal/cli ./tests
+ok  	github.com/pengjunchen/go-cli/internal/llm	2.704s
+ok  	github.com/pengjunchen/go-cli/internal/config	1.066s
+ok  	github.com/pengjunchen/go-cli/internal/cli	16.611s
+ok  	github.com/pengjunchen/go-cli/tests	24.809s
+
+exit_code=0 elapsed_seconds=60.59

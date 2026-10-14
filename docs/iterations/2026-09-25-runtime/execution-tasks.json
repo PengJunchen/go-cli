@@ -1,0 +1,2000 @@
+{
+  "schema_version": 1,
+  "title": "Go CLI Runtime and product iteration proposal",
+  "baseline_commit": "40692e35e4815f0dff1c9f91b13905008f7221a4",
+  "status": "in_progress",
+  "estimate_unit": "single-engineer effective days",
+  "test_convention": "Every TestName listed in verification is planned and does not imply an existing test. Acceptance must assert each exact name occurs in go test -list output before running it, and must also run the complete affected package race suite; a -run command with zero matches is never sufficient.",
+  "waves": [
+    {
+      "id": "A",
+      "title": "Stop immediate user harm and make evidence trustworthy",
+      "phases": [
+        "R0"
+      ],
+      "estimated_days": "8-15",
+      "gate": "R0 hotfixes have red-before-fix behavior tests and pass after fix; raw verification failures remain archived and new gate result is tied to the tested commit."
+    },
+    {
+      "id": "B",
+      "title": "Run ownership and recoverable transcript MVP",
+      "phases": [
+        "R1",
+        "R2"
+      ],
+      "estimated_days": "17-27",
+      "gate": "One authoritative Run outcome, truthful cleanup state, complete committed session restore, and no automatic replay of unknown side effects."
+    },
+    {
+      "id": "C",
+      "title": "Provider, permissions, UI and service-entry closure",
+      "phases": [
+        "R3",
+        "R4",
+        "R5",
+        "R6"
+      ],
+      "estimated_days": "32-52",
+      "gate": "Provider, capability, approval, session, terminal and event contracts are consistent across shipped entry paths; each lane can parallelize after shared contracts are reviewed."
+    },
+    {
+      "id": "D",
+      "title": "Extension boundaries, UI quality and release evidence",
+      "phases": [
+        "R7",
+        "R8"
+      ],
+      "estimated_days": "14-23",
+      "gate": "Every claimed extension/UI/telemetry capability has a default-path or protocol conformance proof, or is clearly marked unavailable."
+    },
+    {
+      "id": "E",
+      "title": "Optional verified cross-process action resumption",
+      "phases": [
+        "R9"
+      ],
+      "estimated_days": "10-20",
+      "gate": "Deferred until a product decision; no general shell/MCP replay without verifier, receipt, fencing and reconciliation."
+    }
+  ],
+  "phases": [
+    {
+      "id": "R0",
+      "wave": "A",
+      "title": "Stop immediate harm and establish trustworthy gates",
+      "estimated_days": "8-15",
+      "dependencies": [],
+      "parallelism": "Independent hotfix slices and validation-gate work may run in parallel; do not delay immediate fixes for a broad Runtime refactor."
+    },
+    {
+      "id": "R1",
+      "wave": "B",
+      "title": "Run terminal outcome, cancellation and resource ownership",
+      "estimated_days": "8-13",
+      "dependencies": [
+        "R0 hotfix contracts; R0 gate work may continue"
+      ],
+      "parallelism": "Stream terminal, Run quiescence and bounded cleanup builders can work after the shared state/ownership contract is reviewed."
+    },
+    {
+      "id": "R2",
+      "wave": "B",
+      "title": "Durable session identity, journal and recovery MVP",
+      "estimated_days": "9-14",
+      "dependencies": [
+        "R1 terminal and cleanup contract"
+      ],
+      "parallelism": "Session identity and JSONL recovery work can be separated after the durable-record schema and single-writer contract are fixed."
+    },
+    {
+      "id": "R3",
+      "wave": "C",
+      "title": "Provider resolution, stream reliability and context policy",
+      "estimated_days": "8-13",
+      "dependencies": [
+        "R0 credential-routing hotfix; R1 terminal contract; R2 transcript schema for compaction integration"
+      ],
+      "parallelism": "Provider factory and context/production policy slices are separable after interface contract review."
+    },
+    {
+      "id": "R4",
+      "wave": "C",
+      "title": "Tool effect capabilities, approvals and bounded execution",
+      "estimated_days": "8-13",
+      "dependencies": [
+        "R0 approval/data-integrity hotfix; R1 execution-state contract"
+      ],
+      "parallelism": "Approval policy and filesystem/schema/output slices may proceed independently after common ToolEffect semantics are reviewed."
+    },
+    {
+      "id": "R5",
+      "wave": "C",
+      "title": "TUI interaction and transcript journeys",
+      "estimated_days": "7-11",
+      "dependencies": [
+        "R0 ask_user hotfix; R1 terminal/event contract; R2 session identity"
+      ],
+      "parallelism": "History rendering and input/editor workflows may proceed after a single-session projection contract is agreed."
+    },
+    {
+      "id": "R6",
+      "wave": "C",
+      "title": "CLI, ACP, MCP and Web entry contracts",
+      "estimated_days": "9-15",
+      "dependencies": [
+        "R0 network/credential hotfix; R1 terminal contract; R2 session identity; R4 capability/approval scope"
+      ],
+      "parallelism": "CLI/trust and ACP/MCP adapter slices can proceed in parallel after session/capability identity is fixed."
+    },
+    {
+      "id": "R7",
+      "wave": "D",
+      "title": "Extension, skill, tracing and audit lifecycle",
+      "estimated_days": "8-13",
+      "dependencies": [
+        "R1 lifecycle contract; R4 capability model; R6 support-version contract"
+      ],
+      "parallelism": "Extension lifecycle and tracing/privacy work are separable."
+    },
+    {
+      "id": "R8",
+      "wave": "D",
+      "title": "UI rendering quality and product capability disclosures",
+      "estimated_days": "6-10",
+      "dependencies": [
+        "R5 TUI workflow; R6 entry support matrix; R7 telemetry/privacy decisions"
+      ],
+      "parallelism": "Terminal quality and dormant-feature disclosure can be delivered as independent slices."
+    },
+    {
+      "id": "R9",
+      "wave": "E",
+      "title": "Opt-in verified cross-process action resumption",
+      "estimated_days": "10-20",
+      "dependencies": [
+        "R2 recovery MVP; R4 capabilities; R6 transport identity; explicit product decision"
+      ],
+      "parallelism": "No implementation until the product decision and action verifier/receipt contract are accepted."
+    }
+  ],
+  "tasks": [
+    {
+      "id": "R0-DES-01",
+      "role": "designer",
+      "title": "Define immediate hotfix contracts and gate truth",
+      "user_story": "As a CLI user and maintainer, I need known destructive, credential, approval and deadlock failures to have explicit safe outcomes and trustworthy regression evidence.",
+      "goal": "Turn immediate high-impact findings into narrow, independently testable fixes and pin the current verification baseline without waiting for a Runtime redesign.",
+      "deliverable": [
+        "Red-before-fix acceptance cases for one-time approval, malformed write/edit args, wildcard without auth, provider credential routing, ask_user delivery, Streaming Bash output cap, MCP origin/retry behavior, and trace prompt redaction.",
+        "A local/CI verification matrix recording the raw make verify failure, NO_COLOR-cleared race pass, scan 20 ERROR and CI filtering mismatch."
+      ],
+      "verification": [
+        "Review each case against its source finding and mark default, explicit-config or dormant reachability.",
+        "Do not treat archived bug-reproducer PASS output as a passing fix: translate it into an expected-correctness test, show it fails on the audited baseline, then passes after the change.",
+        "Protected Makefile/CI/rules/task metadata are not edited under this proposal; route any required protected change through the repository approval chain."
+      ],
+      "rule_mapping": [
+        "APR-001",
+        "APR-002",
+        "TOOL-003",
+        "CLI-01",
+        "LLM-01",
+        "UI-01",
+        "UI-03",
+        "TOOL-002",
+        "MCP-01",
+        "MCP-02",
+        "TRACE-01",
+        "VFY-01",
+        "VFY-02",
+        "VFY-03",
+        "VFY-04",
+        "VFY-05",
+        "VFY-06",
+        "VFY-07",
+        "VFY-08",
+        "VFY-09",
+        "VFY-10"
+      ],
+      "depends_on": [],
+      "status": "done",
+      "commit_spec": "Designer creates a reviewed contract note and named red-before-fix cases; no product-code commit is required.",
+      "phase_id": "R0",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R0-BLD-01",
+      "role": "builder",
+      "title": "Fix one-shot approval and malformed file mutations",
+      "user_story": "As a user, an Allow-once decision must authorize one execution only, and a malformed write/edit request must never silently clear existing data.",
+      "goal": "Fix ApprovalAllow caching and reject missing/wrong-typed write.content and edit.new_string at both schema and execution boundaries while preserving explicit empty strings.",
+      "deliverable": [
+        "Updated approval cache semantics with explicit AlwaysAllow scope.",
+        "Required tool schemas and defensive executor/queue validation.",
+        "Regression tests proving rejected calls leave the original file byte-for-byte unchanged."
+      ],
+      "verification": [
+        "Planned tests: TestMiddlewareCallbackAllowOnlyAppliesToCurrentCall, TestWriteMissingContentArg, TestEditMissingNewStringDoesNotChangeFile, TestWriteEmptyContent.",
+        "Assert exact test names through go test -list, run affected packages with -race -count=1, and exercise the CLI middleware path."
+      ],
+      "rule_mapping": [
+        "APR-001",
+        "TOOL-003"
+      ],
+      "depends_on": [
+        "R0-DES-01"
+      ],
+      "status": "done",
+      "commit_spec": "One focused commit for approval and malformed mutation behavior after red-before-fix tests exist; keep unrelated safety changes out.",
+      "phase_id": "R0",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R0-BLD-02",
+      "role": "builder",
+      "title": "Close immediate network, credential and prompt privacy failures",
+      "user_story": "As an operator, an explicitly unauthenticated listener must not expose wildcard interfaces, credentials must not cross provider/origin boundaries, failed MCP calls must not be replayed blindly, and traces must not persist raw prompts by default.",
+      "goal": "Fail closed on the concrete dangerous combinations and remove credential forwarding or duplicate side-effect paths before broad provider/service work.",
+      "deliverable": [
+        "Wildcard plus no-auth is rejected or bound to explicit loopback with a clear error.",
+        "Provider selection validates protocol, credential scope and origin before sending any request.",
+        "MCP endpoint origin is pinned before any configured Header/Bearer/OAuth credential is sent; this is a prerequisite to exposing those credentials in CLI config because current CLI config does not expose them. Ambiguous post-dispatch failure is returned as unknown without retry.",
+        "Prompt-bearing trace/log attributes are redacted or disabled by default through every actual tracer."
+      ],
+      "verification": [
+        "Planned tests: TestServeCmdNonLoopbackNoAuthRejected, TestProviderCredentialNeverSentToWrongOrigin, TestMCPRejectsCrossOriginEndpointWithCredentials, TestMCPCallToolLostResponseIsUnknownAndNotRetried, TestMCPToolCallLostResponseIsUnknownAndNotRetried, TestDefaultTraceContainsNoPrompt.",
+        "Use loopback httptest servers and verify the second origin receives neither request nor credential; exercise the actual CLI factory and tracing wiring."
+      ],
+      "rule_mapping": [
+        "CLI-01",
+        "LLM-01",
+        "MCP-01",
+        "MCP-02",
+        "TRACE-01"
+      ],
+      "depends_on": [
+        "R0-DES-01"
+      ],
+      "status": "done",
+      "commit_spec": "One commit per isolated service/provider/privacy boundary fix, with each risky path red before the patch and green afterward.",
+      "phase_id": "R0",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R0-BLD-03",
+      "role": "builder",
+      "title": "Unblock ask_user and bounded-output subprocesses",
+      "user_story": "As a TUI user, an ask_user request must reach an input handler; as a user of streaming shell, output truncation must not block a finite child process forever.",
+      "goal": "Add the missing UI message update route and keep draining child pipes after capture limits while bounding retained output.",
+      "deliverable": [
+        "HITL request/response is correlated and cancellation wakes the waiting request.",
+        "Concurrent approval requests retain separate IDs/results and cannot overwrite one pending slot.",
+        "Streaming Bash drains/discards excess output after the retained cap and reports truncation without turning a finite command into timeout."
+      ],
+      "verification": [
+        "Planned tests: TestTUIAskUserMessageReachesHandler, TestAskUserCancelUnblocksWait, TestTUIConcurrentApprovalRequestsRemainResolvable, TestStreamingBashDrainsPastMaxOutput.",
+        "Subprocess output must exceed OS pipe capacity; assert return before deadline, bounded stored output and no lingering reader goroutine."
+      ],
+      "rule_mapping": [
+        "UI-01",
+        "UI-03",
+        "TOOL-002"
+      ],
+      "depends_on": [
+        "R0-DES-01"
+      ],
+      "status": "done",
+      "commit_spec": "Keep the UI message fix and pipe-drain fix in separate commits so each regression can be bisected.",
+      "phase_id": "R0",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R0-BLD-04",
+      "role": "builder",
+      "title": "Make source-level verification coverage and failure reporting trustworthy",
+      "user_story": "As a maintainer, the local and CI gate must run the intended packages and fail honestly on scanner errors, missing tools, bad JSON or zero behavior tests.",
+      "goal": "Make direct source-level test and scanner gates explicit, hermeticize color-dependent tests, inventory build tags/skips, and make scanner/RunVerify failures actionable without changing protected default Makefile/CI wiring.",
+      "deliverable": [
+        "Source-level direct test commands cover cmd/cli and named mock/e2e tagged suites; the execution copy does not claim the protected default Makefile/CI target includes them.",
+        "Tagged suites and skip inventory have named entrypoints and reasons.",
+        "Scanner and verification output distinguishes static hint, skipped evidence and behavior-tested pass; no source path may blanket-ignore a rule or swallow execution/parse failure.",
+        "Formatting checks are read-only and tool versions are recorded; protected default gate wiring is split to R0-PROTECTED-GATE-01."
+      ],
+      "verification": [
+        "Planned tests: TestVerifyDoesNotPassOnZeroBehaviorTests, TestScannerProcessFailureFailsGate, TestScannerInvalidJSONFailsGate, TestGateIgnoresExternalNoColorForANSIContractOnly.",
+        "Run exact source-level test and scanner commands on a clean commit in the original host environment and with NO_COLOR cleared; preserve full logs, reports and exit codes.",
+        "Check exact expected test names before targeted execution; run full affected package race suites. A scanner or source-gate error remains visible and cannot be reclassified as a protected-gate approval."
+      ],
+      "rule_mapping": [
+        "VFY-01",
+        "VFY-02",
+        "VFY-03",
+        "VFY-04",
+        "VFY-05",
+        "VFY-06",
+        "VFY-07",
+        "VFY-08",
+        "VFY-09",
+        "VFY-10"
+      ],
+      "depends_on": [
+        "R0-DES-01"
+      ],
+      "status": "done",
+      "commit_spec": "Source-level implementation only. Protected Makefile, workflow, linter and infra rule edits belong to R0-PROTECTED-GATE-01 and require their explicit approval process.",
+      "phase_id": "R0",
+      "source_status": "proposed",
+      "execution_scope": "Source/test-canary cleanup maps 2d4b79→a8717d0. Five named race tests passed in 1.080s and the scanner gate passed; root also reran make scan at a8717d0 with 354 files, 0 ERROR and 1,448 WARN. The latest make scan at f27e354 passed with 362 files, 0 ERROR and 1,458 WARN. That historical scanner snapshot preceded the later accepted repair and complete make verify recorded in this task scope. Accepted scanner integration repair maps source f45→671c2a9 and 65e→be08f80; the independent review accepts runtime-generated ACP credential canaries and the narrow SCAN-009 error-message handling. At the fixed scanner-review snapshot, make scan reported 366 files, 0 ERROR and 1,510 WARN. The complete make verify at fixed be08f80 exited 0: vet, lint (0 issues), build, full repository race tests, scanner gate (366 files, 0 ERROR, 1,512 WARN), test-log and test-leak checks passed. goimports was explicitly skipped because it was unavailable. This closes the source-level verification task only; the protected default-gate task and its independent release review remain separate."
+    },
+    {
+      "id": "R0-PROTECTED-GATE-01",
+      "source_task_id": "R0-BLD-04",
+      "role": "builder",
+      "title": "Prepare and wire approved protected default repository gates",
+      "user_story": "As a maintainer, I need the reviewed source-level gates connected to the repository defaults after the protected patch is explicitly approved.",
+      "goal": "Produce a reviewable exact patch for protected Makefile/CI/default gate wiring and apply it only after explicit user approval of that patch.",
+      "deliverable": [
+        "A separately reviewable proposed patch for the specific protected Makefile, CI workflow or repository rule changes needed to connect the already-tested source gates.",
+        "After explicit approval of the exact patch, integrated default commands invoke the intended tests/scanner and fail closed on missing tools, malformed output, zero behavior tests, or scanner errors.",
+        "No scanner exemption, ignored finding, severity downgrade or swallowed error is used to make the default gate pass."
+      ],
+      "verification": [
+        "Before applying any protected change, present the exact diff and record explicit user approval; absent approval, keep this task pending and do not modify protected files.",
+        "After approval and integration, run the exact default Makefile/CI-equivalent gate from a clean commit and preserve command, environment, snapshot hash, full output and exit code.",
+        "Independently verify every source-level scanner finding is either fixed or separately justified as a genuine false positive; never suppress it to green the gate."
+      ],
+      "rule_mapping": [
+        "VFY-01",
+        "VFY-02",
+        "VFY-03",
+        "VFY-04",
+        "VFY-05",
+        "VFY-06",
+        "VFY-07",
+        "VFY-08",
+        "VFY-09",
+        "VFY-10"
+      ],
+      "depends_on": [
+        "R0-BLD-04"
+      ],
+      "status": "in_progress",
+      "commit_spec": "The user explicitly approved only the named protected-changes.patch, integrated as source 1fa9488→main b7ffe0b; the user’s renewed authorization names that same complete patch only. The earlier make scan failed at b7ffe0b, while later make scan gates passed at a8717d0 (354 files, 0 ERROR, 1,448 WARN) and f27e354 (362 files, 0 ERROR, 1,458 WARN). Parent verified the protected Makefile/CI paths have no current diff, and this batch makes no protected-file changes. A complete make verify passed at be08f80, but the separately required fail-closed test-gate patch remains unauthorized and unapplied, and independent protected release review remains outstanding; this task stays in progress. The supplemental protected-changes-test-gate.patch remains unauthorized and unapplied.",
+      "phase_id": "R0",
+      "source_status": "execution_split"
+    },
+    {
+      "id": "R0-SOURCE-REV-01",
+      "role": "reviewer",
+      "title": "Independently verify R0 source fixes and local source gates",
+      "user_story": "As a release owner, I need proof that each immediate fix closes its source-confirmed failure without hiding the original evidence.",
+      "goal": "Review each R0 source fix against the original failure, valid red/green evidence, and correct local source-level test/scanner results; this acceptance gate is sufficient for downstream engineering but does not accept protected default wiring.",
+      "deliverable": [
+        "Review report maps every R0 source case to source location, compiled red baseline, green fix, integrated commit and affected-package race evidence.",
+        "Commit-bound local test and scanner logs state exact command, environment, snapshot, test registration, findings and exit status.",
+        "Remaining scanner warnings, source errors, false positives and tagged skips are listed without suppression; source-level acceptance is explicitly distinct from protected release-gate acceptance."
+      ],
+      "verification": [
+        "Run full affected package race suites and actual CLI child-process/fixture tests at the reviewed source snapshot.",
+        "Run the correct direct source scanner and source verification commands from a clean worktree at that snapshot; assert exit codes, exact registered tests and no false-green command substitution.",
+        "Independently verify each proposed false-positive explanation against the rule and triggering source; scanner findings cannot be hidden to pass."
+      ],
+      "rule_mapping": [
+        "APR-001",
+        "APR-002",
+        "TOOL-003",
+        "CLI-01",
+        "LLM-01",
+        "UI-01",
+        "UI-03",
+        "TOOL-002",
+        "MCP-01",
+        "MCP-02",
+        "TRACE-01",
+        "VFY-01",
+        "VFY-02",
+        "VFY-03",
+        "VFY-04",
+        "VFY-05",
+        "VFY-06",
+        "VFY-07",
+        "VFY-08",
+        "VFY-09",
+        "VFY-10"
+      ],
+      "depends_on": [
+        "R0-BLD-01",
+        "R0-BLD-02",
+        "R0-BLD-03",
+        "R0-BLD-04",
+        "R0-BLD-05"
+      ],
+      "status": "done",
+      "commit_spec": "This is the source-review acceptance child mapped to source task R0-REV-01. It does not release the protected default-gate review child.",
+      "phase_id": "R0",
+      "source_status": "execution_split",
+      "source_task_id": "R0-REV-01"
+    },
+    {
+      "id": "R0-PROTECTED-REV-01",
+      "role": "reviewer",
+      "title": "Independently review protected default-gate release wiring",
+      "user_story": "As a release owner, I need proof that each immediate fix closes its source-confirmed failure without hiding the original evidence.",
+      "goal": "Review only the explicitly approved protected-gate patch and prove the repository default/CI entrypoints run the accepted source gates without suppressions.",
+      "deliverable": [
+        "Independent review report ties the approved protected diff to exact default and CI-equivalent commands and records any remaining release blockers.",
+        "Commit-bound gate output demonstrates the tested default entrypoints fail on prohibited scanner errors and cannot false-green."
+      ],
+      "verification": [
+        "Confirm a recorded explicit user approval exists for the exact protected patch before accepting any protected-file change.",
+        "From a clean integrated commit, run default Makefile and CI-equivalent gates and inspect full logs, actual test registration and scanner findings.",
+        "Reject scanner allowlists, ignored findings, severity downgrades or swallowed command errors used to obtain a green result."
+      ],
+      "rule_mapping": [
+        "APR-001",
+        "APR-002",
+        "TOOL-003",
+        "CLI-01",
+        "LLM-01",
+        "UI-01",
+        "UI-03",
+        "TOOL-002",
+        "MCP-01",
+        "MCP-02",
+        "TRACE-01",
+        "VFY-01",
+        "VFY-02",
+        "VFY-03",
+        "VFY-04",
+        "VFY-05",
+        "VFY-06",
+        "VFY-07",
+        "VFY-08",
+        "VFY-09",
+        "VFY-10"
+      ],
+      "depends_on": [
+        "R0-SOURCE-REV-01",
+        "R0-PROTECTED-GATE-01"
+      ],
+      "status": "pending",
+      "commit_spec": "This is the protected release-review child mapped to source task R0-REV-01. Overall source task R0-REV-01 remains incomplete until both mapped review children are accepted.",
+      "phase_id": "R0",
+      "source_status": "execution_split",
+      "source_task_id": "R0-REV-01"
+    },
+    {
+      "id": "R0-BLD-05",
+      "role": "builder",
+      "title": "Add a plan-mode fail-closed stopgap",
+      "user_story": "As a user requesting read-only planning, I need currently known and unknown mutating tools blocked while the complete capability model is being built.",
+      "goal": "Immediately deny known write/git/external-mutation tools and unknown-effect tools in plan mode; preserve explicitly classified read-only behavior, including only network reads allowed by the current product policy.",
+      "deliverable": [
+        "Temporary conservative plan-mode gate covers git mutations, remote/custom/MCP/extension tools and subagent dispatch paths.",
+        "Known read-only tools remain available according to existing product policy; do not broadly ban read-only web search/fetch unless policy requires it.",
+        "R4 replaces the temporary table with reviewed effect metadata without opening a policy gap."
+      ],
+      "verification": [
+        "Planned tests: TestPlanModeBlocksKnownMutatingBuiltins, TestPlanModeToolWrapper_FailsClosedForUnknownAndExternalTools, TestPlanModePreservesApprovedReadOnlyTools.",
+        "Exercise every registered git mutation and a fake MCP/custom side-effect through the real plan middleware; assert zero executor invocations."
+      ],
+      "rule_mapping": [
+        "APR-002"
+      ],
+      "depends_on": [
+        "R0-DES-01"
+      ],
+      "status": "done",
+      "commit_spec": "Focused interim safety commit; annotate it as temporary and tie replacement to R4 effect metadata acceptance.",
+      "phase_id": "R0",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R1-DES-01",
+      "role": "designer",
+      "title": "Specify Run ownership, terminal outcome and cleanup state",
+      "user_story": "As a caller, I need to know separately whether execution stopped and whether its external effect is known.",
+      "goal": "Define ExecutionState and Outcome as orthogonal state dimensions, per-run owner, terminal uniqueness, cancel and cleanup transitions, and RunSlot release conditions using current Assembly/Loop/TurnRunner/RunSlotGuard.",
+      "deliverable": [
+        "State transition table for running, cancel_requested, draining, quiescent and quarantined versus success, error, cancelled and unknown.",
+        "Ownership and shutdown contract for readers, workers, child processes, event delivery, session commit and slot release.",
+        "Event envelope semantics for provisional output, sequence gaps and authoritative terminal projection."
+      ],
+      "verification": [
+        "Design review walks concurrent tool cancellation, provider read timeout, non-cooperative Go tool, killable child process, EventStream full/timeout and shutdown races.",
+        "Must state that outcome unknown alone never releases a shared workspace mutation slot and no global unbounded join is allowed."
+      ],
+      "rule_mapping": [
+        "RT-01",
+        "RT-02",
+        "RT-03",
+        "RT-05",
+        "RT-06",
+        "RT-07",
+        "RT-08",
+        "RT-10",
+        "CLI-05",
+        "TOOL-006",
+        "TOOL-008"
+      ],
+      "depends_on": [
+        "R0-DES-01"
+      ],
+      "status": "done",
+      "commit_spec": "Reviewed contract artifact only; do not require a new runtime framework name or product code in the designer task.",
+      "phase_id": "R1",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R1-BLD-01",
+      "role": "builder",
+      "title": "Make provider and continuation terminal results truthful",
+      "user_story": "As a user, stream read/parse failures, timeout, guard failure and continuation failure must never look like a complete successful answer.",
+      "goal": "Propagate one typed terminal result through provider stream, loop and TurnRunner; close incomplete tool messages and apply OutputGuard before text is made visible.",
+      "deliverable": [
+        "Stream contract distinguishes complete, failed, timed out and cancelled.",
+        "Output guard is part of streaming and generation; failure blocks or buffers output before disclosure.",
+        "Continuation errors remain errors and incomplete tool arguments are never dispatched."
+      ],
+      "verification": [
+        "Planned tests: TestStreamReadErrorIsNotComplete, TestStreamMalformedEventIsNotComplete, TestStreamTimeoutIsNotComplete, TestOutputGuardRunsBeforeVisibleDelta, TestContinuationErrorReturnsFailure.",
+        "Use a local fixture server and actual CLI assembly; verify no successful final event and no tool execution after partial args."
+      ],
+      "rule_mapping": [
+        "RT-04",
+        "LLM-03",
+        "LLM-04",
+        "LLM-05"
+      ],
+      "depends_on": [
+        "R1-DES-01"
+      ],
+      "status": "done",
+      "commit_spec": "Commit the terminal-contract implementation separately from retry policy; regression tests must be red on audited baseline.",
+      "phase_id": "R1",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R1-BLD-02",
+      "role": "builder",
+      "title": "Quiesce cancelled runs and close tool transcript pairs",
+      "user_story": "As a user, cancellation must stop new work immediately while the UI truthfully reports any existing worker that is still cleaning up.",
+      "goal": "Do not mark a Run terminal before workers finish, synthesize after caller cancellation, claim dropped subagent sends succeeded or discard tool history without a paired result/unknown receipt.",
+      "deliverable": [
+        "Cancel request and terminal completion are distinct transitions.",
+        "Agent history closes each tool call by ToolCallID with result, interrupted or unknown semantics.",
+        "Subagent sends report accepted, rejected or backpressure, never false success.",
+        "Per-assembly interceptor/registry state does not leak between Assemblies."
+      ],
+      "verification": [
+        "Planned tests: TestRunOwnerCancellationKeepsClaimUntilWorkerStops, TestAssemblySharesRunSlotGuardAcrossHarnessAndTurnRunner, TestCancelClosesToolCallHistory, TestSubagentSendReportsDroppedMessage, TestAssemblyInterceptorsAreIsolated.",
+        "Block a mutation worker on a channel; after bounded wait assert cleanup_pending/quarantined and second mutation is rejected; release/kill it and assert only then slot becomes available.",
+        "Exercise cancellation via real AssembleAgent and actual shared RunSlotGuard."
+      ],
+      "rule_mapping": [
+        "RT-01",
+        "RT-02",
+        "RT-03",
+        "RT-05",
+        "RT-06",
+        "RT-07",
+        "RT-08",
+        "CLI-05"
+      ],
+      "depends_on": [
+        "R1-DES-01"
+      ],
+      "status": "done",
+      "commit_spec": "One commit for cancellation/history state machine and one for assembly scoping if independently reviewable; both must preserve current shared RunSlotGuard wiring.",
+      "phase_id": "R1",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R1-BLD-03",
+      "role": "builder",
+      "title": "Supervise workers and surface event/resource failures",
+      "user_story": "As an operator, timeout, drop or shutdown must reveal what is still active and which result was not delivered.",
+      "goal": "Make bounded EventStream errors observable to the owner, keep Harness span lifetime aligned with Run, and ensure output and worker cleanup cannot grow without bounds.",
+      "deliverable": [
+        "Event drop/timeout returns a detectable gap or delivery error in Run state.",
+        "Harness root span covers asynchronous Run completion.",
+        "Worker shutdown is bounded and non-cooperative work is quarantined or isolated rather than falsely reported quiescent.",
+        "No unbounded output retention in remote Bash metadata."
+      ],
+      "verification": [
+        "Planned tests: TestEventStreamDropVisibleToRunOwner, TestHarnessSpanEndsAfterRunAndIncludesOutcomeAttributes, TestNonCooperativeWorkerQuarantinedAfterDeadline, TestRemoteBashMetadataRemainsBounded.",
+        "Inject a full 30-second-default projection using a test-configured short timeout; assert loss is surfaced and authoritative transcript remains complete."
+      ],
+      "rule_mapping": [
+        "RT-09",
+        "RT-10",
+        "TOOL-008"
+      ],
+      "depends_on": [
+        "R1-DES-01"
+      ],
+      "status": "done",
+      "commit_spec": "Commit lifecycle/observability work in independently testable chunks; do not turn EventStream into the source of truth.",
+      "phase_id": "R1",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R1-REV-01",
+      "role": "reviewer",
+      "title": "Prove terminal uniqueness and safe quiescence",
+      "user_story": "As a release owner, I need cancellation and timeout behavior verified at the actual Run boundary.",
+      "goal": "Independently verify one terminal result, no premature resource/slot release, and no false successful stream completion.",
+      "deliverable": [
+        "Failure-injection report with each worker state and outcome pair.",
+        "Actual CLI subprocess evidence for child-process kill/join and non-cooperative worker bounded wait.",
+        "Race and leak evidence through production Run path, not only verify helper tests."
+      ],
+      "verification": [
+        "Run all planned exact-name tests after asserting registration; run affected core/provider/tool packages with -race -count=1.",
+        "Kill CLI at provider-read, tool-start, tool-return and event-delivery seams; assert one terminal projection and no overlapping workspace mutation."
+      ],
+      "rule_mapping": [
+        "RT-01",
+        "RT-02",
+        "RT-03",
+        "RT-04",
+        "RT-05",
+        "RT-06",
+        "RT-07",
+        "RT-08",
+        "RT-09",
+        "RT-10",
+        "LLM-03",
+        "LLM-04",
+        "LLM-05",
+        "TOOL-006",
+        "TOOL-008",
+        "CLI-05"
+      ],
+      "depends_on": [
+        "R1-BLD-01",
+        "R1-BLD-02",
+        "R1-BLD-03",
+        "R0-SOURCE-REV-01"
+      ],
+      "status": "done",
+      "commit_spec": "No builder code changes; create separate fix task for any rejected invariant and re-review that commit.",
+      "phase_id": "R1",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R2-DES-01",
+      "role": "designer",
+      "title": "Define minimal durable transcript and recovery format",
+      "user_story": "As a user, I need to resume a session after process exit and see which actions completed, failed or became unknown.",
+      "goal": "Add the smallest incremental durable record contract that fits SessionTree and JSONL without full event sourcing, per-token fsync or automatic arbitrary action replay.",
+      "deliverable": [
+        "Identity rules for physical session file, session ID, entry ID, branch/root parent and ToolCallID/ActionID.",
+        "Commit points for user input, tool intent, tool receipt/unknown, compaction projection, final response and flush/sync acknowledgment.",
+        "Recovery policy for complete lines, valid no-newline tail, truncated JSON tail, malformed complete record, duplicate IDs and unknown side effects.",
+        "On restart, idempotently complete a previously synced, locally validated execution-resolution checkpoint in the global workspace index; never replay the action and keep quarantine active until the global resolution sync succeeds.",
+        "Unresolved action records retain verifiable execution identity (not a bare PID); after parent CLI SIGKILL, recovery quarantines the conflicting session/workspace until child/process-group exit is proven or an operator reconciles it. Safe reads may continue."
+      ],
+      "verification": [
+        "Review crash matrix before dispatch, after side effect before receipt, after receipt before final, during append/flush/sync.",
+        "Verify unknown action is surfaced for reconciliation and never auto-dispatched on reopen.",
+        "Inject a crash after session resolution checkpoint Sync but before global index append/Sync; recovery appends the exact resolution once, clears quarantine only after Sync, and performs zero tool/provider replay.",
+        "Kill the parent CLI while a child process continues writing; on restart, reject conflicting writes until independently verified exit or explicit quarantine reconciliation. Never kill based on a bare PID or clear a RunSlot as evidence.",
+        "During recovery, a workspace read is allowed only when the trusted resolved EffectSet proves read-only and the pinned executor enforces declared workspace/path scope; unknown effects and unscoped default Read/Grep/Find/Ls remain blocked during a conflicting quarantine."
+      ],
+      "rule_mapping": [
+        "SES-01",
+        "SES-02",
+        "SES-03",
+        "SES-04",
+        "SES-05",
+        "SES-06",
+        "SES-08",
+        "SES-10",
+        "SES-13",
+        "SES-14",
+        "RT-11",
+        "CLI-11"
+      ],
+      "depends_on": [
+        "R1-REV-01"
+      ],
+      "status": "done",
+      "commit_spec": "Reviewed record-format and crash-policy note only; preserve existing JSONL compatibility or document a versioned migration before implementation.",
+      "phase_id": "R2",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R2-BLD-01",
+      "role": "builder",
+      "title": "Fix session identity, tree restoration and multi-process ownership",
+      "user_story": "As a user, starting a new session cannot merge into another session, and resume must select the intended session and branch.",
+      "goal": "Repair physical session identity/resume, append-only tree/branch projection, compaction restore provenance, lock-before-read/recovery, and defensive-copy/sequence behavior.",
+      "deliverable": [
+        "Unique physical session file per session even within the same second.",
+        "Resume resolves file/session ID then entry/branch ID without ambiguous conversion.",
+        "Restored Agent history includes compaction summary and valid tool-call groups; branch Clone shares the immutable canonical prefix without copying or rewriting ActionID/ToolCallID authority.",
+        "Single-writer lock acquired before loading or repairing records; unsupported platforms fail closed; entry clones and sequence persistence are stable. Pending action recovery validates local resolution checkpoints and cannot expose a ready SessionView without the injected marker authority applying those checkpoints to the global index and inspecting the resulting markers.",
+        "JSONL record size policy is symmetric between append and reopen."
+      ],
+      "verification": [
+        "Planned tests: TestNewSessionCreatesIndependentRootFile, TestResumeSessionIDSelectsTreeEntry, TestRestoreIncludesCompactionSummary, TestSessionLockAcquiredBeforeLoad, TestUnsupportedSessionLockFailsClosed, TestPendingActionsRequireRecoveryAuthority, TestRecoveryAuthorityMatchesEachPendingActionReference, TestRecoveryAppliesDurableExecutionResolutionAfterGlobalAppendCrashExactlyOnce, TestNeverDispatchedResolutionWithoutGlobalMarkerIsNoOp, TestResolutionConflictKeepsWorkspaceQuarantined, TestCloneSharesCanonicalPrefixWithoutRewritingToolCallIDs, TestCloneAppendsDivergeFromSharedLeaf, TestSessionTreeCloneDoesNotAliasNestedArgs, TestSessionSeqPersists, TestSessionSameSecondUsesUniqueFile, TestSessionLargeRecordRoundTrips.",
+        "Test record sizes at 1 MiB minus one, exactly 1 MiB and plus one; either read them back or reject before successful append.",
+        "Run actual CLI resume in a child process against a temporary session directory."
+      ],
+      "rule_mapping": [
+        "SES-01",
+        "SES-02",
+        "SES-03",
+        "SES-08",
+        "SES-09",
+        "SES-10",
+        "SES-13",
+        "SES-14"
+      ],
+      "depends_on": [
+        "R2-DES-01",
+        "R1-REV-01"
+      ],
+      "status": "in_progress",
+      "commit_spec": "Separate identity/resume and loader/concurrency commits if contracts stay independent; each commit includes exact red-before-fix regression tests.",
+      "phase_id": "R2",
+      "source_status": "proposed",
+      "execution_scope": "Accepted partial mappings include session RunCommitSink changes 63e9fd→1f2a19b, 75ceb→bf4bbcb, 5a6dd→82d47bc; CLI wrapper changes 29765ab→edc1f27 and docs 9a074→800fa65; test-only callback fixture 1945e8→d3cfcf5; snapshot-to-tree compatibility fixes 3ff2d0c→48f5000, c4c1352→45e9c11; workspace-ID format fix d4d656→803d429; and durable CLI helper 9c92ac→f27e354. The adapter review accepted its bounded tests, but the integrated 5bf14e2 run exposed nine stale session fixture expectations later corrected by the test-only commit. The snapshot-to-tree slice fixes legacy V0 branch/parent projection only and does not prove durable CLI resume. The helper’s four named tests passed under race count 5 in 1.877s, but it is not wired into the production CLI run path. The resolver→EnsureWorkspace→PrepareNew cross-module workspace-ID fix is accepted at d4d656→803d429; three named tests passed under race count 5 in 1.283s. The handoff example prefix was corrected separately. Production CLI prompt/REPL durable-session wiring, session/restart reconciliation, typed compaction provenance, and child/process recovery remain open; the real CommitCompaction consumer waits on R3. The accepted `a7b1919→0d6a9b8` slice covers the core consumer path only, not those remaining CLI/restart obligations. This task is not done. The prepared streaming completion sink maps 9d1a8c→f4f1a57 plus 4702be→a44b19d and is accepted after serializing concurrent sink callbacks; tools/core/CLI race suites and full lint passed at a44b19d. At `a44b19d` this sink had not yet been wired into Loop/RunCommitConsumer; the later accepted consumer slice `a7b1919→0d6a9b8` connects it in core and real-session tests, as recorded below. The review of the earlier sink retains a sleep-based descendant-test flakiness concern. Additional accepted partial work: the prepared streaming consumer source `a7b1919→0d6a9b8` passed independent review for the core/real-session sink path; its targeted core race evidence is recorded separately, and fixed-snapshot lint at `0d6a9b8` reported 0 issues. The CLI run-commit design follow-up docs map `2b810→630e7c7`, `e58→fbacda8`, and `ea6→b98319f` and are approved for design only. Neither establishes production prompt/REPL durable-session wiring or restart recovery. Accepted pre-owner lease slice source 3170293→9258330, independently reviewed in reviews/r2-preowner-lease-review.md. The reviewer used the real durable manager with both Harness.Submit and TurnRunner.RunTurn after admission was closed and verified lease return after cleanup and physical-session reopen. This does not close production prompt/REPL durable-session wiring, session/restart reconciliation, or R2 overall."
+    },
+    {
+      "id": "R2-BLD-02",
+      "role": "builder",
+      "title": "Persist intent, receipt and truthful save acknowledgments",
+      "user_story": "As a user, completed responses are recoverable, while a crash in an external action never causes silent duplicate execution.",
+      "goal": "Propagate append/flush/sync errors, persist action intent/result at semantic commit points, recover unknown outcomes without replay and handle torn tails conservatively.",
+      "deliverable": [
+        "Store writes create/append correctly for directory mode and fail to caller on append/flush/sync errors.",
+        "Typed Loop commit sink durably records input, complete assistant tool-call groups, per-action intent/reservation, receipts, resource-resolution checkpoints, compaction projection, and terminal commit at the defined semantic boundaries. RecoveryAuthority applies a session-validated resolution checkpoint to the global workspace index idempotently; the global index remains quarantined until its matching resolution append and Sync succeed.",
+        "Tool intent and workspace dispatch-ready marker are both durable before dispatch; R4 prepared invocation pins trusted identity/effects and exact executor. Result/unknown receipt and separate resource-resolution evidence are durable before the next provider request.",
+        "Final success/save UI acknowledgment follows durable commit.",
+        "Only demonstrably truncated final JSON is quarantined/truncated; valid JSON without newline is preserved and delimited; malformed complete lines fail closed.",
+        "Persist unresolved-action quarantine so a parent process crash cannot expose the same workspace to a conflicting mutation while its child/process group may still be running; do not kill by PID alone."
+      ],
+      "verification": [
+        "Planned tests: TestAppendFailurePreventsSavedAck, TestToolIntentDurableBeforeDispatch, TestCrashAfterActionMarksUnknownWithoutReplay, TestUnknownReceiptWithLiveChildKeepsCrossSessionMutationBlocked, TestLateExecutionDoneResolvesQuarantineExactlyOnce, TestUnknownExecutorWithoutPendingExecutionErrorCannotResolveQuarantine, TestRecoveryAppliesDurableExecutionResolutionAfterGlobalAppendCrashExactlyOnce, TestNeverDispatchedResolutionWithoutGlobalMarkerIsNoOp, TestResolutionConflictKeepsWorkspaceQuarantined, TestValidJSONTailWithoutNewlineIsPreserved, TestTruncatedJSONTailIsQuarantined, TestMalformedCompleteJSONLineFailsClosed, TestDirectoryStoreAppendOpensWriter, TestPendingSavepointUsesAbsoluteEnqueueSequenceAcrossFlush, TestSessionSyncFailurePoisonsWriterUntilReopen, TestAssemblyToolSearchFilteringSurvivesProtectedListProxy.",
+        "Use injectable file writer failures and an actual child process killed after side effect but before receipt; assert side-effect count remains exactly one after restart. Kill the parent process while its child keeps writing; assert restart blocks conflicting writes but allows safe reads until verified child exit or explicit manual reconciliation.",
+        "No test should require fsync for each token; assert only declared semantic commit points.",
+        "Planned tests: TestRecoveryBlocksWorkspaceMutationWhileOrphanChildLives, TestRecoveryAllowsSafeReadWhileWorkspaceQuarantined."
+      ],
+      "rule_mapping": [
+        "SES-04",
+        "SES-05",
+        "SES-06",
+        "SES-07",
+        "SES-12",
+        "RT-11",
+        "CLI-11"
+      ],
+      "depends_on": [
+        "R2-DES-01",
+        "R2-BLD-01",
+        "R1-REV-01",
+        "R4-EFFECT-01"
+      ],
+      "status": "in_progress",
+      "commit_spec": "One commit for durable journal and truthful acknowledgment; persistence format changes require explicit versioning and fixture compatibility tests.",
+      "phase_id": "R2",
+      "source_status": "proposed",
+      "execution_scope": "Partial lane build_bash is preparing only the standalone durable workspace_index storage/RecoveryAuthority adapter and its tests. Separately, managed Grep/Find helper cancellation/completion behavior is accepted at 2bf4→d39dc37, 2e003→ca09393, and 1099c68→da7779a, including preservation of caller cancellation on forced pipe close; the GitDiff/Write/Edit queued-completion slice is accepted at cc06ae→f892461 with root follow-up 5e48628 and real cancellation races. These do not wire default prepared registration/proof or establish whole-workspace recovery; the initial unsupported-overwrite test fixture failure is not behavior RED. The index may proceed without Loop/CLI wiring; do not connect it to dispatch until the R4 prepared-dispatch boundary is accepted. Cross-session marker matching, append+Sync/idempotency, quarantine and restart gates remain open, so this partial lane does not close R2-BLD-02 or R2."
+    },
+    {
+      "id": "R2-REV-01",
+      "role": "reviewer",
+      "title": "Verify restart recovery and unknown-action safety",
+      "user_story": "As a release owner, I need evidence from a restarted real CLI, not only a mocked store or helper, that session recovery is complete and non-replaying.",
+      "goal": "Review the recovered transcript and side-effect ledger across all declared crash points.",
+      "deliverable": [
+        "Subprocess SIGKILL matrix with commit, cursor and action-count assertions.",
+        "Evidence that complete prior records survive torn-tail handling and save errors are visible.",
+        "Explicit list of unrecoverable unknown outcomes requiring reconciliation.",
+        "Evidence that a surviving child after parent SIGKILL leaves the conflict scope quarantined; raw PID reuse cannot trigger unsafe kill or release."
+      ],
+      "verification": [
+        "Run exact planned recovery tests after verifying names and full session/CLI package race suite.",
+        "Reopen the same session twice and assert no duplicate side effect, stable sequence and exactly one terminal projection per run.",
+        "Use a supervised test child with stable executable identity; kill the parent, verify conflicting mutation is blocked, safe read succeeds, and release requires observed exit or explicit manual reconciliation."
+      ],
+      "rule_mapping": [
+        "SES-01",
+        "SES-02",
+        "SES-03",
+        "SES-04",
+        "SES-05",
+        "SES-06",
+        "SES-07",
+        "SES-08",
+        "SES-09",
+        "SES-10",
+        "SES-12",
+        "SES-13",
+        "SES-14",
+        "RT-11",
+        "CLI-11"
+      ],
+      "depends_on": [
+        "R2-BLD-01",
+        "R2-BLD-02",
+        "R1-REV-01",
+        "R4-EFFECT-01"
+      ],
+      "status": "pending",
+      "commit_spec": "Reviewer adds no implementation; rejection creates an explicit fix task and re-review.",
+      "phase_id": "R2",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R3-DES-01",
+      "role": "designer",
+      "title": "Define provider capability and conversation-integrity contracts",
+      "user_story": "As a user, provider names, credentials, tool protocol and conversation behavior must mean the same thing in every entry point.",
+      "goal": "Define one provider factory/capability matrix, retry boundary, cost semantics and context/tool-group invariants before enabling additional adapters.",
+      "deliverable": [
+        "Provider/protocol/credential origin resolution table for CLI, serve, subagent and model cycling.",
+        "Per-provider tool schema/result, system instruction, image, finish reason and stream-terminal contract.",
+        "Retry matrix by pre-visible output, dispatched tool action and unknown effect; cost/budget distinction; compaction record-group policy."
+      ],
+      "verification": [
+        "Product owner explicitly marks native provider/version support; unsupported protocol is rejected before credentials or prompt are sent.",
+        "Clarify PRD-04 as optional hard-budget decision while treating PRD-10 stream usage undercount as defect."
+      ],
+      "rule_mapping": [
+        "LLM-01",
+        "LLM-02",
+        "LLM-06",
+        "LLM-07",
+        "LLM-08",
+        "LLM-09",
+        "LLM-10",
+        "LLM-12",
+        "LLM-14",
+        "LLM-15",
+        "PRD-01",
+        "PRD-02",
+        "PRD-03",
+        "PRD-04",
+        "PRD-09",
+        "PRD-10"
+      ],
+      "depends_on": [
+        "R1-REV-01",
+        "R2-REV-01"
+      ],
+      "status": "pending",
+      "commit_spec": "Contract/matrix only; do not turn conditional native protocol work or an undecided hard budget into a default-path implementation commitment.",
+      "phase_id": "R3",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R3-BLD-01",
+      "role": "builder",
+      "title": "Unify provider resolution and supported-protocol enforcement",
+      "user_story": "As a user, selecting a provider must use its intended endpoint, credential domain and supported wire contract.",
+      "goal": "Use one validated resolver for active CLI entrypoints and make unsupported native/protocol behavior fail closed until end-to-end tests pass.",
+      "deliverable": [
+        "Shared provider factory feeds prompt, REPL/TUI, serve, subagent and model cycling.",
+        "Sampling/system/image/tool schema and finish reason are preserved for each enabled protocol.",
+        "ProviderComposer has deterministic selection and explicit fallback policy."
+      ],
+      "verification": [
+        "Planned tests: TestProviderFactoryConsistentAcrossEntrypoints, TestProviderRejectsUnsupportedToolProtocol, TestNativeProviderToolCallResultRoundTrip, TestProviderPreservesSystemAndImageInputs, TestProviderComposerDeterministicWinner.",
+        "Use fixture HTTP servers and assert headers, body, endpoint, response/tool result and errors; do not require real API credentials in CI."
+      ],
+      "rule_mapping": [
+        "LLM-01",
+        "LLM-02",
+        "LLM-06",
+        "LLM-07",
+        "LLM-10",
+        "LLM-12",
+        "LLM-14",
+        "LLM-15"
+      ],
+      "depends_on": [
+        "R1-REV-01"
+      ],
+      "status": "in_progress",
+      "commit_spec": "Commit shared factory separately from any native provider enablement; native support release requires protocol contract tests for each protocol.",
+      "phase_id": "R3",
+      "source_status": "proposed",
+      "execution_scope": "The narrow resolver-construction slice on r3-resolver (internal/llm plus config) is accepted. A separate provider-owned identity-consumer slice is now in progress for primary/small/same-provider switch consumers using the same immutable resolver. Optional core TryClaimRun source 921ce33→8f54b3b is separately accepted as a guard-only operation; its initial compile-failure RED attempt is not behavioral RED evidence. The bounded ModelSelector lifecycle follow-up is accepted at 6ccb→ffff1d6 and 6ea→3404ec5, with review 9b708→e017f97; at fixed e017f97 the LLM/core/CLI race passed (2.716s/3.806s/19.219s) and lint reported 0 issues. This verifies selector lifecycle behavior only; Assembly is not wired to the shared RunSlotGuard. Retry, cycler, subagent, compaction, broader core/CLI injection, and full ModelRequest/retry-fallback integration remain gated by R2-REV-01 and the complete R3 handoff."
+    },
+    {
+      "id": "R3-BLD-02",
+      "role": "builder",
+      "title": "Fix retry, breaker, loop, budget accounting and safe output cleanup",
+      "user_story": "As a user, transient failures and runtime limits must be handled predictably without retrying an action whose outcome may already have escaped.",
+      "goal": "Correct production middleware classification, attempts, loop lifecycle, stream usage/cost, body bounds and output sanitizer behavior under R1 terminal semantics.",
+      "deliverable": [
+        "Exact MaxAttempts behavior and retry classification for typed provider errors.",
+        "Breaker observes terminal stream result; loop detector uses actual core events and can stop an active run.",
+        "Streaming usage reaches cost reporting; zero/fake stats are not represented as measured values.",
+        "Provider response/error bodies and tool-cache keys/log fields are bounded and secret-safe; sanitizer handles cross-chunk markers."
+      ],
+      "verification": [
+        "Planned tests: TestRetryMaxAttemptsIsExact, TestRetryTypedNetworkError, TestBreakerObservesStreamTerminalError, TestLoopDetectorStopsActualRun, TestStreamUsageAppearsInCostReport, TestProviderErrorBodyBounded, TestSanitizerMarkerAcrossChunks, TestToolCacheDoesNotLogRawArgs.",
+        "Inject timeout, 5xx, network error, stream error, loop repeat and cross-chunk sanitizer marker using actual middleware chain.",
+        "Implement PRD-04 hard budget only if its product decision is explicit; otherwise document unavailable and keep unit accounting honest."
+      ],
+      "rule_mapping": [
+        "LLM-09",
+        "LLM-11",
+        "LLM-13",
+        "LLM-16",
+        "PRD-01",
+        "PRD-02",
+        "PRD-03",
+        "PRD-04",
+        "PRD-05",
+        "PRD-08",
+        "PRD-09",
+        "PRD-10"
+      ],
+      "depends_on": [
+        "R3-DES-01",
+        "R1-REV-01"
+      ],
+      "status": "in_progress",
+      "commit_spec": "Separate retry/loop from accounting/privacy commits when possible; never retry after visible output or side-effect dispatch without idempotency evidence.",
+      "phase_id": "R3",
+      "source_status": "proposed",
+      "execution_scope": "Accepted partial body-bounds/error-classification chain: source `e8→d0ecb1e`, `062→f4c52c0`, and final follow-up `755→da853ff`; the final independent review accepts preservation of bounded response status/prefix and oversize fatality after normalization while retaining explicit timeout precedence. The earlier rejected findings remain documented in the review. Accepted continuation no-replay source `1023→ebb73e1` prevents retry/failover/overflow from replaying a failed continuation. The root-run fixed `ebb73e1` race selection passed `./internal/llm ./internal/production ./internal/core ./internal/cli` (2.794s/1.683s/4.795s/21.281s); the separate CLI fixture delta remains pending independent review. This evidence does not establish an operation-wide retry budget, full attempt/cost accounting, crash-time provider replay, all consumer/cycler/subagent injection, compaction wiring, or full R3 closure. Accepted invalid-request retry classification slice source 6473a7a→6501d1f; see reviews/r3-invalid-request-retry-review.md. HTTP 400/404 terminal classification retains overflow/auth/rate-limit precedence and cancellation stops retry. The later fixed default race at 6501d1f passed; the preceding c3de6b7 failure is retained separately. This does not establish the shared operation-wide budget, cross-fallback attempt accounting, or full R3 closure."
+    },
+    {
+      "id": "R3-BLD-03",
+      "role": "builder",
+      "title": "Preserve conversation groups and preflight context compaction",
+      "user_story": "As a user, long sessions must keep valid tool-call history and recoverable summaries rather than failing at the provider boundary.",
+      "goal": "Fix budget checks before first request, keep tool calls/results grouped through truncate/summary, wire the configured summarizer, and include useful tool outputs in summaries.",
+      "deliverable": [
+        "Context budget preflight and a bounded compaction policy before the first request.",
+        "Compaction preserves ToolCallID groups and summary on session restore.",
+        "Summary strategy receives configured summarizer and relevant non-file tool outputs.",
+        "Memory retrieval semantics are tested where implemented, with clear limits for small and CJK indexes."
+      ],
+      "verification": [
+        "Planned tests: TestContextBudgetCheckedBeforeFirstProviderCall, TestCompactionKeepsToolCallResultTogether, TestSummaryUsesConfiguredModel, TestSummaryIncludesNonFileToolOutput, TestMemorySearchOneAndTwoDocuments, TestMemorySearchCJKSubstring.",
+        "Assert resulting provider request is valid and no unmatched tool call exists after compact/restore."
+      ],
+      "rule_mapping": [
+        "LLM-08",
+        "CMP-01",
+        "CMP-02",
+        "CMP-03",
+        "CMP-04",
+        "MEM-01",
+        "MEM-02"
+      ],
+      "depends_on": [
+        "R3-DES-01",
+        "R2-REV-01"
+      ],
+      "status": "in_progress",
+      "commit_spec": "Commit protocol-group preservation before tuning summary quality; preserve fixtures for old JSONL records.",
+      "phase_id": "R3",
+      "source_status": "proposed",
+      "execution_scope": "Accepted bounded summary-safety chain maps source 42aa→97400f6, 4402→d8a1e97, and 90446→575fc5f; the final review closes system-prompt preservation and standalone Micro normalization/preflight findings. The five-package compaction/core/session/tests/E2E race passed at 575fc5f. Durable session projection, provider-facing summary semantics, and complete R2 CommitCompaction consumer wiring remain separate work; this is not full R3 closure."
+    },
+    {
+      "id": "R3-REV-01",
+      "role": "reviewer",
+      "title": "Review active provider and context contracts at the CLI edge",
+      "user_story": "As a release owner, I need proof that configured provider semantics reach the wire and invalid transcript/state never reaches a model.",
+      "goal": "Verify the real default provider path, enabled native paths, tool history, retry limits and streaming cost reports.",
+      "deliverable": [
+        "Provider support matrix with protocol-specific fixture evidence and credentials scoping.",
+        "Retry/compaction/cost review against the R1/R2 contracts.",
+        "List of native or product features still unavailable."
+      ],
+      "verification": [
+        "Run named fixture tests after confirming exact registration plus full llm/core/compaction package race suites.",
+        "Trace actual CLI assembly to fake local providers; assert no incomplete tool call is sent and no transient stream error appears as success."
+      ],
+      "rule_mapping": [
+        "LLM-01",
+        "LLM-02",
+        "LLM-03",
+        "LLM-04",
+        "LLM-05",
+        "LLM-06",
+        "LLM-07",
+        "LLM-08",
+        "LLM-09",
+        "LLM-10",
+        "LLM-11",
+        "LLM-12",
+        "LLM-13",
+        "LLM-14",
+        "LLM-15",
+        "LLM-16",
+        "PRD-01",
+        "PRD-02",
+        "PRD-03",
+        "PRD-04",
+        "PRD-09",
+        "PRD-10",
+        "CMP-01",
+        "CMP-02",
+        "CMP-03",
+        "CMP-04",
+        "MEM-01",
+        "MEM-02"
+      ],
+      "depends_on": [
+        "R3-BLD-01",
+        "R3-BLD-02",
+        "R3-BLD-03"
+      ],
+      "status": "pending",
+      "commit_spec": "Reviewer code-free; unsupported behaviors are release-gated rather than accepted by naming convention.",
+      "phase_id": "R3",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R4-DES-01",
+      "role": "designer",
+      "title": "Define tool effects, authorization scope and plan-mode policy",
+      "user_story": "As a user, the same tool effect must receive the same permission decision in every entrypoint and mode.",
+      "goal": "Replace name-based side-effect policy with capability/effect identity, bind approvals to the actual executor and define unknown effect behavior.",
+      "deliverable": [
+        "ToolEffect taxonomy for read, workspace write, git-state mutation, network write and external side effect.",
+        "Permission table for interactive, TUI, auto, deny, plan mode, MCP/custom/extension/subagent.",
+        "Product decisions for D-01 model exit from plan mode and APR-003 Bash approval semantics.",
+        "TOOL-001 contract clarifying allowed cwd versus true OS filesystem sandbox."
+      ],
+      "verification": [
+        "Unknown effect and invalid classification default to deny or explicit confirmation; no name-only allowlist is treated as proof of read-only.",
+        "Plan-mode semantics state whether model exit requires UI approval; product owner signs off before implementation."
+      ],
+      "rule_mapping": [
+        "TOOL-001",
+        "APR-002",
+        "APR-003",
+        "APR-004",
+        "APR-005",
+        "APR-008",
+        "D-01"
+      ],
+      "depends_on": [
+        "R1-REV-01"
+      ],
+      "status": "done",
+      "commit_spec": "Reviewed capability and permission contract; no filesystem sandbox claim unless an OS-enforced implementation is explicitly selected.",
+      "phase_id": "R4",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R4-EFFECT-01",
+      "source_task_id": "R4-BLD-01",
+      "role": "builder",
+      "title": "Land trusted tool identity and effect metadata prerequisite",
+      "user_story": "As a user, workspace quarantine must classify the actual registered executor, not trust a tool name or caller-supplied label.",
+      "goal": "Deliver only the independently runnable trusted registration identity/effect seam needed by R2; do not implement full R4 permission behavior or decide D-01.",
+      "deliverable": [
+        "Immutable registry-bound executor identity and trusted EffectSet are queryable from the resolved executor/wrapper without relying on names or caller metadata.",
+        "A side-effect-free prepared-dispatch seam pins the exact executor, normalized call, registry/policy generations, and one-time authorization snapshot. After durable intent sync, direct execution checks the final shared fence before dispatch; a queued mutation consumes one-use admission at enqueue and rechecks that same fence at dequeue before captured execution, without name relookup.",
+        "MutationQueue preserves the captured execution stage and original context, rather than reconstructing a Write/Edit tool or bypassing the captured wrapper. A queue worker cannot re-enter public dispatch, approval, normalization or the queue. Registry List/wrappers cannot expose an unwrapped executable definition; protected proxies preserve Parameterized, StreamingBashTool, PromptGuideliner and TopToolsProvider capabilities.",
+        "Effect inventory covers derived execution; Git actions that may invoke repository-configured helpers remain unknown/composite until a trusted implementation disables those hooks or proves a restricted path.",
+        "The narrow seam is mapped to source R4-BLD-01. Full R4-BLD-01 retains its original source scope and remains pending until its complete approval/Plan Mode contract (including pending D-01) is implemented and reviewed.",
+        "Grep/fd receive no workspace_read effect until fixed-argument and child-environment hardening is present: ripgrep passes patterns with -e, terminates path options with --, uses --no-config and removes RIPGREP_CONFIG_PATH; fd terminates options before user-controlled values and exposes no execution option. Helper-capable Git paths remain unknown/composite unless their captured executor disables or proves those helpers safe."
+      ],
+      "verification": [
+        "Test same-name custom executor spoofing cannot inherit a built-in read-only identity/effect.",
+        "Test registry replacement/version changes produce distinct immutable executor identities.",
+        "Test approval Ask/allow and Ask/deny during preparation; no underlying executor starts before the durable dispatch boundary, and a stale registration/policy generation cannot dispatch.",
+        "Test a queued generation change is caught at dequeue; successful queued work executes the captured executor once and never re-enters approval/queue or re-resolves by tool name. Test ordinary and streaming dispatch share one permit and raw streaming proxies cannot bypass preparation.",
+        "Independent review verifies the trusted metadata is bound to the executor actually returned by the registry; no tool-name allowlist is accepted as proof.",
+        "Through the real prepared path, prove grep pattern --pre=sh plus injected RIPGREP_CONFIG_PATH cannot run a helper, and fd pattern --exec plus an executable path cannot run a command; assert these registrations remain unknown until the hardening is implemented.",
+        "Verify git status/fsmonitor and diff/external-diff or textconv paths remain unknown/composite unless the captured executor disables the repository-configured helper or proves a restricted path."
+      ],
+      "rule_mapping": [
+        "APR-002",
+        "APR-004",
+        "APR-005"
+      ],
+      "depends_on": [],
+      "status": "in_progress",
+      "commit_spec": "Execution-only prerequisite split from R4-BLD-01. Design gates: docs/iterations/2026-09-25-runtime/r4-policy-design.md and its review, docs/iterations/2026-09-25-runtime/r4-tool-inventory.md, and the exact API/order/ownership contract in docs/iterations/2026-09-25-runtime/r4-prepared-dispatch-design.md. Scope excludes plan-exit D-01 and full policy enforcement.",
+      "phase_id": "R4",
+      "source_status": "execution_split"
+    },
+    {
+      "id": "R4-BLD-01",
+      "role": "builder",
+      "title": "Enforce approval semantics and side-effect capability policy",
+      "user_story": "As a user, one-time decisions, plan mode and unknown extension tools must not silently grant recurring side effects.",
+      "goal": "Implement the reviewed effect taxonomy consistently through tools, plan mode, approvals and dynamic registry changes while keeping explicitly allowed read-only network actions distinct from external mutations.",
+      "deliverable": [
+        "One-time Allow never enters reusable session/store cache; AlwaysAllow has a declared scope.",
+        "Unknown classifier/effect fails closed; approval cache binds immutable executor/capability/version/workdir/endpoint identity.",
+        "Plan mode blocks effects that mutate workspace/git or external state, including remote/custom/MCP/extension/subagent paths; explicitly permitted read-only network actions remain a separate policy choice.",
+        "TUI/static/resolver policy agrees across actual entrypoints."
+      ],
+      "verification": [
+        "Planned tests: TestApprovalUnknownClassificationFailsClosed, TestApprovalCacheBindsExecutorVersion, TestPlanModeBlocksEveryRegisteredSideEffect, TestPlanModePreservesExplicitReadOnlyNetworkPolicy, TestApprovalModesConsistentAcrossEntrypoints, TestModelPlanExitMatchesProductDecision.",
+        "Enumerate registry effects in test and fail when a registered tool has no declared effect; exercise subagent dispatch with the same registry."
+      ],
+      "rule_mapping": [
+        "APR-001",
+        "APR-002",
+        "APR-003",
+        "APR-004",
+        "APR-005",
+        "APR-008",
+        "D-01"
+      ],
+      "depends_on": [
+        "R4-DES-01",
+        "R1-REV-01",
+        "R0-BLD-05",
+        "R4-EFFECT-01"
+      ],
+      "status": "in_progress",
+      "commit_spec": "Commit effect metadata and enforcement as a bounded slice; do not preserve compatibility by silently classifying unknown tools as safe.",
+      "phase_id": "R4",
+      "source_status": "proposed",
+      "execution_scope": "Approval/Plan enforcement is active in the r4-approval lane against the independently reviewed policy and prepared-dispatch contract. This is partial progress: full trusted registry/effect integration remains required for task completion; D-01 retains current behavior."
+    },
+    {
+      "id": "R4-BLD-02",
+      "role": "builder",
+      "title": "Harden tool schemas, path boundaries and bounded capture",
+      "user_story": "As a user, built-in tools must validate model arguments and honor documented limits without accidental data loss or unbounded collection.",
+      "goal": "Add model-visible schemas and shared validation; resolve parent symlinks correctly for declared relative-path boundaries; cap tool collection at source; correct cancellation and default search behavior.",
+      "deliverable": [
+        "Schemas and executor validation for Read/Write/Edit/Bash/Grep/Find/Ls and all shipped built-ins.",
+        "TOOL-001 documentation accurately calls the existing allowlist a working-directory constraint unless an OS sandbox is selected.",
+        "Read/write/edit/grep/find/ls relative-path behavior handles parent symlinks within declared contract.",
+        "Any first-party executor that can start asynchronous child/helper resources exposes those resources to the R1 owner; a callback return or missing PendingExecutionError is not quiescence proof for an unknown/config-controlled executor, which must remain quarantined until verified stop or operator reconciliation.",
+        "Search/directory/remote output capture is bounded before accumulation; canceled Grep returns cancellation; unconfigured web search fails clearly instead of mock success.",
+        "Read-only effect and workspace/path scope are separate: the real CLI assembly must propagate its declared allowlist through constructors and resolvers for default Read/Grep/Find/Ls; absolute-path and symlink escapes are rejected before an instance can be classified workspace_read. Pure Go alone does not prove workspace scope."
+      ],
+      "verification": [
+        "Planned tests: TestBuiltinToolSchemasMatchExecutors, TestReadRejectsParentSymlinkEscape, TestSearchStopsAtBoundedCapture, TestGrepCancelReturnsContextError, TestWebSearchMissingProviderFailsClosed, TestRemoteBashOutputAndMetadataBounded.",
+        "For TOOL-001, test cwd acceptance separately from OS sandbox guarantees; never infer command-path isolation from shell string inspection.",
+        "Add mixed-provider tool schema fixtures to ensure wire schema matches execution validation.",
+        "Planned test: TestRegisterDefaultsReadToolUsesConfiguredPathWhitelist.",
+        "Planned test: TestReadToolRejectsAbsolutePathOutsideAllowedPaths.",
+        "Planned test: TestReadToolRejectsSymlinkEscape.",
+        "Planned test: TestAssembleAgentPropagatesPathWhitelistToDefaultTools.",
+        "Planned test: TestDefaultReadGrepFindLsRejectAbsolutePathOutsideAllowedPaths.",
+        "Planned test: TestDefaultReadGrepFindLsRejectSymlinkEscape."
+      ],
+      "rule_mapping": [
+        "TOOL-001",
+        "TOOL-004",
+        "TOOL-005",
+        "TOOL-006",
+        "TOOL-008",
+        "TOOL-009",
+        "TOOL-011"
+      ],
+      "depends_on": [
+        "R4-DES-01",
+        "R1-REV-01",
+        "R3-REV-01"
+      ],
+      "status": "in_progress",
+      "commit_spec": "Keep path semantics, bounded capture and schemas separable when possible; one behavior contract per commit with a failing baseline test.",
+      "phase_id": "R4",
+      "source_status": "proposed",
+      "execution_scope": "Accepted default-schema slice: `a60e238→fa7c969` adds the five missing default-tool schemas and passed its independent review; targeted tools race and the tools/core/approval integration race are archived. This does not complete schemas for every shipped Assembly registration, default-path scope, bounded directory capture, or the R4 gate. Accepted design-only extra-tool schema handoff maps b003→3539d09 with the empty category sentinel refinement; no implementation acceptance is implied. Directory-capture design at 64f8 is conditionally reviewed with implementation clarifications and is not a merged source slice. The WebSearch provider source chain maps 167→f6da89d, 80db→9541657, e444→1d411f7; final review 96e→468aa6c accepted the bounded provider behavior, and the fixed 468aa6c tools/config/CLI/E2E race passed. These slices do not close default path scope, all Assembly schemas, bounded directory capture, or R4 overall."
+    },
+    {
+      "id": "R4-REV-01",
+      "role": "reviewer",
+      "title": "Audit permission and tool behavior from model definition to executor",
+      "user_story": "As a release owner, I need to verify there is no gap between model-visible schema, approval preview, capability policy and the actual executor.",
+      "goal": "Review every registered tool class and ensure risk policy is enforced through real middleware and subagent paths.",
+      "deliverable": [
+        "Generated tool effect/schema coverage ledger and explicit waivers for unavailable tools.",
+        "Evidence that invalid args do not execute and path semantics match product/help promises.",
+        "Approval audit of once/always/deny, extension identity and plan-mode closure."
+      ],
+      "verification": [
+        "Run registered exact-name tests and full tool/approval/core race packages.",
+        "Integration test each effect category through registry, approval middleware and execution seam; verify unknown tools are blocked."
+      ],
+      "rule_mapping": [
+        "TOOL-001",
+        "TOOL-003",
+        "TOOL-004",
+        "TOOL-005",
+        "TOOL-006",
+        "TOOL-008",
+        "TOOL-009",
+        "TOOL-011",
+        "APR-001",
+        "APR-002",
+        "APR-003",
+        "APR-004",
+        "APR-005",
+        "APR-008",
+        "D-01"
+      ],
+      "depends_on": [
+        "R4-BLD-01",
+        "R4-BLD-02"
+      ],
+      "status": "pending",
+      "commit_spec": "Reviewer code-free; identify contract gaps as fix tasks and rerun full real-path tests after changes.",
+      "phase_id": "R4",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R5-DES-01",
+      "role": "designer",
+      "title": "Define the shared TUI transcript and control journey",
+      "user_story": "As a coding-agent user, I need one session view that shows what I asked, what the agent did, what needs approval and whether work is still running or durable.",
+      "goal": "Define TUI model projections from authoritative session/run identity, interaction correlation, input modes, event backpressure and keybinding/help truth.",
+      "deliverable": [
+        "Journey map for new prompt, tool approval, ask_user, parallel approval, steer/queue, cancel/cleanup_pending, resume, fork and export.",
+        "Event-to-transcript projection schema showing provisional versus durable state.",
+        "Pi/OpenCode comparison as workflow references with explicit scope limits."
+      ],
+      "verification": [
+        "Every visible message can be tied to RunID/session/entry/tool-call ID and durable state.",
+        "A user never sees done while a worker remains active or the final record is uncommitted."
+      ],
+      "rule_mapping": [
+        "UI-01",
+        "UI-02",
+        "UI-03",
+        "UI-04",
+        "UI-05",
+        "UI-06",
+        "UI-11",
+        "UI-12",
+        "UI-16"
+      ],
+      "depends_on": [
+        "R1-REV-01",
+        "R2-REV-01"
+      ],
+      "status": "pending",
+      "commit_spec": "Reviewed interaction contract; visuals can evolve but state identity and completion acknowledgment cannot.",
+      "phase_id": "R5",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R5-BLD-01",
+      "role": "builder",
+      "title": "Build TUI HITL, approval queue and transcript correctness",
+      "user_story": "As a TUI user, I can answer all requests, inspect tool activity and trust the completed conversation shown on screen.",
+      "goal": "Wire ask_user and approval responses, queue concurrent approvals by request identity, preserve tool args/pre-tool metadata, and remove duplicate final rendering.",
+      "deliverable": [
+        "HITL and approval requests have unique IDs, explicit response/cancel and no overwrite.",
+        "TUI renders the same user/tool/assistant transcript as session storage, including selected resume/fork branch.",
+        "Tool call details and truthful execution/durability state are visible; dropped Send returns error/backpressure.",
+        "Supported Markdown/Todo/Subagent event renderers are connected to the main local event path or clearly marked unavailable."
+      ],
+      "verification": [
+        "Planned tests: TestTUIApprovalQueueDoesNotLoseRequests, TestTurnDoneDoesNotDuplicateAssistantText, TestTUIEventProjectionPreservesToolArgs, TestTUITranscriptRestoresSelectedBranch, TestTUISendReportsBackpressure.",
+        "Drive actual Bubble Tea model updates and PTY journey through approval, ask_user, tool result, cancellation and restore.",
+        "Planned test: TestTUIWiresTodoAndSubagentEvents."
+      ],
+      "rule_mapping": [
+        "UI-01",
+        "UI-02",
+        "UI-03",
+        "UI-04",
+        "UI-05",
+        "UI-06",
+        "UI-16"
+      ],
+      "depends_on": [
+        "R5-DES-01"
+      ],
+      "status": "in_progress",
+      "commit_spec": "Split approval correlation and transcript projection if necessary; keep each slice reviewable with actual model update tests.",
+      "phase_id": "R5",
+      "source_status": "proposed",
+      "execution_scope": "Partial accepted slice only: source 6921b4bb→e2f8791, 9342cdef→4327ef2, 01404e63→b8bedcb, and fixed interaction follow-up d3ac6b29→ed72cd6. The review accepts approval-detail identity/escaping/review-coverage behavior. This task remains in progress for HITL and approval queue wiring, canonical transcript/session projection, and real end-to-end journeys; no PTY acceptance is recorded. The live TUI projection source chain `7f66→39041d5`, `784→34c33b8`, `508→40178b4` is independently accepted. At main `40178b4`, the full `internal/tui` race suite and five listed related CLI tests passed; these are focused checks, not a full CLI/PTY or durable canonical-history journey."
+    },
+    {
+      "id": "R5-BLD-02",
+      "role": "builder",
+      "title": "Complete TUI input, cancel and discoverability journeys",
+      "user_story": "As a user, I can edit a queued message, steer or cancel predictably, and understand the keys shown by help and dialogs.",
+      "goal": "Unify editor and running-turn input semantics, fix caret and keyboard behavior, and ensure cancellation has a visible cleanup state.",
+      "deliverable": [
+        "Stable multiline/editor insert/navigation and steer/queue behavior.",
+        "Help/keybinding registry matches modal actions; approval can be canceled explicitly.",
+        "Run cancellation shows requested/stopping/quarantined states separately from terminal cancelled."
+      ],
+      "verification": [
+        "Planned tests: TestSteerEditorCaretTracksInsertion, TestHelpKeysMatchModalBindings, TestApprovalCanBeCancelled, TestTUIStopWaitShowsCleanupPending.",
+        "PTY test sends key sequences and compares transcript/state transitions with the shared runtime contract."
+      ],
+      "rule_mapping": [
+        "UI-07",
+        "UI-11",
+        "UI-12"
+      ],
+      "depends_on": [
+        "R5-DES-01",
+        "R1-REV-01"
+      ],
+      "status": "in_progress",
+      "commit_spec": "One focused commit per editor or keybinding behavior group; retain recorded PTY input/output for reviewer reproduction.",
+      "phase_id": "R5",
+      "source_status": "proposed",
+      "execution_scope": "Partial accepted slices include the R5 interaction source through d3ac6b29→ed72cd6 and the fixed TTY/PTY follow-up 7ab3735→7b384ea, c5e338→7a33f3d, c48ec4→8e907e2, and 05f6902→37c7352. Preserve the real PTY failure at 84324fe as pre-fix evidence; the later fixed Darwin/arm64 PTY run passed nine loopback-provider requests and the independently reviewed TTY/PTY slice is accepted. Windows cross-compilation remains unverified because existing approval code references undefined syscall.Stat_t before this slice. Remaining input/cancel/help and complete TUI journey requirements, tagged E2E and full R5/R8 gates remain open; this task is not done."
+    },
+    {
+      "id": "R5-REV-01",
+      "role": "reviewer",
+      "title": "Review the TUI as an end-to-end agent journey",
+      "user_story": "As a release owner, I need the terminal UI reviewed as an interactive product, not a set of disconnected widgets.",
+      "goal": "Verify same-session history, approval/HITL, cancellation and durable end state under PTY interaction.",
+      "deliverable": [
+        "PTY transcript captures for main journeys and resize/cancel cases.",
+        "Comparison against supported Pi/OpenCode workflows without assuming feature parity by count.",
+        "List of unsupported editor/session actions surfaced accurately in help."
+      ],
+      "verification": [
+        "Assert named UI tests registered before running; run full TUI/core/session race suites and PTY subprocess cases.",
+        "Use small, large and concurrent approval scenarios and assert no duplicated assistant text or dropped requests."
+      ],
+      "rule_mapping": [
+        "UI-01",
+        "UI-02",
+        "UI-03",
+        "UI-04",
+        "UI-05",
+        "UI-06",
+        "UI-07",
+        "UI-11",
+        "UI-12",
+        "UI-16"
+      ],
+      "depends_on": [
+        "R5-BLD-01",
+        "R5-BLD-02"
+      ],
+      "status": "pending",
+      "commit_spec": "Reviewer code-free; rejected journeys become isolated builder fix tasks.",
+      "phase_id": "R5",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R6-DES-01",
+      "role": "designer",
+      "title": "Define entrypoint identity, trust and supported wire versions",
+      "user_story": "As an operator, prompt, serve, ACP and MCP must apply the same identity, permission and session rules and describe only wire versions they support.",
+      "goal": "Freeze each adapter's supported protocol version and lifecycle contract; define auth, task/session routing, approval delivery, standard I/O ownership and trust revocation.",
+      "deliverable": [
+        "Entry capability matrix for prompt/REPL/TUI/serve/ACP/Web/MCP.",
+        "ACP auth/session/event ID and stdio framing/timeout contract.",
+        "MCP supported-version wire contract including endpoint origin, reconnect, message/status/session headers and teardown.",
+        "Trust lifecycle for project config, fingerprint changes, persistence and revocation."
+      ],
+      "verification": [
+        "Do not make latest protocol version support a goal by itself; freeze intended version before implementing conformance tests.",
+        "Define behavior for prompt-only or prototype Web paths and remote approval before calling them supported."
+      ],
+      "rule_mapping": [
+        "CLI-02",
+        "CLI-03",
+        "CLI-04",
+        "CLI-07",
+        "CLI-12",
+        "CLI-14",
+        "CLI-15",
+        "CLI-16",
+        "MCP-03",
+        "MCP-04",
+        "MCP-05",
+        "MCP-06",
+        "APR-006"
+      ],
+      "depends_on": [
+        "R1-REV-01",
+        "R2-REV-01",
+        "R4-REV-01"
+      ],
+      "status": "pending",
+      "commit_spec": "Reviewed support-version and entry contract; no implementation is approved by merely naming an adapter official or current.",
+      "phase_id": "R6",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R6-BLD-01",
+      "role": "builder",
+      "title": "Close CLI config, trust, auth-file and machine-output behavior",
+      "user_story": "As a CLI user, credentials and trust decisions must survive intended restarts, and help/version/machine output must remain usable when configuration is invalid.",
+      "goal": "Wire onboarding credentials to shared provider construction, build explicit project trust/revoke/fingerprint flow and make CLI commands robust to invalid config and output modes.",
+      "deliverable": [
+        "Provider auth/keychain load path is consumed by the same factory used by runtime.",
+        "Trust loader and assembler share one explicit persistent manager with fingerprint comparison and revocation.",
+        "help/version work before full config validation; positional prompt, spans and machine stdout/stderr report actual status.",
+        "Token files are created/replaced with secure mode; missing persistence path cannot silently promise session history."
+      ],
+      "verification": [
+        "Planned tests: TestCLICredentialsLoadedIntoProviderFactory, TestProjectTrustRevokedOnConfigChange, TestTrustSurvivesCLIRestart, TestHelpWorksWithInvalidConfig, TestPromptUsesFullPositionalTextAndFailureSpan, TestTokenRewriteRestrictsPermissions.",
+        "Run actual CLI subprocess tests using isolated home/config roots and assert stdout protocol remains parseable."
+      ],
+      "rule_mapping": [
+        "CLI-06",
+        "CLI-07",
+        "CLI-09",
+        "CLI-10",
+        "CLI-11",
+        "CLI-13",
+        "CLI-17",
+        "APR-006"
+      ],
+      "depends_on": [
+        "R6-DES-01",
+        "R3-REV-01"
+      ],
+      "status": "in_progress",
+      "commit_spec": "Separate provider auth and trust store changes from CLI output cleanup; each path needs restart or error-injection coverage.",
+      "phase_id": "R6",
+      "source_status": "proposed",
+      "execution_scope": "Partial lane build_private_files, based at 62aa472 on codebase 1c285ac, is authorized under approved R6 design section 50 for atomic private auth/token/trust-file persistence and auth-reader error/permission behavior only. This isolated slice may proceed while full entrypoint/consumer prerequisites remain pending; complete provider-factory wiring, consumer trust lifecycle, remaining CLI behavior, entrypoint verification and R6 acceptance remain gated. Separately, scoped-auth onboarding/keychain fixes map 6c8021f→868a47e, ae89cd9→a50bc77, 3436c3f→70b387c, and 0533451f→d10e01c; the bounded findings are accepted and the six-package privatefile/config/llm/cli/cmd/cli/tests race passed on d10e01c. Full R6 trust, adapter, entrypoint and coverage gates remain open."
+    },
+    {
+      "id": "R6-BLD-02",
+      "role": "builder",
+      "title": "Make ACP, MCP and Web adapter lifecycles conform to declared contracts",
+      "user_story": "As an automation or remote-client user, sessions, auth, approval, events and tool calls must stay inside the correct request and transport lifetime.",
+      "goal": "Bound dispatch, queue and I/O; isolate per-session events; make MCP config reload replace clients/tools atomically; fail or mark unsupported where a complete protocol path is absent.",
+      "deliverable": [
+        "ACP handler capacity applies to actual background dispatch; queues and HTTP timeouts are bounded.",
+        "Events are keyed by task/session and cannot leak across concurrent runs; remote approval has a defined response path.",
+        "Stdio owns protocol streams, line size, cancellation, reader and serialized writer lifecycle.",
+        "MCP reload reads new config, replaces/removes loaded tool definitions, bumps registry version and shuts down all clients/reconnect workers.",
+        "MCP isError/nil handling, tool-name round-trip and span parent propagate correctly; Web UI is connected to Agent or visibly unavailable."
+      ],
+      "verification": [
+        "Planned tests: TestACPEventsIsolatedByTask, TestACPDispatchBounded, TestACPRemoteApprovalRoundTrip, TestStdioSilentReadCancelled, TestStdioConcurrentWritesSerialized, TestMCPReloadReplacesLoadedToolDefinition, TestMCPIsErrorPropagates, TestMCPToolNameRoundTrips, TestMCPShutdownJoinsReconnects, TestWebAuthenticatedAgentJourney.",
+        "For MCP, run exact declared wire-version conformance fixtures and a real local peer journey; do not infer protocol support from adapter class names."
+      ],
+      "rule_mapping": [
+        "CLI-02",
+        "CLI-03",
+        "CLI-04",
+        "CLI-08",
+        "CLI-12",
+        "CLI-14",
+        "CLI-15",
+        "CLI-16",
+        "MCP-03",
+        "MCP-04",
+        "MCP-05",
+        "MCP-06",
+        "MCP-07",
+        "MCP-08",
+        "MCP-09",
+        "TOOL-007"
+      ],
+      "depends_on": [
+        "R6-DES-01",
+        "R4-REV-01",
+        "R2-REV-01"
+      ],
+      "status": "in_progress",
+      "commit_spec": "Keep ACP/MCP/Web adapter changes separate; each declared protocol version must have reproducible wire fixtures before support is advertised.",
+      "phase_id": "R6",
+      "source_status": "proposed",
+      "execution_scope": "Partial accepted slices: ACP replay/cutover 658→0f6272e and 3c→01c61d7; private ACP HTTP identity/profile behavior 2279→b11d0c3 and fixed follow-up 6359→7daf21a; MCP tool adapter 4e9d→5bf14e2; Web availability e7→55d62ef and ee→fe920cb. The fixed HTTP identity snapshot passed ACP/CLI/core race suites (6.009s/19.116s/3.982s), with route-specific probes, follow-up ACP race, vet and lint also passing. The MCP package passed in the integrated 5bf14e2 race run even though nine session tests failed; the adapter review covers span/error/nil/IsError behavior only. Full ACP session/approval lifecycle and official-protocol compatibility, full MCP Streamable HTTP adapter lifecycle and Assembly reload/registry generation, authenticated Web agent journey, entrypoint wiring and R6 gates remain open; this partial work does not close R6. Further accepted bounded slices: CLI/doctor URL-backed MCP transport wiring `e517→d431658` and fixture/assertion follow-up `ceb→e3f7c50`; MCP operation-scoped completion signal `b218→525007e`; private ACP HTTP client lifecycle `56e→90bcaf6`, `4f3→2583a7c`, `4e→32bef4a`; and ACP stdio phase-4 test coverage at `08a8108`. The `e3f7c50` combined integration run remains failed (MCP package passed; CLI continuation and retry/stdio E2E assertions failed). The ACP HTTP and MCP completion races pass only their named package scopes. Full adapter, actual entrypoint journey, and R6 gates remain open."
+    },
+    {
+      "id": "R6-REV-01",
+      "role": "reviewer",
+      "title": "Verify every shipped CLI/service entry against common Runtime contracts",
+      "user_story": "As a release owner, I need entry-specific implementation checked against shared auth, session, cancellation and capability semantics.",
+      "goal": "Validate all actual binary paths and clearly separate browser/remote protocol evidence from unit coverage.",
+      "deliverable": [
+        "Entry-by-entry supported/partial/unclosed matrix backed by subprocess or fixture evidence.",
+        "MCP version-specific conformance summary; ACP identity and event isolation proof.",
+        "Unsupported surfaces are removed from active help or described as prototypes."
+      ],
+      "verification": [
+        "Run CLI package race suite and actual prompt/serve/ACP/stdio/Web/MCP fixture journeys.",
+        "Assert wildcard no-auth and credential scope negative cases remain closed after config reload and provider fallback."
+      ],
+      "rule_mapping": [
+        "CLI-01",
+        "CLI-02",
+        "CLI-03",
+        "CLI-04",
+        "CLI-05",
+        "CLI-06",
+        "CLI-07",
+        "CLI-08",
+        "CLI-09",
+        "CLI-10",
+        "CLI-11",
+        "CLI-12",
+        "CLI-13",
+        "CLI-14",
+        "CLI-15",
+        "CLI-16",
+        "CLI-17",
+        "MCP-01",
+        "MCP-02",
+        "MCP-03",
+        "MCP-04",
+        "MCP-05",
+        "MCP-06",
+        "MCP-07",
+        "MCP-08",
+        "MCP-09",
+        "APR-006",
+        "TOOL-007"
+      ],
+      "depends_on": [
+        "R6-BLD-01",
+        "R6-BLD-02"
+      ],
+      "status": "pending",
+      "commit_spec": "Reviewer code-free; missing peer coverage is recorded as unsupported until tested.",
+      "phase_id": "R6",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R7-DES-01",
+      "role": "designer",
+      "title": "Set lifecycle and support contracts for extensions, skills and telemetry",
+      "user_story": "As an extension author and operator, lifecycle, events and traces must report real behavior without leaking prompts or claiming dormant features are connected.",
+      "goal": "Decide supported extension/skill APIs, hook actions, shutdown delivery guarantees and trace exporter protocol/privacy semantics.",
+      "deliverable": [
+        "Extension lifecycle, ordering, error and immutable-observer-data contract.",
+        "Skill parsing/resource/parameter/effect contract and supported registration model.",
+        "Telemetry privacy, parent/span status, delivery/drop, none semantics, metric labels and audit decision outcome contract.",
+        "Dormant API inventory with supported, unavailable or retirement decision."
+      ],
+      "verification": [
+        "Select only wire protocols that can be tested with matching collector/broker; undocumented JSON-over-TCP is not called Kafka.",
+        "No raw user prompt, secret or unbounded tool argument is retained by default trace/audit path."
+      ],
+      "rule_mapping": [
+        "EXT-01",
+        "EXT-02",
+        "EXT-03",
+        "EXT-04",
+        "EXT-05",
+        "EXT-06",
+        "EXT-07",
+        "SKILL-01",
+        "SKILL-02",
+        "SKILL-03",
+        "SKILL-04",
+        "TRACE-01",
+        "TRACE-02",
+        "TRACE-03",
+        "TRACE-04",
+        "TRACE-05",
+        "TRACE-06",
+        "PRD-06",
+        "PRD-07",
+        "PRD-08",
+        "APR-007",
+        "MEM-05",
+        "RT-09"
+      ],
+      "depends_on": [
+        "R1-REV-01",
+        "R4-REV-01",
+        "R6-REV-01"
+      ],
+      "status": "pending",
+      "commit_spec": "Reviewed contract and capability ledger only; API presence is not treated as support acceptance.",
+      "phase_id": "R7",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R7-BLD-01",
+      "role": "builder",
+      "title": "Make extension and skill behavior deterministic, bounded and honest",
+      "user_story": "As a user, registered extensions and skills must either run under documented limits or be reported unsupported rather than silently doing nothing.",
+      "goal": "Fix hook order, lifecycle error propagation, concurrent init/stop, mutable observer data, skill parser/resource/symlink/parameter/XML boundaries and declared registry wiring.",
+      "deliverable": [
+        "Deterministic registration order and truthful lifecycle status/error.",
+        "Hook actions exposed only when implemented; unknown/remote capability rejected clearly.",
+        "Skill loader bounded and cancellable; metadata escaped; parameter schema and tool allowlist enforced or marked unsupported.",
+        "Registry/match and remote extension surfaces connected end-to-end or retired/documented unavailable.",
+        "EventBridge declares whether shutdown drains or abandons events and never claims lossless delivery for events already consumed but not delivered."
+      ],
+      "verification": [
+        "Planned tests: TestExtensionOrderStable, TestExtensionInitFailurePropagates, TestExtensionConcurrentInitAndShutdownSafe, TestExtensionWaiterCancellationDoesNotCancelInit, TestExtensionOwnerCancellationKeepsCleanupPendingUntilCallbackReturns, TestExtensionOwnerCancellationDropsStageAndShutsDownOnce, TestExtensionStagingConflictJoinsCleanupErrorAndShutsDownOnce, TestHookEventDataIsImmutable, TestSkillLoaderHonorsLimitsAndCancel, TestSkillMetadataCannotInjectXML, TestSkillArgumentsValidated, TestUnsupportedRemoteExtensionRejected.",
+        "Exercise a small real extension through load/init/tool-or-hook/shutdown path; test malformed and oversized skill files.",
+        "Planned test: TestEventBridgeCancelAfterReadReportsOrDrainsEvent; fill the output buffer, cancel after source read, and assert bounded drain or an explicit dropped-event count according to the reviewed contract."
+      ],
+      "rule_mapping": [
+        "EXT-01",
+        "EXT-02",
+        "EXT-03",
+        "EXT-04",
+        "EXT-05",
+        "EXT-06",
+        "SKILL-01",
+        "SKILL-02",
+        "SKILL-03",
+        "SKILL-04",
+        "EXT-07"
+      ],
+      "depends_on": [
+        "R7-DES-01"
+      ],
+      "status": "in_progress",
+      "commit_spec": "Separate lifecycle from skill parser changes; remove or mark dormant public API when product declines implementation.",
+      "phase_id": "R7",
+      "source_status": "proposed",
+      "execution_scope": "Partial extension registry/lifecycle-core lane only, owned by build_permissions: internal/extension/registry.go, manager.go, plugin_manager.go and matching package tests. Cover deterministic ordered snapshots, staging conflict atomicity, init owner/waiter cancellation semantics, late-success cleanup and exactly-once shutdown; conflict cleanup errors must remain discoverable with errors.Is/errors.Join. PluginManager.WaitShutdown source c7843be→bf8fbc0 is accepted only as a read-only observation of the existing shutdown operation (three tests race count 20 passed, extension package race passed); it does not establish Assembly shutdown ordering. The bounded MCP HotReloader local close/join lifecycle and interval-validation slice is accepted at f67→55ac77f and c195→b2e2a5f: f67 covers RequestStop/Done/Wait and worker join, while c195 rejects non-positive poll intervals before owner creation. The fixed MCP and integrated MCP/CLI race suites passed; this does not wire HotReloader into default Assembly. Planned registry regressions are TestExtensionWaiterCancellationDoesNotCancelInit, TestExtensionOwnerCancellationKeepsCleanupPendingUntilCallbackReturns, TestExtensionOwnerCancellationDropsStageAndShutsDownOnce, and TestExtensionStagingConflictJoinsCleanupErrorAndShutsDownOnce. Do not touch internal/cli/assemble.go, skill files, Hook/EventBridge bridge files, or internal/core/run_slot.go. This is not full R7-BLD-01 or R7 acceptance; skills, default-assembly wiring and R7 gates remain pending. The Assembly-close review history retains the rejected 93d7fc5 baseline. Its follow-up review accepts only the server-generation-local producer fence/join and Stop-waiter behavior at source 889209a, with the fixed ACP package race recorded in reviews/r7-assembly-close-review.md. That report still identifies a P2 in IsBuiltInHTTPClientLocallyJoined (typed-nil panic and reconnect race), and the helper is not wired into CLI Assembly. Healthy built-in HTTP ACP Assembly completion, serve-command integration, and REPL flush-ticker join remain open; this partial review does not close R7."
+    },
+    {
+      "id": "R7-BLD-02",
+      "role": "builder",
+      "title": "Make tracing, metrics and approval audit privacy-safe and truthful",
+      "user_story": "As an operator, trace output must be correctly correlated and bounded, and approval audits must show the user's actual decision without recording secrets.",
+      "goal": "Unify tracer wiring, redaction, span status/parent, exporter shutdown/delivery, metrics labels, audit append integrity and cost/runtime stat truth.",
+      "deliverable": [
+        "One trace identity/executable exporter selection across main and assembly; none means no exporter.",
+        "No prompt/raw output/secrets in traces and error chains by default; error spans have error status.",
+        "Async/sync delivery contract matches implementation; dropped batch and shutdown-queued records are visible.",
+        "Approval audit distinguishes classifier result from user response and tool outcome; audit chain advances only after durable append.",
+        "Stats show unknown/unavailable rather than fake zeros."
+      ],
+      "verification": [
+        "Planned tests: TestTraceUsesSingleParentChain, TestTraceNoneWritesNothing, TestTracePromptAndSecretRedacted, TestTraceErrorSpanStatus, TestTraceShutdownDoesNotAcceptOrphanedSpan, TestTraceFailedBatchReported, TestTelemetryLabelsAreInjective, TestAuditHashAdvancesOnlyAfterAppend, TestApprovalAuditRecordsFinalChoice, TestUnavailableStatsNotReportedAsZero.",
+        "Use in-memory and file exporters plus simulated failing collectors; verify no high-cardinality/raw labels and no secret content."
+      ],
+      "rule_mapping": [
+        "TRACE-01",
+        "TRACE-02",
+        "TRACE-03",
+        "TRACE-04",
+        "TRACE-05",
+        "TRACE-06",
+        "PRD-05",
+        "PRD-06",
+        "PRD-07",
+        "PRD-08",
+        "APR-007",
+        "MEM-05",
+        "RT-09"
+      ],
+      "depends_on": [
+        "R7-DES-01",
+        "R1-REV-01"
+      ],
+      "status": "in_progress",
+      "commit_spec": "Split high-risk privacy from exporter conformance where possible; trace snapshots must be reviewed for secrets before acceptance.",
+      "phase_id": "R7",
+      "source_status": "proposed",
+      "execution_scope": "Accepted partial slices: telemetry source 78b694c→948c27f plus test-only fixtures e3e1c6→78b1bb3; and bounded async-exporter ownership/CLI-finalizer source 0e→c484c66. The latter does not cover Assembly/REPL/serve producer lifecycles, stdout/structured-output preflight, or full CLI shutdown error propagation. R7 tracing lifecycle integration, remaining audit/privacy work, declared dependencies and R7-REV-01 remain open; this is not full R7 acceptance."
+    },
+    {
+      "id": "R7-REV-01",
+      "role": "reviewer",
+      "title": "Review plugin lifecycle and telemetry evidence boundaries",
+      "user_story": "As a release owner, I need proof that extension, skill and observability features work through their production wiring and fail visibly otherwise.",
+      "goal": "Verify only advertised lifecycle and exporter protocol claims and ensure logs/traces remain safe across error paths.",
+      "deliverable": [
+        "Support/defer/retire table for extension and skill APIs.",
+        "Trace privacy and exporter lifecycle report with actual serialized output samples.",
+        "Audit trail failure-injection evidence."
+      ],
+      "verification": [
+        "Run exact planned names plus complete extension/skill/tracing/approval race suites.",
+        "Exercise extension init failure, reconnect shutdown, trace exporter failure and audit disk failure through production assembly."
+      ],
+      "rule_mapping": [
+        "EXT-01",
+        "EXT-02",
+        "EXT-03",
+        "EXT-04",
+        "EXT-05",
+        "EXT-06",
+        "EXT-07",
+        "SKILL-01",
+        "SKILL-02",
+        "SKILL-03",
+        "SKILL-04",
+        "TRACE-01",
+        "TRACE-02",
+        "TRACE-03",
+        "TRACE-04",
+        "TRACE-05",
+        "TRACE-06",
+        "PRD-05",
+        "PRD-06",
+        "PRD-07",
+        "PRD-08",
+        "APR-007",
+        "MEM-05"
+      ],
+      "depends_on": [
+        "R7-BLD-01",
+        "R7-BLD-02"
+      ],
+      "status": "pending",
+      "commit_spec": "Reviewer code-free; any unverified exporter/protocol is downgraded in support matrix rather than inferred from naming.",
+      "phase_id": "R7",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R8-DES-01",
+      "role": "designer",
+      "title": "Set UI terminal support and public capability claims",
+      "user_story": "As a user, help and documentation must distinguish available coding-agent workflows from dormant library APIs.",
+      "goal": "Define terminal platform/accessibility/render targets and decide which optional image, task, memory, web and branch features are actually product commitments.",
+      "deliverable": [
+        "Supported terminal/OS/encoding/color matrix and accessibility fallback contract.",
+        "User-visible capability matrix for image_read, goal/task/todo persistence, auto memory, session fork/snapshot/migration, web UI and dormant registries.",
+        "Pi/OpenCode workflow comparison scoped to user value rather than feature-count parity."
+      ],
+      "verification": [
+        "Each claimed capability maps to a default entrypoint smoke test and expected durable behavior.",
+        "Uncommitted product features are marked unavailable/deferred rather than appearing to work through mock/default behavior."
+      ],
+      "rule_mapping": [
+        "UI-05",
+        "UI-08",
+        "UI-13",
+        "UI-14",
+        "UI-15",
+        "TOOL-010",
+        "MEM-03",
+        "MEM-04",
+        "SES-11",
+        "CLI-16",
+        "EXT-03",
+        "EXT-04",
+        "SKILL-04"
+      ],
+      "depends_on": [
+        "R5-REV-01",
+        "R6-REV-01",
+        "R7-REV-01"
+      ],
+      "status": "pending",
+      "commit_spec": "Decision matrix only; avoid silently expanding the release into features with no product owner or measurable acceptance.",
+      "phase_id": "R8",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R8-BLD-01",
+      "role": "builder",
+      "title": "Bound TUI rendering and support terminal variation",
+      "user_story": "As a user with a large session or non-ASCII terminal, scrolling and rendering must remain correct and responsive.",
+      "goal": "Implement viewport/search, bounded incremental rendering, Unicode/ANSI cell-width correctness, resize handling, theme/diff behavior and accessibility fallback.",
+      "deliverable": [
+        "Stable transcript viewport with search and bounded memory/render work.",
+        "Correct CJK, combining, wide emoji and ANSI clipping.",
+        "diff_style/theme behavior is applied or removed from config; resize and ASCII fallback follow declared matrix."
+      ],
+      "verification": [
+        "Planned tests: TestTranscriptViewportSearchAndScroll, TestTranscriptViewportCJKAndANSI, TestStreamRenderBoundedLargeTranscript, TestTerminalResizeKeepsViewportStable, TestASCIIFallbackHasNoControlGlyphDependency.",
+        "Run PTY render checks over growing transcript and record bounded allocations/latency trend with a fixed workload; validate representative supported terminals manually."
+      ],
+      "rule_mapping": [
+        "UI-08",
+        "UI-09",
+        "UI-10",
+        "UI-13",
+        "UI-14",
+        "UI-15"
+      ],
+      "depends_on": [
+        "R8-DES-01",
+        "R5-REV-01"
+      ],
+      "status": "in_progress",
+      "commit_spec": "Separate rendering correctness from benchmark tuning; do not add snapshot-only tests that restate the renderer implementation.",
+      "phase_id": "R8",
+      "source_status": "proposed",
+      "execution_scope": "Parent-authorized partial helper slice only on branch codex/runtime-r8-tui-cells based at 98a6930: Unicode/cell-width helpers, box rendering and renderer integration covered by approved R8 design items 3 and 6. This is partial R8-BLD-01 progress; the remaining viewport/search/resize/accessibility work, declared R5-REV-01 prerequisite, full R5/R8 gate, and review remain open."
+    },
+    {
+      "id": "R8-BLD-02",
+      "role": "builder",
+      "title": "Ship or clearly disable deferred product capabilities",
+      "user_story": "As a user, a named command or tool must either work across restart and runtime wiring or explain that it is not available.",
+      "goal": "Implement only capabilities selected in R8-DES-01; hide or mark dormant APIs that are not funded for this release.",
+      "deliverable": [
+        "For selected ImageRead and persisted Goal/Task/Todo features, register in the default CLI and prove restart roundtrip.",
+        "For selected memory retrieval, connect it to runtime with bounded and explainable retrieval, or mark it manual-only.",
+        "For declined branch/snapshot/migration/Web/external extension paths, remove misleading help/status or return explicit unsupported.",
+        "If memory storage remains a supported path, append/delete errors leave in-memory indexes consistent with durable state; otherwise the affected persistence feature is clearly unavailable."
+      ],
+      "verification": [
+        "Planned tests: TestImageReadAvailableInDefaultCLI, TestGoalTaskTodoSurviveRestart, TestMemoryRetrievalInjectedWhenEnabled, TestDormantCapabilityReportsUnsupported.",
+        "Run CLI subprocess restart journey for every capability actually selected; do not require tests for explicitly unavailable features beyond a clear unsupported result.",
+        "For Docker, validate the declared target architecture in build metadata or smoke each promised target; no ARM64 support is implied unless selected.",
+        "Planned tests: TestMemoryStoreAppendFailureDoesNotPublishMemory, TestMemoryStoreDeleteReopenFailureConsistent."
+      ],
+      "rule_mapping": [
+        "TOOL-010",
+        "MEM-03",
+        "MEM-04",
+        "SES-11",
+        "CLI-16",
+        "EXT-03",
+        "EXT-04",
+        "SKILL-04",
+        "VFY-11"
+      ],
+      "depends_on": [
+        "R8-DES-01"
+      ],
+      "status": "pending",
+      "commit_spec": "One commit per selected capability; documentation/hide-path changes may be separate. Feature implementation requires a named product acceptance, not audit inference.",
+      "phase_id": "R8",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R8-REV-01",
+      "role": "reviewer",
+      "title": "Run final TUI, capability and evidence gate",
+      "user_story": "As a release owner, I need the final supported feature list to match reproducible product behavior on supported platforms.",
+      "goal": "Review real PTY behavior, startup/help claims, restart persistence and the complete evidence bundle before release.",
+      "deliverable": [
+        "Final supported/partial/unclosed/unavailable matrix with source report mapping.",
+        "Cross-platform/terminal verification record and known limitations.",
+        "Current-commit gate logs; Phase status cannot substitute for them."
+      ],
+      "verification": [
+        "Run exact named tests with registration assertion and package race suites.",
+        "Re-run local and CI-equivalent validation with command versions and env recorded; verify no stale generated/source changes from formatting checks."
+      ],
+      "rule_mapping": [
+        "UI-08",
+        "UI-09",
+        "UI-10",
+        "UI-13",
+        "UI-14",
+        "UI-15",
+        "TOOL-010",
+        "MEM-03",
+        "MEM-04",
+        "SES-11",
+        "CLI-16",
+        "EXT-03",
+        "EXT-04",
+        "SKILL-04",
+        "VFY-01",
+        "VFY-02",
+        "VFY-03",
+        "VFY-04",
+        "VFY-05",
+        "VFY-06",
+        "VFY-07",
+        "VFY-08",
+        "VFY-09",
+        "VFY-10",
+        "VFY-11"
+      ],
+      "depends_on": [
+        "R8-BLD-01",
+        "R8-BLD-02"
+      ],
+      "status": "pending",
+      "commit_spec": "Reviewer code-free; release matrix states separately source review, unit behavior, Runtime integration, protocol peer and PTY evidence.",
+      "phase_id": "R8",
+      "source_status": "proposed"
+    },
+    {
+      "id": "R9-DES-01",
+      "role": "designer",
+      "title": "Specify opt-in action replay eligibility and reconciliation",
+      "user_story": "As a user who explicitly opts in, I want only verifiable idempotent actions to resume after a process crash.",
+      "goal": "Define the smallest action class eligible for cross-process resume, with stable identity, receipt/verifier, generation fencing, cancellation and human reconciliation for unknown results.",
+      "deliverable": [
+        "Per-tool replay eligibility and proof contract; shell and arbitrary MCP default to ineligible.",
+        "Explicit opt-in, status and manual reconciliation UX.",
+        "Threat and failure matrix for duplicate owner, stale generation, lost receipt and verifier failure."
+      ],
+      "verification": [
+        "Do not proceed to build unless every supported action proves idempotency or durable receipt semantics and explicit product approval exists.",
+        "Unknown action remains unknown and cannot be interpreted as permission to retry."
+      ],
+      "rule_mapping": [
+        "SES-04",
+        "SES-05",
+        "SES-06",
+        "MCP-02",
+        "RT-02",
+        "RT-03"
+      ],
+      "depends_on": [
+        "R2-REV-01",
+        "R4-REV-01",
+        "R6-REV-01"
+      ],
+      "status": "deferred",
+      "commit_spec": "No implementation commit unless product opts in and design passes a separate review.",
+      "phase_id": "R9",
+      "source_status": "deferred"
+    },
+    {
+      "id": "R9-BLD-01",
+      "role": "builder",
+      "title": "Implement only receipt-verified opt-in resumable actions",
+      "user_story": "As an opted-in user, a supported action may resume only when the stored receipt/verifier proves safe execution state.",
+      "goal": "Add generation-fenced action claim, verification and explicit reconciliation without changing the R2 default unknown/no-replay behavior.",
+      "deliverable": [
+        "Narrow allowlisted action executor with stable idempotency key and durable receipt.",
+        "Restart recovery that verifies before any resumed action and never reruns an action with ambiguous state.",
+        "UI status for verifying, resumable, resumed, failed verification and manual reconciliation."
+      ],
+      "verification": [
+        "Planned tests: TestResumeActionRequiresExplicitOptIn, TestResumeActionVerifiesReceiptBeforeDispatch, TestResumeActionGenerationFence, TestUnknownActionRequiresReconciliation, TestDuplicateRecoveryOwnerCannotExecuteTwice.",
+        "SIGKILL duplicate-owner and receipt-corruption matrix; side-effect count remains one or execution is blocked."
+      ],
+      "rule_mapping": [
+        "SES-04",
+        "SES-05",
+        "SES-06",
+        "MCP-02",
+        "RT-02",
+        "RT-03"
+      ],
+      "depends_on": [
+        "R9-DES-01"
+      ],
+      "status": "deferred",
+      "commit_spec": "No commit until R9 design is approved; retain default-disabled behavior behind explicit configuration and capability allowlist.",
+      "phase_id": "R9",
+      "source_status": "deferred"
+    },
+    {
+      "id": "R9-REV-01",
+      "role": "reviewer",
+      "title": "Audit replay safety independently before enabling",
+      "user_story": "As a release owner, I need an independent proof that crash recovery cannot duplicate or wrongly suppress external actions.",
+      "goal": "Review verifier soundness, receipt durability, fencing, opt-in scope and human reconciliation.",
+      "deliverable": [
+        "Independent replay matrix and explicit eligible-action list.",
+        "Negative evidence for shell, MCP and every unverified action class remaining non-replayable.",
+        "Enablement recommendation per action, not blanket Runtime auto-resume approval."
+      ],
+      "verification": [
+        "Run exact registered tests, package race suites and full CLI child-process SIGKILL tests with duplicated recovery owners.",
+        "Corrupt or remove receipt and verifier inputs; action must stop for reconciliation rather than dispatch."
+      ],
+      "rule_mapping": [
+        "SES-04",
+        "SES-05",
+        "SES-06",
+        "MCP-02",
+        "RT-02",
+        "RT-03"
+      ],
+      "depends_on": [
+        "R9-BLD-01"
+      ],
+      "status": "deferred",
+      "commit_spec": "Reviewer code-free; no action is enabled until a separate release decision accepts the written action-specific evidence.",
+      "phase_id": "R9",
+      "source_status": "deferred"
+    }
+  ],
+  "source_status": "proposed",
+  "execution": {
+    "branch": "codex/runtime-stabilization",
+    "start_commit": "00149001e2350b18dd69d7fa41ab7fcd6ed0241a",
+    "audit_source_commit": "40692e35e4815f0dff1c9f91b13905008f7221a4",
+    "evidence_policy": {
+      "red": "compiled test fails because baseline behavior violates the intended contract; compile failures and zero matches do not count",
+      "green": "same regression test passes and affected package race suite passes"
+    },
+    "worktrees": {
+      "permissions": "/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/permissions",
+      "bash": "/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/bash",
+      "tui": "/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/tui",
+      "network": "/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network",
+      "provider": "/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/provider",
+      "privacy": "/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/privacy",
+      "verify": "/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/verify"
+    }
+  }
+}

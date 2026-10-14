@@ -185,7 +185,7 @@ func TestWithParametersReplacesNotMerges(t *testing.T) {
 	assert.Empty(t, d.Tools())
 }
 
-// DefaultSkillDefinition getters all return the stored backing values.
+// DefaultSkillDefinition getters preserve the configured field values.
 func TestDefaultSkillDefinitionGetters(t *testing.T) {
 	d := &DefaultSkillDefinition{
 		name:        "g",

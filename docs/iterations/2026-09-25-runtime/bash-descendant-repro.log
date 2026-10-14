@@ -1,0 +1,27 @@
+Finite descendant/inherited-pipe boundary
+
+Temporary test command:
+  rtk env GOMAXPROCS=2 go test -p 2 ./internal/tools -run '^TestAuditStreamingBashInheritedPipeDeadline$' -count=1 -timeout 5s -v
+Exit code: 0 (the test asserts and records the observed delay).
+
+Test command under StreamingBash:
+  sleep 0.7 & child=$!; printf '%s\n' "$child" >&2; wait "$child"
+Configured tool timeout: 100 ms.
+Observed:
+  ERROR streaming_bash.timeout ... duration_ms=710 timeout=100ms
+  elapsed=711ms err=bash: timed out after 100ms: context deadline exceeded
+  child_pid=75945 output="75945\n" metadata=map[duration_ms:710 error:timed out exit_code:-1 truncated:false]
+
+The Bash shell was killed at its context deadline, but its finite `sleep`
+descendant retained the inherited pipe descriptors until it exited. `wg.Wait`
+therefore completed around the child's natural 700 ms exit, not at 100 ms.
+Inspection of base `0014900` confirms the same `exec.CommandContext`, then
+`wg.Wait`, then `cmd.Wait` ordering, so this process-tree behavior predates the
+output-cap fix.
+
+Child cleanup check:
+  rtk ps -o pid=,ppid=,stat=,comm= -p 75945
+Exit code: 1; no matching process remained after the reproducer returned.
+
+The test source was temporary and removed. The child exited naturally; no
+long-lived process was left behind.

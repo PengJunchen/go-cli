@@ -1,0 +1,8 @@
+source_head=b1d5cc92b0835fba5021f12ada0926e72cd9ba71
+command=go test -race -p 2 -count=1 ./internal/privatefile ./internal/config ./internal/approval ./internal/cli
+ok  	github.com/pengjunchen/go-cli/internal/privatefile	1.079s
+ok  	github.com/pengjunchen/go-cli/internal/config	1.071s
+ok  	github.com/pengjunchen/go-cli/internal/approval	1.992s
+ok  	github.com/pengjunchen/go-cli/internal/cli	17.098s
+
+exit=0 elapsed_seconds=51.8

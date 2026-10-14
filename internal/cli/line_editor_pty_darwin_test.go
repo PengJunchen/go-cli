@@ -15,6 +15,11 @@ import (
 // openPTY creates a pseudo-terminal pair and returns the slave end as an
 // *os.File (which reports true for xterm.IsTerminal).
 func openPTY(t *testing.T) (*os.File, func()) {
+	slave, _, cleanup := openPTYWithMaster(t)
+	return slave, cleanup
+}
+
+func openPTYWithMaster(t *testing.T) (*os.File, *os.File, func()) {
 	t.Helper()
 	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)
 	require.NoError(t, err)
@@ -35,8 +40,13 @@ func openPTY(t *testing.T) (*os.File, func()) {
 	slave, err := os.OpenFile(string(buf[:idx]), os.O_RDWR|unix.O_NOCTTY, 0)
 	require.NoError(t, err)
 
-	return slave, func() {
+	return slave, master, func() {
 		slave.Close()
 		master.Close()
 	}
+}
+
+func pendingPTYInputBytes(fd uintptr) (int, error) {
+	const fionread = 0x4004667f
+	return unix.IoctlGetInt(int(fd), fionread)
 }

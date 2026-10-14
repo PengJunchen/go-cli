@@ -1,17 +1,12 @@
 package tools
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
-	"os"
 	"os/exec"
 	"path"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -113,6 +108,20 @@ func (t *GrepTool) Description() string {
 	return "grep: searches files under a directory for a regexp pattern. Args: pattern (string), glob (string, optional include filter), path (string, optional)."
 }
 
+// Parameters returns the JSON Schema for grep's model-supplied arguments.
+func (t *GrepTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"pattern": map[string]any{"type": "string"},
+			"glob":    map[string]any{"type": "string"},
+			"path":    map[string]any{"type": "string"},
+		},
+		"required":             []any{"pattern"},
+		"additionalProperties": false,
+	}
+}
+
 // Execute searches for pattern under path (default ".") and returns matching
 // lines as "file:line:content". Needs to accept an empty-path default resolved
 // against the workdir.
@@ -153,7 +162,10 @@ func (t *GrepTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		return nil, err
 	}
 
-	ms, truncated, err := t.search(ctx, re, searchPath, glob)
+	ms, truncated, lifecycle, helperStarted, err := t.search(ctx, re, searchPath, glob)
+	if helperStarted {
+		reportPreparedLocalProcessCompletion(ctx, lifecycle)
+	}
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("grep.search_failed", "tool", "grep", "path", searchPath, "err", err)
@@ -184,143 +196,51 @@ func (t *GrepTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 }
 
 // search runs ripgrep when available, otherwise the pure-Go walker. It returns
-// matched lines and whether the result was truncated by the output caps.
-func (t *GrepTool) search(ctx context.Context, re *regexp.Regexp, searchPath, glob string) ([]match, bool, error) {
+// matched lines, output truncation, and the last started helper lifecycle.
+func (t *GrepTool) search(ctx context.Context, re *regexp.Regexp, searchPath, glob string) ([]match, bool, managedLocalResult, bool, error) {
+	var lastLifecycle managedLocalResult
+	helperStarted := false
+	capture := newGrepMatchCapture(t.MaxMatches, t.MaxOutput)
 	if !t.forcePureGo && hasRipgrep() {
-		ms, err := grepWithRipgrep(ctx, re, searchPath, glob)
+		lifecycle, started, err := grepWithRipgrepJSONManaged(ctx, re, searchPath, glob, capture)
+		if started {
+			lastLifecycle = lifecycle
+			helperStarted = true
+		}
 		if err == nil {
-			tms, truncated := t.truncateMatches(ms)
-			return tms, truncated, nil
+			return capture.Matches(), capture.Truncated(), lastLifecycle, helperStarted, nil
+		}
+		if errors.Is(err, errGrepCaptureLimit) || errors.Is(err, errGrepOutputProtocol) {
+			return nil, false, lastLifecycle, helperStarted, err
+		}
+		if !shouldFallbackAfterManagedHelper(ctx, err) {
+			return nil, false, lastLifecycle, helperStarted, err
 		}
 		// rg was present but failed (bad path, permission, etc.): fall through
-		// to the pure-Go path.
+		// to the pure-Go path, but only after the managed helper has joined.
 	}
-	tms, truncated := t.truncateMatches(grepPureGo(ctx, re, searchPath, glob))
-	return tms, truncated, nil
-}
-
-// grepWithRipgrep runs `rg --line-number -n -g <glob> <pattern> <path>` and
-// parses its output. The pattern is passed as a literal argument (not combined
-// with flags) to avoid shell-argument injection, and --no-ignore is not used so
-// behavior stays deterministic.
-func grepWithRipgrep(ctx context.Context, re *regexp.Regexp, searchPath, glob string) ([]match, error) {
-	args := []string{"--line-number", "-n"}
-	if glob != "" {
-		args = append(args, "-g", glob)
-	}
-	args = append(args, re.String(), searchPath)
-
-	cmd := exec.CommandContext(ctx, "rg", args...)
-	cmd.Stderr = &bytes.Buffer{}
-	out, err := cmd.Output()
+	capture = newGrepMatchCapture(t.MaxMatches, t.MaxOutput)
+	truncated, err := grepPureGo(ctx, re, searchPath, glob, t.whitelist, capture)
 	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && ee.ExitCode() == 1 {
-			// rg exits 1 when no matches were found: return empty result.
-			return nil, nil
-		}
-		return nil, fmt.Errorf("grep: rg: %w", err)
+		return nil, false, lastLifecycle, helperStarted, err
 	}
-
-	return parseRipgrepOutput(out, re.String()), nil
+	return capture.Matches(), truncated, lastLifecycle, helperStarted, nil
 }
 
-// parseRipgrepOutput splits rg "path:line:content" output into matches.
-func parseRipgrepOutput(out []byte, pattern string) []match {
-	var ms []match
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := sc.Text()
-		file, lineNo, content, ok := splitMatchLine(line)
-		if !ok {
-			continue
-		}
-		ms = append(ms, match{File: file, Line: lineNo, Content: content})
+// grepWithRipgrep runs ripgrep through its JSON event protocol.
+func grepWithRipgrep(ctx context.Context, re *regexp.Regexp, searchPath, glob string) ([]match, error) {
+	capture := newGrepMatchCapture(grepDefaultMaxMatches, grepDefaultMaxOutput)
+	_, _, err := grepWithRipgrepJSONManaged(ctx, re, searchPath, glob, capture)
+	if err != nil {
+		return nil, err
 	}
-	return ms
-}
-
-// splitMatchLine parses a "file:line:content" line into its parts.
-func splitMatchLine(line string) (file string, lineNo int, content string, ok bool) {
-	first := strings.IndexByte(line, ':')
-	if first < 0 {
-		return "", 0, "", false
-	}
-	second := strings.IndexByte(line[first+1:], ':')
-	if second < 0 {
-		return "", 0, "", false
-	}
-	lineNumStr := line[first+1 : first+1+second]
-	var n int
-	if _, err := fmt.Sscanf(lineNumStr, "%d", &n); err != nil {
-		return "", 0, "", false
-	}
-	return line[:first], n, line[first+1+second+1:], true
-}
-
-// grepPureGo walks searchPath and matches each line against re using
-// regexp.MatchString, respecting the glob include filter via path.Match.
-func grepPureGo(ctx context.Context, re *regexp.Regexp, searchPath, glob string) []match {
-	var ms []match
-	// Recursive walk is best-effort: unreadable or missing entries are skipped
-	// deterministically, so any returned walk error is intentionally ignored.
-	if walkErr := filepath.WalkDir(searchPath, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip unreadable entries deterministically
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if glob != "" {
-			// Match against the base file name and the slash-joined relative
-			// path so globs like "*.go" or "**/*.txt" both apply.
-			rel, rerr := filepath.Rel(searchPath, p)
-			if rerr != nil {
-				rel = p
-			}
-			slash := filepath.ToSlash(rel)
-			if !matchGlob(glob, d.Name()) && !matchGlob(glob, slash) {
-				return nil
-			}
-		}
-		scanFile(p, re, &ms)
-		return nil
-	}); walkErr != nil {
-		return ms
-	}
-	return ms
+	return capture.Matches(), nil
 }
 
 // matchGlob reports whether name matches glob, via path.Match (slash-based).
 func matchGlob(glob, name string) bool {
 	ok, err := path.Match(glob, name)
 	return err == nil && ok
-}
-
-// scanFile reads and matches a single file's lines against re.
-func scanFile(filePath string, re *regexp.Regexp, ms *[]match) {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return
-	}
-	defer func() { _ = f.Close() }() //nolint:errcheck // best-effort close during scan.
-
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	lineNo := 0
-	for sc.Scan() {
-		lineNo++
-		content := sc.Text()
-		if re.MatchString(content) {
-			*ms = append(*ms, match{File: filePath, Line: lineNo, Content: content})
-		}
-	}
 }
 
 // match is a single grep result line.
@@ -334,7 +254,7 @@ type match struct {
 func buildMatchOutput(ms []match) string {
 	var sb strings.Builder
 	for _, m := range ms {
-		sb.WriteString(m.File)
+		sb.WriteString(grepDisplayPath(m.File))
 		sb.WriteString(":")
 		sb.WriteString(fmt.Sprintf("%d", m.Line))
 		sb.WriteString(":")
@@ -342,27 +262,6 @@ func buildMatchOutput(ms []match) string {
 		sb.WriteString("\n")
 	}
 	return strings.TrimSuffix(sb.String(), "\n")
-}
-
-// truncateMatches caps matches by the tool's count and byte-output limits.
-func (t *GrepTool) truncateMatches(ms []match) ([]match, bool) {
-	truncated := len(ms) > t.MaxMatches
-	if truncated {
-		ms = ms[:t.MaxMatches]
-	}
-
-	bytesUsed := 0
-	limit := len(ms)
-	for i, m := range ms {
-		lineBytes := len(m.File) + 1 + len(fmt.Sprintf("%d", m.Line)) + 1 + len(m.Content) + 1
-		if bytesUsed+lineBytes > t.MaxOutput {
-			truncated = true
-			limit = i
-			break
-		}
-		bytesUsed += lineBytes
-	}
-	return ms[:limit], truncated
 }
 
 // hasRipgrep reports whether the `rg` binary is on PATH.

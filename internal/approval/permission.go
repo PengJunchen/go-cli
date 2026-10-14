@@ -6,8 +6,10 @@ package approval
 type PermissionMode int
 
 const (
-	// PermissionDefault applies the safety-policy classifier: dangerous tools
-	// are denied, everything else is allowed.
+	// PermissionDefault applies the safety-policy classifier: explicitly
+	// forbidden tools are denied, built-in read-only names classify Allow, and
+	// every other name classifies Ask. Prepared dispatch preserves a read-only
+	// Allow only after trusted registration, effect, and scope checks pass.
 	PermissionDefault PermissionMode = iota
 	// PermissionPlan holds tool execution for plan confirmation: the resolved
 	// classifier returns Ask so each call needs explicit confirmation.

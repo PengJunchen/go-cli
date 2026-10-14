@@ -276,91 +276,141 @@ func (t *DefaultSessionTree) ListBranches() []BranchMeta {
 	return out
 }
 
-// Clone deep-copies the entries of the source branch (root to fromBranchID)
-// into a new branch identified by newBranchID. The new entries get ids of the
-// form "{newBranchID}-{originalID}" and their ParentIDs are remapped to the new
-// id space. After cloning, the new branch's leaf becomes the current leaf and
-// branch metadata is recorded linking the new branch to its source.
+func branchMetaFromCheckpoint(checkpoint SessionEntry) BranchMeta {
+	createdAt := checkpoint.Timestamp
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	return BranchMeta{
+		BranchID:   checkpoint.BranchID,
+		ParentID:   checkpoint.BaseLeafEntryID,
+		CreatedAt:  createdAt,
+		BaseLeafID: checkpoint.BaseLeafEntryID,
+	}
+}
+
+func (t *DefaultSessionTree) restoreBranchMetadataFromCheckpoints(entries []*SessionEntry) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, entry := range entries {
+		if entry == nil || entry.RecordVersion != 1 || entry.Type != EntryTypeCheckpoint || entry.CheckpointKind != CheckpointBranch {
+			continue
+		}
+		t.branches[entry.BranchID] = branchMetaFromCheckpoint(*entry)
+	}
+}
+
+// NewBranchCheckpoint constructs a branch checkpoint that shares the existing
+// immutable prefix through sourceLeafEntryID. Callers that persist branches
+// must append and sync this record before passing the canonical stored value to
+// ApplyBranchCheckpoint.
+func (t *DefaultSessionTree) NewBranchCheckpoint(ctx context.Context, sourceLeafEntryID, branchID, parentBranchID, sessionID string) (SessionEntry, error) {
+	if branchID == "" {
+		return SessionEntry{}, fmt.Errorf("session: branch checkpoint requires a branch ID")
+	}
+	branch, err := t.GetBranch(ctx, sourceLeafEntryID)
+	if err != nil {
+		return SessionEntry{}, fmt.Errorf("session: branch checkpoint: source leaf: %w", err)
+	}
+	if len(branch) == 0 {
+		return SessionEntry{}, fmt.Errorf("session: branch checkpoint source %q is empty", sourceLeafEntryID)
+	}
+	if sessionID != "" {
+		for _, entry := range branch {
+			if entry.RecordVersion == 1 && entry.SessionID != "" && entry.SessionID != sessionID {
+				return SessionEntry{}, fmt.Errorf("session: branch source %q belongs to physical session %q, not %q", sourceLeafEntryID, entry.SessionID, sessionID)
+			}
+		}
+	}
+
+	checkpointID := branchID + "-" + sourceLeafEntryID
+	t.mu.RLock()
+	_, duplicateBranch := t.branches[branchID]
+	_, duplicateEntry := t.entries[checkpointID]
+	t.mu.RUnlock()
+	if duplicateBranch || duplicateEntry {
+		return SessionEntry{}, fmt.Errorf("session: branch ID %q already exists", branchID)
+	}
+
+	checkpoint := SessionEntry{
+		ID:                checkpointID,
+		ParentID:          sourceLeafEntryID,
+		Type:              EntryTypeCheckpoint,
+		Timestamp:         time.Now().UTC(),
+		BranchID:          branchID,
+		ParentBranchID:    parentBranchID,
+		BaseLeafEntryID:   sourceLeafEntryID,
+		ActiveLeafEntryID: checkpointID,
+		CheckpointKind:    CheckpointBranch,
+	}
+	if sessionID != "" {
+		checkpoint.RecordVersion = 1
+		checkpoint.SessionID = sessionID
+	}
+	return checkpoint, nil
+}
+
+// ApplyBranchCheckpoint applies an already-synced canonical branch checkpoint
+// to the in-memory tree. The active branch pointer changes only after the
+// checkpoint has been appended successfully.
+func (t *DefaultSessionTree) ApplyBranchCheckpoint(ctx context.Context, checkpoint SessionEntry) error {
+	if checkpoint.Type != EntryTypeCheckpoint || checkpoint.CheckpointKind != CheckpointBranch {
+		return fmt.Errorf("session: entry %q is not a branch checkpoint", checkpoint.ID)
+	}
+	if checkpoint.BranchID == "" || checkpoint.BaseLeafEntryID == "" || checkpoint.ParentID != checkpoint.BaseLeafEntryID {
+		return fmt.Errorf("session: branch checkpoint %q has incomplete source coordinates", checkpoint.ID)
+	}
+	if checkpoint.ActiveLeafEntryID != "" && checkpoint.ActiveLeafEntryID != checkpoint.ID {
+		return fmt.Errorf("session: branch checkpoint %q does not point active leaf at itself", checkpoint.ID)
+	}
+	if checkpoint.RecordVersion == 1 {
+		if checkpoint.SessionID == "" || checkpoint.Seq == 0 {
+			return fmt.Errorf("session: canonical branch checkpoint %q has incomplete durable identity", checkpoint.ID)
+		}
+		if err := validateVersion1EntryCoordinates(checkpoint); err != nil {
+			return fmt.Errorf("session: invalid branch checkpoint %q: %w", checkpoint.ID, err)
+		}
+	}
+	if _, err := t.GetBranch(ctx, checkpoint.BaseLeafEntryID); err != nil {
+		return fmt.Errorf("session: branch checkpoint %q has unknown base leaf: %w", checkpoint.ID, err)
+	}
+	if err := t.Append(ctx, &checkpoint); err != nil {
+		return fmt.Errorf("session: append branch checkpoint %q: %w", checkpoint.ID, err)
+	}
+
+	meta := branchMetaFromCheckpoint(checkpoint)
+	t.mu.Lock()
+	t.leafID = checkpoint.ID
+	t.branches[checkpoint.BranchID] = meta
+	branchStore := t.branchStore
+	t.mu.Unlock()
+	if branchStore != nil {
+		if err := branchStore.AppendBranch(ctx, meta); err != nil {
+			slog.Warn("session_branch_checkpoint_cache_failed", "branch_id", checkpoint.BranchID, "err", err)
+		}
+	}
+	return nil
+}
+
+// Clone creates a new branch by sharing the source branch's immutable prefix
+// and appending one checkpoint. Durable callers use NewBranchCheckpoint,
+// AppendAndSync, then ApplyBranchCheckpoint to preserve sync-before-activation.
 func (t *DefaultSessionTree) Clone(ctx context.Context, fromBranchID, newBranchID string) error {
 	span, _ := tracing.SpanFromContext(ctx, "session.branch.clone", tracing.SpanKindInternal)
 	defer span.End()
 
-	// Get source branch entries (root to leaf).
-	branch, err := t.GetBranch(ctx, fromBranchID)
+	checkpoint, err := t.NewBranchCheckpoint(ctx, fromBranchID, newBranchID, "", "")
 	if err != nil {
-		return fmt.Errorf("session: clone: get source branch: %w", err)
+		return fmt.Errorf("session: clone: construct checkpoint: %w", err)
 	}
-	if len(branch) == 0 {
-		return fmt.Errorf("session: clone: source branch %q is empty", fromBranchID)
-	}
-
-	// Build the old->new id mapping so ParentIDs can be remapped.
-	idMap := make(map[string]string, len(branch))
-	for _, e := range branch {
-		idMap[e.ID] = newBranchID + "-" + e.ID
-	}
-
-	// Build the old->new ToolCallID mapping so tool-call references can be
-	// remapped, avoiding ID collisions between the original and cloned branches.
-	toolCallIDMap := make(map[string]string)
-	seq := 0
-	for _, e := range branch {
-		for _, tc := range e.ToolCalls {
-			toolCallIDMap[tc.ID] = fmt.Sprintf("%s-cloned-%d", tc.ID, seq)
-			seq++
-		}
-	}
-
-	for _, e := range branch {
-		newEntry := e.clone()
-		newEntry.ID = idMap[e.ID]
-		newEntry.ParentID = idMap[e.ParentID] // maps to new ID, or "" for the root
-		// Remap ToolCall IDs to avoid collisions with the source branch.
-		for i := range newEntry.ToolCalls {
-			if newID, ok := toolCallIDMap[newEntry.ToolCalls[i].ID]; ok {
-				newEntry.ToolCalls[i].ID = newID
-			}
-		}
-		// Remap the tool-result's ToolCallID to the cloned tool-call's new ID.
-		if newEntry.ToolCallID != "" {
-			if newID, ok := toolCallIDMap[newEntry.ToolCallID]; ok {
-				newEntry.ToolCallID = newID
-			}
-		}
-		if err := t.Append(ctx, newEntry); err != nil {
-			return fmt.Errorf("session: clone: append entry %q: %w", newEntry.ID, err)
-		}
-	}
-
-	// Set the current leaf to the new branch's last entry.
-	lastEntry := branch[len(branch)-1]
-	newLeafID := idMap[lastEntry.ID]
-	if err := t.MoveTo(ctx, newLeafID); err != nil {
-		return fmt.Errorf("session: clone: move to new leaf: %w", err)
-	}
-
-	// Record branch metadata linking the clone to its source.
-	cloneMeta := BranchMeta{
-		BranchID:   newBranchID,
-		ParentID:   fromBranchID,
-		CreatedAt:  time.Now().UTC(),
-		BaseLeafID: newLeafID,
-	}
-	t.mu.Lock()
-	t.branches[newBranchID] = cloneMeta
-	branchStore := t.branchStore
-	t.mu.Unlock()
-
-	// Persist the clone's branch metadata. I/O is done outside the lock.
-	if branchStore != nil {
-		if err := branchStore.AppendBranch(ctx, cloneMeta); err != nil {
-			slog.Warn("session_clone_persist_failed", "op", "session.branch.clone", "branch_id", newBranchID, "err", err)
-		}
+	if err := t.ApplyBranchCheckpoint(ctx, checkpoint); err != nil {
+		return fmt.Errorf("session: clone: apply checkpoint: %w", err)
 	}
 
 	span.SetAttributes(
 		tracing.Attribute{Key: "from_branch", Value: fromBranchID},
 		tracing.Attribute{Key: "new_branch", Value: newBranchID},
+		tracing.Attribute{Key: "checkpoint_entry_id", Value: checkpoint.ID},
 	)
 	return nil
 }

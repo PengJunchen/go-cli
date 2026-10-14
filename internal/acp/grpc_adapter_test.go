@@ -90,7 +90,7 @@ func TestGRPCAdapterConnectEmitsSpan(t *testing.T) {
 	require.NoError(t, client.Connect(ctx))
 
 	span := waitForSpan(t, exporter, "acp.connect")
-	assert.Equal(t, "gRPC", spanAttr(span, "transport"))
+	assert.Equal(t, ACPHTTPProfileV1, spanAttr(span, "transport"))
 	assert.Equal(t, "trace-grpc-connect", span.TraceID)
 }
 
@@ -141,13 +141,12 @@ func TestGRPCReconnectBackoff(t *testing.T) {
 		attempt int
 		want    time.Duration
 	}{
-		{0, 1 * time.Second},
-		{1, 2 * time.Second},
-		{2, 4 * time.Second},
-		{3, 8 * time.Second},
-		{4, 16 * time.Second},
-		{5, 30 * time.Second}, // capped
-		{6, 30 * time.Second}, // still capped
+		{0, 100 * time.Millisecond},
+		{1, 200 * time.Millisecond},
+		{2, 400 * time.Millisecond},
+		{3, 800 * time.Millisecond},
+		{4, 1 * time.Second}, // capped
+		{5, 1 * time.Second}, // still capped
 	}
 	for _, tt := range tests {
 		assert.Equal(t, tt.want, grpcReconnectBackoff(tt.attempt))
@@ -157,46 +156,96 @@ func TestGRPCReconnectBackoff(t *testing.T) {
 // controllableGRPCServer is a minimal ACP HTTP server whose availability can
 // be toggled at runtime to simulate connection drops and recoveries.
 type controllableGRPCServer struct {
-	mu        sync.Mutex
-	available bool
-	pending   []ACPMessage
-	received  []ACPMessage
+	mu             sync.Mutex
+	available      bool
+	pending        []httpACPEnvelope
+	received       []ACPMessage
+	sessions       map[string]string
+	streamRequests int
 }
 
 func (s *controllableGRPCServer) handler(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
+	if r.URL.Path == "/stream" {
+		s.streamRequests++
+	}
 	if !s.available {
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
+	profiles := r.Header.Values(ACPHTTPProfileHeader)
+	if len(profiles) != 1 || profiles[0] != ACPHTTPProfileV1 {
+		s.mu.Unlock()
+		http.Error(w, "unsupported profile", http.StatusBadRequest)
+		return
+	}
 	switch r.URL.Path {
-	case "/connect", "/disconnect":
+	case "/connect":
+		var envelope httpACPEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil || envelope.Version != ACPHTTPProfileV1 {
+			s.mu.Unlock()
+			http.Error(w, "unsupported envelope", http.StatusBadRequest)
+			return
+		}
+		if s.sessions == nil {
+			s.sessions = make(map[string]string)
+		}
+		s.sessions["controlled-session"] = envelope.SenderID
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"version": ACPHTTPProfileV1, "session_id": "controlled-session",
+		})
+	case "/disconnect":
+		var envelope httpACPEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err == nil {
+			delete(s.sessions, envelope.SessionID)
+		}
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	case "/send":
-		var msg ACPMessage
-		if err := json.NewDecoder(r.Body).Decode(&msg); err == nil {
-			s.received = append(s.received, msg)
-			if msg.Type == TypeMessage {
-				s.pending = append(s.pending, ACPMessage{
-					Type:       TypeResponse,
-					SenderID:   "srv",
-					ReceiverID: msg.SenderID,
-					Content:    "echo:" + msg.Content,
-					Timestamp:  msg.Timestamp,
-				})
-			}
+		var envelope httpACPEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil || envelope.Version != ACPHTTPProfileV1 || s.sessions[envelope.SessionID] != envelope.SenderID {
+			s.mu.Unlock()
+			http.Error(w, "unknown session", http.StatusNotFound)
+			return
+		}
+		msg := envelope.message()
+		s.received = append(s.received, msg)
+		if msg.Type == TypeMessage {
+			s.pending = append(s.pending, httpEnvelopeFromMessage(envelope.SessionID, ACPMessage{
+				Type:       TypeResponse,
+				SenderID:   "srv",
+				ReceiverID: msg.SenderID,
+				Content:    "echo:" + msg.Content,
+				Timestamp:  msg.Timestamp,
+			}))
 		}
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	case "/stream":
-		out := s.pending
-		s.pending = nil
+		sessionID := r.URL.Query().Get("session_id")
+		if _, ok := s.sessions[sessionID]; !ok {
+			s.mu.Unlock()
+			http.Error(w, "unknown session", http.StatusNotFound)
+			return
+		}
+		out := make([]httpACPEnvelope, 0, len(s.pending))
+		remaining := s.pending[:0]
+		for _, envelope := range s.pending {
+			if envelope.SessionID == sessionID {
+				out = append(out, envelope)
+			} else {
+				remaining = append(remaining, envelope)
+			}
+		}
+		s.pending = remaining
 		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.WriteHeader(http.StatusOK)
-		for _, msg := range out {
-			data, _ := json.Marshal(msg)
+		for _, envelope := range out {
+			data, _ := json.Marshal(envelope)
 			fmt.Fprintf(w, "%s\n", data) //nolint:errcheck // best-effort stream write
 		}
 	default:
@@ -222,6 +271,12 @@ func (s *controllableGRPCServer) hasReceived(content string) bool {
 	return false
 }
 
+func (s *controllableGRPCServer) streamRequestCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.streamRequests
+}
+
 // newControllableGRPCPeer starts a controllableGRPCServer behind an
 // httptest.Server and returns the server, its controller, and a client wired
 // to it.
@@ -239,7 +294,6 @@ func newControllableGRPCPeer(t *testing.T) (*httptest.Server, *controllableGRPCS
 // then resumes normal send/receive operation once the server is back.
 func TestGRPCAdapterReconnectAfterDrop(t *testing.T) {
 	_, ctrl, client := newControllableGRPCPeer(t)
-	adapter := client.(*gRPCAdapter)
 	ctx := context.Background()
 	require.NoError(t, client.Connect(ctx))
 
@@ -255,25 +309,14 @@ func TestGRPCAdapterReconnectAfterDrop(t *testing.T) {
 		t.Fatal("baseline send/receive timed out")
 	}
 
-	// Drop the server.
+	// Drop the server and wait for the reader to observe a failed poll.
+	initialStreams := ctrl.streamRequestCount()
 	ctrl.setAvailable(false)
+	require.Eventually(t, func() bool { return ctrl.streamRequestCount() > initialStreams }, 2*time.Second, 10*time.Millisecond,
+		"expected the generation reader to poll /stream during recovery")
 
-	// Wait for reconnection to start (readLoop detects 503 on /stream).
-	require.Eventually(t, func() bool {
-		adapter.reconnectMu.Lock()
-		defer adapter.reconnectMu.Unlock()
-		return adapter.reconnecting
-	}, 2*time.Second, 10*time.Millisecond, "expected reconnection to start")
-
-	// Restore the server before the first reconnection attempt (1s backoff).
+	// Restore the server; the reader must resume against the same session ID.
 	ctrl.setAvailable(true)
-
-	// Wait for reconnection to succeed.
-	require.Eventually(t, func() bool {
-		adapter.reconnectMu.Lock()
-		defer adapter.reconnectMu.Unlock()
-		return !adapter.reconnecting
-	}, 5*time.Second, 10*time.Millisecond, "expected reconnection to succeed")
 
 	// Verify send/receive works after reconnection.
 	require.NoError(t, client.SendMessage(ctx, ACPMessage{
@@ -290,50 +333,25 @@ func TestGRPCAdapterReconnectAfterDrop(t *testing.T) {
 	_ = client.Disconnect(ctx) //nolint:errcheck // best-effort cleanup
 }
 
-// TestGRPCAdapterQueuesMessagesDuringReconnection verifies that messages sent
-// while reconnection is in progress are queued and flushed after the
-// connection is re-established.
-func TestGRPCAdapterQueuesMessagesDuringReconnection(t *testing.T) {
+// TestGRPCAdapterRejectsMessagesDuringRecovery verifies that a send attempted
+// while the peer is unavailable returns an error and is never replayed.
+func TestGRPCAdapterRejectsMessagesDuringRecovery(t *testing.T) {
 	_, ctrl, client := newControllableGRPCPeer(t)
-	adapter := client.(*gRPCAdapter)
 	ctx := context.Background()
 	require.NoError(t, client.Connect(ctx))
 
-	// Drop the server.
+	initialStreams := ctrl.streamRequestCount()
 	ctrl.setAvailable(false)
+	require.Eventually(t, func() bool { return ctrl.streamRequestCount() > initialStreams }, 2*time.Second, 10*time.Millisecond,
+		"expected the generation reader to observe the transport failure")
 
-	// Wait for reconnection to start.
-	require.Eventually(t, func() bool {
-		adapter.reconnectMu.Lock()
-		defer adapter.reconnectMu.Unlock()
-		return adapter.reconnecting
-	}, 2*time.Second, 10*time.Millisecond, "expected reconnection to start")
-
-	// Send a message while reconnecting — it should be queued, not sent.
-	require.NoError(t, client.SendMessage(ctx, ACPMessage{
-		Type: TypeMessage, SenderID: "grpc-reconnect", ReceiverID: "srv",
-		Content: "queued-msg",
+	// The client can see an explicit send failure but cannot claim delivery.
+	require.Error(t, client.SendMessage(ctx, ACPMessage{
+		Type: TypeMessage, SenderID: "grpc-reconnect", ReceiverID: "srv", Content: "queued-msg",
 	}))
-
-	// The message must not have reached the server yet.
-	assert.False(t, ctrl.hasReceived("queued-msg"),
-		"message should be queued locally, not sent to the server")
-
-	// Restore the server.
 	ctrl.setAvailable(true)
-
-	// Wait for reconnection to succeed.
-	require.Eventually(t, func() bool {
-		adapter.reconnectMu.Lock()
-		defer adapter.reconnectMu.Unlock()
-		return !adapter.reconnecting
-	}, 5*time.Second, 10*time.Millisecond, "expected reconnection to succeed")
-
-	// The queued message should have been flushed to the server.
-	require.Eventually(t, func() bool {
-		return ctrl.hasReceived("queued-msg")
-	}, 2*time.Second, 10*time.Millisecond,
-		"queued message should be flushed after reconnection")
+	require.Never(t, func() bool { return ctrl.hasReceived("queued-msg") }, 1200*time.Millisecond, 20*time.Millisecond,
+		"a failed send must never be silently replayed")
 
 	_ = client.Disconnect(ctx) //nolint:errcheck // best-effort cleanup
 }
@@ -342,17 +360,15 @@ func TestGRPCAdapterQueuesMessagesDuringReconnection(t *testing.T) {
 // during reconnection terminates the reconnection loop cleanly.
 func TestGRPCAdapterReconnectDisconnectCancels(t *testing.T) {
 	_, ctrl, client := newControllableGRPCPeer(t)
-	adapter := client.(*gRPCAdapter)
 	ctx := context.Background()
 	require.NoError(t, client.Connect(ctx))
 
-	// Drop the server to trigger reconnection.
+	// Drop the server to trigger bounded same-session polling.
+	initialStreams := ctrl.streamRequestCount()
 	ctrl.setAvailable(false)
-	require.Eventually(t, func() bool {
-		adapter.reconnectMu.Lock()
-		defer adapter.reconnectMu.Unlock()
-		return adapter.reconnecting
-	}, 2*time.Second, 10*time.Millisecond, "expected reconnection to start")
+	require.Eventually(t, func() bool { return ctrl.streamRequestCount() > initialStreams }, 2*time.Second, 10*time.Millisecond,
+		"expected a stream poll while unavailable")
+	ctrl.setAvailable(true)
 
 	// Disconnect while reconnecting — should not hang.
 	done := make(chan struct{})
@@ -366,9 +382,6 @@ func TestGRPCAdapterReconnectDisconnectCancels(t *testing.T) {
 		t.Fatal("Disconnect hung during reconnection")
 	}
 
-	// After Disconnect, reconnecting should be false.
-	adapter.reconnectMu.Lock()
-	reconnecting := adapter.reconnecting
-	adapter.reconnectMu.Unlock()
-	assert.False(t, reconnecting, "reconnecting should be false after Disconnect")
+	require.NoError(t, client.Connect(ctx), "a completed cleanup permits a fresh session")
+	require.NoError(t, client.Disconnect(ctx))
 }

@@ -342,6 +342,8 @@ func TestSkillAdapterImplementsToolDefinition(t *testing.T) {
 	assert.Contains(t, desc, "adapter description")
 	assert.Contains(t, desc, "bash")
 	assert.Contains(t, desc, "attempts")
+	assert.Contains(t, desc, "suggested tools (not enforced)")
+	assert.Contains(t, desc, "not accepted as arguments")
 
 	call := tools.ToolCall{ID: "call-1", Name: "adapter-skill"}
 	res, err := adapter.Execute(ctx, call)
@@ -374,6 +376,71 @@ func TestSkillAdapterExecuteListsToolsAndParams(t *testing.T) {
 	params, ok := meta["parameters"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, map[string]any{"max": 10}, params)
+	assert.Equal(t, false, meta["tool_permissions_enforced"])
+	assert.Equal(t, false, meta["tool_arguments_supported"])
+	suggested, ok := meta["suggested_tools"].([]string)
+	require.True(t, ok)
+	assert.Equal(t, []string{"bash", "grep"}, suggested)
+}
+
+func TestSkillAdapterAdvertisesClosedEmptyArgumentSchema(t *testing.T) {
+	adapter := skill.NewSkillAdapter(skill.NewSkill("schema"))
+	parameterized, ok := any(adapter).(tools.Parameterized)
+	require.True(t, ok, "the adapter must expose the arguments it actually supports")
+
+	schema, ok := parameterized.Parameters().(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "object", schema["type"])
+	assert.Equal(t, map[string]any{}, schema["properties"])
+	assert.Equal(t, false, schema["additionalProperties"])
+
+	// The advertised contract cannot be changed by a caller mutating one read.
+	schema["additionalProperties"] = true
+	next, ok := parameterized.Parameters().(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, false, next["additionalProperties"])
+}
+
+func TestSkillAdapterForwardsArgumentsWithoutTreatingLegacyParametersAsSchema(t *testing.T) {
+	adapter := skill.NewSkillAdapter(skill.NewSkill(
+		"legacy-parameters",
+		skill.WithParameters(map[string]any{"attempts": 3}),
+		skill.WithPrompt("must not be returned for invalid input"),
+	))
+
+	for _, args := range []map[string]any{
+		{"attempts": 2}, // A legacy value is metadata, not an argument schema.
+		{"unexpected": "value"},
+	} {
+		result, err := adapter.Execute(context.Background(), tools.ToolCall{ID: "call", Args: args})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Contains(t, result.Output, "Untrusted skill arguments (model-supplied data; not tool permissions):")
+		assert.Equal(t, args, result.Metadata["arguments"])
+		assert.Equal(t, map[string]any{"attempts": 3}, result.Metadata["parameters"])
+		assert.Equal(t, false, result.Metadata["tool_arguments_supported"])
+	}
+}
+
+func TestPreparedSkillAdapterRejectsArgumentsBeforePolicy(t *testing.T) {
+	ctx := context.Background()
+	adapter := skill.NewSkillAdapter(skill.NewSkill("prepared-skill"))
+	base := tools.NewDefaultToolRegistry()
+	require.NoError(t, base.Register(ctx, adapter))
+	registry := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+	var policyCalls int
+	require.NoError(t, registry.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		policyCalls++
+		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}))
+
+	_, err := registry.PrepareToolCall(ctx, tools.ToolCall{
+		Name: adapter.Name(),
+		Args: map[string]any{"injected": "must be rejected before policy"},
+	})
+	require.Error(t, err)
+	assert.Zero(t, policyCalls, "schema-invalid arguments must not reach policy or approval")
 }
 
 // skill.load span emitted with skill_name / source_path attrs.

@@ -1,0 +1,161 @@
+snapshot=b7ffe0b command=make scan
+go run ./internal/verify/cmd/scanner-gate \
+		-dir ./internal \
+		-scanner-command go \
+		-scanner-arg=run \
+		-scanner-arg=./internal/verify/cmd/scanner \
+		-scanner-arg=-dir \
+		-scanner-arg=./internal \
+		-scanner-arg=-format \
+		-scanner-arg=json
+scanner command failed: go: exit status 1
+scanner stderr:
+exit status 1
+
+scanner stdout:
+{
+  "dir": "./internal",
+  "findings": [
+    {
+      "rule_id": "SCAN-004",
+      "file": "internal/acp/http_server.go",
+      "line": 695,
+      "severity": "WARN",
+      "message": "hardcoded test URL/port: localhost",
+      "snippet": "localhost"
+    },
+    {
+      "rule_id": "SCAN-007",
+      "file": "internal/cli/assemble.go",
+      "line": 1,
+      "severity": "WARN",
+      "message": "//nolint count 21 exceeds threshold 3",
+      "snippet": "21 nolint directives"
+    },
+    {
+      "rule_id": "SCAN-007",
+      "file": "internal/cli/cli.go",
+      "line": 1,
+      "severity": "WARN",
+      "message": "//nolint count 5 exceeds threshold 3",
+      "snippet": "5 nolint directives"
+    },
+    {
+      "rule_id": "SCAN-007",
+      "file": "internal/cli/doctor.go",
+      "line": 1,
+      "severity": "WARN",
+      "message": "//nolint count 5 exceeds threshold 3",
+      "snippet": "5 nolint directives"
+    },
+    {
+      "rule_id": "SCAN-007",
+      "file": "internal/cli/interactive.go",
+      "line": 1,
+      "severity": "WARN",
+      "message": "//nolint count 6 exceeds threshold 3",
+      "snippet": "6 nolint directives"
+    },
+    {
+      "rule_id": "SCAN-007",
+      "file": "internal/cli/line_editor.go",
+      "line": 1,
+      "severity": "WARN",
+      "message": "//nolint count 38 exceeds threshold 3",
+      "snippet": "38 nolint directives"
+    },
+    {
+      "rule_id": "SCAN-004",
+      "file": "internal/cli/mention_resolver.go",
+      "line": 160,
+      "severity": "WARN",
+      "message": "hardcoded test URL/port: localhost",
+      "snippet": "localhost"
+    },
+    {
+      "rule_id": "SCAN-007",
+      "file": "internal/cli/models_cmd.go",
+      "line": 1,
+      "severity": "WARN",
+      "message": "//nolint count 4 exceeds threshold 3",
+      "snippet": "4 nolint directives"
+    },
+    {
+      "rule_id": "SCAN-007",
+      "file": "internal/cli/onboarding.go",
+      "line": 1,
+      "severity": "WARN",
+      "message": "//nolint count 37 exceeds threshold 3",
+      "snippet": "37 nolint directives"
+    },
+    {
+      "rule_id": "SCAN-007",
+      "file": "internal/cli/prompt.go",
+      "line": 1,
+      "severity": "WARN",
+      "message": "//nolint count 6 exceeds threshold 3",
+      "snippet": "6 nolint directives"
+    },
+    {
+      "rule_id": "SCAN-007",
+      "file": "internal/cli/repl_session.go",
+      "line": 1,
+      "severity": "WARN",
+      "message": "//nolint count 12 exceeds threshold 3",
+      "snippet": "12 nolint directives"
+    },
+    {
+      "rule_id": "SCAN-004",
+      "file": "internal/cli/serve_cmd.go",
+      "line": 72,
+      "severity": "WARN",
+      "message": "hardcoded test URL/port: 127.0.0.1:9090",
+      "snippet": "127.0.0.1:9090"
+    },
+    {
+      "rule_id": "SCAN-004",
+      "file": "internal/cli/serve_cmd.go",
+      "line": 102,
+      "severity": "WARN",
+      "message": "hardcoded test URL/port: serve: --no-auth is not allowed with a non-loopback address %q (use --addr 127.0.0.1:9090 or enable auth)",
+      "snippet": "serve: --no-auth is not allowed with a non-loopback address %q (use --addr 127.0.0.1:9090 or enable auth)"
+    },
+    {
+      "rule_id": "SCAN-007",
+      "file": "internal/cli/serve_cmd.go",
+      "line": 1,
+      "severity": "WARN",
+      "message": "//nolint count 21 exceeds threshold 3",
+      "snippet": "21 nolint directives"
+    },
+    {
+      "rule_id": "SCAN-007",
+      "file": "internal/cli/slash_context.go",
+      "line": 1,
+      "severity": "WARN",
+      "message": "//nolint count 10 exceeds threshold 3",
+      "snippet": "10 nolint directives"
+    },
+    {
+      "rule_id": "SCAN-007",
+      "file": "internal/cli/slash_handlers.go",
+      "line": 1,
+      "severity": "WARN",
+      "message": "//nolint count 93 exceeds threshold 3",
+      "snippet": "93 nolint directives"
+    },
+    {
+      "rule_id": "SCAN-007",
+      "file": "internal/cli/slash_mcp_reload.go",
+      "line": 1,
+      "severity": "WARN",
+      "message": "//nolint count 4 exceeds threshold 3",
+      "snippet": "4 nolint directives"
+    },
+    {
+      "rule_id": "SCAN-007",
+      "file": "i...<truncated>
+exit status 1
+make: *** [scan] Error 1
+
+exit=2 elapsed_seconds=41.88

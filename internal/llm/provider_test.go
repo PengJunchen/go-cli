@@ -41,7 +41,8 @@ func TestHTTPChatModelGenerateCannedCompletion(t *testing.T) {
 		var req openAIRequest
 		require.NoError(t, json.Unmarshal(body, &req))
 		assert.Equal(t, "gpt-4o", req.Model)
-		assert.Equal(t, 0.7, req.Temperature)
+		require.NotNil(t, req.Temperature)
+		assert.Equal(t, 0.7, *req.Temperature)
 		require.Len(t, req.Messages, 1)
 		assert.Equal(t, "user", req.Messages[0].Role)
 		assert.Equal(t, "hello", req.Messages[0].Content)
@@ -94,7 +95,7 @@ func TestHTTPChatModelGenerateToolCall(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -119,14 +120,19 @@ func TestHTTPChatModelHTTP500(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m", APIKey: "k"},
 		client:   http.DefaultClient,
 	}
 	_, err := model.Generate(context.Background(), nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "boom")
+	assert.NotContains(t, err.Error(), "boom")
+	assert.Contains(t, err.Error(), "server")
+	assert.Contains(t, err.Error(), "500")
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Contains(t, providerErr.Message, "boom")
 }
 
 // TestHTTPChatModelMalformedJSON verifies a malformed body surfaces as an error.
@@ -139,7 +145,7 @@ func TestHTTPChatModelMalformedJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -158,7 +164,7 @@ func TestHTTPChatModelContextCanceled(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -182,7 +188,7 @@ func TestHTTPChatModelBaseURLJoin(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(),
 		cfg:      ModelConfig{Model: "m", BaseURL: srv.URL + "/"},
 		client:   http.DefaultClient,
@@ -203,7 +209,7 @@ func TestHTTPChatModelStreamSingleChunk(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -225,7 +231,7 @@ func TestHTTPChatModelStreamSingleChunk(t *testing.T) {
 // TestBuildBodyOptions verifies per-call options override config defaults.
 func TestBuildBodyOptions(t *testing.T) {
 	p := NewEinoProvider(WithBaseURL("http://example.com"))
-	m := &HTTPChatModel{
+	m := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: p,
 		cfg:      ModelConfig{Model: "m", Temperature: 0.2, MaxTokens: 10},
 		client:   http.DefaultClient,
@@ -235,8 +241,10 @@ func TestBuildBodyOptions(t *testing.T) {
 
 	var req openAIRequest
 	require.NoError(t, json.Unmarshal(body, &req))
-	assert.Equal(t, 0.9, req.Temperature)
-	assert.Equal(t, 42, req.MaxTokens)
+	require.NotNil(t, req.Temperature)
+	assert.Equal(t, 0.9, *req.Temperature)
+	require.NotNil(t, req.MaxTokens)
+	assert.Equal(t, 42, *req.MaxTokens)
 	assert.Equal(t, []string{"END"}, req.Stop)
 	assert.Len(t, req.Messages, 1)
 }

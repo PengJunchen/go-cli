@@ -1,0 +1,63 @@
+2026/09/25 15:45:30 INFO tools.register_default tool=write
+2026/09/25 15:45:30 INFO mutation.enqueue path=/private/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil1764712630/001/existing.txt operation=write trace_id="" span_id=""
+2026/09/25 15:45:30 ERROR write.exists path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil1764712630/001/existing.txt trace_id="" span_id=""
+2026/09/25 15:45:33 INFO tools.register_default tool=edit
+2026/09/25 15:45:33 INFO mutation.enqueue path=/private/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil1088097916/001/existing.txt operation=edit trace_id="" span_id=""
+2026/09/25 15:45:33 ERROR edit.diff_unresolved path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil1088097916/001/existing.txt err="git: not inside a work tree (run from within a git repository): git read-only command failed: context canceled\ncontext canceled" trace_id="" span_id=""
+--- FAIL: TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile (3.02s)
+    --- FAIL: TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile/write (3.00s)
+        git_diff_cancellation_integration_test.go:58: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli/internal/tools/git_diff_cancellation_integration_test.go:58
+            	Error:      	Condition never satisfied
+            	Test:       	TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile/write
+2026/09/25 15:45:33 INFO tools.register_default tool=write
+2026/09/25 15:45:33 INFO mutation.enqueue path=/private/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil742270434/001/existing.txt operation=write trace_id="" span_id=""
+2026/09/25 15:45:33 ERROR write.exists path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil742270434/001/existing.txt trace_id="" span_id=""
+2026/09/25 15:45:36 INFO tools.register_default tool=edit
+2026/09/25 15:45:36 INFO mutation.enqueue path=/private/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil1119234374/001/existing.txt operation=edit trace_id="" span_id=""
+2026/09/25 15:45:36 ERROR edit.diff_unresolved path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil1119234374/001/existing.txt err="git: not inside a work tree (run from within a git repository): git read-only command failed: context canceled\ncontext canceled" trace_id="" span_id=""
+--- FAIL: TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile (3.02s)
+    --- FAIL: TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile/write (3.00s)
+        git_diff_cancellation_integration_test.go:58: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli/internal/tools/git_diff_cancellation_integration_test.go:58
+            	Error:      	Condition never satisfied
+            	Test:       	TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile/write
+2026/09/25 15:45:36 INFO tools.register_default tool=write
+2026/09/25 15:45:36 INFO mutation.enqueue path=/private/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil21969736/001/existing.txt operation=write trace_id="" span_id=""
+2026/09/25 15:45:36 ERROR write.exists path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil21969736/001/existing.txt trace_id="" span_id=""
+2026/09/25 15:45:39 INFO tools.register_default tool=edit
+2026/09/25 15:45:39 INFO mutation.enqueue path=/private/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil1187447022/001/existing.txt operation=edit trace_id="" span_id=""
+2026/09/25 15:45:39 ERROR edit.diff_unresolved path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil1187447022/001/existing.txt err="git: not inside a work tree (run from within a git repository): git read-only command failed: signal: terminated\ncontext canceled\ncontext canceled" trace_id="" span_id=""
+--- FAIL: TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile (3.03s)
+    --- FAIL: TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile/write (3.00s)
+        git_diff_cancellation_integration_test.go:58: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli/internal/tools/git_diff_cancellation_integration_test.go:58
+            	Error:      	Condition never satisfied
+            	Test:       	TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile/write
+2026/09/25 15:45:39 INFO tools.register_default tool=write
+2026/09/25 15:45:39 INFO mutation.enqueue path=/private/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil3802531979/001/existing.txt operation=write trace_id="" span_id=""
+2026/09/25 15:45:39 ERROR write.exists path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil3802531979/001/existing.txt trace_id="" span_id=""
+2026/09/25 15:45:42 INFO tools.register_default tool=edit
+2026/09/25 15:45:42 INFO mutation.enqueue path=/private/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil3024805591/001/existing.txt operation=edit trace_id="" span_id=""
+2026/09/25 15:45:42 ERROR edit.diff_unresolved path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil3024805591/001/existing.txt err="git: not inside a work tree (run from within a git repository): git read-only command failed: context canceled\ncontext canceled" trace_id="" span_id=""
+--- FAIL: TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile (3.02s)
+    --- FAIL: TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile/write (3.00s)
+        git_diff_cancellation_integration_test.go:58: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli/internal/tools/git_diff_cancellation_integration_test.go:58
+            	Error:      	Condition never satisfied
+            	Test:       	TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile/write
+2026/09/25 15:45:42 INFO tools.register_default tool=write
+2026/09/25 15:45:42 INFO mutation.enqueue path=/private/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil1036751011/001/existing.txt operation=write trace_id="" span_id=""
+2026/09/25 15:45:42 ERROR write.exists path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil1036751011/001/existing.txt trace_id="" span_id=""
+2026/09/25 15:45:45 INFO tools.register_default tool=edit
+2026/09/25 15:45:45 INFO mutation.enqueue path=/private/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil1440422005/001/existing.txt operation=edit trace_id="" span_id=""
+2026/09/25 15:45:45 ERROR edit.diff_unresolved path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFil1440422005/001/existing.txt err="git: not inside a work tree (run from within a git repository): git read-only command failed: context canceled\ncontext canceled" trace_id="" span_id=""
+--- FAIL: TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile (3.02s)
+    --- FAIL: TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile/write (3.00s)
+        git_diff_cancellation_integration_test.go:58: 
+            	Error Trace:	/Users/pengjunchen/Documents/github/go-cli/internal/tools/git_diff_cancellation_integration_test.go:58
+            	Error:      	Condition never satisfied
+            	Test:       	TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile/write
+FAIL
+FAIL	github.com/pengjunchen/go-cli/internal/tools	15.189s
+FAIL

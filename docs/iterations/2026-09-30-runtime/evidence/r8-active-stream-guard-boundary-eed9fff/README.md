@@ -1,0 +1,24 @@
+# R8 active-stream visibility under the default output guard
+
+This native PTY check stopped at the required precondition for the End/follow-tail journey: assistant text never appeared while the provider stream was held open. It therefore does not establish active-stream PageUp/End behavior on source commit `eed9fff60bb552aab1d4d3fb1261a0d2a4ee942b`.
+
+The CLI binary was built from that exact commit and had SHA-256 `a2e4d0c92b8217129fcc19a3c43fc29c5be11156188e7c865e2b8a1a1e148af6`. The isolated checkout was detached at the same SHA and clean before this evidence-only change. The fixture used a Darwin native `openpty`, an ephemeral loopback provider, a temporary HOME/config/session, and the dummy key `r8-local-provider-fixture-only`. It made 26 local authenticated streaming requests, including a Read tool cycle. No production timeout or source was changed.
+
+## Captured run
+
+After 24 deterministic turns, the local provider began `R8 active stream`, flushed `R8-ACTIVE-PARTIAL`, and held the response open. It then flushed seven non-empty `R8-RENDER-KEEPALIVE-*` deltas at roughly 1.5-second intervals while the driver waited up to 11 seconds for the initial text in a decoded 80×24 PTY frame. The driver timed out at that render gate. At that point the CLI process was still alive, the PTY raw output had no `R8-ACTIVE-PARTIAL` marker, and the current frame still showed the previous completed rows and the submitted prompt. The provider did not receive the render acknowledgement, so the fixture did not release later chunks or finish the response.
+
+The raw PTY transcript is intentionally omitted. [`provider-flush-events.json`](provider-flush-events.json) preserves the event timestamps observed before the 11-second wait ended, [`active-frame.txt`](active-frame.txt) preserves the captured frame with right-edge padding trimmed for diff readability, and [`r8-active-stream-guard-pty.py`](r8-active-stream-guard-pty.py) is the local deterministic runner. The runner uses `pyte` to decode the PTY and only sends PageUp/End after it sees the active marker; those keys were not sent in this run. `/exit` and terminal restoration were consequently not exercised by this failed journey.
+
+## Observation boundaries
+
+| Boundary | Evidence | Conclusion |
+|---|---|---|
+| Provider sent content | The local fixture logged a successful flush for the initial marker and seven non-empty keepalives. | Confirmed directly by the provider-side log. |
+| CLI stream pipeline consumed chunks | The process stayed alive after the 11-second render wait while the provider sent non-empty deltas every 1.5 seconds. Assembly installs the timeout middleware ([`assemble.go`](../../../../../internal/cli/assemble.go#L1282)); its default chunk-idle timeout is 10 seconds and resets when it reads a chunk ([`middleware_timeout.go`](../../../../../internal/llm/middleware_timeout.go#L46), [reset path](../../../../../internal/llm/middleware_timeout.go#L283)). | This supports chunk consumption by the model/core path, but the PTY fixture did not instrument the channel directly. |
+| Core event reached the TUI | The current frame and PTY bytes contain no active marker. Source sets `publishIncremental=false` for a complete-response guard and sends the checked text only after the stream finishes ([`loop.go`](../../../../../internal/core/loop.go#L1468), [`guarded path`](../../../../../internal/core/loop.go#L1569), [`candidate release`](../../../../../internal/core/loop.go#L1697)). | Source-derived behavior; the fixture did not tap `EventStream` directly. |
+| TUI rendered an active partial | Neither the decoded frame nor captured PTY output contains `R8-ACTIVE-PARTIAL`. | Not rendered. The End/follow-tail acceptance precondition was not met. |
+
+The default CLI assembly installs the output guard chain unconditionally ([`assemble.go`](../../../../../internal/cli/assemble.go#L426), [`guard construction`](../../../../../internal/cli/assemble.go#L1375)). `outputGuardModel` implements the complete-response guard and passes the inner stream through to the loop-owned continuation path ([`output_guard_adapter.go`](../../../../../internal/cli/output_guard_adapter.go#L67)); the loop sets `publishIncremental` to false for that guarded path and sends text only after `CheckCandidate` ([`loop.go`](../../../../../internal/core/loop.go#L1751), [`candidate release`](../../../../../internal/core/loop.go#L1701)). This is a whole-response guard boundary, not evidence of a TUI scrolling defect. If R8 requires partial text to be visible during generation, that needs an explicit design decision about how provisional text interacts with complete-response checking and redaction.
+
+No PageUp/End, source edit, timeout change, merge, or push was performed for this attempt. The existing post-completion viewport evidence at [`r8-native-pty-587be07`](../r8-native-pty-587be07/README.md) is a separate source/run and does not prove active-stream acceptance on `eed9fff`.

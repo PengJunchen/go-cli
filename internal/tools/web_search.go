@@ -8,33 +8,38 @@ import (
 	"strings"
 )
 
+// ErrWebSearchProviderUnavailable is returned when no real web-search provider
+// is configured for a tool invocation.
+var ErrWebSearchProviderUnavailable = errors.New("search provider unavailable")
+
 // WebSearchToolOption configures a WebSearchTool.
 type WebSearchToolOption func(*WebSearchTool)
 
-// WithSearchProvider sets the search backend provider. When not set, a
-// MockSearchProvider is used by default for backward compatibility.
+// WithSearchProvider sets the search backend provider. Tests that need fixed
+// results may explicitly inject a MockSearchProvider.
 func WithSearchProvider(p WebSearchProvider) WebSearchToolOption {
 	return func(t *WebSearchTool) { t.provider = p }
 }
 
 // WebSearchTool performs a web search and returns results. It delegates to a
-// WebSearchProvider; by default a MockSearchProvider is used for backward
-// compatibility. It implements the ToolDefinition interface.
+// configured WebSearchProvider. An unconfigured tool reports that search is
+// unavailable instead of returning synthetic results. It implements the
+// ToolDefinition interface.
 type WebSearchTool struct {
 	provider WebSearchProvider
 }
 
 var _ ToolDefinition = (*WebSearchTool)(nil)
+var _ Parameterized = (*WebSearchTool)(nil)
 
 // NewWebSearchTool returns a WebSearchTool configured with the given options.
-// When no provider option is supplied, a MockSearchProvider is used.
+// When no provider option is supplied, searches fail with
+// ErrWebSearchProviderUnavailable. A mock provider is available only through
+// explicit injection.
 func NewWebSearchTool(opts ...WebSearchToolOption) *WebSearchTool {
 	t := &WebSearchTool{}
 	for _, opt := range opts {
 		opt(t)
-	}
-	if t.provider == nil {
-		t.provider = NewMockSearchProvider()
 	}
 	return t
 }
@@ -43,11 +48,28 @@ func NewWebSearchTool(opts ...WebSearchToolOption) *WebSearchTool {
 func (t *WebSearchTool) Name() string { return "web_search" }
 
 // ProviderName returns the name of the configured search provider.
-func (t *WebSearchTool) ProviderName() string { return t.provider.Name() }
+func (t *WebSearchTool) ProviderName() string {
+	if t == nil || t.provider == nil {
+		return "unavailable"
+	}
+	return t.provider.Name()
+}
 
 // Description returns a brief description of the tool.
 func (t *WebSearchTool) Description() string {
 	return "web_search: searches the web for a query and returns results. Args: query (string)."
+}
+
+// Parameters returns the JSON Schema for a web search request.
+func (*WebSearchTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query": map[string]any{"type": "string"},
+		},
+		"required":             []string{"query"},
+		"additionalProperties": false,
+	}
 }
 
 // Execute takes args["query"] and returns formatted search results from the
@@ -56,6 +78,9 @@ func (t *WebSearchTool) Execute(ctx context.Context, call ToolCall) (*ToolResult
 	query, ok := call.Args["query"].(string)
 	if !ok || strings.TrimSpace(query) == "" {
 		return nil, errors.New("web_search: missing string argument 'query'")
+	}
+	if t == nil || t.provider == nil {
+		return nil, fmt.Errorf("web_search: %w", ErrWebSearchProviderUnavailable)
 	}
 
 	results, err := t.provider.Search(ctx, query, SearchOptions{

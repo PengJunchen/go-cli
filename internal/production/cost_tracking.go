@@ -91,6 +91,11 @@ type CostTracker struct {
 	tiers          map[string]CostTier
 	total          float64
 	calls          int
+	legacyTotal    float64
+	legacyCalls    int
+	attemptRecords map[string]AttemptCostRecord
+	attemptSummary AttemptCostSummary
+	priceSource    AttemptCostPriceSource
 	subagentCosts  map[string]CostSummary
 	budgetLimit    float64
 	budgetCallback BudgetCallback
@@ -102,15 +107,22 @@ var _ CostCalculator = (*CostTracker)(nil)
 // NewCostTracker builds a CostTracker from the given tiers. If tiers is empty
 // or nil, DefaultCostTiers is used.
 func NewCostTracker(tiers []CostTier) *CostTracker {
+	priceSource := AttemptCostFromConfiguredTier
 	if len(tiers) == 0 {
 		tiers = DefaultCostTiers
+		priceSource = AttemptCostFromDefaultTier
 	}
 	tm := make(map[string]CostTier, len(tiers))
 	for _, t := range tiers {
 		tm[t.Model] = t
 	}
 	slog.Debug("production.cost_tracker.new", "tiers", len(tm))
-	return &CostTracker{tiers: tm, subagentCosts: make(map[string]CostSummary)}
+	return &CostTracker{
+		tiers:          tm,
+		attemptRecords: make(map[string]AttemptCostRecord),
+		priceSource:    priceSource,
+		subagentCosts:  make(map[string]CostSummary),
+	}
 }
 
 // CalculateCost returns the cost of a single model call. It returns an error
@@ -144,6 +156,8 @@ func (t *CostTracker) Record(model string, inputTokens, outputTokens int) (float
 	t.mu.Lock()
 	t.total += cost
 	t.calls++
+	t.legacyTotal += cost
+	t.legacyCalls++
 	calls := t.calls
 	total := t.total
 	budget := t.budgetLimit
@@ -164,14 +178,16 @@ func (t *CostTracker) Record(model string, inputTokens, outputTokens int) (float
 	return cost, nil
 }
 
-// Total returns the accumulated cost across all recorded calls.
+// Total returns the accumulated known cost across legacy records and priced or
+// provider-reported attempts. Attempts with unknown cost do not add zero-cost
+// evidence to this subtotal.
 func (t *CostTracker) Total() float64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.total
 }
 
-// Calls returns the number of recorded calls.
+// Calls returns the number of legacy records and unique actual attempts.
 func (t *CostTracker) Calls() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()

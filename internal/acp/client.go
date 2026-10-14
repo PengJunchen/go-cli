@@ -5,11 +5,8 @@
 //
 // Two client adapters are provided:
 //
-//   - gRPCAdapter: a stdlib JSON-over-HTTP interpretation of the ACP gRPC
-//     contract. No external gRPC dependency exists, so the adapter dials an
-//     HTTP endpoint and exchanges JSON messages over well-known routes
-//     (/connect, /send, /disconnect, /stream) that mirror the ACP service and
-//     method naming convention.
+//   - gRPCAdapter: the historical constructor name for go-cli's private
+//     go-cli-acp-json/1 HTTP profile. This is neither official ACP nor gRPC.
 //   - StdioAdapter: exchanges newline-delimited JSON (JSON-RPC style) over an
 //     io.Reader/io.Writer pair (typically stdin/stdout). This is what makes the
 //     protocol testable in-process.
@@ -23,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"time"
@@ -31,6 +29,9 @@ import (
 // ACPMessage is the wire format exchanged between agents. Every field is
 // serialized to JSON so the same structure works over both HTTP and stdio.
 type ACPMessage struct {
+	// Version identifies the private go-cli ACP profile when present. It is
+	// currently set on the first stdio connect frame.
+	Version string `json:"version,omitempty"`
 	// Type identifies the message kind (see the Type* constants).
 	Type string `json:"type"`
 	// SenderID is the identity of the agent that produced the message.
@@ -64,6 +65,9 @@ type ACPTransport string
 const (
 	ACPTransportGRPC  ACPTransport = "gRPC"
 	ACPTransportStdio ACPTransport = "Stdio"
+	// ACPJSONProfileVersionV1 identifies the private JSON profile declared by
+	// current stdio connect frames.
+	ACPJSONProfileVersionV1 = "go-cli-acp-json/1"
 )
 
 // String returns the canonical transport name.
@@ -197,12 +201,31 @@ type Option func(*adapterOptions)
 
 // adapterOptions carries optional adapter configuration.
 type adapterOptions struct {
-	name string
+	name                      string
+	stdioOwnedTransportCloser io.Closer
+	httpBearerToken           string
 }
 
 // WithName overrides the identity reported by an adapter's Name method.
 func WithName(name string) Option {
 	return func(o *adapterOptions) { o.name = name }
+}
+
+// WithStdioOwnedTransportCloser opts the StdioAdapter into closing the
+// supplied transport during Disconnect. If the supplied closer also exposes a
+// Join() error method, Disconnect calls it after its stdio workers have joined.
+// Without this option, reader and writer resources remain caller-owned and are
+// never closed by the adapter.
+func WithStdioOwnedTransportCloser(closer io.Closer) Option {
+	return func(o *adapterOptions) { o.stdioOwnedTransportCloser = closer }
+}
+
+// WithHTTPBearerToken configures bearer authentication for the private
+// JSON-over-HTTP adapter. Stdio adapters ignore this option. The token is sent
+// only to the configured HTTP endpoint origin and is never read from ambient
+// files, environment variables, or URL user information.
+func WithHTTPBearerToken(token string) Option {
+	return func(o *adapterOptions) { o.httpBearerToken = token }
 }
 
 // resolveName returns the resolved adapter name, applying any options.

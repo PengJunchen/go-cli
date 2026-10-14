@@ -69,3 +69,17 @@ func TestHeuristicEstimateMixed(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 5, n)
 }
+
+func TestEstimateItemTokensCountsProjectedSummaryWrapperAndIgnoresOldCache(t *testing.T) {
+	item := TurnItem{
+		Role: RoleUser, Content: "summary", IsCompaction: true,
+		EstimatedTokens: 1,
+	}
+
+	got := estimateItemTokens(&item, runeCountEstimator{})
+	assert.Equal(t, len(UntrustedSummaryContext("summary")), got)
+	assert.Equal(t, got, item.EstimatedTokens)
+
+	empty := TurnItem{Role: RoleUser, IsCompaction: true}
+	assert.Equal(t, len(UntrustedSummaryContext("[compacted]")), estimateItemTokens(&empty, runeCountEstimator{}))
+}

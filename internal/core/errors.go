@@ -2,6 +2,10 @@ package core
 
 import "errors"
 
+// ErrSubAgentModelBuilderUnavailable is returned when a real SubAgent factory
+// requires an override model builder but none was configured.
+var ErrSubAgentModelBuilderUnavailable = errors.New("core: sub-agent model builder unavailable")
+
 // Sentinel errors reported by the default stub implementations. They indicate
 // that a capability is not yet backed by a real implementation.
 var (

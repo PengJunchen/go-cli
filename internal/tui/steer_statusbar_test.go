@@ -11,6 +11,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/core"
 )
 
 // keyMsg is a tiny helper that builds a tea.KeyMsg from a key type and optional
@@ -91,6 +93,27 @@ func TestSteerInputCursorMovement(t *testing.T) {
 	// Ctrl+E moves cursor to end.
 	updateKey(m, keyMsg(tea.KeyCtrlE))
 	assert.Equal(t, 6, m.steerCursor)
+}
+
+func TestSteerEditorCaretTracksInsertion(t *testing.T) {
+	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
+	m.interactive = false
+
+	updateKey(m, keyMsg(tea.KeyTab))
+	for _, ch := range "你好" {
+		updateKey(m, runeKey(ch))
+	}
+	assert.Equal(t, "你好", m.steerInput)
+
+	updateKey(m, keyMsg(tea.KeyLeft))
+	assert.Equal(t, 3, m.steerCursor, "left should move by one UTF-8 rune")
+	assert.Contains(t, m.View(), "> steer> 你█好", "caret should render at the UTF-8 insertion point")
+	updateKey(m, runeKey('X'))
+	assert.Equal(t, "你X好", m.steerInput, "typing inserts at the caret, preserving the suffix")
+	assert.Equal(t, 4, m.steerCursor)
+
+	updateKey(m, keyMsg(tea.KeyRight))
+	assert.Equal(t, 7, m.steerCursor, "right should move by one UTF-8 rune")
 }
 
 // TestSteerInputDeleteWord verifies Ctrl+W deletes the word before the cursor.
@@ -185,6 +208,21 @@ func TestCtrlCQuit(t *testing.T) {
 	assert.True(t, called.Load(), "cancel callback should be invoked on Ctrl+C")
 }
 
+func TestDurableTranscriptCtrlCDefersQuitToParent(t *testing.T) {
+	var called atomic.Bool
+	app := NewBubbleteaApp(make(chan AgentEvent, 1),
+		WithDeferQuitUntilTranscriptRefresh(),
+		WithCancelCallback(func() { called.Store(true) }),
+	)
+	model := app.model
+	model.interactive = false
+
+	cmd := model.handleKey(keyMsg(tea.KeyCtrlC))
+	assert.Nil(t, cmd, "the durable owner must stay alive until the parent applies its acknowledged refresh")
+	assert.False(t, model.quitting)
+	assert.True(t, called.Load(), "Ctrl+C must cancel the active run")
+}
+
 // TestPauseToggle verifies that Space toggles pause/resume callbacks.
 func TestPauseToggle(t *testing.T) {
 	var pauseCalled, resumeCalled atomic.Bool
@@ -246,12 +284,16 @@ func TestStatusBarRendering(t *testing.T) {
 	m.tokenOutput = 500
 	m.tokenMax = 8000
 	m.tokenCost = 0.025
+	m.tokenUsageSource = core.TokenUsageSourceReported
+	m.tokenCostSources = []core.TokenUsageCostSource{core.TokenUsageCostEstimated}
+	m.tokenPriceSources = []core.TokenUsagePriceSource{core.TokenUsagePriceDefaultTier}
+	m.tokenProviderModels = []core.TokenUsageProviderModel{{ProviderID: "openai", ModelID: "gpt-4o-mini"}}
 	bar := m.renderStatusBarLocked()
 	m.mu.Unlock()
 
 	assert.Contains(t, bar, "Tokens: 1500/8000 (18%)")
-	assert.Contains(t, bar, "Cost: $0.0250")
-	assert.NotContains(t, bar, "\x1b[", "should not have warning color under 80%")
+	assert.Contains(t, bar, "Estimated cost: $0.0250")
+	assert.NotContains(t, bar, "\x1b[38;", "should not have warning color under 80%")
 
 	// High usage (over 80%).
 	m.mu.Lock()
@@ -265,8 +307,8 @@ func TestStatusBarRendering(t *testing.T) {
 	assert.Contains(t, bar, "100%")
 }
 
-// TestStatusBar_TwoLines verifies the status bar renders as two lines when
-// both model info and token usage are present.
+// TestStatusBar_TwoLines verifies the status bar renders context, metrics, and
+// one bounded provenance line.
 func TestStatusBar_TwoLines(t *testing.T) {
 	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
 	m.mu.Lock()
@@ -281,17 +323,18 @@ func TestStatusBar_TwoLines(t *testing.T) {
 	bar := m.renderStatusBarLocked()
 	m.mu.Unlock()
 
-	// Two lines separated by \n.
+	// Three lines separated by \n.
 	lines := splitLines(bar)
-	assert.Len(t, lines, 2, "status bar should be two lines")
+	assert.Len(t, lines, 3, "status bar should be three lines")
 	// Line 1 contains model/turn/session/mode info.
 	assert.Contains(t, lines[0], "claude-sonnet-4")
 	assert.Contains(t, lines[0], "turn #3")
 	assert.Contains(t, lines[0], "abc12345")
 	assert.Contains(t, lines[0], "chat")
-	// Line 2 contains tokens/cost.
+	// Line 2 contains tokens/cost; line 3 points to details.
 	assert.Contains(t, lines[1], "Tokens:")
-	assert.Contains(t, lines[1], "Cost:")
+	assert.Contains(t, lines[1], "Known cost:", "a cost without evidence is shown as a known subtotal")
+	assert.Contains(t, lines[2], "/cost")
 }
 
 // TestStatusBar_ModelInfo verifies the model name appears on line 1.
@@ -328,12 +371,28 @@ func TestStatusBar_TokenWarning(t *testing.T) {
 	m.tokenOutput = 0
 	m.tokenMax = 10000
 	m.tokenCost = 0.02
+	m.tokenUsageSource = core.TokenUsageSourceReported
 	bar := m.renderStatusBarLocked()
 	m.mu.Unlock()
 
 	// 8500/10000 = 85% > 80%, so the token line should have ANSI styling.
 	assert.Contains(t, bar, "\x1b[", "over 80% should have warning ANSI styling")
 	assert.Contains(t, bar, "85%")
+}
+
+func TestStatusBarSuppressesExactWarningForPartialUsage(t *testing.T) {
+	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
+	m.mu.Lock()
+	m.tokenInput = 8500
+	m.tokenMax = 10000
+	m.tokenUsageSource = core.TokenUsageSourceReported
+	m.tokenUnknownUsageAttempts = 1
+	bar := m.renderStatusBarLocked()
+	m.mu.Unlock()
+
+	assert.Contains(t, bar, "Known tokens: 8500/10000")
+	assert.NotContains(t, bar, "85%")
+	assert.NotContains(t, bar, "\x1b[38;", "partial token lower bound must not receive an exact percentage warning")
 }
 
 // TestInteractive_TUIConfigWired verifies that TUIConfig options are correctly
@@ -452,12 +511,16 @@ func TestFollowUpInputChineseBackspace(t *testing.T) {
 	}
 	assert.Equal(t, "你好", m.followUpInput)
 	assert.Equal(t, 6, m.followUpCursor)
+	updateKey(m, keyMsg(tea.KeyLeft))
+	assert.Contains(t, m.View(), "> followup> 你█好", "follow-up caret should render at the insertion point")
+	updateKey(m, keyMsg(tea.KeyRight))
 
 	// Backspace deletes "好".
 	updateKey(m, keyMsg(tea.KeyBackspace))
 	assert.True(t, utf8.ValidString(m.followUpInput))
 	assert.Equal(t, "你", m.followUpInput)
 	assert.Equal(t, 3, m.followUpCursor)
+	assert.Contains(t, m.View(), "> followup> 你█", "follow-up caret should render after the remaining rune")
 }
 
 // TestFollowUpInputChineseCtrlW verifies Ctrl+W in follow-up mode traverses

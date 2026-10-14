@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 
@@ -35,6 +36,10 @@ type DeferredToolRegistry interface {
 // registered under the requested name.
 var ErrDeferredToolNotFound = errors.New("tools: deferred tool not found")
 
+// ErrDeferredToolListUnstable reports that a generic backing registry changed
+// the DTR overlay during every bounded List retry.
+var ErrDeferredToolListUnstable = errors.New("tools: deferred tool list changed during snapshot")
+
 // deferredStubDescription is the placeholder description returned by an
 // unloaded (or failed-to-load) deferred tool. It is intentionally generic; the
 // loader is expected to replace it with a real description on success.
@@ -45,9 +50,16 @@ const deferredStubDescription = "deferred tool (not yet loaded)"
 type DefaultDeferredToolRegistry struct {
 	underlying ToolRegistry // dependency held by interface.
 
-	mu      sync.RWMutex
-	loaders map[string]func() (ToolDefinition, error)
-	loaded  map[string]ToolDefinition
+	mu              sync.RWMutex
+	loaders         map[string]func() (ToolDefinition, error)
+	loaded          map[string]ToolDefinition
+	projectBindings map[string]ProjectTrustBinding
+	revision        uint64
+
+	// MCP generation metadata is protected by mu alongside loaders/loaded.
+	mcpSources      map[string]mcpSourceState
+	mcpReservations map[string]mcpGenerationOwner
+	mcpEntries      map[string]mcpDeferredEntry
 }
 
 var _ DeferredToolRegistry = (*DefaultDeferredToolRegistry)(nil)
@@ -57,9 +69,13 @@ var _ DeferredToolRegistry = (*DefaultDeferredToolRegistry)(nil)
 // and RegisterDeferred still records the loader.
 func NewDefaultDeferredToolRegistry(underlying ToolRegistry) DeferredToolRegistry {
 	return &DefaultDeferredToolRegistry{
-		underlying: underlying,
-		loaders:    map[string]func() (ToolDefinition, error){},
-		loaded:     map[string]ToolDefinition{},
+		underlying:      underlying,
+		loaders:         map[string]func() (ToolDefinition, error){},
+		loaded:          map[string]ToolDefinition{},
+		projectBindings: map[string]ProjectTrustBinding{},
+		mcpSources:      map[string]mcpSourceState{},
+		mcpReservations: map[string]mcpGenerationOwner{},
+		mcpEntries:      map[string]mcpDeferredEntry{},
 	}
 }
 
@@ -76,8 +92,49 @@ func (r *DefaultDeferredToolRegistry) RegisterDeferred(_ context.Context, name s
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if reservation, exists := r.mcpReservations[name]; exists {
+		return fmt.Errorf("%w: %q is reserved by MCP source %q generation %d", ErrMCPNameReserved, name, reservation.sourceID, reservation.generation)
+	}
 	r.loaders[name] = loader
 	delete(r.loaded, name)
+	delete(r.projectBindings, name)
+	r.revision++
+	return nil
+}
+
+func (r *DefaultDeferredToolRegistry) registerProjectSourcedDeferred(
+	ctx context.Context,
+	name string,
+	loader func() (ToolDefinition, error),
+	binding ProjectTrustBinding,
+) error {
+	if ctx == nil {
+		return errors.New("tools: project deferred registration context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(name) == "" || loader == nil {
+		return errors.New("tools: project deferred registration requires a name and loader")
+	}
+	if !validProjectTrustBinding(binding) {
+		return ErrProjectTrustBindingInvalid
+	}
+	if r == nil || r.underlying == nil {
+		return ErrProjectSourcedRegistrationUnavailable
+	}
+	if _, ok := r.underlying.(ProjectSourcedToolRegistrar); !ok {
+		return ErrProjectSourcedRegistrationUnavailable
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if reservation, exists := r.mcpReservations[name]; exists {
+		return fmt.Errorf("%w: %q is reserved by MCP source %q generation %d", ErrMCPNameReserved, name, reservation.sourceID, reservation.generation)
+	}
+	r.loaders[name] = loader
+	delete(r.loaded, name)
+	r.projectBindings[name] = binding
+	r.revision++
 	return nil
 }
 
@@ -118,29 +175,74 @@ func (r *DefaultDeferredToolRegistry) Load(ctx context.Context, name string) (To
 		logger.Error("tools.deferred.load.not_found", "tool", name)
 		return nil, ErrDeferredToolNotFound
 	}
+	mcpEntry, mcpOwned := r.mcpEntries[name]
+	projectBinding, projectOwned := r.projectBindings[name]
+	if mcpOwned {
+		state, current := r.mcpSources[mcpEntry.owner.sourceID]
+		reservation, reserved := r.mcpReservations[name]
+		if !current || state.generation != mcpEntry.owner.generation || !reserved || reservation != mcpEntry.owner {
+			span.SetAttributes(tracing.Attribute{Key: "tool_name", Value: name}, tracing.Attribute{Key: "status", Value: "stale_generation"}, tracing.Attribute{Key: "success", Value: false})
+			return nil, ErrMCPGenerationStale
+		}
+	}
 
 	def, err := loader()
 	if err != nil {
+		if mcpOwned {
+			span.SetAttributes(tracing.Attribute{Key: "tool_name", Value: name}, tracing.Attribute{Key: "status", Value: "retryable_failure"})
+			logger.Error("tools.deferred.load.failed", "tool", name, "err", err)
+			return &deferredStub{name: name}, fmt.Errorf("tools: deferred load %q: %w", name, err)
+		}
 		// Fall back to a stub: execution neither blocks nor panics. The stub
 		// is cached in the loaded map so subsequent Loads return it
 		// immediately without re-invoking the loader.
 		stub := &deferredStub{name: name}
 		r.loaded[name] = stub
+		r.revision++
 		span.SetAttributes(tracing.Attribute{Key: "tool_name", Value: name}, tracing.Attribute{Key: "status", Value: "stub"})
 		logger.Error("tools.deferred.load.failed", "tool", name, "err", err)
 		return stub, fmt.Errorf("tools: deferred load %q: %w", name, err)
 	}
 	if def == nil {
 		stub := &deferredStub{name: name}
+		if mcpOwned {
+			return stub, errors.New("tools: MCP deferred loader for " + name + " returned a nil definition")
+		}
 		r.loaded[name] = stub
+		r.revision++
 		span.SetAttributes(tracing.Attribute{Key: "tool_name", Value: name}, tracing.Attribute{Key: "status", Value: "stub"})
 		logger.Error("tools.deferred.load.nil", "tool", name)
 		return stub, errors.New("tools: deferred loader for " + name + " returned a nil definition")
 	}
 
-	r.loaded[name] = def
-	if r.underlying != nil {
-		if regErr := r.underlying.Register(ctx, def); regErr != nil {
+	if mcpOwned {
+		if def.Name() != name {
+			return nil, fmt.Errorf("tools: MCP deferred loader for %q returned definition %q", name, def.Name())
+		}
+		if err := mcpEntry.registry.registerMCPMaterialization(ctx, mcpEntry, def); err != nil {
+			logger.Error("tools.deferred.load.register_failed", "tool", name, "err", err)
+			return def, fmt.Errorf("tools: deferred load %q: register: %w", name, err)
+		}
+		r.loaded[name] = def
+		r.revision++
+	} else {
+		r.loaded[name] = def
+		r.revision++
+	}
+	if !mcpOwned && r.underlying != nil {
+		var regErr error
+		if projectOwned {
+			registrar, ok := r.underlying.(ProjectSourcedToolRegistrar)
+			if !ok {
+				regErr = ErrProjectSourcedRegistrationUnavailable
+			} else {
+				regErr = registrar.RegisterProjectSourced(ctx, def, projectBinding)
+			}
+		} else {
+			regErr = r.underlying.Register(ctx, def)
+		}
+		if regErr != nil {
+			delete(r.loaded, name)
 			logger.Error("tools.deferred.load.register_failed", "tool", name, "err", regErr)
 			return def, fmt.Errorf("tools: deferred load %q: register: %w", name, regErr)
 		}
@@ -235,7 +337,126 @@ func NewDeferredToolRegistryAdapter(underlying ToolRegistry) *DeferredToolRegist
 
 // Register delegates to the underlying registry (eager registration).
 func (a *DeferredToolRegistryAdapter) Register(ctx context.Context, def ToolDefinition) error {
+	if def != nil {
+		a.mu.RLock()
+		defer a.mu.RUnlock()
+		if reservation, exists := a.mcpReservations[def.Name()]; exists {
+			return fmt.Errorf("%w: %q is reserved by MCP source %q generation %d", ErrMCPNameReserved, def.Name(), reservation.sourceID, reservation.generation)
+		}
+	}
 	return a.underlying.Register(ctx, def)
+}
+
+func (a *DeferredToolRegistryAdapter) RegisterProjectSourced(ctx context.Context, def ToolDefinition, binding ProjectTrustBinding) error {
+	if a == nil || a.underlying == nil {
+		return ErrProjectSourcedRegistrationUnavailable
+	}
+	registrar, ok := a.underlying.(ProjectSourcedToolRegistrar)
+	if !ok {
+		return ErrProjectSourcedRegistrationUnavailable
+	}
+	return a.registerTrustedWithMCPReservation(def, func() error {
+		return registrar.RegisterProjectSourced(ctx, def, binding)
+	})
+}
+
+func (a *DeferredToolRegistryAdapter) RegisterProjectSourcedDeferred(ctx context.Context, name string, loader func() (ToolDefinition, error), binding ProjectTrustBinding) error {
+	if a == nil || a.DefaultDeferredToolRegistry == nil {
+		return ErrProjectSourcedRegistrationUnavailable
+	}
+	return a.DefaultDeferredToolRegistry.registerProjectSourcedDeferred(ctx, name, loader, binding)
+}
+
+// DispatchFence forwards the underlying registry's shared dispatch fence.
+func (a *DeferredToolRegistryAdapter) DispatchFence() *DispatchFence {
+	provider, ok := a.underlying.(DispatchFenceProvider)
+	if !ok {
+		return nil
+	}
+	return provider.DispatchFence()
+}
+
+func (a *DeferredToolRegistryAdapter) preparedToolPipeline() (*preparedToolPipelineState, *DispatchFence) {
+	provider, ok := a.underlying.(preparedToolPipelineProvider)
+	if !ok {
+		return nil, nil
+	}
+	return provider.preparedToolPipeline()
+}
+
+func (a *DeferredToolRegistryAdapter) registerTrustedWithMCPReservation(def ToolDefinition, register func() error) error {
+	if def == nil {
+		return register()
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if reservation, exists := a.mcpReservations[def.Name()]; exists {
+		return fmt.Errorf("%w: %q is reserved by MCP source %q generation %d", ErrMCPNameReserved, def.Name(), reservation.sourceID, reservation.generation)
+	}
+	return register()
+}
+
+// RegisterTrustedControl forwards only the narrow first-party control
+// registration capability exposed by the underlying registry.
+func (a *DeferredToolRegistryAdapter) RegisterTrustedControl(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := a.underlying.(TrustedControlRegistrar)
+	if !ok {
+		return ErrTrustedControlRegistrationUnavailable
+	}
+	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.RegisterTrustedControl(ctx, def) })
+}
+
+// RegisterTrustedNetworkRead forwards the narrow reviewed network-reader
+// capability when the underlying registry supports it.
+func (a *DeferredToolRegistryAdapter) RegisterTrustedNetworkRead(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := a.underlying.(TrustedNetworkReadRegistrar)
+	if !ok {
+		return ErrTrustedNetworkReadRegistrationUnavailable
+	}
+	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.RegisterTrustedNetworkRead(ctx, def) })
+}
+
+func (a *DeferredToolRegistryAdapter) registerTrustedWorkspaceWrite(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := a.underlying.(trustedWorkspaceWriteRegistrar)
+	if !ok {
+		return ErrPreparedRegistrationUnavailable
+	}
+	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.registerTrustedWorkspaceWrite(ctx, def) })
+}
+
+func (a *DeferredToolRegistryAdapter) registerTrustedLocalProcess(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := a.underlying.(trustedLocalProcessRegistrar)
+	if !ok {
+		return ErrPreparedRegistrationUnavailable
+	}
+	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.registerTrustedLocalProcess(ctx, def) })
+}
+
+func (a *DeferredToolRegistryAdapter) registerTrustedInlineLocalReader(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := a.underlying.(trustedInlineLocalReaderRegistrar)
+	if !ok {
+		return ErrPreparedRegistrationUnavailable
+	}
+	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.registerTrustedInlineLocalReader(ctx, def) })
+}
+
+func (a *DeferredToolRegistryAdapter) registerTrustedScopedWorkspaceRead(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := a.underlying.(trustedScopedWorkspaceReadRegistrar)
+	if !ok {
+		return ErrPreparedRegistrationUnavailable
+	}
+	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.registerTrustedScopedWorkspaceRead(ctx, def) })
+}
+
+func (a *DeferredToolRegistryAdapter) toolRegistrationSnapshot(ctx context.Context, name string) (registeredToolSnapshot, error) {
+	if _, err := a.Get(ctx, name); err != nil {
+		return registeredToolSnapshot{}, err
+	}
+	provider, ok := a.underlying.(registrationSnapshotProvider)
+	if !ok {
+		return registeredToolSnapshot{}, ErrPreparedRegistrationUnavailable
+	}
+	return provider.toolRegistrationSnapshot(ctx, name)
 }
 
 // Get returns the tool with the given name. It first checks the underlying
@@ -267,19 +488,50 @@ func (a *DeferredToolRegistryAdapter) Get(ctx context.Context, name string) (Too
 // placeholder stubs for unloaded deferred tools. Already-loaded deferred tools
 // appear once (via the underlying registry); unloaded ones appear as stubs.
 func (a *DeferredToolRegistryAdapter) List(ctx context.Context) ([]ToolDefinition, error) {
-	eager, err := a.underlying.List(ctx)
-	if err != nil {
-		return nil, err
+	if _, supportsSourceGenerations := mcpRegistryFrom(a.underlying); supportsSourceGenerations {
+		a.mu.RLock()
+		defer a.mu.RUnlock()
+
+		eager, err := a.underlying.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return a.mergeDeferredLocked(eager), nil
 	}
 
-	a.mu.RLock()
-	defer a.mu.RUnlock()
+	for attempt := 0; attempt < 3; attempt++ {
+		a.mu.RLock()
+		revision := a.revision
+		a.mu.RUnlock()
 
+		eager, err := a.underlying.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		a.mu.RLock()
+		if revision != a.revision {
+			a.mu.RUnlock()
+			continue
+		}
+		merged := a.mergeDeferredLocked(eager)
+		a.mu.RUnlock()
+		return merged, nil
+	}
+	return nil, ErrDeferredToolListUnstable
+}
+
+func (a *DeferredToolRegistryAdapter) mergeDeferredLocked(eager []ToolDefinition) []ToolDefinition {
 	seen := make(map[string]bool, len(eager))
 	for _, d := range eager {
 		seen[d.Name()] = true
 	}
+	loaderNames := make([]string, 0, len(a.loaders))
 	for name := range a.loaders {
+		loaderNames = append(loaderNames, name)
+	}
+	sort.Strings(loaderNames)
+	for _, name := range loaderNames {
 		if _, loaded := a.loaded[name]; loaded {
 			// Loaded tools are already in the underlying registry (or a
 			// failed-load stub that we intentionally hide from List).
@@ -290,5 +542,5 @@ func (a *DeferredToolRegistryAdapter) List(ctx context.Context) ([]ToolDefinitio
 			seen[name] = true
 		}
 	}
-	return eager, nil
+	return eager
 }

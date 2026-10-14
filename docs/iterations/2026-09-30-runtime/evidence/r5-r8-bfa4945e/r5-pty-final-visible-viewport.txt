@@ -1,0 +1,12 @@
+Session: s_b5499a2ef4240570e409c75609e361cd | Branch: main |
+[assistant]                                                 
+[tool: write]                                               
+wrote 676 bytes to /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0
+000gn/T/go-cli-r5-pty-35zmyxv0/workspace/once.txt           
+[receipt: success]                                          
+[assistant]                                                 
+PTY fixture completed the requested interaction.            
+pty-review-model | turn #2 | interact | chat                
+Tokens: 76/8000 (0%) | Cost: $0.0000                        
+>                                                           
+                                                            

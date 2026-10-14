@@ -17,6 +17,7 @@ type registerDefaultsConfig struct {
 	gitTool          GitTool
 	builtinWhitelist map[string]bool
 	pathWhitelist    []string
+	canonicalRoot    string
 }
 
 // WithRegisteredFileTracker wires a FileTracker into the WriteTool and
@@ -66,12 +67,18 @@ func WithRegisteredBuiltinWhitelist(names []string) RegisterDefaultsOption {
 	}
 }
 
-// WithRegisteredPathWhitelist wires a path whitelist into the WriteTool and
-// EditFileTool registered by RegisterDefaults. When configured, write and edit
-// operations are restricted to paths within the allowed base directories,
-// matching the defense-in-depth provided by the bash sandbox.
+// WithRegisteredPathWhitelist wires a path whitelist into the file tools
+// registered by RegisterDefaults. When configured, read, write, edit, grep,
+// find, and ls operations are restricted to paths within the allowed base
+// directories. An empty path list leaves file tools unrestricted.
 func WithRegisteredPathWhitelist(paths []string) RegisterDefaultsOption {
 	return func(c *registerDefaultsConfig) { c.pathWhitelist = paths }
+}
+
+// WithRegisteredCanonicalWorkspaceRoot pins the canonical workspace root
+// captured by the durable session manager for scoped built-in read proofs.
+func WithRegisteredCanonicalWorkspaceRoot(root string) RegisterDefaultsOption {
+	return func(c *registerDefaultsConfig) { c.canonicalRoot = root }
 }
 
 // RegisterDefaults registers the built-in read, bash, write, edit, grep, find
@@ -99,6 +106,17 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	}
 	if len(cfg.pathWhitelist) > 0 {
 		writeOpts = append(writeOpts, WithWritePathWhitelist(cfg.pathWhitelist))
+	}
+
+	// Build ReadTool options.
+	readOpts := []ReadToolOption{}
+	if len(cfg.pathWhitelist) > 0 {
+		readOpts = append(readOpts, WithReadPathWhitelist(cfg.pathWhitelist))
+	} else if cfg.canonicalRoot != "" {
+		readOpts = append(readOpts, WithReadPathWhitelist([]string{cfg.canonicalRoot}))
+	}
+	if cfg.canonicalRoot != "" {
+		readOpts = append(readOpts, withReadCanonicalWorkspaceRoot(cfg.canonicalRoot))
 	}
 
 	// Build EditFileTool options.
@@ -138,10 +156,15 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	lsOpts := []LSToolOption{}
 	if len(cfg.pathWhitelist) > 0 {
 		lsOpts = append(lsOpts, WithLSPathWhitelist(cfg.pathWhitelist))
+	} else if cfg.canonicalRoot != "" {
+		lsOpts = append(lsOpts, WithLSPathWhitelist([]string{cfg.canonicalRoot}))
+	}
+	if cfg.canonicalRoot != "" {
+		lsOpts = append(lsOpts, withLSCanonicalWorkspaceRoot(cfg.canonicalRoot))
 	}
 
 	defs := []ToolDefinition{
-		NewReadTool(),
+		NewReadTool(readOpts...),
 		NewStreamingBashTool(bashOpts...),
 		NewWriteTool(writeOpts...),
 		NewEditFileTool(editOpts...),
@@ -187,11 +210,37 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	}
 
 	for _, def := range defs {
-		if err := reg.Register(ctx, def); err != nil {
+		if err := registerDefaultTool(ctx, reg, def); err != nil {
 			return fmt.Errorf("tools: register %s: %w", def.Name(), err)
 		}
 		slog.Info("tools.register_default", "tool", def.Name())
 	}
 
 	return nil
+}
+
+func registerDefaultTool(ctx context.Context, reg ToolRegistry, def ToolDefinition) error {
+	switch def.(type) {
+	case *ReadTool, *LSTool, *GrepTool, *FindTool:
+		if registrar, ok := reg.(trustedScopedWorkspaceReadRegistrar); ok {
+			return registrar.registerTrustedScopedWorkspaceRead(ctx, def)
+		}
+		// Keep the existing completion-only registration for registries that
+		// predate the scoped-reader capability. It never mints read effects.
+		switch def.(type) {
+		case *ReadTool, *LSTool:
+			if registrar, ok := reg.(trustedInlineLocalReaderRegistrar); ok {
+				return registrar.registerTrustedInlineLocalReader(ctx, def)
+			}
+		}
+	case *WriteTool, *EditFileTool:
+		if registrar, ok := reg.(trustedWorkspaceWriteRegistrar); ok {
+			return registrar.registerTrustedWorkspaceWrite(ctx, def)
+		}
+	case *BashTool, *StreamingBashToolImpl:
+		if registrar, ok := reg.(trustedLocalProcessRegistrar); ok {
+			return registrar.registerTrustedLocalProcess(ctx, def)
+		}
+	}
+	return reg.Register(ctx, def)
 }

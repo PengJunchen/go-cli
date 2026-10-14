@@ -44,9 +44,9 @@ type vqvgMarkers struct {
 	hasLeakGuard bool
 }
 
-// checkVQVG parses all non-test .go files under dir and produces the six
-// VQ-001..004 / VG-001..002 verification results. These rules now return PASS
-// or FAIL (never SKIP) based on the heuristic AST evidence in the source.
+// checkVQVG parses all non-test .go files under dir and produces static hints
+// for the six VQ-001..004 / VG-001..002 rules. These markers are not behavioral
+// evidence and therefore never produce PASS or FAIL.
 func checkVQVG(dir string) []VerifyResult {
 	markers := scanVQVGMarkers(dir)
 
@@ -73,20 +73,20 @@ func checkVQVG(dir string) []VerifyResult {
 	return results
 }
 
-// vqvgResult builds a single VerifyResult with a PASS/FAIL/SKIP status and a
-// descriptive message in English for the given evidence.
+// vqvgResult builds a static heuristic hint with a descriptive message.
 func vqvgResult(id, name string, pass bool, passMsg, failMsg string) VerifyResult {
-	status := "FAIL"
-	message := failMsg
+	message := "static heuristic did not find the expected marker; behavioral verification is not run"
 	if pass {
-		status = "PASS"
-		message = passMsg
+		message = "static heuristic found markers; behavioral verification is still required: " + passMsg
+	} else if failMsg != "" {
+		message += ": " + failMsg
 	}
 	return VerifyResult{
-		ID:      id,
-		Name:    name,
-		Status:  status,
-		Message: message,
+		ID:       id,
+		Name:     name,
+		Status:   "HINT",
+		Evidence: EvidenceStaticHeuristic,
+		Message:  message,
 	}
 }
 

@@ -1,0 +1,106 @@
+2026/09/25 01:46:45 INFO config_load op=config_load source=file+env file_path=.go-cli.yaml
+2026/09/25 01:46:45 INFO config_load op=config_load source=merged file_path=.go-cli.yaml trace_id="" span_id=""
+2026/09/25 01:46:45 INFO mcp.http.connect server=zhipu-web-search endpoint=http://127.0.0.1:57161
+2026/09/25 01:46:45 INFO mcp.http.initialized server=zhipu-web-search protocolVersion=2025-06-18
+2026/09/25 01:46:45 WARN assemble_mcp_list_failed server=zhipu-web-search err="mcp: response ID does not match request ID 2"
+2026/09/25 01:46:45 INFO skill.load path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestE2E_RealConfigScenario_FullPipeline4279561687/001/.go-cli/skills/docx.md name=docx trace_id="" span_id=""
+2026/09/25 01:46:45 INFO skill.load path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/TestE2E_RealConfigScenario_FullPipeline4279561687/001/.go-cli/skills/pdf/SKILL.md name=pdf trace_id="" span_id=""
+2026/09/25 01:46:45 INFO skill.load_dir dir=.go-cli/skills count=2 trace_id="" span_id=""
+2026/09/25 01:46:45 INFO assemble_skills_registered dir=.go-cli/skills count=2
+2026/09/25 01:46:45 ERROR tools.deferred.load.not_found tool=mcp__zhipu-web-search__webSearchPro trace_id="" span_id=""
+--- FAIL: TestE2E_RealConfigScenario_FullPipeline (0.00s)
+    ime_e2e_config_test.go:123:
+          Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/cli/ime_e2e_config_test.go:123
+          Error:        Received unexpected error:
+                        tools: tool not found
+          Test:         TestE2E_RealConfigScenario_FullPipeline
+          Messages:     MCP tool must be registered
+2026/09/25 01:46:45 INFO config_load op=config_load source=file+env file_path=.go-cli.yaml
+2026/09/25 01:46:45 INFO config_load op=config_load source=merged file_path=.go-cli.yaml trace_id="" span_id=""
+2026/09/25 01:46:45 INFO mcp.http.connect server=test-server endpoint=http://127.0.0.1:57163
+2026/09/25 01:46:45 INFO mcp.http.initialized server=test-server protocolVersion=2025-06-18
+2026/09/25 01:46:45 WARN assemble_mcp_list_failed server=test-server err="mcp: response ID does not match request ID 2"
+2026/09/25 01:46:45 ERROR tools.deferred.load.not_found tool=mcp__test-server__customSearch trace_id="" span_id=""
+--- FAIL: TestE2E_RealConfigScenario_MCPDescriptionPropagated (0.00s)
+    ime_e2e_config_test.go:228:
+          Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/cli/ime_e2e_config_test.go:228
+          Error:        Received unexpected error:
+                        tools: tool not found
+          Test:         TestE2E_RealConfigScenario_MCPDescriptionPropagated
+2026/09/25 01:46:45 INFO approval.register.trust_manager
+2026/09/25 01:46:45 INFO config_load op=config_load source=file+env file_path=.go-cli.yaml
+2026/09/25 01:46:45 INFO config_load op=config_load source=merged file_path=.go-cli.yaml trace_id="" span_id=""
+2026/09/25 01:46:45 INFO assemble_mcp_config_discovered path=.go-cli/mcp.json servers=1
+2026/09/25 01:46:45 INFO mcp.http.connect server=auto-server endpoint=http://127.0.0.1:57165
+2026/09/25 01:46:45 INFO mcp.http.initialized server=auto-server protocolVersion=2025-06-18
+2026/09/25 01:46:45 WARN assemble_mcp_list_failed server=auto-server err="mcp: response ID does not match request ID 2"
+2026/09/25 01:46:45 ERROR tools.deferred.load.not_found tool=mcp__auto-server__autoTool trace_id="" span_id=""
+2026/09/25 01:46:45 INFO approval.register.trust_manager
+--- FAIL: TestE2E_RealConfigScenario_AutoDiscoveryFallback (0.00s)
+    ime_e2e_config_test.go:312:
+          Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/cli/ime_e2e_config_test.go:312
+          Error:        Received unexpected error:
+                        tools: tool not found
+          Test:         TestE2E_RealConfigScenario_AutoDiscoveryFallback
+          Messages:     auto-discovered MCP tool must be registered
+2026/09/25 01:46:45 INFO config_load op=config_load source=file+env file_path=.go-cli.yaml
+2026/09/25 01:46:45 INFO config_load op=config_load source=merged file_path=.go-cli.yaml trace_id="" span_id=""
+2026/09/25 01:46:45 INFO mcp.http.connect server=config-server endpoint=http://127.0.0.1:57167
+2026/09/25 01:46:45 INFO mcp.http.initialized server=config-server protocolVersion=2025-06-18
+2026/09/25 01:46:45 WARN assemble_mcp_list_failed server=config-server err="mcp: response ID does not match request ID 2"
+2026/09/25 01:46:45 ERROR tools.deferred.load.not_found tool=mcp__config-server__fromConfig trace_id="" span_id=""
+--- FAIL: TestE2E_RealConfigScenario_ConfigWinsOverAutoDiscovery (0.00s)
+    ime_e2e_config_test.go:383:
+          Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/cli/ime_e2e_config_test.go:383
+          Error:        Received unexpected error:
+                        tools: tool not found
+          Test:         TestE2E_RealConfigScenario_ConfigWinsOverAutoDiscovery
+2026/09/25 01:46:45 INFO approval.register.trust_manager
+2026/09/25 01:46:45 INFO assemble_mcp_config_discovered path=.go-cli/mcp.json servers=1
+2026/09/25 01:46:45 INFO mcp.http.connect server=web-search endpoint=http://127.0.0.1:57170
+2026/09/25 01:46:45 INFO mcp.http.initialized server=web-search protocolVersion=2025-06-18
+2026/09/25 01:46:45 WARN assemble_mcp_list_failed server=web-search err="mcp: response ID does not match request ID 2"
+2026/09/25 01:46:45 ERROR tools.deferred.load.not_found tool=mcp__web-search__search trace_id="" span_id=""
+2026/09/25 01:46:45 INFO approval.register.trust_manager
+--- FAIL: TestIntegration_MCPAutoDiscovery_ArrayFormat (0.00s)
+    ime_integration_test.go:234:
+          Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/cli/ime_integration_test.go:234
+          Error:        Received unexpected error:
+                        tools: tool not found
+          Test:         TestIntegration_MCPAutoDiscovery_ArrayFormat
+2026/09/25 01:46:45 INFO approval.register.trust_manager
+2026/09/25 01:46:45 INFO assemble_mcp_config_discovered path=.go-cli/mcp.json servers=1
+2026/09/25 01:46:45 INFO mcp.http.connect server=echo-server endpoint=http://127.0.0.1:57172
+2026/09/25 01:46:45 INFO mcp.http.initialized server=echo-server protocolVersion=2025-06-18
+2026/09/25 01:46:45 WARN assemble_mcp_list_failed server=echo-server err="mcp: response ID does not match request ID 2"
+2026/09/25 01:46:45 ERROR tools.deferred.load.not_found tool=mcp__echo-server__echo trace_id="" span_id=""
+2026/09/25 01:46:45 INFO approval.register.trust_manager
+--- FAIL: TestIntegration_MCPAutoDiscovery_MapFormat (0.00s)
+    ime_integration_test.go:282:
+          Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/cli/ime_integration_test.go:282
+          Error:        Received unexpected error:
+                        tools: tool not found
+          Test:         TestIntegration_MCPAutoDiscovery_MapFormat
+2026/09/25 01:46:45 INFO mcp.http.connect server=config-server endpoint=http://127.0.0.1:57174
+2026/09/25 01:46:45 INFO mcp.http.initialized server=config-server protocolVersion=2025-06-18
+2026/09/25 01:46:45 WARN assemble_mcp_list_failed server=config-server err="mcp: response ID does not match request ID 2"
+2026/09/25 01:46:45 ERROR tools.deferred.load.not_found tool=mcp__config-server__config-tool trace_id="" span_id=""
+--- FAIL: TestIntegration_MCPConfigOverridesAutoDiscovery (0.00s)
+    ime_integration_test.go:346:
+          Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/cli/ime_integration_test.go:346
+          Error:        Received unexpected error:
+                        tools: tool not found
+          Test:         TestIntegration_MCPConfigOverridesAutoDiscovery
+2026/09/25 01:46:45 INFO mcp.http.connect server=sse-server endpoint=http://127.0.0.1:57177
+2026/09/25 01:46:45 INFO mcp.http.initialized server=sse-server protocolVersion=2025-06-18
+2026/09/25 01:46:45 WARN assemble_mcp_list_failed server=sse-server err="mcp: response ID does not match request ID 2"
+2026/09/25 01:46:45 ERROR tools.deferred.load.not_found tool=mcp__sse-server__sse-tool trace_id="" span_id=""
+--- FAIL: TestInteractiveCmd_RegisterMCPTools_SSEServer (0.00s)
+    interactive_extra_test.go:179:
+          Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/cli/interactive_extra_test.go:179
+          Error:        Received unexpected error:
+                        tools: tool not found
+          Test:         TestInteractiveCmd_RegisterMCPTools_SSEServer
+FAIL
+FAIL  github.com/pengjunchen/go-cli/internal/cli  0.028s
+FAIL

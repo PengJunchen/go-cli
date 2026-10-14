@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/mcp"
 )
 
 func TestDoctorFormat(t *testing.T) {
@@ -29,6 +30,22 @@ func TestDoctorFormat(t *testing.T) {
 	assert.Contains(t, out, "[PASS]")
 	assert.Contains(t, out, "[WARN]")
 	assert.Contains(t, out, "offline")
+}
+
+func TestToMCPConfigSelectsStreamableHTTPForURL(t *testing.T) {
+	cfg := toMCPConfig(config.MCPServerConfig{Name: "http-server", URL: "http://127.0.0.1/mcp"})
+	assert.Equal(t, mcp.MCPTransportStreamableHTTP, cfg.Transport)
+	assert.Equal(t, "http://127.0.0.1/mcp", cfg.URL)
+}
+
+func TestNewMCPClientForDoctorSelectsStreamableHTTPAdapter(t *testing.T) {
+	cfg := mcp.MCPServerConfig{
+		Name:      "http-server",
+		URL:       "http://127.0.0.1/mcp",
+		Transport: mcp.MCPTransportStreamableHTTP,
+	}
+	client := newMCPClientForDoctor(cfg)
+	require.IsType(t, (*mcp.HTTPClientAdapter)(nil), client)
 }
 
 func TestDoctorRunnerRun(t *testing.T) {
@@ -323,21 +340,29 @@ func TestMCPServersCheckerNoServers(t *testing.T) {
 }
 
 func TestMCPServersCheckerFailedServer(t *testing.T) {
-	c := &MCPServersChecker{
-		configLoader: func() (*config.Config, error) {
-			return &config.Config{
-				MCP: config.MCPConfig{
-					Servers: []config.MCPServerConfig{
-						{Name: "bad", URL: "http://127.0.0.1:1"},
-					},
-				},
-			}, nil
-		},
-	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	globalConfigDir := filepath.Join(home, ".go-cli")
+	require.NoError(t, os.MkdirAll(globalConfigDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(globalConfigDir, "config.json"), []byte(`{"mcp":{"servers":[{"name":"bad","url":"http://127.0.0.1:1"}]}}`), 0o600))
+	c := NewMCPServersChecker()
 	chk := c.Check(context.Background())
 	assert.Equal(t, doctorWarn, chk.Status)
 	assert.Contains(t, chk.Message, "failed")
 	assert.Contains(t, chk.Message, "Advice")
+}
+
+func TestMCPServersCheckerRejectsUnknownServerProvenance(t *testing.T) {
+	c := &MCPServersChecker{
+		configLoader: func() (*config.Config, error) {
+			return &config.Config{MCP: config.MCPConfig{Servers: []config.MCPServerConfig{{Name: "ambiguous", URL: "http://127.0.0.1:1"}}}}, nil
+		},
+	}
+	chk := c.Check(context.Background())
+	assert.Equal(t, doctorWarn, chk.Status)
+	assert.Contains(t, chk.Message, "ambiguous provenance")
+	assert.NotContains(t, chk.Message, "127.0.0.1")
 }
 
 // --- LSPChecker ---

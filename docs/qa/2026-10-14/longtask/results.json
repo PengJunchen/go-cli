@@ -1,0 +1,226 @@
+{
+  "baseline": {
+    "branch": "develop",
+    "commit": "e77e8058c51e5370a2ecc3eacb5fce0419829bcf"
+  },
+  "run": {
+    "startedAt": "2026-10-14T12:29:02+08:00",
+    "hostOS": "darwin",
+    "command": "rtk proxy go test -race -tags=e2e ./tests -run '^TestE2EBinaryLongTask$' -count=1 -json",
+    "status": "passed-in-isolated-run-but-superseded",
+    "durationSeconds": 19.239,
+    "rawLog": "rawlogs/e2e-binary-longtask-darwin.jsonl"
+  },
+  "latestFocusedRun": {
+    "startedAt": "2026-10-14T14:06:34+08:00",
+    "hostOS": "darwin",
+    "command": "rtk proxy go test -race -tags=e2e ./tests -run '^TestE2EBinaryLongTask$' -count=1 -json",
+    "status": "passed",
+    "durationSeconds": 17.627,
+    "testElapsedSeconds": 16.02,
+    "rawLog": "rawlogs/pty-childgroup-cleanup-green.jsonl",
+    "sourceStateAtCapture": "Source tree based on commit 89 with the final fixture patch applied; that patch was subsequently committed as 6aa6f9318f3d3c40822c368e489c9284cd932072."
+  },
+  "currentAcceptanceStatus": "integrated-verify-and-tagged-e2e-passed-on-6aa6f9318f3d3c40822c368e489c9284cd932072",
+  "latestFocusedLongTaskRun": {
+    "startedAt": "2026-10-14T14:06:34+08:00",
+    "hostOS": "darwin",
+    "command": "rtk proxy go test -race -tags=e2e ./tests -run '^TestE2EBinaryLongTask$' -count=1 -json",
+    "status": "passed",
+    "testElapsedSeconds": 16.02,
+    "packageElapsedSeconds": 17.627,
+    "rawLog": "rawlogs/pty-childgroup-cleanup-green.jsonl",
+    "sourceCommitAfterCapture": "6aa6f9318f3d3c40822c368e489c9284cd932072",
+    "realRaceInstrumentedBinary": true,
+    "actualStreamedHTTPRequests": 120,
+    "lastRequestMessageCount": 29,
+    "oldestTurnOmittedAfterCompaction": true,
+    "productionCompactionLogPresent": true,
+    "followUpRequestContainsFullCanary": true,
+    "followUpRequestContainsToolStdout": true,
+    "followUpQueueAcknowledgedBeforeShellRelease": true,
+    "escapeToInterruptedMilliseconds": 18,
+    "delayedSideEffectAbsentAfterSeconds": 5,
+    "automaticContinuationRequestsBeforeFreshPrompt": 0,
+    "freshPromptAfterCancellationCompleted": true
+  },
+  "earlierFullTaggedSuite": {
+    "status": "failed",
+    "failedCase": "TestE2EBinaryLongTask/PTY_follow-up_preserves_Bash_side_effect",
+    "diagnosis": "The test released the Bash fixture after the PTY view showed follow-up text, before the production callback confirmed channel enqueue."
+  },
+  "earlierEscapeTaggedSuiteFailure": {
+    "status": "historical-failure-superseded-by-final-6aa-pass",
+    "baselineCommit": "224462776911986f0c9afba6b895acce1007458e",
+    "failedCase": "TestE2EBinaryLongTask/PTY_Escape_cancels_long_Bash_before_delayed_effect",
+    "diagnosis": "This earlier repository-wide tagged run showed [quitting...] and the app exited before [interrupted], with TUI exited before its event source and durable refresh completed. The source regression, focused TestE2EBinaryLongTask rerun, and final integrated tagged gate now pass.",
+    "summary": "../gates/test-e2e-224-cancel-red.json",
+    "summarySHA256": "1a2f6b6a546e3f69bfec39bc253332e0d779ca2a0412ea4932fdca511d1ca22b"
+  },
+  "latestFullTaggedSuite": {
+    "status": "passed",
+    "commit": "6aa6f9318f3d3c40822c368e489c9284cd932072",
+    "hostOS": "darwin",
+    "exitCode": 0,
+    "total": 4787,
+    "passed": 4781,
+    "failed": 0,
+    "skipped": 6,
+    "packages": 7,
+    "durationSeconds": 164.917,
+    "summary": "../gates/test-e2e.json"
+  },
+  "latestIntegratedGates": {
+    "status": "passed",
+    "commit": "6aa6f9318f3d3c40822c368e489c9284cd932072",
+    "taggedE2E": "../gates/test-e2e.json",
+    "verify": {
+      "summary": "../gates/verify.json",
+      "exitCode": 0,
+      "total": 8713,
+      "passed": 8707,
+      "failed": 0,
+      "skipped": 6,
+      "packages": 28,
+      "durationSeconds": 370.378,
+      "lintErrors": 0,
+      "scanErrors": 0
+    },
+    "sourceUnchangedDuringVerify": true
+  },
+  "latestEscapeFocusedRun": {
+    "status": "passed",
+    "command": "rtk proxy go test -race -tags=e2e ./tests -run '^TestE2EBinaryLongTask/PTY_Escape_cancels_long_Bash_before_delayed_effect$' -count=1 -json",
+    "rawLog": "rawlogs/pty-childgroup-cleanup-green.jsonl",
+    "escapeToPromptMilliseconds": 18,
+    "delayedSideEffectAbsentAfterSeconds": 5,
+    "automaticFollowUpRequestsBeforeFreshPrompt": 0,
+    "freshPromptAfterCancellationCompleted": true,
+    "providerRequestsAfterFreshPrompt": 2
+  },
+  "checks": [
+    {
+      "name": "real race-instrumented CLI, streamed HTTP, 120 turns, and compaction",
+      "status": "passed-focused-run-and-final-6aa-tagged-suite",
+      "httpRequests": 120,
+      "lastRequestMessageCount": 29,
+      "oldestTurnOmittedFromLastRequest": true,
+      "productionCompactionLogPresent": true
+    },
+    {
+      "name": "Darwin PTY follow-up while Bash waits on a controlled release file",
+      "status": "passed-focused-run-and-final-6aa-tagged-suite",
+      "followUp": "FOLLOW-UP-CANARY include the shell result in your completion",
+      "actualSecondRequestContainsFollowUp": true,
+      "actualSecondRequestContainsToolOutput": true,
+      "bashStartedMarkerConfirmed": true,
+      "releaseControlledUntilProductionQueueAcknowledgment": true,
+      "queueAcknowledgmentLog": "core.turn.runner.followup.sent",
+      "sideEffectFileVerified": true
+    },
+    {
+      "name": "Darwin PTY Escape cancels delayed Bash side effect",
+      "status": "passed-focused-run-and-final-6aa-tagged-suite",
+      "escapeToPromptMilliseconds": 18,
+      "delayedSideEffectAbsentAfterSeconds": 5,
+      "automaticFollowUpRequestsBeforeFreshPrompt": 0,
+      "freshPromptAfterCancellationCompleted": true,
+      "providerRequestsAfterFreshPrompt": 2
+    }
+  ],
+  "relatedChecks": {
+    "tuiFollowUpAndSteerSpaceRegression": {
+      "status": "passed",
+      "command": "rtk proxy go test -race -count=1 ./internal/tui -run '^(TestFollowUpUpdateAndViewPreserveSpace|TestSteerUpdateAndViewPreserveSpace)$' -json",
+      "rawLog": "rawlogs/tui-space-green.jsonl",
+      "redLog": "rawlogs/tui-space-red.jsonl"
+    },
+    "grepEscapedPipeDeadlineFixture": {
+      "status": "passed",
+      "command": "rtk proxy go test -race -count=1 ./internal/tools -run '^TestGrepTimeoutWithEscapedPipeWriterPreservesCancellationCause$' -json",
+      "rawLog": "rawlogs/grep-escaped-pipe-green.jsonl",
+      "redLog": "rawlogs/grep-escaped-pipe-startup-red.jsonl"
+    },
+    "testGateDescendantPipeFixture": {
+      "status": "passed-in-final-6aa-full-verify",
+      "timeoutMilliseconds": 2000,
+      "waitDelayMilliseconds": 3000,
+      "elapsedUpperBoundSeconds": 8,
+      "focusedElapsedSeconds": 3.43,
+      "descendantPIDMarkerConfirmed": true,
+      "exitCode": 124,
+      "descendantStopped": true,
+      "residualProcessGroupDiagnosticObserved": true,
+      "redLogs": [
+        "rawlogs/test-gate-descendant-startup-red.jsonl",
+        "rawlogs/test-gate-descendant-waitdelay-red.jsonl"
+      ],
+      "latestConcurrentRunLog": "rawlogs/test-gate-descendant-concurrent-red.jsonl",
+      "earlierOneOffGreenLog": "rawlogs/test-gate-descendant-green.jsonl",
+      "greenLog": "rawlogs/test-gate-descendant-seconds-green.jsonl",
+      "note": "The fixture keeps the synthetic parent-exits/descendant-holds-pipes relationship. Its 8s bound includes the 2s command timeout, 3s WaitDelay, 500ms cleanup, and 2.5s scheduling allowance. The focused race run returned timeout 124 with the marker present and descendant stopped; the residual-descendant diagnostic is expected for this deliberate fixture. The final full verify on commit 6aa passed."
+    },
+    "sshpassAmbiguousExitFixture": {
+      "status": "focused-race-pass-and-final-6aa-full-verify",
+      "exitCodes": [1, 2, 3, 4, 5, 6, 7],
+      "allOutcomesUnknownAndQuiescent": true,
+      "redLog": "rawlogs/sshpass-local-exit-codes-red.jsonl",
+      "isolatedRetryLog": "rawlogs/sshpass-exit-5-isolation.jsonl",
+      "greenLog": "rawlogs/sshpass-local-exit-codes-green.jsonl",
+      "note": "A one-second fixture timeout expired for fake sshpass exit 5 during loaded race verification; an isolated retry completed in 161ms. The test-specific timeout is now 5s, and the full seven-code focused race run passed."
+    },
+    "longTaskQueueAcknowledgedE2E": {
+      "status": "passed-in-final-6aa-tagged-suite",
+      "command": "rtk proxy go test -race -tags=e2e ./tests -run '^TestE2EBinaryLongTask$' -count=1 -json",
+      "rawLog": "rawlogs/pty-childgroup-cleanup-green.jsonl",
+      "productionQueueAcknowledgmentBeforeRelease": true,
+      "actualFollowUpRequestContainsFullCanary": true,
+      "actualFollowUpRequestContainsBashToolResult": true,
+      "shellPIDAndStartFilesProveExecution": true,
+      "cancelDelayedEffectAbsentAfterSeconds": 5,
+      "cancelProviderRequests": 1,
+      "previewMarkerFalsePositiveRedLog": "rawlogs/pty-preview-marker-false-positive-red.jsonl"
+    },
+    "ptyBashGroupCleanupIdentity": {
+      "status": "passed-focused-race-test-and-final-6aa-gates",
+      "command": "rtk proxy go test -race -tags=e2e ./tests -run '^TestCleanupLongTaskBashGroupVerifiesFixtureIdentity$' -count=1 -json",
+      "rawLog": "rawlogs/pty-bash-group-cleanup-final-green.jsonl",
+      "matchingTokenKillsTestOwnedGroup": true,
+      "wrongTokenLeavesGroupAliveFor100ms": true,
+      "identityChecks": ["fixture PID", "matching PGID", "unique command token twice"],
+      "leaderExitedDescendantCleanup": "not-claimed",
+      "boundedFixtureResidual": "A foreground sleep can outlive an already-exited Bash leader for at most 5s; this run waited through that delay and verified the side-effect file remained absent."
+    },
+    "cancelledLegacyTUILifecycle": {
+      "status": "passed-focused-race-test-and-final-6aa-full-verify",
+      "redLog": "rawlogs/repl-cancel-lifecycle-red.jsonl",
+      "greenLog": "rawlogs/repl-cancel-lifecycle-green.jsonl",
+      "finalNoTimeoutGreenLog": "rawlogs/repl-cancel-no-timeout-green.jsonl",
+      "uncancelledPrematureExitRemainsError": true,
+      "durableRefreshPrematureExitRemainsError": true
+    },
+    "supersededOwnerJoinTimeoutProbe": {
+      "status": "rejected-design-not-final-behavior",
+      "rawLogs": [
+        "rawlogs/repl-cancel-lifecycle-bounded-green.jsonl",
+        "rawlogs/repl-cancel-owner-boundary-green.jsonl"
+      ],
+      "reason": "A helper timeout was not a bounded caller because executeTurn still joined turnDone and stopTUI waited eventSource.Done(); the final source removes this added timeout and retains actual owner joins."
+    }
+  },
+  "linux": {
+    "e2eTestPackageCrossCompile": "passed-on-6aa6f9318f3d3c40822c368e489c9284cd932072",
+    "crossCompileTarget": "linux/amd64",
+    "crossCompileExitCode": 0,
+    "crossCompileSourceCommit": "6aa6f9318f3d3c40822c368e489c9284cd932072",
+    "ptyRuntime": "not-run-on-linux",
+    "crossCompileLog": "rawlogs/linux-e2e-test-cross-compile-final.txt"
+  },
+  "evidenceCategories": [
+    "real-binary-and-local-http-sse",
+    "real-darwin-pty-e2e",
+    "unit-regression",
+    "linux-cross-compile"
+  ],
+  "scope": "A real local CLI binary and terminal workflow were exercised against a deterministic local OpenAI-compatible mock. The two PTY child invocations use --no-sandbox: the run verifies TUI approval, Bash side effects and cancellation, plus actual HTTP request content, but does not validate OS sandbox isolation or enforcement. The test cleanup signals only a live Bash leader whose PID, PGID, and unique token match; it does not claim cleanup of an unverified group after that leader exits. The final cancel run waited five seconds and observed no side-effect file. This is not a real-provider or production-model acceptance run."
+}

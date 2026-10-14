@@ -9,6 +9,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/core"
 )
 
 // newTestModel builds a non-interactive teaModel wired to an event channel for
@@ -19,15 +21,12 @@ func newTestModel(events <-chan AgentEvent) *teaModel {
 	return app.model
 }
 
-// TestTeaModel_InitReturnsCmd verifies Init returns a non-nil command that
-// arms the event, message and quit listeners.
-func TestTeaModel_InitReturnsCmd(t *testing.T) {
+// TestTeaModel_InitDoesNotStartUnownedCommands verifies external channel pumps
+// are owned and joined by BubbleteaApp.Run rather than detached tea.Cmds.
+func TestTeaModel_InitDoesNotStartUnownedCommands(t *testing.T) {
 	m := newTestModel(make(chan AgentEvent, 1))
 	cmd := m.Init()
-	require.NotNil(t, cmd, "Init must return a command")
-	// Executing the batched command yields one of the listener messages (or
-	// nil); it must not panic.
-	_ = cmd()
+	require.Nil(t, cmd, "model initialization must not create detached readers")
 }
 
 // TestTeaModel_ViewEmpty verifies a fresh model renders an empty view.
@@ -143,6 +142,7 @@ func TestTeaModel_TokenUsageStatusBar(t *testing.T) {
 		Type: "token_usage",
 		TokenUsage: &TokenUsageData{
 			InputTokens: 7000, OutputTokens: 1000, MaxTokens: 8000, Cost: 0.05,
+			UsageSource: core.TokenUsageSourceReported,
 		},
 	}})
 	assert.Equal(t, 7000, m.tokenInput)
@@ -152,17 +152,35 @@ func TestTeaModel_TokenUsageStatusBar(t *testing.T) {
 	assert.Contains(t, view, "\x1b[", "over 80% usage should be yellow")
 }
 
-// TestBubbleteaApp_RunCompletesOnChannelClose verifies Run returns nil when the
-// event channel closes (waitForEvent returns tea.Quit).
-func TestBubbleteaApp_RunCompletesOnChannelClose(t *testing.T) {
+// TestBubbleteaApp_EventSourceCloseDoesNotQuit verifies closing the event
+// source stops only that reader while the UI remains available for control.
+func TestBubbleteaApp_EventSourceCloseDoesNotQuit(t *testing.T) {
 	events := make(chan AgentEvent, 2)
 	events <- AgentEvent{ContentType: ContentTypeStatus, Content: "done"}
 	close(events)
 
-	app := NewBubbleteaApp(events)
-	require.NoError(t, app.Run(context.Background()))
+	app := NewBubbleteaApp(events, WithInitialTranscript(appControlSnapshot("session-1", "main", "initial")))
+	runErr := make(chan error, 1)
+	go func() { runErr <- app.Run(context.Background()) }() //nolint:errcheck
+	select {
+	case <-app.ProgramReady():
+	case <-time.After(time.Second):
+		t.Fatal("program did not start")
+	}
+	select {
+	case err := <-runErr:
+		t.Fatalf("event source close unexpectedly quit the UI: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
 	assert.Equal(t, int64(1), app.EventsProcessed())
 	assert.Contains(t, app.View(), "done")
+	app.Quit()
+	select {
+	case err := <-runErr:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("explicit Quit did not stop the app")
+	}
 }
 
 // TestBubbleteaApp_QuitStopsLoop verifies Quit stops a running loop and that

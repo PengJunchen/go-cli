@@ -12,8 +12,8 @@ import (
 // threeModels is a reusable pool of three ModelEntry values for tests.
 var threeModels = []ModelEntry{
 	{Provider: "openai", Model: "gpt-4o", Weight: 1},
-	{Provider: "claude", Model: "claude-3", Weight: 1},
-	{Provider: "gemini", Model: "gemini-pro", Weight: 1},
+	{Provider: "compatible-claude", Model: "claude-3", Weight: 1},
+	{Provider: "compatible-gemini", Model: "gemini-pro", Weight: 1},
 }
 
 // TestModelCycler_Name verifies the middleware identifier.
@@ -244,6 +244,15 @@ type cyclerTestProvider struct {
 
 func (p *cyclerTestProvider) Name() string        { return p.name }
 func (p *cyclerTestProvider) Models() []ModelInfo { return nil }
+func (p *cyclerTestProvider) resolverSpec() ProviderSpec {
+	return ProviderSpec{
+		ProviderID:              p.name,
+		ProtocolID:              ProtocolOpenAICompatible,
+		DefaultBaseURL:          "https://fixture.invalid",
+		DefaultEndpointExplicit: true,
+		Enabled:                 true,
+	}
+}
 func (p *cyclerTestProvider) Build(_ context.Context, cfg ModelConfig) (BaseChatModel, func(), error) {
 	return &fbMockModel{
 		genContent: cfg.Model,
@@ -252,14 +261,21 @@ func (p *cyclerTestProvider) Build(_ context.Context, cfg ModelConfig) (BaseChat
 		streamErr:  p.genErr,
 	}, func() {}, nil
 }
+func (p *cyclerTestProvider) buildGuarded(ctx context.Context, cfg ModelConfig, candidate *resolvedCandidateHandle) (BaseChatModel, func(), error) {
+	model, cleanup, err := p.Build(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &attemptFencedTestModel{inner: model, candidate: candidate}, cleanup, nil
+}
 
 // newCyclerTestRegistry creates a ProviderRegistry with cyclerTestProvider
-// instances registered under the names used by threeModels. When genErr is
+// instances registered under the compatible identities used by threeModels. When genErr is
 // non-nil, every built model will fail.
 func newCyclerTestRegistry(t *testing.T, genErr error) *ProviderRegistry {
 	t.Helper()
 	reg := NewProviderRegistry()
-	for _, name := range []string{"openai", "claude", "gemini"} {
+	for _, name := range []string{"openai", "compatible-claude", "compatible-gemini"} {
 		require.NoError(t, reg.Register(&cyclerTestProvider{name: name, genErr: genErr}))
 	}
 	return reg
@@ -277,16 +293,16 @@ func TestModelCycler_WrapModel_DelegatesToSelected(t *testing.T) {
 	primary := &fbMockModel{genContent: "primary-ok"}
 	wrapped := c.WrapModel(primary)
 
-	resp, err := wrapped.Generate(context.Background(), nil)
+	resp, err := wrapped.Generate(attemptTestContext(), nil)
 	require.NoError(t, err)
 	assert.Contains(t, []string{"gpt-4o", "claude-3", "gemini-pro"}, resp.Content,
 		"response should come from a selected model, not the primary")
 	assert.Equal(t, 0, primary.genCalls, "primary should not be called when selected model succeeds")
 }
 
-// TestModelCycler_WrapModel_FallbackOnError verifies that when the selected
-// model returns an error, Generate falls back to the primary model.
-func TestModelCycler_WrapModel_FallbackOnError(t *testing.T) {
+// TestModelCycler_WrapModel_NoProtocolFallback verifies that an untyped
+// selected-model failure does not silently dispatch through the primary.
+func TestModelCycler_WrapModel_NoProtocolFallback(t *testing.T) {
 	reg := newCyclerTestRegistry(t, errors.New("selected model down"))
 	c := NewModelCycler(ModelCyclerConfig{
 		Models:   threeModels,
@@ -296,10 +312,9 @@ func TestModelCycler_WrapModel_FallbackOnError(t *testing.T) {
 	primary := &fbMockModel{genContent: "primary-ok"}
 	wrapped := c.WrapModel(primary)
 
-	resp, err := wrapped.Generate(context.Background(), nil)
-	require.NoError(t, err)
-	assert.Equal(t, "primary-ok", resp.Content, "should fall back to primary on error")
-	assert.Equal(t, 1, primary.genCalls, "primary should be called exactly once as fallback")
+	_, err := wrapped.Generate(attemptTestContext(), nil)
+	require.Error(t, err)
+	assert.Zero(t, primary.genCalls, "protocol failure must not fall back to the unbound primary")
 }
 
 // TestModelCycler_WrapModel_NoRegistry verifies that without a registry, every
@@ -335,7 +350,7 @@ func TestModelCycler_WrapModel_RoundRobin(t *testing.T) {
 
 	expected := []string{"gpt-4o", "claude-3", "gemini-pro"}
 	for i, want := range expected {
-		resp, err := wrapped.Generate(context.Background(), nil)
+		resp, err := wrapped.Generate(attemptTestContext(), nil)
 		require.NoError(t, err)
 		assert.Equal(t, want, resp.Content, "call %d should select model %q", i, want)
 	}
@@ -355,10 +370,9 @@ func TestModelCycler_WrapModel_SessionAffinity(t *testing.T) {
 	primary := &fbMockModel{genContent: "primary-ok"}
 	wrapped := c.WrapModel(primary)
 
-	ctx := WithSessionID(context.Background(), "session-A")
-
 	var firstContent string
 	for i := 0; i < 5; i++ {
+		ctx := WithSessionID(attemptTestContext(), "session-A")
 		resp, err := wrapped.Generate(ctx, nil)
 		require.NoError(t, err)
 		if i == 0 {
@@ -388,7 +402,7 @@ func TestModelCycler_WrapModel_SessionAffinity_DifferentSessions(t *testing.T) {
 
 	contents := make(map[string]bool)
 	for _, sid := range []string{"s1", "s2", "s3"} {
-		ctx := WithSessionID(context.Background(), sid)
+		ctx := WithSessionID(attemptTestContext(), sid)
 		resp, err := wrapped.Generate(ctx, nil)
 		require.NoError(t, err)
 		contents[resp.Content] = true
@@ -410,7 +424,7 @@ func TestModelCycler_WrapModel_Stream_Delegates(t *testing.T) {
 	primary := &fbMockModel{streamText: "primary-stream"}
 	wrapped := c.WrapModel(primary)
 
-	ch, err := wrapped.Stream(context.Background(), nil)
+	ch, err := wrapped.Stream(attemptTestContext(), nil)
 	require.NoError(t, err)
 
 	var got string
@@ -422,9 +436,9 @@ func TestModelCycler_WrapModel_Stream_Delegates(t *testing.T) {
 	assert.Equal(t, 0, primary.streamCalls, "primary should not be called when selected model succeeds")
 }
 
-// TestModelCycler_WrapModel_Stream_FallbackOnError verifies that when the
-// selected model's Stream returns an error, the call falls back to the primary.
-func TestModelCycler_WrapModel_Stream_FallbackOnError(t *testing.T) {
+// TestModelCycler_WrapModel_Stream_NoProtocolFallback verifies that an
+// untyped selected-stream failure does not dispatch through the primary.
+func TestModelCycler_WrapModel_Stream_NoProtocolFallback(t *testing.T) {
 	reg := newCyclerTestRegistry(t, errors.New("stream down"))
 	c := NewModelCycler(ModelCyclerConfig{
 		Models:   threeModels,
@@ -434,15 +448,10 @@ func TestModelCycler_WrapModel_Stream_FallbackOnError(t *testing.T) {
 	primary := &fbMockModel{streamText: "primary-stream"}
 	wrapped := c.WrapModel(primary)
 
-	ch, err := wrapped.Stream(context.Background(), nil)
-	require.NoError(t, err)
-
-	var got string
-	for chunk := range ch {
-		got += chunk.Content
-	}
-	assert.Equal(t, "primary-stream", got, "should fall back to primary stream on error")
-	assert.Equal(t, 1, primary.streamCalls, "primary should be called exactly once as fallback")
+	ch, err := wrapped.Stream(attemptTestContext(), nil)
+	require.Error(t, err)
+	require.Nil(t, ch)
+	assert.Zero(t, primary.streamCalls, "protocol failure must not fall back to the unbound primary stream")
 }
 
 // TestModelCycler_WrapModel_Stream_NoRegistry verifies that without a registry,

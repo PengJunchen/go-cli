@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -59,7 +60,7 @@ func TestSubAgentMaxTurnsRespected(t *testing.T) {
 	assert.Equal(t, "response-3", res.Content)
 }
 
-func TestSubAgentSendAfterTerminalStillRecords(t *testing.T) {
+func TestSubAgentSendAfterTerminalIsRejected(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	sub := newTestSubAgent("early")
@@ -69,9 +70,9 @@ func TestSubAgentSendAfterTerminalStillRecords(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, SubAgentCompleted, sub.State())
 
-	// a send after the run ended is still recorded under lock.
-	require.NoError(t, sub.Send(context.Background(), "late msg"))
-	assert.Equal(t, []string{"late msg"}, sub.Received())
+	// A send after the run ended must not be reported as accepted.
+	require.ErrorIs(t, sub.Send(context.Background(), "late msg"), ErrSubAgentNotRunning)
+	assert.Empty(t, sub.Received())
 }
 
 func TestSubAgentWaitContextCancellation(t *testing.T) {
@@ -96,27 +97,41 @@ func TestSubAgentWaitContextCancellation(t *testing.T) {
 func TestSubAgentSendDoesNotBlockOnFullInbox(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	sub := newTestSubAgent("inbox")
-	ch, err := sub.Run(context.Background(), "p")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRunner := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseRunner()
+	runner := &heldInboxSubAgentRunner{started: started, release: release}
+	sub := mustSubAgent(NewDefaultSubAgent(
+		SubAgentConfig{Name: "inbox"},
+		WithSubAgentRunner(func(SubAgentConfig) subAgentRunner { return runner }),
+	))
+	_, err := sub.Run(context.Background(), "p")
 	require.NoError(t, err)
-
-	// Consume events concurrently so the sub-task routing (which re-emits each
-	// queued message as a user event) never blocks on the out channel.
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		drainChan(ch)
-	}()
-
-	// Blast far more messages than the inbox buffer; Send must never block.
-	for i := 0; i < 100; i++ {
-		require.NoError(t, sub.Send(context.Background(), "msg"))
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("sub-agent runner did not start")
 	}
 
+	// Blast far more messages than the inbox buffer; accepted messages are
+	// recorded, while overflow is reported without blocking.
+	accepted := 0
+	for i := 0; i < 100; i++ {
+		err := sub.Send(context.Background(), "msg")
+		if err == nil {
+			accepted++
+		} else {
+			require.ErrorIs(t, err, ErrSubAgentInboxFull)
+		}
+	}
+	assert.Equal(t, inboxBufferSize, accepted)
+	assert.Len(t, sub.Received(), accepted)
+	releaseRunner()
 	_, err = sub.Wait(context.Background())
 	require.NoError(t, err)
-	assert.Len(t, sub.Received(), 100)
-	<-drained
+	assert.Len(t, sub.Received(), inboxBufferSize)
 }
 
 func TestSubAgentPumpInboxClosedReturnsNil(t *testing.T) {

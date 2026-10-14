@@ -40,7 +40,10 @@ func TestNoopRunSlotGuard_ExecutePassthrough(t *testing.T) {
 	g := noopRunSlotGuard{}
 	claim, err := g.ClaimRun(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, "noop", claim.ID)
+	assert.NotEmpty(t, claim.ID)
+	otherClaim, err := g.ClaimRun(context.Background())
+	require.NoError(t, err)
+	assert.NotEqual(t, claim.ID, otherClaim.ID)
 
 	sentinel := errors.New("fn executed")
 	err = g.ExecuteClaimedRun(claim, func() error {
@@ -50,6 +53,7 @@ func TestNoopRunSlotGuard_ExecutePassthrough(t *testing.T) {
 
 	// Release must be a no-op and not panic.
 	g.Release(claim)
+	g.Release(otherClaim)
 }
 
 // TestHarness_ZeroConfigCompat verifies that a harness created without
@@ -275,14 +279,13 @@ func TestFollowUp_NilChannel_NoOp(t *testing.T) {
 	id := runningTurnID(t, runner)
 	require.NotEmpty(t, id)
 
-	// FollowUp with nil channel should not panic and should record on the turn.
+	// FollowUp with no delivery channel must not claim the input was accepted.
 	err := runner.FollowUp(context.Background(), id, "are you done?")
-	require.NoError(t, err)
+	require.Error(t, err)
 
 	turn, err := runner.Get(context.Background(), id)
 	require.NoError(t, err)
-	require.Len(t, turn.FollowUps, 1)
-	assert.Equal(t, "are you done?", turn.FollowUps[0].Content)
+	assert.Empty(t, turn.FollowUps)
 
 	close(bl.release)
 	<-done

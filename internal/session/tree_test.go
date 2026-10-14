@@ -73,6 +73,87 @@ func TestTree_AppendNoOverwrite(t *testing.T) {
 	require.Error(t, tree.Append(context.Background(), newTestEntry("a", "", EntryTypeAssistant)))
 }
 
+func TestSessionTreeAppendRestoresSequenceCounter(t *testing.T) {
+	ctx := context.Background()
+	tree := NewDefaultSessionTree()
+	require.NoError(t, tree.Append(ctx, &SessionEntry{ID: "seed", Type: EntryTypeUser, Seq: 41}))
+	require.NoError(t, tree.Append(ctx, &SessionEntry{ID: "next", ParentID: "seed", Type: EntryTypeAssistant}))
+
+	branch, err := tree.GetBranch(ctx, "next")
+	require.NoError(t, err)
+	require.Len(t, branch, 2)
+	assert.Equal(t, uint64(41), branch[0].Seq)
+	assert.Equal(t, uint64(42), branch[1].Seq)
+}
+
+func TestSessionTreeAppendRejectsNonIncreasingSequence(t *testing.T) {
+	ctx := context.Background()
+	tree := NewDefaultSessionTree()
+	require.NoError(t, tree.Append(ctx, &SessionEntry{ID: "first", Type: EntryTypeUser, Seq: 7}))
+
+	err := tree.Append(ctx, &SessionEntry{ID: "second", ParentID: "first", Type: EntryTypeUser, Seq: 7})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sequence")
+	assert.Equal(t, "first", tree.CurrentLeaf())
+}
+
+func TestSessionTreeAppendValidatesVersionOneCoordinates(t *testing.T) {
+	ctx := context.Background()
+	tree := NewDefaultSessionTree()
+	bad := &SessionEntry{ID: "bad-v1", Type: EntryTypeUser, RecordVersion: 1, Seq: 1}
+	require.Error(t, tree.Append(ctx, bad))
+
+	// Version zero remains readable with the legacy shape.
+	require.NoError(t, tree.Append(ctx, newTestEntry("legacy", "", EntryTypeUser)))
+}
+
+func TestSessionTreeAppendRejectsUnmappableVersionOneCompactionBoundary(t *testing.T) {
+	ctx := context.Background()
+	tree := NewDefaultSessionTree()
+	require.NoError(t, tree.Append(ctx, newR2UserEntry("root", "", 1, 0)))
+	require.NoError(t, tree.Append(ctx, newR2UserEntry("child", "root", 2, 1)))
+
+	marker := &SessionEntry{
+		ID:                      "compaction",
+		ParentID:                "child",
+		Type:                    EntryTypeCompaction,
+		Summary:                 "summary",
+		RecordVersion:           1,
+		Seq:                     3,
+		CompactedThroughEntryID: "other-branch-entry",
+	}
+	require.Error(t, tree.Append(ctx, marker))
+	assert.Equal(t, "root", tree.CurrentLeaf())
+}
+
+func newR2UserEntry(id, parentID string, seq, transcriptIndex uint64) *SessionEntry {
+	return &SessionEntry{
+		ID:              id,
+		ParentID:        parentID,
+		Type:            EntryTypeUser,
+		Content:         "content-" + id,
+		RecordVersion:   1,
+		SessionID:       "physical-session",
+		RunID:           "run-1",
+		TranscriptIndex: &transcriptIndex,
+		Seq:             seq,
+	}
+}
+
+func newR2AssistantEntry(id, parentID string, seq, transcriptIndex uint64) *SessionEntry {
+	return &SessionEntry{
+		ID:              id,
+		ParentID:        parentID,
+		Type:            EntryTypeAssistant,
+		Content:         "content-" + id,
+		RecordVersion:   1,
+		SessionID:       "physical-session",
+		RunID:           "run-1",
+		TranscriptIndex: &transcriptIndex,
+		Seq:             seq,
+	}
+}
+
 func TestTree_AppendUnknownParent(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 

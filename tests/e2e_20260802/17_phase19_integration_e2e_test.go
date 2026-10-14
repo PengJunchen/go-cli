@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,19 +42,19 @@ import (
 // TestE2E_Phase19_ApprovalCallbackWithSandbox
 // -----------------------------------------------------------------------------
 
-// alwaysAllowCallback is a test ApprovalCallback that always returns Allow.
-// It replaces InteractiveApprovalCallback in E2E tests because the interactive
-// callback's strings.Reader is consumed after the first read.
-type alwaysAllowCallback struct{}
+// countingAllowCallback records whether the approval callback was reached.
+type countingAllowCallback struct {
+	calls atomic.Int32
+}
 
-func (alwaysAllowCallback) RequestApproval(_ context.Context, _ string, _ map[string]any) (approval.ApprovalResult, error) {
+func (callback *countingAllowCallback) RequestApproval(_ context.Context, _ string, _ map[string]any) (approval.ApprovalResult, error) {
+	callback.calls.Add(1)
 	return approval.ApprovalAllow, nil
 }
 
-// TestE2E_Phase19_ApprovalCallbackWithSandbox verifies that a bash command goes
-// through both BashSandbox validation and ApprovalCallback. The AutoClassifier
-// returns Ask for bash so the callback is consulted; the BashSandbox then
-// validates the command inside the tool.
+// TestE2E_Phase19_ApprovalCallbackWithSandbox verifies that prepared dispatch
+// rejects an opaque legacy approval wrapper before invoking its callback or a
+// tool. It also checks that the BashSandbox still blocks unsafe commands.
 func TestE2E_Phase19_ApprovalCallbackWithSandbox(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -61,7 +62,7 @@ func TestE2E_Phase19_ApprovalCallbackWithSandbox(t *testing.T) {
 
 	dir := t.TempDir()
 
-	// 1. Create BashTool with BashSandbox (whitelist temp dir, blacklist rm).
+	// Create BashTool with BashSandbox (whitelist temp dir, blacklist rm).
 	sb := tools.NewDefaultBashSandbox(
 		tools.WithWhitelist([]string{dir}),
 	)
@@ -77,38 +78,32 @@ func TestE2E_Phase19_ApprovalCallbackWithSandbox(t *testing.T) {
 	tr := tools.NewDefaultToolRegistry()
 	require.NoError(t, tr.Register(ctx, bashTool))
 
-	// Test 1: safe command in whitelisted dir -> callback allows -> sandbox
-	// passes -> executes.
-	mw1 := approval.NewApprovalMiddleware(
+	// The compatibility wrapper is intentionally rejected by prepared
+	// dispatch. A denial here proves it cannot be treated as an audited
+	// production approval stage.
+	callback := &countingAllowCallback{}
+	mw := approval.NewApprovalMiddleware(
 		approval.NewAutoClassifier(nil, []string{"bash"}),
 		approval.NewInMemoryApprovalStore(),
-		approval.WithCallback(alwaysAllowCallback{}),
+		approval.WithCallback(callback),
 	)
-	wrapped1 := tools.NewMiddlewareToolRegistry(tr, mw1.WrapToolCall)
-	def1, err := wrapped1.Get(ctx, "bash")
-	require.NoError(t, err)
+	wrapped := tools.NewMiddlewareToolRegistry(tr, mw.WrapToolCall)
+	def, err := wrapped.Get(ctx, "bash")
+	require.Nil(t, def)
+	require.ErrorIs(t, err, tools.ErrPreparedOpaqueWrapperUnsupported)
+	assert.Zero(t, callback.calls.Load(), "rejected wrappers must not prompt for approval")
 
-	res, err := def1.Execute(ctx, toolCallWithArgs("bash", map[string]any{
-		"command": "echo hello",
-	}))
-	require.NoError(t, err)
-	assert.Equal(t, "hello\n", res.Output)
-
-	// Test 2: "rm -rf /" -> callback allows -> sandbox blocks.
-	mw2 := approval.NewApprovalMiddleware(
-		approval.NewAutoClassifier(nil, []string{"bash"}),
-		approval.NewInMemoryApprovalStore(),
-		approval.WithCallback(alwaysAllowCallback{}),
-	)
-	wrapped2 := tools.NewMiddlewareToolRegistry(tr, mw2.WrapToolCall)
-	def2, err := wrapped2.Get(ctx, "bash")
-	require.NoError(t, err)
-
-	_, err = def2.Execute(ctx, toolCallWithArgs("bash", map[string]any{
-		"command": "rm -rf /",
+	// The sandbox independently rejects a destructive command before the
+	// shell executes it. Its target is confined to this test's temporary dir.
+	protectedPath := filepath.Join(dir, "protected.txt")
+	require.NoError(t, os.WriteFile(protectedPath, []byte("keep"), 0600))
+	_, err = bashTool.Execute(ctx, toolCallWithArgs("bash", map[string]any{
+		"command": fmt.Sprintf("rm -rf %q", protectedPath),
 	}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sandbox")
+	_, err = os.Stat(protectedPath)
+	require.NoError(t, err, "the sandbox must preserve the targeted temporary file")
 
 	// Test 3: "echo hi" in non-whitelisted dir -> sandbox blocks. We need a
 	// separate BashTool with a non-whitelisted workdir.
@@ -118,19 +113,7 @@ func TestE2E_Phase19_ApprovalCallbackWithSandbox(t *testing.T) {
 		tools.WithBashSandbox(sb), // same sandbox whitelisted to dir, not otherDir
 		tools.WithTimeout(10*time.Second),
 	)
-	tr2 := tools.NewDefaultToolRegistry()
-	require.NoError(t, tr2.Register(ctx, bashToolOther))
-
-	mw3 := approval.NewApprovalMiddleware(
-		approval.NewAutoClassifier(nil, []string{"bash"}),
-		approval.NewInMemoryApprovalStore(),
-		approval.WithCallback(alwaysAllowCallback{}),
-	)
-	wrapped3 := tools.NewMiddlewareToolRegistry(tr2, mw3.WrapToolCall)
-	def3, err := wrapped3.Get(ctx, "bash")
-	require.NoError(t, err)
-
-	_, err = def3.Execute(ctx, toolCallWithArgs("bash", map[string]any{
+	_, err = bashToolOther.Execute(ctx, toolCallWithArgs("bash", map[string]any{
 		"command": "echo hi",
 	}))
 	require.Error(t, err)
@@ -208,35 +191,76 @@ func TestE2E_Phase19_FileTrackerBackupDiffUndo(t *testing.T) {
 // TestE2E_Phase19_ParallelToolsWithApproval verifies that parallel execution
 // with per-tool approval works: read tools execute while bash is denied, and
 // the denial does not block other tools. Results are collected in input order.
+type phase19PreparedDecisionCounter struct {
+	inner     approval.ApprovalClassifier
+	mu        sync.Mutex
+	decisions map[string]int
+}
+
+func (c *phase19PreparedDecisionCounter) Name() string { return c.inner.Name() }
+
+func (c *phase19PreparedDecisionCounter) Classify(ctx context.Context, call tools.ToolCall) approval.Classification {
+	c.mu.Lock()
+	c.decisions[call.Name]++
+	c.mu.Unlock()
+	return c.inner.Classify(ctx, call)
+}
+
+func (c *phase19PreparedDecisionCounter) Counts() map[string]int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	counts := make(map[string]int, len(c.decisions))
+	for name, count := range c.decisions {
+		counts[name] = count
+	}
+	return counts
+}
+
 func TestE2E_Phase19_ParallelToolsWithApproval(t *testing.T) {
-	t.Skip("Pre-existing failure: read2 must execute assertion fails")
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Create 3 tools: 2 read + 1 bash.
-	readTool1 := &recordingTool{name: "read1"}
-	readTool2 := &recordingTool{name: "read2"}
+	dir := t.TempDir()
+	readPath := filepath.Join(dir, "read-target.txt")
+	require.NoError(t, os.WriteFile(readPath, []byte("read-one-sentinel"), 0600))
+
+	// Register real trusted read/ls builtins with a bounded workspace scope.
+	// A recording bash fixture remains untrusted and must be denied before its
+	// executor can run.
+	base := tools.NewDefaultToolRegistry()
+	require.NoError(t, tools.RegisterDefaults(ctx, base,
+		tools.WithRegisteredBuiltinWhitelist([]string{"read", "ls"}),
+		tools.WithRegisteredPathWhitelist([]string{dir}),
+	))
 	bashTool := &recordingTool{name: "bash"}
+	require.NoError(t, base.Register(ctx, bashTool))
 
-	tr := tools.NewDefaultToolRegistry()
-	require.NoError(t, tr.Register(ctx, readTool1))
-	require.NoError(t, tr.Register(ctx, readTool2))
-	require.NoError(t, tr.Register(ctx, bashTool))
-
-	// ApprovalMiddleware: SafetyPolicyClassifier denies bash, allows reads.
+	// The classifier counts every policy decision while preserving the real
+	// deny-first safety policy: trusted read/ls are allowed and bash is denied.
+	classifier := &phase19PreparedDecisionCounter{
+		inner:     approval.NewSafetyPolicyClassifier([]string{"bash"}),
+		decisions: make(map[string]int),
+	}
+	fence, err := tools.DispatchFenceFromRegistry(base)
+	require.NoError(t, err)
+	planController := core.NewDefaultPlanModeController(fence)
 	mw := approval.NewApprovalMiddleware(
-		approval.NewSafetyPolicyClassifier([]string{"bash"}),
+		classifier,
 		approval.NewInMemoryApprovalStore(),
-		approval.WithAutoApprove(false),
+		approval.WithDispatchFence(fence),
+		approval.WithPlanModeController(planController),
 	)
-	wrapped := tools.NewMiddlewareToolRegistry(tr, mw.WrapToolCall)
+	preparedRegistry := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, preparedRegistry.SetPreparedToolPolicy(mw.PreparedPolicy))
+	require.NoError(t, preparedRegistry.SetPreparedToolStages(tools.PreparedToolStages{}))
 
-	// Execute all 3 concurrently.
+	// Prepare and dispatch all calls concurrently through the actual one-use
+	// prepared capability; no legacy Tool.Execute wrapper participates.
 	calls := []tools.ToolCall{
-		{ID: "1", Name: "read1", Args: map[string]any{}},
+		{ID: "1", Name: "read", Args: map[string]any{"path": readPath}},
 		{ID: "2", Name: "bash", Args: map[string]any{}},
-		{ID: "3", Name: "read2", Args: map[string]any{}},
+		{ID: "3", Name: "ls", Args: map[string]any{"path": dir}},
 	}
 
 	type result struct {
@@ -251,12 +275,12 @@ func TestE2E_Phase19_ParallelToolsWithApproval(t *testing.T) {
 		wg.Add(1)
 		go func(idx int, call tools.ToolCall) {
 			defer wg.Done()
-			def, err := wrapped.Get(ctx, call.Name)
+			invocation, err := preparedRegistry.PrepareToolCall(ctx, call)
 			if err != nil {
 				results[idx] = result{index: idx, err: err}
 				return
 			}
-			res, err := def.Execute(ctx, call)
+			res, err := invocation.Dispatch(ctx)
 			if err != nil {
 				results[idx] = result{index: idx, err: err}
 				return
@@ -273,16 +297,16 @@ func TestE2E_Phase19_ParallelToolsWithApproval(t *testing.T) {
 
 	// Read tools should succeed.
 	assert.NoError(t, results[0].err)
-	assert.Equal(t, "ok:read1", results[0].out)
-	assert.True(t, readTool1.executed, "read1 must execute")
+	assert.Contains(t, results[0].out, "read-one-sentinel")
 
 	assert.NoError(t, results[2].err)
-	assert.Equal(t, "ok:read2", results[2].out)
-	assert.True(t, readTool2.executed, "read2 must execute")
+	assert.Contains(t, results[2].out, "read-target.txt")
 
-	// Bash should be denied.
+	// Bash should be denied before its test executor can cause a side effect.
 	assert.ErrorIs(t, results[1].err, approval.ErrToolDenied)
+	assert.Zero(t, bashTool.calls.Load(), "bash executor must not run")
 	assert.False(t, bashTool.executed, "bash must not execute")
+	assert.Equal(t, map[string]int{"read": 1, "ls": 1, "bash": 1}, classifier.Counts(), "each parallel tool call gets one approval decision")
 }
 
 // -----------------------------------------------------------------------------
@@ -315,9 +339,24 @@ func TestE2E_Phase19_CompactionSinglePath(t *testing.T) {
 	// Many user/assistant turns with tool results.
 	for i := 0; i < 20; i++ {
 		items = append(items, compaction.TurnItem{
-			ID:         fmt.Sprintf("user-%d", i),
-			Role:       compaction.RoleUser,
-			Content:    fmt.Sprintf("User message number %d with some padding text to increase token count", i),
+			ID:      fmt.Sprintf("user-%d", i),
+			Role:    compaction.RoleUser,
+			Content: fmt.Sprintf("User message number %d with some padding text to increase token count", i),
+		})
+		items = append(items, compaction.TurnItem{
+			ID:      fmt.Sprintf("asst-call-%d", i),
+			Role:    compaction.RoleAssistant,
+			Content: fmt.Sprintf("Assistant response %d with additional text content", i),
+			ToolCalls: []llm.ToolCall{{
+				ID:   fmt.Sprintf("tool-%d", i),
+				Name: "read",
+			}},
+		})
+		items = append(items, compaction.TurnItem{
+			ID:         fmt.Sprintf("tool-%d", i),
+			Role:       compaction.RoleTool,
+			ToolCallID: fmt.Sprintf("tool-%d", i),
+			ToolName:   "read",
 			ToolResult: fmt.Sprintf("Tool result %d with lots of output text to bloat the context window significantly", i),
 		})
 		items = append(items, compaction.TurnItem{
@@ -336,10 +375,10 @@ func TestE2E_Phase19_CompactionSinglePath(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify history shrinks.
-	afterTokens := estimateItemsTokens(compacted, estimator)
+	afterTokens := estimateItemsTokens(compacted.Items, estimator)
 	assert.Less(t, afterTokens, beforeTokens, "compacted tokens should be fewer")
 	assert.LessOrEqual(t, afterTokens, maxTokens, "compacted tokens should be within budget")
-	assert.Less(t, len(compacted), len(items), "compacted item count should be fewer")
+	assert.Less(t, len(compacted.Items), len(items), "compacted item count should be fewer")
 
 	// Verify only one strategy was used (single path).
 	strategy := compactor.LastStrategy()
@@ -347,7 +386,7 @@ func TestE2E_Phase19_CompactionSinglePath(t *testing.T) {
 
 	// Verify system messages survive.
 	hasSystem := false
-	for _, it := range compacted {
+	for _, it := range compacted.Items {
 		if it.Role == compaction.RoleSystem {
 			hasSystem = true
 			break
@@ -500,7 +539,7 @@ func TestE2E_Phase19_GoalManagementWithPlanMode(t *testing.T) {
 	assert.True(t, planCtrl.IsActive())
 	assert.True(t, planCtrl.ShouldBlockWrite("write"))
 	assert.True(t, planCtrl.ShouldBlockWrite("bash"))
-	assert.False(t, planCtrl.ShouldBlockWrite("read"))
+	assert.False(t, planCtrl.ShouldBlockWrite("goal_list"), "the explicit read-only goal-list control remains available in Plan Mode")
 
 	// 7. PlanMode inactive -> write tool allowed.
 	require.NoError(t, planCtrl.Exit(ctx, "plan complete"))
@@ -546,14 +585,14 @@ func TestE2E_Phase19_ConfigFieldConsumption(t *testing.T) {
 	items := []compaction.TurnItem{
 		{ID: "1", Role: compaction.RoleSystem, Content: "system prompt"},
 		{ID: "2", Role: compaction.RoleUser, Content: "hello"},
-		{ID: "3", Role: compaction.RoleAssistant, Content: "hi"},
-		{ID: "4", Role: compaction.RoleTool, ToolResult: strings.Repeat("large tool result content ", 50)},
+		{ID: "3", Role: compaction.RoleAssistant, Content: "hi", ToolCalls: []llm.ToolCall{{ID: "tool-4", Name: "read"}}},
+		{ID: "4", Role: compaction.RoleTool, ToolCallID: "tool-4", ToolName: "read", ToolResult: strings.Repeat("large tool result content ", 50)},
 		{ID: "5", Role: compaction.RoleUser, Content: "next question"},
-		{ID: "6", Role: compaction.RoleAssistant, Content: "answer"},
-		{ID: "7", Role: compaction.RoleTool, ToolResult: strings.Repeat("another big tool result ", 50)},
+		{ID: "6", Role: compaction.RoleAssistant, Content: "answer", ToolCalls: []llm.ToolCall{{ID: "tool-7", Name: "read"}}},
+		{ID: "7", Role: compaction.RoleTool, ToolCallID: "tool-7", ToolName: "read", ToolResult: strings.Repeat("another big tool result ", 50)},
 	}
 	// Use a budget that micro can satisfy by placeholdering tool results.
-	out, err := compactor.Compact(context.Background(), items, 100, est)
+	out, err := compactItemsForTest(context.Background(), compactor, items, 100, est)
 	require.NoError(t, err)
 	assert.NotEmpty(t, out, "micro compactor should produce output")
 
@@ -973,7 +1012,6 @@ func TestE2E_Phase19_SubAgentSystemPrompt(t *testing.T) {
 // conversion works through WebFetchTool with DefaultHTMLConverter: output is
 // Markdown (no HTML tags), and script/style content is removed.
 func TestE2E_Phase19_HTMLConverterWithWebFetch(t *testing.T) {
-	t.Skip("Pre-existing failure: web_fetch blocks private IP 127.0.0.1")
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -997,7 +1035,9 @@ func TestE2E_Phase19_HTMLConverterWithWebFetch(t *testing.T) {
 	defer srv.Close()
 
 	converter := tools.NewDefaultHTMLConverter()
-	tool := tools.NewWebFetchTool(tools.WithHTMLConverter(converter))
+	// The custom client is scoped to this controlled httptest loopback fixture;
+	// production WebFetchTool requests continue to use SSRF validation.
+	tool := tools.NewWebFetchTool(tools.WithWebFetchClient(srv.Client()), tools.WithHTMLConverter(converter))
 
 	res, err := tool.Execute(ctx, toolCallWithArgs("web_fetch", map[string]any{
 		"url": srv.URL,

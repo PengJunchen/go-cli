@@ -8,14 +8,44 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/pengjunchen/go-cli/internal/privatefile"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
+
+var (
+	// ErrAuditLogAppend identifies an incomplete audit-log append.
+	ErrAuditLogAppend = errors.New("audit log: append failed")
+	// ErrAuditLogSync identifies a failed durability sync for an audit append.
+	ErrAuditLogSync = errors.New("audit log: sync failed")
+	// ErrAuditLogRollback identifies a failed rollback after an incomplete append.
+	ErrAuditLogRollback = errors.New("audit log: rollback failed")
+	// ErrAuditLogCorrupt identifies a malformed or tampered audit hash chain.
+	ErrAuditLogCorrupt = errors.New("audit log: chain corrupt")
+	// ErrAuditLogClose identifies a failed audit file close.
+	ErrAuditLogClose = errors.New("audit log: close failed")
+)
+
+const maxAuditLogLineBytes = 64 * 1024
+const defaultAuditLogLockTimeout = 5 * time.Second
+
+type auditFile interface {
+	io.Writer
+	Sync() error
+	Stat() (os.FileInfo, error)
+	Truncate(size int64) error
+	Close() error
+}
+
+type auditFileOpener func(path string, flag int, perm os.FileMode) (auditFile, error)
 
 // AuditEntry is a single audit record captured by an AuditLog.
 type AuditEntry struct {
@@ -67,11 +97,16 @@ type AuditLog interface {
 // DefaultAuditLog is a JSONL file-backed AuditLog. Each entry is appended as a
 // single JSON line; Query re-reads the file and filters in memory.
 type DefaultAuditLog struct {
-	mu       sync.RWMutex
-	path     string
-	name     string
-	lastHash string
-	maxSize  int64
+	mu          sync.RWMutex
+	path        string
+	name        string
+	lastHash    string
+	cursor      privatefile.FileFingerprint
+	cursorValid bool
+	lockTimeout time.Duration
+	poisoned    error
+	maxSize     int64
+	openFile    auditFileOpener
 }
 
 // Compile-time assertion that DefaultAuditLog satisfies AuditLog.
@@ -97,12 +132,48 @@ func WithMaxSize(size int64) AuditLogOption {
 	return func(a *DefaultAuditLog) { a.maxSize = size }
 }
 
+func sanitizeProductionAuditEntry(entry AuditEntry) AuditEntry {
+	entry.Operation = boundAuditLogText(entry.Operation, 256)
+	entry.ToolName = boundAuditLogText(entry.ToolName, 128)
+	entry.UserID = boundAuditLogText(entry.UserID, 128)
+	entry.SessionID = boundAuditLogText(entry.SessionID, 128)
+	entry.Args = redactedAuditMap(entry.Args)
+	entry.Result = redactedAuditMap(entry.Result)
+	return entry
+}
+
+func redactedAuditMap(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
+	}
+	return map[string]any{"redacted": true, "field_count": len(values)}
+}
+
+func boundAuditLogText(value string, maxBytes int) string {
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, value)
+	if len(value) <= maxBytes {
+		return value
+	}
+	value = value[:maxBytes]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
+}
+
 // NewDefaultAuditLog returns a DefaultAuditLog that appends JSON-lines to path.
 func NewDefaultAuditLog(path string, opts ...AuditLogOption) AuditLog {
 	a := &DefaultAuditLog{
-		path:    path,
-		name:    "default-audit-log",
-		maxSize: defaultAuditMaxSize,
+		path:        path,
+		name:        "default-audit-log",
+		maxSize:     defaultAuditMaxSize,
+		lockTimeout: defaultAuditLogLockTimeout,
+		openFile:    openAuditLogFile,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -110,6 +181,10 @@ func NewDefaultAuditLog(path string, opts ...AuditLogOption) AuditLog {
 		}
 	}
 	return a
+}
+
+func openAuditLogFile(path string, flag int, perm os.FileMode) (auditFile, error) {
+	return os.OpenFile(path, flag, perm)
 }
 
 // Log appends a JSON representation of entry to the log file, emitting an
@@ -120,83 +195,187 @@ func (l *DefaultAuditLog) Log(ctx context.Context, entry AuditEntry) error {
 	defer span.End()
 
 	if entry.Timestamp.IsZero() {
-		entry.Timestamp = time.Now()
+		entry.Timestamp = time.Now().UTC()
+	} else {
+		entry.Timestamp = entry.Timestamp.UTC()
 	}
+	entry = sanitizeProductionAuditEntry(entry)
 
 	l.mu.Lock()
-	// Build hash chain: link to previous entry, then compute this entry's hash
-	// over PrevHash + JSON payload (excluding the Hash field itself).
-	entry.PrevHash = l.lastHash
-	payload, err := json.Marshal(entry)
-	if err != nil {
+	if l.poisoned != nil {
 		l.mu.Unlock()
+		err := fmt.Errorf("%w: writer quarantined: %w", ErrAuditLogRollback, l.poisoned)
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		return err
 	}
-	h := sha256.Sum256([]byte(entry.PrevHash + string(payload)))
-	entry.Hash = hex.EncodeToString(h[:])
-	l.lastHash = entry.Hash
-	data, err := json.Marshal(entry)
-	if err != nil {
-		l.mu.Unlock()
-		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return err
-	}
-	err = l.appendLine(data)
+	lockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), l.auditLockTimeout())
+	defer cancel()
+	appendErr := privatefile.WithAuditExclusiveLock(lockCtx, l.path, func() error {
+		if err := l.refreshChain(); err != nil {
+			return err
+		}
+
+		entry.PrevHash = l.lastHash
+		payload, err := json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+		h := sha256.Sum256([]byte(entry.PrevHash + string(payload)))
+		entry.Hash = hex.EncodeToString(h[:])
+		data, err := json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+		durable, rotated, appendErr := l.appendLine(data)
+		if durable {
+			l.lastHash = entry.Hash
+			if rotated {
+				l.lastHash = ""
+			}
+			l.captureCursor()
+		} else {
+			l.cursorValid = false
+		}
+		return appendErr
+	})
 	l.mu.Unlock()
 
 	span.SetAttributes(
 		tracing.Attribute{Key: "operation", Value: entry.Operation},
-		tracing.Attribute{Key: "success", Value: err == nil},
+		tracing.Attribute{Key: "success", Value: appendErr == nil},
 	)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	logger.InfoContext(ctx, "audit.log",
 		"operation", entry.Operation,
 		"tool", entry.ToolName,
 		"path", l.path,
-		"err", err,
+		"err", appendErr,
 	)
-	if err != nil {
-		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return err
+	if appendErr != nil {
+		span.SetStatus(tracing.SpanStatusError, appendErr.Error())
+		return appendErr
 	}
 	span.SetStatus(tracing.SpanStatusOK, "")
 	return nil
+}
+
+func (l *DefaultAuditLog) auditLockTimeout() time.Duration {
+	if l.lockTimeout <= 0 {
+		return defaultAuditLogLockTimeout
+	}
+	return l.lockTimeout
+}
+
+// refreshChain reuses a hash cursor only while the file's identity, size, and
+// ctime remain unchanged. A change, missing cursor, or unavailable fingerprint
+// forces a complete hash-chain verification while the cross-process lock is
+// held.
+func (l *DefaultAuditLog) refreshChain() error {
+	before, beforeErr := privatefile.FingerprintFile(l.path)
+	if beforeErr == nil && l.cursorValid && l.cursor == before {
+		return nil
+	}
+
+	lastHash, _, err := walkAuditLog(l.path, nil)
+	if err != nil {
+		return err
+	}
+	after, afterErr := privatefile.FingerprintFile(l.path)
+	if beforeErr == nil && afterErr == nil && before != after {
+		return fmt.Errorf("%w: file changed while verifying chain", ErrAuditLogCorrupt)
+	}
+	l.lastHash = lastHash
+	if beforeErr == nil && afterErr == nil {
+		l.cursor = after
+		l.cursorValid = true
+	} else {
+		l.cursorValid = false
+	}
+	return nil
+}
+
+func (l *DefaultAuditLog) captureCursor() {
+	fingerprint, err := privatefile.FingerprintFile(l.path)
+	if err != nil {
+		l.cursorValid = false
+		return
+	}
+	l.cursor = fingerprint
+	l.cursorValid = true
 }
 
 // appendLine writes a single JSON line to the log file, creating the file and
 // parent directory if needed. After writing, it checks whether the file exceeds
 // maxSize and rotates it (single generation: path → path+".1") if so. It must
 // be called while l.mu is held.
-func (l *DefaultAuditLog) appendLine(data []byte) error {
+func (l *DefaultAuditLog) appendLine(data []byte) (bool, bool, error) {
 	if dir := filepath.Dir(l.path); dir != "." {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return err
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return false, false, fmt.Errorf("audit log: mkdir: %w", err)
 		}
 	}
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := l.openFile(l.path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o600)
 	if err != nil {
-		return err
+		return false, false, fmt.Errorf("audit log: open: %w", err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false, false, errors.Join(fmt.Errorf("audit log: stat: %w", err), wrapAuditLogClose(f.Close()))
 	}
 	line := append(data, '\n')
-	if _, err := f.Write(line); err != nil {
-		_ = f.Close()
-		return err
+	written, writeErr := f.Write(line)
+	if writeErr == nil && written != len(line) {
+		writeErr = io.ErrShortWrite
+	}
+	if writeErr != nil {
+		return l.rollbackAppend(f, info.Size(), ErrAuditLogAppend, writeErr)
+	}
+	if err := f.Sync(); err != nil {
+		return l.rollbackAppend(f, info.Size(), ErrAuditLogSync, err)
+	}
+
+	// The line is durable after Sync succeeds, even if a later close or rotate fails.
+	info, statErr := f.Stat()
+	if statErr != nil {
+		return true, false, errors.Join(fmt.Errorf("audit log: stat after append: %w", statErr), wrapAuditLogClose(f.Close()))
 	}
 	// Rotate when the file exceeds maxSize.
-	if info, statErr := f.Stat(); statErr == nil && info.Size() > l.maxSize {
+	if info.Size() > l.maxSize {
 		if cerr := f.Close(); cerr != nil {
-			return cerr
+			return true, false, fmt.Errorf("%w: %w", ErrAuditLogClose, cerr)
 		}
 		if rerr := os.Rename(l.path, l.path+".1"); rerr != nil {
-			return rerr
+			return true, false, fmt.Errorf("audit log: rotate: %w", rerr)
 		}
-		l.lastHash = "" // new chain starts in the fresh file
+		return true, true, nil
+	}
+	if err := f.Close(); err != nil {
+		return true, false, fmt.Errorf("%w: %w", ErrAuditLogClose, err)
+	}
+	return true, false, nil
+}
+
+func (l *DefaultAuditLog) rollbackAppend(f auditFile, originalSize int64, sentinel, cause error) (bool, bool, error) {
+	l.cursorValid = false
+	rollbackErr := f.Truncate(originalSize)
+	if rollbackErr == nil {
+		rollbackErr = f.Sync()
+	}
+	closeErr := f.Close()
+	appendErr := fmt.Errorf("%w: %w", sentinel, cause)
+	if rollbackErr != nil {
+		l.poisoned = rollbackErr
+		return false, false, errors.Join(appendErr, fmt.Errorf("%w: %w", ErrAuditLogRollback, rollbackErr), wrapAuditLogClose(closeErr))
+	}
+	return false, false, errors.Join(appendErr, wrapAuditLogClose(closeErr))
+}
+
+func wrapAuditLogClose(err error) error {
+	if err == nil {
 		return nil
 	}
-	return f.Close()
+	return fmt.Errorf("%w: %w", ErrAuditLogClose, err)
 }
 
 // VerifyChain reads the log file and verifies the SHA-256 hash chain: each
@@ -206,49 +385,12 @@ func (l *DefaultAuditLog) appendLine(data []byte) error {
 func (l *DefaultAuditLog) VerifyChain() error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-
-	f, err := os.Open(l.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
+	lockCtx, cancel := context.WithTimeout(context.Background(), l.auditLockTimeout())
+	defer cancel()
+	return privatefile.WithAuditExclusiveLock(lockCtx, l.path, func() error {
+		_, _, err := walkAuditLog(l.path, nil)
 		return err
-	}
-	defer func() { _ = f.Close() }() //nolint:errcheck // best-effort close during scan.
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-	lineNum := 0
-	expectedPrev := ""
-	for scanner.Scan() {
-		lineNum++
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var entry AuditEntry
-		if err := json.Unmarshal(line, &entry); err != nil {
-			return fmt.Errorf("audit chain: line %d: %w", lineNum, err)
-		}
-		if entry.PrevHash != expectedPrev {
-			return fmt.Errorf("audit chain: line %d: prev_hash mismatch", lineNum)
-		}
-		savedHash := entry.Hash
-		entry.Hash = ""
-		payload, err := json.Marshal(entry)
-		if err != nil {
-			return fmt.Errorf("audit chain: line %d: %w", lineNum, err)
-		}
-		h := sha256.Sum256([]byte(entry.PrevHash + string(payload)))
-		if hex.EncodeToString(h[:]) != savedHash {
-			return fmt.Errorf("audit chain: line %d: hash mismatch", lineNum)
-		}
-		expectedPrev = savedHash
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("audit chain: %w", err)
-	}
-	return nil
+	})
 }
 
 // Query streams the log file line by line and returns entries that match
@@ -261,36 +403,19 @@ func (l *DefaultAuditLog) Query(ctx context.Context, filter AuditFilter) ([]Audi
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	f, err := os.Open(l.path)
-	if err != nil {
-		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		span.SetStatus(tracing.SpanStatusError, err.Error())
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer func() { _ = f.Close() }() //nolint:errcheck // best-effort close during scan.
-
 	var filtered []AuditEntry
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var entry AuditEntry
-		if err := json.Unmarshal(line, &entry); err != nil {
-			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-			span.SetStatus(tracing.SpanStatusError, err.Error())
-			return nil, err
-		}
-		if filter.Matches(entry) {
-			filtered = append(filtered, entry)
-		}
-	}
-	if err := scanner.Err(); err != nil {
+	lockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), l.auditLockTimeout())
+	defer cancel()
+	err := privatefile.WithAuditExclusiveLock(lockCtx, l.path, func() error {
+		_, _, walkErr := walkAuditLog(l.path, func(entry AuditEntry) error {
+			if filter.Matches(entry) {
+				filtered = append(filtered, entry)
+			}
+			return nil
+		})
+		return walkErr
+	})
+	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		return nil, err
@@ -302,6 +427,79 @@ func (l *DefaultAuditLog) Query(ctx context.Context, filter AuditFilter) ([]Audi
 	)
 	span.SetStatus(tracing.SpanStatusOK, "")
 	return filtered, nil
+}
+
+func walkAuditLog(path string, visit func(AuditEntry) error) (string, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("audit log: open for read: %w", err)
+	}
+	reader := bufio.NewReaderSize(f, maxAuditLogLineBytes+1)
+	expectedPrev := ""
+	lineNum := 0
+	for {
+		line, readErr := reader.ReadSlice('\n')
+		if errors.Is(readErr, bufio.ErrBufferFull) {
+			closeErr := f.Close()
+			return "", false, errors.Join(fmt.Errorf("%w: line %d exceeds %d bytes", ErrAuditLogCorrupt, lineNum+1, maxAuditLogLineBytes), wrapAuditLogClose(closeErr))
+		}
+		if errors.Is(readErr, io.EOF) {
+			if len(line) != 0 {
+				closeErr := f.Close()
+				return "", false, errors.Join(fmt.Errorf("%w: unterminated line %d", ErrAuditLogCorrupt, lineNum+1), wrapAuditLogClose(closeErr))
+			}
+			break
+		}
+		if readErr != nil {
+			closeErr := f.Close()
+			return "", false, errors.Join(fmt.Errorf("audit log: read line: %w", readErr), wrapAuditLogClose(closeErr))
+		}
+		lineNum++
+		if len(line) > maxAuditLogLineBytes {
+			closeErr := f.Close()
+			return "", false, errors.Join(fmt.Errorf("%w: line %d exceeds %d bytes", ErrAuditLogCorrupt, lineNum, maxAuditLogLineBytes), wrapAuditLogClose(closeErr))
+		}
+		line = line[:len(line)-1]
+		if len(line) == 0 {
+			continue
+		}
+		var entry AuditEntry
+		if err := json.Unmarshal(line, &entry); err != nil {
+			closeErr := f.Close()
+			return "", false, errors.Join(fmt.Errorf("%w: line %d: %w", ErrAuditLogCorrupt, lineNum, err), wrapAuditLogClose(closeErr))
+		}
+		if entry.PrevHash != expectedPrev {
+			closeErr := f.Close()
+			return "", false, errors.Join(fmt.Errorf("%w: line %d previous hash mismatch", ErrAuditLogCorrupt, lineNum), wrapAuditLogClose(closeErr))
+		}
+		savedHash := entry.Hash
+		entry.Hash = ""
+		payload, err := json.Marshal(entry)
+		if err != nil {
+			closeErr := f.Close()
+			return "", false, errors.Join(fmt.Errorf("%w: line %d: %w", ErrAuditLogCorrupt, lineNum, err), wrapAuditLogClose(closeErr))
+		}
+		h := sha256.Sum256([]byte(entry.PrevHash + string(payload)))
+		if savedHash == "" || hex.EncodeToString(h[:]) != savedHash {
+			closeErr := f.Close()
+			return "", false, errors.Join(fmt.Errorf("%w: line %d hash mismatch", ErrAuditLogCorrupt, lineNum), wrapAuditLogClose(closeErr))
+		}
+		entry.Hash = savedHash
+		if visit != nil {
+			if err := visit(entry); err != nil {
+				closeErr := f.Close()
+				return "", false, errors.Join(err, wrapAuditLogClose(closeErr))
+			}
+		}
+		expectedPrev = savedHash
+	}
+	if err := f.Close(); err != nil {
+		return "", false, fmt.Errorf("%w: %w", ErrAuditLogClose, err)
+	}
+	return expectedPrev, true, nil
 }
 
 // Name returns the log identifier.

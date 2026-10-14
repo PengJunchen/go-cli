@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 func TestPlanModeToolInterceptor_AllowsWhenInactive(t *testing.T) {
@@ -27,13 +29,71 @@ func TestPlanModeToolInterceptor_BlocksWriteToolsWhenActive(t *testing.T) {
 	assert.Contains(t, err.Error(), "write")
 }
 
-func TestPlanModeToolInterceptor_AllowsReadToolsWhenActive(t *testing.T) {
+func TestPlanModeToolInterceptor_AllowsApprovedReadAndControlToolsWhenActive(t *testing.T) {
 	ctrl := NewDefaultPlanModeController()
 	require.NoError(t, ctrl.Enter(context.Background(), "planning"))
 	interceptor := NewPlanModeToolInterceptor(ctrl)
 
-	err := interceptor("read", "call-1", nil)
-	require.NoError(t, err, "read tools should not be blocked")
+	for _, name := range []string{
+		"read", "ls", "grep", "find", "web_search", "web_fetch",
+		"git_diff", "git_status", "git_log", "git_branch", "git_blame", "git_remote",
+		"lsp_query", "tool_search", "goal_get", "goal_list", "task_get", "task_list",
+		"ask_user", "enter_plan_mode", "exit_plan_mode",
+	} {
+		err := interceptor(name, "call-1", nil)
+		require.NoError(t, err, "%s should remain available under the R0 Plan Mode allowlist", name)
+	}
+}
+
+func TestPlanModeToolInterceptor_FailsClosedForUnknownAndExternalTools(t *testing.T) {
+	ctrl := NewDefaultPlanModeController()
+	require.NoError(t, ctrl.Enter(context.Background(), "planning"))
+	interceptor := NewPlanModeToolInterceptor(ctrl)
+
+	for _, name := range []string{
+		"write", "edit", "bash", "git_commit", "git_checkout", "git_pull",
+		"dispatch_subagent", "mcp__server__write", "custom_side_effect", "extension_tool", "unknown_tool",
+	} {
+		err := interceptor(name, "call-1", nil)
+		require.Error(t, err, "%s must be blocked in plan mode", name)
+		assert.Contains(t, err.Error(), "blocked")
+	}
+}
+
+func TestPlanModeToolWrapper_FailsClosedForUnknownAndExternalTools(t *testing.T) {
+	ctrl := NewDefaultPlanModeController()
+	require.NoError(t, ctrl.Enter(context.Background(), "planning"))
+	executions := 0
+	wrapped := NewPlanModeToolWrapper(ctrl)(func(_ context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
+		executions++
+		return &tools.ToolResult{}, nil
+	})
+
+	for _, name := range []string{"git_commit", "dispatch_subagent", "mcp__server__write", "custom_side_effect", "extension_tool", "unknown_tool"} {
+		result, err := wrapped(context.Background(), tools.ToolCall{Name: name})
+		require.ErrorIs(t, err, ErrPlanModeBlocked, "%s must be blocked", name)
+		require.NotNil(t, result)
+		assert.Equal(t, true, result.Metadata["plan_mode_blocked"])
+	}
+	assert.Zero(t, executions, "blocked tools must not reach the executor")
+}
+
+func TestPlanModeToolWrapperAllowsNetworkReadTools(t *testing.T) {
+	ctrl := NewDefaultPlanModeController()
+	require.NoError(t, ctrl.Enter(context.Background(), "planning"))
+	executions := 0
+	wrapped := NewPlanModeToolWrapper(ctrl)(func(_ context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+		executions++
+		return &tools.ToolResult{Output: call.Name}, nil
+	})
+
+	for _, name := range []string{"web_fetch", "web_search"} {
+		result, err := wrapped(context.Background(), tools.ToolCall{Name: name})
+		require.NoError(t, err, "%s is an explicitly approved R0 network read", name)
+		require.NotNil(t, result)
+		assert.Equal(t, name, result.Output)
+	}
+	assert.Equal(t, 2, executions)
 }
 
 func TestPlanModeToolInterceptor_NilControllerAllowsAll(t *testing.T) {

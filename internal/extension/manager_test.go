@@ -314,7 +314,8 @@ func TestCoordinatorPassesRegistry(t *testing.T) {
 
 	ext := newMgrTestExt("reg-ext")
 	require.NoError(t, coord.initExtension(ctx, ext))
-	assert.Same(t, reg, ext.Registry())
+	assert.NotSame(t, reg, ext.Registry(), "Init receives a private staging registry")
+	assert.IsType(t, &DefaultExtensionRegistry{}, ext.Registry())
 }
 
 // Hook block/terminate/replace actions are relayed unchanged by the coordinator.
@@ -324,9 +325,9 @@ func TestCoordinatorRunHookActions(t *testing.T) {
 	hook := newMgrTestHook("act")
 	event := HookEvent{Name: "e", Timestamp: time.Now()}
 
-	hook.SetResult(HookResult{Action: hookActionBlock, Reason: "denied"})
+	hook.SetResult(HookResult{Action: HookActionBlock, Reason: "denied"})
 	res := coord.runHook(ctx, hook, event)
-	assert.Equal(t, hookActionBlock, res.Action)
+	assert.Equal(t, HookActionBlock, res.Action)
 	assert.Equal(t, "denied", res.Reason)
 
 	hook.SetResult(HookResult{Action: hookActionReplace, Replacement: "repl"})

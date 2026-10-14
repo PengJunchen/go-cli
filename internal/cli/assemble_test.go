@@ -3,6 +3,9 @@ package cli //exempt:scan003
 import (
 	"context"
 	"io"
+	"net/http"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pengjunchen/go-cli/internal/config"
@@ -14,17 +17,32 @@ import (
 )
 
 // newAssembleTestConfig returns a minimal Config whose provider section forces
-// buildModel down the EinoProvider path. EinoProvider.Build only constructs the
-// HTTPChatModel object (no network calls), so assembly succeeds without a live
-// endpoint.
-func newAssembleTestConfig() *config.Config {
+// buildModel down the OpenAI-compatible path with an explicitly scoped key.
+// EinoProvider.Build only constructs the HTTPChatModel object (no network
+// calls), so assembly succeeds without a live endpoint.
+func newAssembleTestConfig(t *testing.T) *config.Config {
+	t.Helper()
 	return &config.Config{
+		Git: config.GitConfig{
+			WorkDir: t.TempDir(),
+		},
 		Provider: config.ProviderConfig{
 			Name:    "openai",
-			BaseURL: "http://127.0.0.1:0",
+			BaseURL: "http://127.0.0.1:1",
 			APIKey:  "test-key",
 		},
 	}
+}
+
+func TestNewAssembleTestConfigUsesIsolatedWorkDir(t *testing.T) {
+	first := newAssembleTestConfig(t)
+	second := newAssembleTestConfig(t)
+
+	require.NotEmpty(t, first.Git.WorkDir)
+	require.NotEmpty(t, second.Git.WorkDir)
+	require.NotEqual(t, first.Git.WorkDir, second.Git.WorkDir)
+	require.True(t, filepath.IsAbs(first.Git.WorkDir))
+	require.True(t, filepath.IsAbs(second.Git.WorkDir))
 }
 
 // TestAssembleAgent_RegistryNotNil verifies that AssembleAgent populates the
@@ -32,7 +50,7 @@ func newAssembleTestConfig() *config.Config {
 func TestAssembleAgent_RegistryNotNil(t *testing.T) {
 	assembly, err := AssembleAgent(
 		context.Background(),
-		newAssembleTestConfig(),
+		newAssembleTestConfig(t),
 		"openai", "test-model",
 		io.Discard,
 	)
@@ -47,7 +65,7 @@ func TestAssembleAgent_RegistryNotNil(t *testing.T) {
 func TestAssembleAgent_RegistryRetrieval(t *testing.T) {
 	assembly, err := AssembleAgent(
 		context.Background(),
-		newAssembleTestConfig(),
+		newAssembleTestConfig(t),
 		"openai", "test-model",
 		io.Discard,
 	)
@@ -83,7 +101,7 @@ func TestAssembleAgent_RegistryRetrieval(t *testing.T) {
 func TestAssembleAgent_RegistryOverride(t *testing.T) {
 	assembly, err := AssembleAgent(
 		context.Background(),
-		newAssembleTestConfig(),
+		newAssembleTestConfig(t),
 		"openai", "test-model",
 		io.Discard,
 	)
@@ -130,7 +148,7 @@ var _ llm.ModelProvider = (*fakeModelProvider)(nil)
 func TestAssembleAgent_WiresPartialComponents(t *testing.T) {
 	assembly, err := AssembleAgent(
 		context.Background(),
-		newAssembleTestConfig(),
+		newAssembleTestConfig(t),
 		"openai", "test-model",
 		io.Discard,
 	)
@@ -155,7 +173,7 @@ func TestAssembleAgent_WiresPartialComponents(t *testing.T) {
 func TestAssembleAgent_WiresPermissionModeResolver(t *testing.T) {
 	assembly, err := AssembleAgent(
 		context.Background(),
-		newAssembleTestConfig(),
+		newAssembleTestConfig(t),
 		"openai", "test-model",
 		io.Discard,
 	)
@@ -167,100 +185,140 @@ func TestAssembleAgent_WiresPermissionModeResolver(t *testing.T) {
 		"resolver must be the default permission_mode resolver")
 }
 
-// getWebSearchTool retrieves the original (unwrapped) *tools.WebSearchTool from
-// the assembled tool registry. List returns the underlying definitions without
-// middleware wrapping, so the concrete type is accessible.
-func getWebSearchTool(t *testing.T, assembly *AgentAssembly) *tools.WebSearchTool {
-	t.Helper()
-	defs, err := assembly.ToolRegistry.List(context.Background())
-	require.NoError(t, err)
-	for _, d := range defs {
-		if d.Name() == "web_search" {
-			ws, ok := d.(*tools.WebSearchTool)
-			require.True(t, ok, "web_search tool should be *tools.WebSearchTool")
-			return ws
-		}
-	}
-	t.Fatal("web_search tool not found in registry")
-	return nil
+type assembleRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f assembleRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
-// TestAssembleAgent_WebSearchDefaultUsesMockProvider verifies that when no
-// web_search config is provided, the WebSearchTool defaults to the
-// MockSearchProvider (task 19-7).
-func TestAssembleAgent_WebSearchDefaultUsesMockProvider(t *testing.T) {
-	assembly, err := AssembleAgent(
-		context.Background(),
-		newAssembleTestConfig(),
-		"openai", "test-model",
-		io.Discard,
-	)
+func withAssembleDefaultTransport(t *testing.T, transport http.RoundTripper) {
+	t.Helper()
+	previous := http.DefaultTransport
+	http.DefaultTransport = transport
+	t.Cleanup(func() { http.DefaultTransport = previous })
+}
+
+func searchResponse(req *http.Request, body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}
+}
+
+func getWebSearchTool(t *testing.T, assembly *AgentAssembly) tools.ToolDefinition {
+	t.Helper()
+	tool, err := assembly.ToolRegistry.Get(context.Background(), "web_search")
+	require.NoError(t, err)
+	return tool
+}
+
+func executeAssembledWebSearch(t *testing.T, cfg *config.Config) (*tools.ToolResult, error) {
+	t.Helper()
+	ctx := context.Background()
+	assembly, err := AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard, WithApproveMode(ApproveAuto))
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
+	tool := getWebSearchTool(t, assembly)
+	return tool.Execute(ctx, tools.ToolCall{Name: "web_search", Args: map[string]any{"query": "provider test"}})
+}
 
-	ws := getWebSearchTool(t, assembly)
-	assert.Equal(t, "mock", ws.ProviderName(),
-		"default config should use MockSearchProvider")
+func TestAssembleAgent_WebSearchWithoutRealProviderFailsClosed(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		provider string
+	}{
+		{name: "default"},
+		{name: "explicit_mock", provider: "mock"},
+		{name: "unknown", provider: "not-a-provider"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := newAssembleTestConfig(t)
+			cfg.WebSearch.Provider = testCase.provider
+			var requests int
+			withAssembleDefaultTransport(t, assembleRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				requests++
+				return nil, assert.AnError
+			}))
+			assembly, err := AssembleAgent(context.Background(), cfg, "openai", "test-model", io.Discard, WithApproveMode(ApproveAuto))
+			require.NoError(t, err)
+			t.Cleanup(assembly.Cleanup)
+			_, err = assembly.ToolRegistry.Get(context.Background(), "web_search")
+			require.ErrorIs(t, err, tools.ErrToolNotFound, "an unusable search tool must not be registered")
+
+			result, err := tools.NewWebSearchTool().Execute(context.Background(), tools.ToolCall{
+				Name: "web_search",
+				Args: map[string]any{"query": "provider test"},
+			})
+			require.Nil(t, result, "unconfigured search must not return fabricated results")
+			require.ErrorIs(t, err, tools.ErrWebSearchProviderUnavailable)
+			assert.Zero(t, requests)
+		})
+	}
 }
 
 // TestAssembleAgent_WebSearchFetchProvider verifies that when
 // web_search.provider = "fetch", the WebSearchTool uses the
 // FetchSearchProvider (task 19-7).
 func TestAssembleAgent_WebSearchFetchProvider(t *testing.T) {
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.WebSearch.Provider = "fetch"
-	assembly, err := AssembleAgent(
-		context.Background(),
-		cfg,
-		"openai", "test-model",
-		io.Discard,
-	)
+	var request *http.Request
+	withAssembleDefaultTransport(t, assembleRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		request = req
+		return searchResponse(req, `<div class="result"><a class="result__a" href="https://example.org">Result</a><a class="result__snippet">Snippet</a></div>`), nil
+	}))
+	result, err := executeAssembledWebSearch(t, cfg)
 	require.NoError(t, err)
-	t.Cleanup(assembly.Cleanup)
-
-	ws := getWebSearchTool(t, assembly)
-	assert.Equal(t, "fetch", ws.ProviderName(),
-		"provider=fetch should use FetchSearchProvider")
+	assert.Equal(t, false, result.Metadata["mock"], "provider=fetch should use FetchSearchProvider")
+	require.NotNil(t, request, "fetch provider should perform one localmocked request")
+	assert.Equal(t, "html.duckduckgo.com", request.URL.Host)
 }
 
 // TestAssembleAgent_WebSearchBraveProvider verifies that when
 // web_search.provider = "brave" with an API key, the WebSearchTool uses the
 // BraveSearchProvider (task 19-7).
 func TestAssembleAgent_WebSearchBraveProvider(t *testing.T) {
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.WebSearch.Provider = "brave"
-	cfg.WebSearch.APIKey = "test-key"
-	assembly, err := AssembleAgent(
-		context.Background(),
-		cfg,
-		"openai", "test-model",
-		io.Discard,
-	)
+	apiKey := t.TempDir()
+	cfg.WebSearch.APIKey = apiKey
+	var request *http.Request
+	withAssembleDefaultTransport(t, assembleRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		request = req
+		return searchResponse(req, `{"web":{"results":[]}}`), nil
+	}))
+	result, err := executeAssembledWebSearch(t, cfg)
 	require.NoError(t, err)
-	t.Cleanup(assembly.Cleanup)
-
-	ws := getWebSearchTool(t, assembly)
-	assert.Equal(t, "brave", ws.ProviderName(),
-		"provider=brave with API key should use BraveSearchProvider")
+	assert.Equal(t, false, result.Metadata["mock"], "provider=brave with API key should use BraveSearchProvider")
+	require.NotNil(t, request, "Brave provider should perform one localmocked request")
+	assert.Equal(t, "api.search.brave.com", request.URL.Host)
+	assert.Equal(t, apiKey, request.Header.Get("X-Subscription-Token"))
 }
 
-// TestAssembleAgent_WebSearchBraveWithoutAPIKeyFallsBackToMock verifies that
-// when web_search.provider = "brave" but no API key is supplied, the tool
-// falls back to the MockSearchProvider rather than a broken Brave provider.
-func TestAssembleAgent_WebSearchBraveWithoutAPIKeyFallsBackToMock(t *testing.T) {
-	cfg := newAssembleTestConfig()
+// TestAssembleAgent_WebSearchBraveWithoutAPIKeyFailsClosed verifies that
+// missing Brave credentials never select fabricated mock results.
+func TestAssembleAgent_WebSearchBraveWithoutAPIKeyFailsClosed(t *testing.T) {
+	cfg := newAssembleTestConfig(t)
 	cfg.WebSearch.Provider = "brave"
-	// No API key set.
-	assembly, err := AssembleAgent(
-		context.Background(),
-		cfg,
-		"openai", "test-model",
-		io.Discard,
-	)
+	var requests int
+	withAssembleDefaultTransport(t, assembleRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		return nil, assert.AnError
+	}))
+	assembly, err := AssembleAgent(context.Background(), cfg, "openai", "test-model", io.Discard, WithApproveMode(ApproveAuto))
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
+	_, err = assembly.ToolRegistry.Get(context.Background(), "web_search")
+	require.ErrorIs(t, err, tools.ErrToolNotFound, "Brave search without credentials is not callable")
 
-	ws := getWebSearchTool(t, assembly)
-	assert.Equal(t, "mock", ws.ProviderName(),
-		"brave without API key should fall back to MockSearchProvider")
+	result, err := tools.NewWebSearchTool(tools.WithSearchProvider(tools.NewBraveSearchProvider(cfg.WebSearch.APIKey))).Execute(context.Background(), tools.ToolCall{
+		Name: "web_search",
+		Args: map[string]any{"query": "provider test"},
+	})
+	require.Nil(t, result, "missing Brave credentials must not return fabricated results")
+	require.ErrorIs(t, err, tools.ErrWebSearchProviderUnavailable)
+	assert.Contains(t, err.Error(), "Brave api key is required")
+	assert.Zero(t, requests, "missing Brave credentials must not issue a network request")
 }

@@ -20,7 +20,14 @@ type TodoItem struct {
 // pushed via Send to refresh the progress panel without going through the event
 // stream.
 type TodoUpdateMsg struct {
-	Items []TodoItem
+	// Revision zero is the legacy unversioned form. Such updates are accepted,
+	// but cannot participate in stale-message ordering.
+	Revision uint64
+	Items    []TodoItem
+}
+
+func cloneTodoItems(items []TodoItem) []TodoItem {
+	return append([]TodoItem(nil), items...)
 }
 
 var todoCheckboxStyle = lipgloss.NewStyle().Bold(true)

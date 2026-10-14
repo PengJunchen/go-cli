@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -71,12 +72,13 @@ type SessionLister interface {
 //     file under <storeDir>/sessions/<timestamp>-<id>.jsonl. This mode is
 //     auto-detected when the path is (or will be) a directory.
 type JSONLSessionStore struct {
-	mu      sync.Mutex
-	path    string // current file path (session file in dirMode, original path otherwise)
-	entries map[string]*SessionEntry
-	file    *os.File
-	bw      *bufio.Writer // buffered writer wrapping file to batch write syscalls
-	loaded  bool
+	mu       sync.Mutex
+	path     string // current file path (session file in dirMode, original path otherwise)
+	entries  map[string]*SessionEntry
+	file     *os.File
+	bw       *bufio.Writer // buffered writer wrapping file to batch write syscalls
+	loaded   bool
+	poisoned bool // a failed buffered write/flush/sync makes this handle unsafe to reuse.
 
 	// dirMode fields (zero-valued in legacy mode)
 	dirMode   bool   // true when the store manages per-session files
@@ -130,7 +132,7 @@ func (s *JSONLSessionStore) Open(ctx context.Context) error {
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	span.SetAttributes(tracing.Attribute{Key: "path", Value: s.path})
 
-	if err := s.ensureLoaded(); err != nil {
+	if err := s.ensureLoaded(ctx); err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		logger.Error("session_open", "op", "session.open", "error_type", "load_failed", "path", s.path, "err", err)
 		return err
@@ -151,43 +153,62 @@ func (s *JSONLSessionStore) SetSessionID(id string, newSession bool) error {
 	if !s.dirMode {
 		return nil
 	}
-
+	if !validPhysicalSessionID(id) {
+		return errors.New("session: invalid physical session ID")
+	}
+	if !newSession {
+		if err := s.ensureLoaded(context.Background()); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		s.sessionID = id
+		s.mu.Unlock()
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !newSession {
-		// Resume: keep the current session file (loaded during Open).
-		s.sessionID = id
-		return nil
-	}
-
-	// New session: close the current file, clear entries, create a new file.
-	if err := s.closeFileLocked(); err != nil {
-		return fmt.Errorf("session: close previous session file: %w", err)
-	}
-	s.entries = make(map[string]*SessionEntry)
-
-	s.sessionID = id
-	filename := fmt.Sprintf("%s-%s.jsonl", time.Now().UTC().Format(sessionTimestampFmt), id)
-	s.path = filepath.Join(s.storeDir, "sessions", filename)
-
-	// Ensure the sessions subdirectory exists before creating the file.
 	sessionsDir := filepath.Join(s.storeDir, "sessions")
-	if err := os.MkdirAll(sessionsDir, dirPerm); err != nil {
+	if err := mkdirDurably(sessionsDir, dirPerm); err != nil {
 		return fmt.Errorf("session: create sessions dir: %w", err)
 	}
-
-	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, filePerm)
+	filename := fmt.Sprintf("%s-%s.jsonl", time.Now().UTC().Format("20060102-150405.000000000"), id)
+	newPath := filepath.Join(sessionsDir, filename)
+	f, err := openSessionFileNoFollow(sessionsDir, filename, os.O_CREATE|os.O_EXCL|os.O_RDWR, filePerm)
 	if err != nil {
 		return fmt.Errorf("session: create session file: %w", err)
 	}
 	if err := flockExclusive(f); err != nil {
 		_ = f.Close()
+		_ = os.Remove(newPath)
 		return fmt.Errorf("session: lock session file: %w", err)
 	}
+	if err := f.Sync(); err != nil {
+		_ = flockUnlock(f)
+		_ = f.Close()
+		_ = os.Remove(newPath)
+		return fmt.Errorf("session: sync new session file: %w", err)
+	}
+	if err := syncDirectory(sessionsDir); err != nil {
+		_ = flockUnlock(f)
+		_ = f.Close()
+		_ = os.Remove(newPath)
+		return fmt.Errorf("session: sync sessions directory: %w", err)
+	}
+
+	if err := s.closeFileLocked(); err != nil {
+		_ = flockUnlock(f)
+		_ = f.Close()
+		_ = os.Remove(newPath)
+		return fmt.Errorf("session: close previous session file: %w", err)
+	}
+	s.entries = make(map[string]*SessionEntry)
+	s.sessionID = id
+	s.path = newPath
 	s.file = f
 	s.bw = bufio.NewWriter(f)
 	s.loaded = true
+	s.poisoned = false
 	return nil
 }
 
@@ -200,11 +221,17 @@ func (s *JSONLSessionStore) ListSessions(ctx context.Context) ([]SessionMeta, er
 	}
 
 	sessionsDir := filepath.Join(s.storeDir, "sessions")
-	dirEntries, err := os.ReadDir(sessionsDir)
+	directory, err := openSessionDirectoryNoFollow(sessionsDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
+		return nil, fmt.Errorf("session: read sessions dir: %w", err)
+	}
+	// This descriptor is used only to enumerate a read-only directory.
+	defer func() { _ = directory.Close() }()
+	dirEntries, err := directory.ReadDir(-1)
+	if err != nil {
 		return nil, fmt.Errorf("session: read sessions dir: %w", err)
 	}
 
@@ -263,7 +290,7 @@ func (s *JSONLSessionStore) Append(ctx context.Context, entry *SessionEntry) err
 		tracing.Attribute{Key: "entry_id", Value: entry.ID},
 	)
 
-	if err := s.ensureLoaded(); err != nil {
+	if err := s.ensureLoaded(ctx); err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		logger.Error("session_save", "op", "session.save", "error_type", "load_failed", "entry_id", entry.ID, "err", err)
 		return err
@@ -271,6 +298,10 @@ func (s *JSONLSessionStore) Append(ctx context.Context, entry *SessionEntry) err
 
 	cp := entry.clone()
 	s.mu.Lock()
+	if s.poisoned {
+		s.mu.Unlock()
+		return ErrDurableWriterPoisoned
+	}
 	if _, exists := s.entries[cp.ID]; exists {
 		s.mu.Unlock()
 		span.SetStatus(tracing.SpanStatusError, "duplicate entry")
@@ -298,7 +329,7 @@ func (s *JSONLSessionStore) Get(ctx context.Context, id string) (*SessionEntry, 
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	span.SetAttributes(tracing.Attribute{Key: "entry_id", Value: id})
 
-	if err := s.ensureLoaded(); err != nil {
+	if err := s.ensureLoaded(ctx); err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		return nil, err
 	}
@@ -317,7 +348,7 @@ func (s *JSONLSessionStore) Get(ctx context.Context, id string) (*SessionEntry, 
 
 // List returns defensive copies of all stored entries sorted by timestamp.
 func (s *JSONLSessionStore) List(ctx context.Context) ([]*SessionEntry, error) {
-	if err := s.ensureLoaded(); err != nil {
+	if err := s.ensureLoaded(ctx); err != nil {
 		return nil, fmt.Errorf("session: list entries: %w", err)
 	}
 	s.mu.Lock()
@@ -338,21 +369,27 @@ func (s *JSONLSessionStore) Save(ctx context.Context) error {
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, slog.Default())
 
-	if err := s.ensureLoaded(); err != nil {
+	if err := s.ensureLoaded(ctx); err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.file != nil {
+		if s.poisoned {
+			span.SetStatus(tracing.SpanStatusError, ErrDurableWriterPoisoned.Error())
+			return ErrDurableWriterPoisoned
+		}
 		if s.bw != nil {
 			if err := s.bw.Flush(); err != nil {
+				s.poisoned = true
 				span.SetStatus(tracing.SpanStatusError, err.Error())
 				logger.Error("session_flush", "op", "session.flush", "error_type", "flush_failed", "err", err)
 				return fmt.Errorf("session: flush store file: %w", err)
 			}
 		}
 		if err := s.file.Sync(); err != nil {
+			s.poisoned = true
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("session_flush", "op", "session.flush", "error_type", "sync_failed", "err", err)
 			return fmt.Errorf("session: flush store file: %w", err)
@@ -377,14 +414,27 @@ func (s *JSONLSessionStore) closeFileLocked() error {
 	if s.file == nil {
 		return nil
 	}
+	var flushErr error
+	var syncErr error
 	if s.bw != nil {
-		_ = s.bw.Flush() //nolint:errcheck // best-effort flush before close
+		if !s.poisoned {
+			flushErr = s.bw.Flush()
+			if flushErr == nil {
+				syncErr = s.file.Sync()
+			}
+		}
 	}
-	_ = flockUnlock(s.file) //nolint:errcheck // best-effort unlock
-	err := s.file.Close()
+	if flushErr != nil || syncErr != nil {
+		s.poisoned = true
+	}
+	unlockErr := flockUnlock(s.file)
+	closeErr := s.file.Close()
 	s.file = nil
 	s.bw = nil
-	return err
+	if s.poisoned && flushErr == nil && syncErr == nil {
+		return errors.Join(ErrDurableWriterPoisoned, unlockErr, closeErr)
+	}
+	return errors.Join(flushErr, syncErr, unlockErr, closeErr)
 }
 
 func (s *JSONLSessionStore) count() int {
@@ -394,9 +444,12 @@ func (s *JSONLSessionStore) count() int {
 }
 
 // ensureLoaded opens the backing file and loads existing entries on first use.
-func (s *JSONLSessionStore) ensureLoaded() error {
+func (s *JSONLSessionStore) ensureLoaded(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := contextErr(ctx); err != nil {
+		return err
+	}
 	if s.loaded {
 		return nil
 	}
@@ -417,21 +470,40 @@ func (s *JSONLSessionStore) ensureLoaded() error {
 		return nil
 	}
 
-	if err := s.loadEntriesLocked(); err != nil {
-		return err
+	if err := mkdirDurably(filepath.Dir(s.path), dirPerm); err != nil {
+		return fmt.Errorf("session: create store directory: %w", err)
 	}
-	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, filePerm)
+	f, err := openSessionFileNoFollow(filepath.Dir(s.path), filepath.Base(s.path), os.O_CREATE|os.O_RDWR, filePerm)
 	if err != nil {
 		return fmt.Errorf("session: open store file: %w", err)
 	}
 	// Acquire advisory flock to prevent concurrent writes from other
 	// processes corrupting the file.
-	if err := flockExclusive(f); err != nil {
+	if err := flockExclusiveContext(ctx, f); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("session: lock store file: %w", err)
 	}
+	entries, err := readDurableJSONL(f, filepath.Dir(s.path))
+	if err != nil {
+		_ = flockUnlock(f)
+		_ = f.Close()
+		return fmt.Errorf("session: load store file: %w", err)
+	}
+	loadedEntries := make(map[string]*SessionEntry, len(entries))
+	for i := range entries {
+		if _, exists := loadedEntries[entries[i].ID]; !exists {
+			loadedEntries[entries[i].ID] = entries[i].clone()
+		}
+	}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		_ = flockUnlock(f)
+		_ = f.Close()
+		return fmt.Errorf("session: seek append position: %w", err)
+	}
+	s.entries = loadedEntries
 	s.file = f
 	s.bw = bufio.NewWriter(f)
+	s.poisoned = false
 	s.loaded = true
 	return nil
 }
@@ -440,7 +512,7 @@ func (s *JSONLSessionStore) ensureLoaded() error {
 // recent session file for potential resume. Caller must hold s.mu.
 func (s *JSONLSessionStore) dirModeInitLocked() error {
 	sessionsDir := filepath.Join(s.storeDir, "sessions")
-	if err := os.MkdirAll(sessionsDir, dirPerm); err != nil {
+	if err := mkdirDurably(sessionsDir, dirPerm); err != nil {
 		return fmt.Errorf("session: create sessions dir: %w", err)
 	}
 	mostRecent, err := s.findMostRecentSessionLocked()
@@ -460,11 +532,17 @@ func (s *JSONLSessionStore) dirModeInitLocked() error {
 // Caller must hold s.mu.
 func (s *JSONLSessionStore) findMostRecentSessionLocked() (string, error) {
 	sessionsDir := filepath.Join(s.storeDir, "sessions")
-	dirEntries, err := os.ReadDir(sessionsDir)
+	directory, err := openSessionDirectoryNoFollow(sessionsDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return "", nil
 		}
+		return "", fmt.Errorf("session: read sessions dir: %w", err)
+	}
+	// This descriptor is used only to enumerate a read-only directory.
+	defer func() { _ = directory.Close() }()
+	dirEntries, err := directory.ReadDir(-1)
+	if err != nil {
 		return "", fmt.Errorf("session: read sessions dir: %w", err)
 	}
 	var best string
@@ -485,55 +563,34 @@ func (s *JSONLSessionStore) findMostRecentSessionLocked() (string, error) {
 	return best, nil
 }
 
-// loadEntriesLocked reads existing JSONL lines into memory. It must be called
-// with s.mu held.
-func (s *JSONLSessionStore) loadEntriesLocked() error {
-	f, err := os.Open(s.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil // brand-new store; nothing to load
-		}
-		return fmt.Errorf("session: open store file for reading: %w", err)
-	}
-	defer func() { _ = f.Close() }() //nolint:errcheck // read-only best-effort close.
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), jsonlScannerMaxBuffer)
-	lineNum := 0
-	for scanner.Scan() {
-		lineNum++
-		line := scanner.Bytes()
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-		var e SessionEntry
-		if err := json.Unmarshal(line, &e); err != nil {
-			slog.Warn("session.jsonl.corrupt_line", "line", lineNum, "err", err)
-			continue // skip corrupt lines, keep the rest.
-		}
-		if _, exists := s.entries[e.ID]; !exists {
-			s.entries[e.ID] = e.clone()
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("session: read store file: %w", err)
-	}
-	return nil
-}
-
 // writeJSONLine encodes entry as a single JSONL line written to the buffered
 // writer. Caller must hold s.mu.
 func (s *JSONLSessionStore) writeJSONLine(entry *SessionEntry) error {
 	if s.bw == nil {
 		return errors.New("session: store writer is not open")
 	}
-	return json.NewEncoder(s.bw).Encode(entry)
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	if len(encoded) > maxDurableJSONLineBytes {
+		return fmt.Errorf("session: serialized entry exceeds %d bytes", maxDurableJSONLineBytes)
+	}
+	if _, err := s.bw.Write(encoded); err != nil {
+		s.poisoned = true
+		return err
+	}
+	if err := s.bw.WriteByte('\n'); err != nil {
+		s.poisoned = true
+		return err
+	}
+	return nil
 }
 
 // readSessionPreview reads the first user-type entry from a session file and
 // returns a truncated preview and the total entry count.
 func readSessionPreview(path string) (string, int) {
-	f, err := os.Open(path)
+	f, err := openSessionFileNoFollow(filepath.Dir(path), filepath.Base(path), os.O_RDONLY, 0)
 	if err != nil {
 		return "", 0
 	}

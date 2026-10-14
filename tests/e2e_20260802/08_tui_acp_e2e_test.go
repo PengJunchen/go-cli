@@ -4,7 +4,9 @@
 package e2e_20260802 //nolint:staticcheck
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -827,29 +829,58 @@ func TestACP_StdioAdapterReceiveBeforeConnect(t *testing.T) {
 }
 
 func TestACP_StdioAdapterConnectDisconnect(t *testing.T) {
-	r, w := io.Pipe()
+	adapterIn, peerIn := io.Pipe()
+	peerOut, adapterOut := io.Pipe()
+	t.Cleanup(func() {
+		_ = adapterIn.Close()
+		_ = peerIn.Close()
+		_ = peerOut.Close()
+		_ = adapterOut.Close()
+	})
 
-	// Start a goroutine that reads connect message from the pipe.
-	var wg sync.WaitGroup
-	wg.Add(1)
+	// The peer reads both frames and closes its owned input after observing the
+	// disconnect frame. That real EOF lets the adapter join its reader worker.
+	peerErrCh := make(chan error, 1)
 	go func() {
-		defer wg.Done()
-		buf := make([]byte, 1024)
-		n, _ := r.Read(buf) //nolint:errcheck,gosec
-		// Should contain the connect message as JSON.
-		assert.Contains(t, string(buf[:n]), "connect")
+		defer func() {
+			_ = peerIn.Close()
+			_ = peerOut.Close()
+		}()
+		reader := bufio.NewReader(peerOut)
+		for _, expected := range []string{acp.TypeConnect, acp.TypeDisconnect} {
+			frame, err := reader.ReadString('\n')
+			if err != nil {
+				peerErrCh <- err
+				return
+			}
+			var message acp.ACPMessage
+			if err := json.Unmarshal([]byte(frame), &message); err != nil {
+				peerErrCh <- fmt.Errorf("decode stdio frame: %w", err)
+				return
+			}
+			if message.Type != expected {
+				peerErrCh <- fmt.Errorf("expected frame type %q, got %q", expected, message.Type)
+				return
+			}
+		}
+		peerErrCh <- nil
 	}()
 
-	adapter := acp.NewStdioAdapter(r, w)
-	ctx := context.Background()
+	adapter := acp.NewStdioAdapter(adapterIn, adapterOut)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 
 	err := adapter.Connect(ctx)
 	assert.NoError(t, err)
 
 	err = adapter.Disconnect(ctx)
 	assert.NoError(t, err)
-
-	wg.Wait()
+	select {
+	case err := <-peerErrCh:
+		require.NoError(t, err)
+	case <-ctx.Done():
+		t.Fatalf("stdio peer did not finish before deadline: %v", ctx.Err())
+	}
 }
 
 // =============================================================================

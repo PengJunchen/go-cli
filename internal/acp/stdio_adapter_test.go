@@ -2,6 +2,7 @@ package acp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -26,7 +27,12 @@ func newStdioPeer(t *testing.T) (ACPClient, *MockACPServer) {
 	mock.SetIO(serverR, serverW, nil)
 	require.NoError(t, mock.Start(context.Background()))
 
-	client := NewStdioAdapter(clientR, clientW, WithName("client"))
+	client := NewStdioAdapter(
+		clientR,
+		clientW,
+		WithName("client"),
+		WithStdioOwnedTransportCloser(closeAll{clientR, clientW}),
+	)
 
 	t.Cleanup(func() {
 		closeIgnored(serverR)
@@ -156,15 +162,25 @@ func TestStdioAdapterTraceChainConsistent(t *testing.T) {
 }
 
 func TestStdioAdapterDisconnectWithCanceledContext(t *testing.T) {
-	client, _ := newStdioPeer(t)
-	ctx := context.Background()
-	require.NoError(t, client.Connect(ctx))
+	reader, peerWriter := io.Pipe()
+	var out bytes.Buffer
+	client := NewStdioAdapter(reader, &out)
+	t.Cleanup(func() {
+		closeIgnored(peerWriter)
+		closeIgnored(reader)
+	})
+	require.NoError(t, client.Connect(context.Background()))
 
-	canceled, cancel := context.WithCancel(ctx)
+	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	err := client.Disconnect(canceled)
 	assert.Error(t, err)
-	assert.Equal(t, context.Canceled, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	done := requireStdioPending(t, err, false)
+	closeIgnored(peerWriter)
+	closeIgnored(reader)
+	assertChannelCloses(t, done)
+	assert.Equal(t, 1, bytes.Count(out.Bytes(), []byte("\n")), "a pre-canceled disconnect must not dispatch a frame")
 }
 
 // TestStdioAdapterDisconnectUnreadPipeReturns verifies that Disconnect returns
@@ -174,8 +190,9 @@ func TestStdioAdapterDisconnectWithCanceledContext(t *testing.T) {
 func TestStdioAdapterDisconnectUnreadPipeReturns(t *testing.T) {
 	clientR, serverW := io.Pipe() // client reads, server writes
 	serverR, clientW := io.Pipe() // server reads, client writes
+	writer := &signalWriteAt{writer: clientW, blockAt: 2, started: make(chan struct{})}
 
-	client := NewStdioAdapter(clientR, clientW, WithName("client"))
+	client := NewStdioAdapter(clientR, writer, WithName("client"))
 
 	// Drain only the connect frame so Connect doesn't block; stop reading
 	// afterwards so the disconnect frame write blocks forever.
@@ -184,28 +201,42 @@ func TestStdioAdapterDisconnectUnreadPipeReturns(t *testing.T) {
 		_, _ = rd.ReadBytes('\n') //nolint:errcheck // drain connect frame only
 	}()
 
-	ctx := context.Background()
-	require.NoError(t, client.Connect(ctx))
+	require.NoError(t, client.Connect(context.Background()))
 
-	// Close the client's input so readLoop's blocked reader unblocks.
-	closeIgnored(serverW)
-
-	// Disconnect must return promptly even though the disconnect write blocks.
+	// Disconnect must return pending promptly even though the disconnect write
+	// is caller-owned and the peer stopped reading.
 	done := make(chan error, 1)
+	var cleanupDone <-chan struct{}
+	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		done <- client.Disconnect(ctx)
 	}()
 	select {
+	case <-writer.started:
+		cancel()
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("disconnect frame Write did not start")
+	}
+	select {
 	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
+		require.Error(t, err)
+		var pending stdioPending
+		require.ErrorAs(t, err, &pending)
+		assert.True(t, pending.UnknownDelivery(), "the disconnect frame Write started but has not returned")
+		assertChannelOpen(t, pending.Done(), "blocked disconnect Write must remain tracked")
+		cleanupDone = pending.Done()
+	case <-time.After(time.Second):
 		t.Fatal("Disconnect blocked when peer pipe was never read")
 	}
 
-	// Cleanup: closing serverR unblocks the leaked inner writeLine goroutine.
+	// Cleanup closes both caller-owned endpoints; only then may the actual read
+	// and write workers join and the pending cleanup complete.
 	closeIgnored(clientW)
 	closeIgnored(serverR)
+	closeIgnored(serverW)
 	closeIgnored(clientR)
+	assertChannelCloses(t, cleanupDone)
 }
 
 // TestStdioAdapterDisconnectDeliversFrame verifies that when the peer reads

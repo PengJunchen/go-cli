@@ -1,0 +1,12 @@
+commit=2178cd5f30f17b0df46aaa9f5ac8c67e0a0647e4
+command=go test -p 2 -race -count=1 ./internal/approval ./internal/tools ./internal/core
+GOMAXPROCS=2
+ok  	github.com/pengjunchen/go-cli/internal/approval	1.143s
+ok  	github.com/pengjunchen/go-cli/internal/tools	33.085s
+ok  	github.com/pengjunchen/go-cli/internal/core	3.279s
+
+exit_code=0
+go version go1.26.4 darwin/arm64
+platform=Darwin/arm64
+NO_COLOR='1'
+TERM='dumb'

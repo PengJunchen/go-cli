@@ -127,7 +127,9 @@ type nativeChatModel struct {
 	// encode serializes msgs+options into the provider's request body.
 	encode func(msgs []Message, opts []Option) ([]byte, error)
 	// decode parses the provider's response body into an assistant Message.
-	decode func(body []byte) (*Message, error)
+	decode    func(body []byte) (*Message, error)
+	buildMode ProviderBuildMode
+	candidate *resolvedCandidateHandle
 }
 
 // Compile-time assertion that the shared helper satisfies the chat contract.
@@ -145,8 +147,14 @@ func (m *nativeChatModel) Generate(ctx context.Context, msgs []Message, opts ...
 		tracing.Attribute{Key: "model", Value: m.model},
 	)
 
-	msg, err := m.generate(spanCtx, msgs, opts...)
+	msg, attempt, err := m.generate(spanCtx, msgs, opts...)
+	var usage *Usage
+	if msg != nil {
+		usage = msg.Usage
+	}
+	err = finishProviderAttempt(spanCtx, attempt, err, usage)
 	if err != nil {
+		setProviderErrorSpanAttributes(span, err)
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 	} else {
 		span.SetStatus(tracing.SpanStatusOK, "")
@@ -169,15 +177,15 @@ func (m *nativeChatModel) Generate(ctx context.Context, msgs []Message, opts ...
 	return msg, err
 }
 
-func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
+func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, *ProviderAttempt, error) {
 	body, err := m.encode(msgs, opts)
 	if err != nil {
-		return nil, err
+		return nil, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("llm: build request: %w", err)
+		return nil, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: build request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if m.header != nil {
@@ -186,29 +194,39 @@ func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...
 		}
 	}
 
+	attempt, err := (providerDispatchBinding{mode: m.buildMode, candidate: m.candidate}).begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("llm: do request: %w", err)
+		return nil, attempt, fmt.Errorf("llm: do request: %w", &providerTransportFailure{cause: err})
 	}
-	defer func() {
-		if cerr := resp.Body.Close(); cerr != nil {
-			slog.Warn("llm_close_body", "err", cerr)
-		}
-	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		payload, rerr := io.ReadAll(resp.Body)
-		if rerr != nil {
-			return nil, fmt.Errorf("llm: read error response: %w", rerr)
+		payload, truncated, readErr, closeErr := readBoundedProviderBody(resp.Body, maxProviderErrorBodyBytes)
+		if readErr != nil {
+			providerErr := newProviderError(resp.StatusCode, m.provider, string(payload))
+			providerErr.BodyTruncated = truncated
+			return nil, attempt, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
 		}
-		return nil, newProviderError(resp.StatusCode, m.provider, string(payload))
+		providerErr := newProviderError(resp.StatusCode, m.provider, string(payload))
+		providerErr.BodyTruncated = truncated
+		return nil, attempt, errors.Join(providerErr, closeErr)
 	}
 
-	data, rerr := io.ReadAll(resp.Body)
-	if rerr != nil {
-		return nil, fmt.Errorf("llm: read response: %w", rerr)
+	data, truncated, readErr, closeErr := readBoundedProviderBody(resp.Body, maxProviderJSONBodyBytes)
+	if readErr != nil {
+		return nil, attempt, errors.Join(fmt.Errorf("llm: read response: %w", readErr), closeErr)
 	}
-	return m.decode(data)
+	if truncated {
+		return nil, attempt, errors.Join(ErrProviderResponseTooLarge, closeErr)
+	}
+	if closeErr != nil {
+		return nil, attempt, closeErr
+	}
+	msg, decodeErr := m.decode(data)
+	return msg, attempt, decodeErr
 }
 
 // Stream returns the generation result as a channel of MessageChunk. For the
@@ -226,7 +244,7 @@ func (m *nativeChatModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 	case openaiProviderName:
 		return m.streamOpenAI(ctx, msgs, opts)
 	default:
-		return nil, fmt.Errorf("llm: provider %q does not support native streaming; use Generate instead", m.provider)
+		return nil, preDispatchCandidateError(m.candidate, PreDispatchProtocol, fmt.Errorf("llm: provider %q does not support native streaming; use Generate instead", m.provider))
 	}
 }
 
@@ -237,7 +255,7 @@ func (m *nativeChatModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 // For streaming, a shallow copy of the client is made with Timeout=0 so that
 // SSE streams are not cut off by the client-level timeout. The caller's
 // context provides cancellation instead (AC-2, AC-3).
-func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endpoint string) (io.ReadCloser, error) {
+func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endpoint string) (io.ReadCloser, *ProviderAttempt, error) {
 	// Copy the client and clear the Timeout so long-lived SSE streams are
 	// not terminated by the default 120s client timeout. Context
 	// cancellation still applies (AC-3).
@@ -249,7 +267,7 @@ func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endp
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("llm: build request: %w", err)
+		return nil, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: build request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
@@ -259,24 +277,27 @@ func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endp
 		}
 	}
 
+	attempt, err := (providerDispatchBinding{mode: m.buildMode, candidate: m.candidate}).begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	resp, err := streamClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("llm: do request: %w", err)
+		return nil, attempt, fmt.Errorf("llm: do request: %w", &providerTransportFailure{cause: err})
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer func() {
-			if cerr := resp.Body.Close(); cerr != nil {
-				slog.Warn("llm_close_error_body", "err", cerr)
-			}
-		}()
-		payload, rerr := io.ReadAll(resp.Body)
-		if rerr != nil {
-			return nil, fmt.Errorf("llm: read error response: %w", rerr)
+		payload, truncated, readErr, closeErr := readBoundedProviderBody(resp.Body, maxProviderErrorBodyBytes)
+		if readErr != nil {
+			providerErr := newProviderError(resp.StatusCode, m.provider, string(payload))
+			providerErr.BodyTruncated = truncated
+			return nil, attempt, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
 		}
-		return nil, newProviderError(resp.StatusCode, m.provider, string(payload))
+		providerErr := newProviderError(resp.StatusCode, m.provider, string(payload))
+		providerErr.BodyTruncated = truncated
+		return nil, attempt, errors.Join(providerErr, closeErr)
 	}
-	return resp.Body, nil
+	return resp.Body, attempt, nil
 }
 
 // withStreamFlag decodes the request body, injects "stream": true, and
@@ -292,6 +313,37 @@ func withStreamFlag(body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("llm: marshal stream request: %w", err)
 	}
 	return out, nil
+}
+
+func updateClaudeRequestField(body []byte, name string, value json.RawMessage) ([]byte, error) {
+	var request map[string]json.RawMessage
+	if err := json.Unmarshal(body, &request); err != nil || request == nil {
+		return nil, errors.New("llm: decode Claude request JSON")
+	}
+	request[name] = value
+	updated, err := json.Marshal(request)
+	if err != nil {
+		return nil, errors.New("llm: marshal Claude request JSON")
+	}
+	return updated, nil
+}
+
+func injectClaudeThinking(data []byte, genOpts *GenerationOptions) ([]byte, error) {
+	config, ok := ThinkingFromOpts(genOpts)
+	if !ok || config.Level == ThinkingNone {
+		return data, nil
+	}
+	thinking := make(map[string]any)
+	ClaudeThinkingAdapter{}.Apply(thinking, config)
+	rawThinking, err := json.Marshal(thinking["thinking"])
+	if err != nil {
+		return nil, errors.New("llm: marshal Claude thinking configuration")
+	}
+	return updateClaudeRequestField(data, "thinking", rawThinking)
+}
+
+func withClaudeStreamFlag(body []byte) ([]byte, error) {
+	return updateClaudeRequestField(body, "stream", json.RawMessage(`true`))
 }
 
 // injectThinking retrieves the ThinkingConfig stored by WithThinking on
@@ -345,12 +397,12 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 	body, err := m.encode(msgs, opts)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 	streamBody, err := withStreamFlag(body)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 	// Ensure stream_options.include_usage is set so usage stats are streamed.
 	var streamReqMap map[string]any
@@ -360,15 +412,15 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 			streamBody, err = json.Marshal(streamReqMap)
 			if err != nil {
 				close(ch)
-				return ch, err
+				return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 			}
 		}
 	}
 
-	respBody, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
+	respBody, attempt, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, finishProviderAttempt(ctx, attempt, err, nil)
 	}
 
 	go func() {
@@ -386,12 +438,18 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		isJSON, jsonBody, err := detectJSONResponse(reader)
 		if err != nil {
 			slog.Error("llm_stream_peek_error", "err", err)
+			sendStreamError(ctx, ch, fmt.Errorf("llm: inspect OpenAI stream: %w", err))
 			return
 		}
 		if isJSON {
 			var parsed openAIResponse
 			if err := json.Unmarshal(jsonBody, &parsed); err != nil {
 				slog.Error("llm_stream_json_parse_error", "err", err)
+				sendStreamError(ctx, ch, fmt.Errorf("llm: decode OpenAI stream response: %w", err))
+				return
+			}
+			if len(parsed.Choices) == 0 {
+				sendStreamError(ctx, ch, fmt.Errorf("llm: OpenAI stream response contains no choices"))
 				return
 			}
 			var content string
@@ -410,13 +468,7 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 				}
 			}
 			final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
-			if parsed.Usage != nil {
-				final.Usage = &Usage{
-					InputTokens:  parsed.Usage.PromptTokens,
-					OutputTokens: parsed.Usage.CompletionTokens,
-					TotalTokens:  parsed.Usage.PromptTokens + parsed.Usage.CompletionTokens,
-				}
-			}
+			final.Usage = parsed.Usage.toUsage()
 			select {
 			case ch <- final:
 			case <-ctx.Done():
@@ -427,7 +479,11 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		parser := NewDefaultSSEParser()
 		events, _ := parser.Parse(ctx, reader) //nolint:errcheck
 
-		toolCalls, finishReason, usage := accumulateOpenAIStreamToolCalls(ctx, events, ch)
+		toolCalls, finishReason, usage, streamErr := accumulateOpenAIStreamToolCalls(ctx, events, ch)
+		if streamErr != nil {
+			sendStreamError(ctx, ch, streamErr)
+			return
+		}
 		final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
 		if usage != nil {
 			final.Usage = usage
@@ -438,7 +494,7 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		}
 	}()
 
-	return ch, nil
+	return finishProviderAttemptStream(ctx, ch, attempt), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -448,10 +504,11 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 // claudeStreamEvent is a single SSE event in the Anthropic streaming protocol.
 type claudeStreamEvent struct {
 	Type         string               `json:"type"`
-	Index        int                  `json:"index"`
+	Index        *int                 `json:"index,omitempty"`
 	Message      *claudeStreamMessage `json:"message,omitempty"`
 	ContentBlock *claudeStreamBlock   `json:"content_block,omitempty"`
 	Delta        *claudeStreamDelta   `json:"delta,omitempty"`
+	Usage        *claudeStreamUsage   `json:"usage,omitempty"`
 }
 
 // claudeStreamMessage carries the top-level message metadata from message_start.
@@ -462,49 +519,79 @@ type claudeStreamMessage struct {
 
 // claudeStreamBlock describes a content block from content_block_start.
 type claudeStreamBlock struct {
-	Type string `json:"type"`           // "text" or "tool_use"
-	ID   string `json:"id,omitempty"`   // tool_use ID
-	Name string `json:"name,omitempty"` // tool name
+	Type  string          `json:"type"`           // "text" or "tool_use"
+	ID    string          `json:"id,omitempty"`   // tool_use ID
+	Name  string          `json:"name,omitempty"` // tool name
+	Input json.RawMessage `json:"input,omitempty"`
 }
 
-// claudeStreamDelta carries the incremental delta from content_block_delta.
+// claudeStreamDelta carries the nested delta from a content or message event.
 type claudeStreamDelta struct {
-	Type        string       `json:"type"`                   // "text_delta" or "input_json_delta"
-	Text        string       `json:"text,omitempty"`         // text_delta text
-	PartialJSON string       `json:"partial_json,omitempty"` // input_json_delta fragment
-	StopReason  string       `json:"stop_reason,omitempty"`  // message_delta stop_reason
-	Usage       *claudeUsage `json:"usage,omitempty"`        // message_delta output_tokens
+	Type        string          `json:"type"`                   // content-block delta type
+	Text        string          `json:"text,omitempty"`         // text_delta text
+	PartialJSON string          `json:"partial_json,omitempty"` // input_json_delta fragment
+	StopReason  json.RawMessage `json:"stop_reason"`            // message_delta stop_reason update
+}
+
+type claudeStreamUsage struct {
+	InputTokens  *int `json:"input_tokens,omitempty"`
+	OutputTokens *int `json:"output_tokens,omitempty"`
+}
+
+// claudeStreamBlockState tracks whether a started content block can still
+// receive indexed deltas.
+type claudeStreamBlockState struct {
+	blockType string
+	closed    bool
+}
+
+func updateClaudeStopReason(current *string, raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return errors.New("llm: Claude message_delta is missing stop_reason")
+	}
+	if strings.TrimSpace(string(raw)) == "null" {
+		*current = ""
+		return nil
+	}
+	var reason string
+	if err := json.Unmarshal(raw, &reason); err != nil {
+		return errors.New("llm: decode Claude message_delta stop reason")
+	}
+	*current = reason
+	return nil
 }
 
 // claudeToolAccum accumulates a single tool call's fragments across chunks.
 type claudeToolAccum struct {
-	id   string
-	name string
-	args strings.Builder
+	id           string
+	name         string
+	initialInput json.RawMessage
+	args         strings.Builder
 }
 
 // streamClaude sends a streaming Anthropic messages request and parses the SSE
 // response. The "stream": true flag is injected into the request body. Event
-// types handled: message_start (role), content_block_delta (text/tool args),
-// message_stop (final chunk with accumulated tool calls).
+// order is validated across message_start, content_block_start/delta/stop,
+// message_delta, and message_stop. Text deltas stream immediately; tool
+// arguments are accumulated for the final chunk.
 func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts []Option) (<-chan MessageChunk, error) {
 	ch := make(chan MessageChunk, 64)
 
 	body, err := m.encode(msgs, opts)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
-	streamBody, err := withStreamFlag(body)
+	streamBody, err := withClaudeStreamFlag(body)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 
-	respBody, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
+	respBody, attempt, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, finishProviderAttempt(ctx, attempt, err, nil)
 	}
 
 	go func() {
@@ -518,144 +605,310 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		parser := NewDefaultSSEParser()
 		events, _ := parser.Parse(ctx, respBody) //nolint:errcheck
 
-		// Tool-call accumulation keyed by content block index.
 		tools := map[int]*claudeToolAccum{}
-		var toolIndices []int // preserve insertion order
+		blocks := map[int]*claudeStreamBlockState{}
+		var toolIndices []int
+		toolIDs := make(map[string]struct{})
 		var stopReason string
 		var inputTokens, outputTokens int
-		var hasUsage bool
-		finalSent := false
-		canceled := false
+		var hasInputTokens, hasOutputTokens bool
+		var eventCount int
+		var toolPayloadBytes int
+		messageStarted := false
+		messageDeltaSeen := false
+		messageStopped := false
+		openBlockCount := 0
+		nextBlockIndex := 0
+		sawToolUse := false
 
 		for event := range events {
-			if canceled {
-				continue
+			if event.Error != nil {
+				sendStreamError(ctx, ch, event.Error)
+				return
+			}
+			if ctx.Err() != nil {
+				sendStreamError(ctx, ch, ctx.Err())
+				return
 			}
 			if event.Data == "" {
 				continue
 			}
+			eventCount++
+			if eventCount > GuardedStreamMaxChunks {
+				sendStreamError(ctx, ch, fmt.Errorf("llm: Claude stream exceeds %d events", GuardedStreamMaxChunks))
+				return
+			}
+			if messageStopped {
+				sendStreamError(ctx, ch, errors.New("llm: Claude stream contains data after message_stop"))
+				return
+			}
 			var ce claudeStreamEvent
 			if err := json.Unmarshal([]byte(event.Data), &ce); err != nil {
-				slog.Warn("llm_stream_parse_skip", "err", err)
-				continue
+				sendStreamError(ctx, ch, errors.New("llm: decode Claude stream event"))
+				return
+			}
+			if event.Type == "" || event.Type != ce.Type {
+				sendStreamError(ctx, ch, errors.New("llm: Claude SSE event name does not match data type"))
+				return
+			}
+			if ce.Type == "error" {
+				sendStreamError(ctx, ch, errors.New("llm: Claude provider returned an error event"))
+				return
 			}
 
 			switch ce.Type {
 			case "message_start":
+				if messageStarted || ce.Message == nil || ce.Message.Role != "assistant" {
+					sendStreamError(ctx, ch, errors.New("llm: invalid Claude message_start event"))
+					return
+				}
+				messageStarted = true
 				if ce.Message != nil {
 					select {
 					case ch <- MessageChunk{Role: RoleAssistant}:
 					case <-ctx.Done():
-						canceled = true
-						continue
+						sendStreamError(ctx, ch, ctx.Err())
+						return
 					}
 					if ce.Message.Usage != nil {
-						inputTokens = ce.Message.Usage.InputTokens
-						hasUsage = true
+						if ce.Message.Usage.InputTokens != nil {
+							inputTokens = *ce.Message.Usage.InputTokens
+							hasInputTokens = true
+						}
+						if ce.Message.Usage.OutputTokens != nil {
+							outputTokens = *ce.Message.Usage.OutputTokens
+							hasOutputTokens = true
+						}
 					}
 				}
 
 			case "content_block_start":
-				if ce.ContentBlock != nil && ce.ContentBlock.Type == "tool_use" {
-					idx := ce.Index
-					if _, ok := tools[idx]; !ok {
-						tools[idx] = &claudeToolAccum{
-							id:   ce.ContentBlock.ID,
-							name: ce.ContentBlock.Name,
-						}
-						toolIndices = append(toolIndices, idx)
+				if !messageStarted || messageDeltaSeen {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content block started outside the message content phase"))
+					return
+				}
+				if ce.Index == nil {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content_block_start has no index"))
+					return
+				}
+				idx := *ce.Index
+				if idx < 0 || idx != nextBlockIndex {
+					sendStreamError(ctx, ch, fmt.Errorf("llm: Claude content block index %d is out of order; expected %d", idx, nextBlockIndex))
+					return
+				}
+				if ce.ContentBlock == nil || (ce.ContentBlock.Type != "text" && ce.ContentBlock.Type != "tool_use") {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content block has an unsupported or missing type"))
+					return
+				}
+				if ce.ContentBlock.Type == "text" && sawToolUse {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content blocks use an unsupported order"))
+					return
+				}
+				blocks[idx] = &claudeStreamBlockState{blockType: ce.ContentBlock.Type}
+				openBlockCount++
+				nextBlockIndex++
+				if ce.ContentBlock.Type == "tool_use" {
+					if idx < 0 || idx >= GuardedStreamMaxToolCalls || len(tools) >= GuardedStreamMaxToolCalls {
+						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool block index %d is outside the supported range", idx))
+						return
 					}
+					if ce.ContentBlock.ID == "" || ce.ContentBlock.Name == "" {
+						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool block %d is missing an ID or name", idx))
+						return
+					}
+					if _, exists := toolIDs[ce.ContentBlock.ID]; exists {
+						sendStreamError(ctx, ch, errors.New("llm: Claude stream contains duplicate tool call IDs"))
+						return
+					}
+					toolIDs[ce.ContentBlock.ID] = struct{}{}
+					if _, ok := tools[idx]; ok {
+						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool block %d was declared more than once", idx))
+						return
+					}
+					nextBytes, ok := addBoundedStreamBytes(toolPayloadBytes, len(ce.ContentBlock.ID))
+					if ok {
+						nextBytes, ok = addBoundedStreamBytes(nextBytes, len(ce.ContentBlock.Name))
+					}
+					if ok && len(ce.ContentBlock.Input) > 0 {
+						nextBytes, ok = addBoundedStreamBytes(nextBytes, len(ce.ContentBlock.Input))
+					}
+					if !ok {
+						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool payload exceeds %d-byte limit", GuardedStreamMaxBytes))
+						return
+					}
+					toolPayloadBytes = nextBytes
+					if len(ce.ContentBlock.Input) > 0 {
+						if _, err := decodeClaudeJSONObject(ce.ContentBlock.Input); err != nil {
+							sendStreamError(ctx, ch, errors.New("llm: Claude tool input must be a JSON object"))
+							return
+						}
+					}
+					tools[idx] = &claudeToolAccum{
+						id:           ce.ContentBlock.ID,
+						name:         ce.ContentBlock.Name,
+						initialInput: append(json.RawMessage(nil), ce.ContentBlock.Input...),
+					}
+					toolIndices = append(toolIndices, idx)
+					sawToolUse = true
 				}
 
 			case "content_block_delta":
+				if !messageStarted || messageDeltaSeen {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content delta arrived outside the message content phase"))
+					return
+				}
+				if ce.Index == nil {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content_block_delta has no index"))
+					return
+				}
+				block, ok := blocks[*ce.Index]
+				if !ok || block.closed {
+					sendStreamError(ctx, ch, fmt.Errorf("llm: Claude content delta index %d does not reference an open block", *ce.Index))
+					return
+				}
 				if ce.Delta == nil {
-					continue
+					sendStreamError(ctx, ch, errors.New("llm: Claude content_block_delta has no delta"))
+					return
 				}
 				switch ce.Delta.Type {
 				case "text_delta":
+					if block.blockType != "text" {
+						sendStreamError(ctx, ch, errors.New("llm: Claude text delta does not match the active block type"))
+						return
+					}
+					if sawToolUse {
+						sendStreamError(ctx, ch, errors.New("llm: Claude content blocks use an unsupported order"))
+						return
+					}
+					for lowerIndex := 0; lowerIndex < *ce.Index; lowerIndex++ {
+						lowerBlock := blocks[lowerIndex]
+						if lowerBlock != nil && lowerBlock.blockType == "text" && !lowerBlock.closed {
+							sendStreamError(ctx, ch, fmt.Errorf("llm: Claude text block %d emitted before lower-index text block %d stopped", *ce.Index, lowerIndex))
+							return
+						}
+					}
 					if ce.Delta.Text != "" {
 						select {
 						case ch <- MessageChunk{Role: RoleAssistant, Content: ce.Delta.Text}:
 						case <-ctx.Done():
-							canceled = true
-							continue
+							sendStreamError(ctx, ch, ctx.Err())
+							return
 						}
 					}
 				case "input_json_delta":
-					if accum, ok := tools[ce.Index]; ok {
-						accum.args.WriteString(ce.Delta.PartialJSON)
+					if block.blockType != "tool_use" {
+						sendStreamError(ctx, ch, errors.New("llm: Claude input JSON delta does not match the active block type"))
+						return
 					}
+					accum, ok := tools[*ce.Index]
+					if !ok {
+						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude arguments reference unknown tool block %d", *ce.Index))
+						return
+					}
+					nextBytes, ok := addBoundedStreamBytes(toolPayloadBytes, len(ce.Delta.PartialJSON))
+					if !ok {
+						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool payload exceeds %d-byte limit", GuardedStreamMaxBytes))
+						return
+					}
+					toolPayloadBytes = nextBytes
+					accum.args.WriteString(ce.Delta.PartialJSON)
+				default:
+					sendStreamError(ctx, ch, errors.New("llm: unsupported Claude content delta type"))
+					return
 				}
+
+			case "content_block_stop":
+				if ce.Index == nil {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content_block_stop has no index"))
+					return
+				}
+				block, ok := blocks[*ce.Index]
+				if !messageStarted || messageDeltaSeen || !ok || block.closed {
+					sendStreamError(ctx, ch, fmt.Errorf("llm: Claude content_block_stop index %d does not reference an open block", *ce.Index))
+					return
+				}
+				block.closed = true
+				openBlockCount--
 
 			case "message_delta":
-				if ce.Delta != nil {
-					if ce.Delta.StopReason != "" {
-						stopReason = ce.Delta.StopReason
+				if !messageStarted || openBlockCount != 0 || ce.Delta == nil {
+					sendStreamError(ctx, ch, errors.New("llm: invalid Claude message_delta event"))
+					return
+				}
+				if err := updateClaudeStopReason(&stopReason, ce.Delta.StopReason); err != nil {
+					sendStreamError(ctx, ch, err)
+					return
+				}
+				if ce.Usage != nil {
+					if ce.Usage.InputTokens != nil {
+						inputTokens = *ce.Usage.InputTokens
+						hasInputTokens = true
 					}
-					if ce.Delta.Usage != nil {
-						outputTokens = ce.Delta.Usage.OutputTokens
-						hasUsage = true
+					if ce.Usage.OutputTokens != nil {
+						outputTokens = *ce.Usage.OutputTokens
+						hasOutputTokens = true
 					}
 				}
+				messageDeltaSeen = true
 
 			case "message_stop":
-				final := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: stopReason}
-				if len(toolIndices) > 0 {
-					final.ToolCalls = make([]ToolCall, 0, len(toolIndices))
-					for _, idx := range toolIndices {
-						accum := tools[idx]
-						var args any
-						if accum.args.Len() > 0 {
-							var decoded any
-							if err := json.Unmarshal([]byte(accum.args.String()), &decoded); err == nil {
-								args = decoded
-							} else {
-								args = accum.args.String()
-							}
-						}
-						final.ToolCalls = append(final.ToolCalls, ToolCall{
-							ID:   accum.id,
-							Name: accum.name,
-							Args: args,
-						})
-					}
+				if !messageStarted || !messageDeltaSeen || openBlockCount != 0 || stopReason == "" {
+					sendStreamError(ctx, ch, errors.New("llm: Claude message_stop arrived without a complete terminal reason"))
+					return
 				}
-				if hasUsage {
-					final.Usage = &Usage{
-						InputTokens:  inputTokens,
-						OutputTokens: outputTokens,
-						TotalTokens:  inputTokens + outputTokens,
-					}
-				}
-				select {
-				case ch <- final:
-					finalSent = true
-				case <-ctx.Done():
-					canceled = true
-					continue
-				}
+				messageStopped = true
+
+			case "ping":
+				// These are valid non-terminal protocol events.
+
+			default:
+				sendStreamError(ctx, ch, errors.New("llm: unsupported Claude stream event type"))
+				return
 			}
 		}
 
-		// If the stream ended without message_stop, emit a final chunk so
-		// the caller is not left waiting.
-		if !finalSent && ctx.Err() == nil {
-			fallback := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: stopReason}
-			if hasUsage {
-				fallback.Usage = &Usage{
-					InputTokens:  inputTokens,
-					OutputTokens: outputTokens,
-					TotalTokens:  inputTokens + outputTokens,
+		if ctx.Err() != nil {
+			sendStreamError(ctx, ch, ctx.Err())
+			return
+		}
+		if !messageStarted || !messageStopped {
+			sendStreamError(ctx, ch, errors.New("llm: Claude stream ended without message_stop"))
+			return
+		}
+		if (stopReason == "tool_use") != (len(toolIndices) > 0) {
+			sendStreamError(ctx, ch, errors.New("llm: Claude tool calls do not match the terminal stop reason"))
+			return
+		}
+		finishReason := claudeFinishReason(stopReason)
+		final := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: finishReason}
+		if len(toolIndices) > 0 {
+			final.ToolCalls = make([]ToolCall, 0, len(toolIndices))
+			for _, idx := range toolIndices {
+				accum := tools[idx]
+				rawArgs := accum.args.String()
+				input := json.RawMessage(rawArgs)
+				if len(input) == 0 {
+					input = accum.initialInput
 				}
+				decodedArgs, decodeErr := decodeClaudeJSONObject(input)
+				if decodeErr != nil {
+					sendStreamError(ctx, ch, errors.New("llm: Claude tool input must be a complete JSON object"))
+					return
+				}
+				final.ToolCalls = append(final.ToolCalls, ToolCall{ID: accum.id, Name: accum.name, Args: decodedArgs})
 			}
-			select {
-			case ch <- fallback:
-			case <-ctx.Done():
-			}
+		}
+		if hasInputTokens && hasOutputTokens {
+			final.Usage = &Usage{InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: inputTokens + outputTokens}
+		}
+		select {
+		case ch <- final:
+		case <-ctx.Done():
+			sendStreamError(ctx, ch, ctx.Err())
 		}
 	}()
 
-	return ch, nil
+	return finishProviderAttemptStream(ctx, ch, attempt), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -672,16 +925,16 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 	body, err := m.encode(msgs, opts)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 
 	// Switch the endpoint to the streaming variant.
 	streamEndpoint := strings.Replace(m.endpoint, geminiGenerateAction, geminiStreamAction, 1)
 
-	respBody, err := m.streamRoundTrip(ctx, body, streamEndpoint)
+	respBody, attempt, err := m.streamRoundTrip(ctx, body, streamEndpoint)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, finishProviderAttempt(ctx, attempt, err, nil)
 	}
 
 	go func() {
@@ -698,32 +951,43 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 		var finishReason string
 		var toolCalls []ToolCall
 		var usage *Usage
-		canceled := false
+		var eventCount int
+		var toolPayloadBytes int
+		terminalSeen := false
 		for event := range events {
-			if canceled {
-				continue
+			if event.Error != nil {
+				sendStreamError(ctx, ch, event.Error)
+				return
+			}
+			if ctx.Err() != nil {
+				sendStreamError(ctx, ch, ctx.Err())
+				return
 			}
 			if event.Data == "" {
 				continue
 			}
+			eventCount++
+			if eventCount > GuardedStreamMaxChunks {
+				sendStreamError(ctx, ch, fmt.Errorf("llm: Gemini stream exceeds %d events", GuardedStreamMaxChunks))
+				return
+			}
 			var parsed geminiResponse
 			if err := json.Unmarshal([]byte(event.Data), &parsed); err != nil {
-				slog.Warn("llm_stream_parse_skip", "err", err)
-				continue
+				sendStreamError(ctx, ch, fmt.Errorf("llm: decode Gemini stream event: %w", err))
+				return
 			}
 			// Gemini sends usageMetadata in the response chunks; the final
 			// chunk carries the cumulative totals.
-			if parsed.UsageMetadata != nil {
-				usage = &Usage{
-					InputTokens:  parsed.UsageMetadata.PromptTokenCount,
-					OutputTokens: parsed.UsageMetadata.CandidatesTokenCount,
-					TotalTokens:  parsed.UsageMetadata.PromptTokenCount + parsed.UsageMetadata.CandidatesTokenCount,
-				}
-			}
+			usage = parsed.UsageMetadata.toUsage()
 			if len(parsed.Candidates) > 0 {
+				if terminalSeen {
+					sendStreamError(ctx, ch, errors.New("llm: Gemini stream emitted candidates after a terminal finish reason"))
+					return
+				}
 				candidate := parsed.Candidates[0]
 				if candidate.FinishReason != "" {
 					finishReason = candidate.FinishReason
+					terminalSeen = true
 				}
 				if candidate.Content != nil {
 					var sb strings.Builder
@@ -733,25 +997,52 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 						// together, not fragmented like OpenAI), so we just
 						// append when encountered.
 						if part.FunctionCall != nil {
-							toolCalls = append(toolCalls, ToolCall{
+							if len(toolCalls) >= GuardedStreamMaxToolCalls || part.FunctionCall.Name == "" || part.FunctionCall.Args == nil {
+								sendStreamError(ctx, ch, errors.New("llm: Gemini function call is incomplete or exceeds the supported call count"))
+								return
+							}
+							call := ToolCall{
 								ID:   fmt.Sprintf("call_%d", len(toolCalls)),
 								Name: part.FunctionCall.Name,
 								Args: part.FunctionCall.Args,
-							})
+							}
+							encoded, marshalErr := json.Marshal(call)
+							if marshalErr != nil {
+								sendStreamError(ctx, ch, fmt.Errorf("llm: encode Gemini function call: %w", marshalErr))
+								return
+							}
+							nextBytes, ok := addBoundedStreamBytes(toolPayloadBytes, len(encoded))
+							if !ok {
+								sendStreamError(ctx, ch, fmt.Errorf("llm: Gemini tool payload exceeds %d-byte limit", GuardedStreamMaxBytes))
+								return
+							}
+							toolPayloadBytes = nextBytes
+							toolCalls = append(toolCalls, call)
 						}
 					}
 					if sb.Len() > 0 {
 						select {
 						case ch <- MessageChunk{Role: RoleAssistant, Content: sb.String()}:
 						case <-ctx.Done():
-							canceled = true
-							continue
+							sendStreamError(ctx, ch, ctx.Err())
+							return
 						}
 					}
 				}
 			}
 		}
 
+		if ctx.Err() != nil {
+			sendStreamError(ctx, ch, ctx.Err())
+			return
+		}
+		if finishReason == "" {
+			sendStreamError(ctx, ch, errors.New("llm: Gemini stream ended without a candidate finish reason"))
+			return
+		}
+		if finishReason == "MAX_TOKENS" {
+			finishReason = finishReasonLength
+		}
 		final := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: finishReason, ToolCalls: toolCalls}
 		if usage != nil {
 			final.Usage = usage
@@ -762,19 +1053,20 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 		}
 	}()
 
-	return ch, nil
+	return finishProviderAttemptStream(ctx, ch, attempt), nil
 }
 
 // nativeProviderBase holds the shared state of the three native providers.
 // The concrete OpenAIProvider/ClaudeProvider/GeminiProvider embed it and only
 // differ in their name, default base URL, model and wire format.
 type nativeProviderBase struct {
-	name           string
-	defaultBaseURL string
-	defaultModel   string
-	httpClient     *http.Client
-	defaultAPIKey  string
-	models         []ModelInfo
+	name              string
+	defaultBaseURL    string
+	baseURLConfigured bool
+	defaultModel      string
+	httpClient        *http.Client
+	defaultAPIKey     string
+	models            []ModelInfo
 }
 
 // buildCommon resolves the effective model name and returns a shared error,
@@ -803,22 +1095,34 @@ func (b *nativeProviderBase) resolveAPIKey(cfg ModelConfig) string {
 	if cfg.APIKey != "" {
 		return cfg.APIKey
 	}
+	if cfg.credentialResolved {
+		return ""
+	}
 	return b.defaultAPIKey
+}
+
+func (b *nativeProviderBase) credentialForOrigin(origin string) (string, bool) {
+	defaultOrigin, err := normalizeProviderOrigin(b.defaultBaseURL)
+	if err != nil || defaultOrigin != origin {
+		return "", false
+	}
+	return b.defaultAPIKey, true
 }
 
 // newChatModel builds a nativeChatModel bound to this provider's shared
 // endpoint/header/encode/decode closures.
 func (b *nativeProviderBase) newChatModel(cfg ModelConfig, model, baseURL, apiKey, endpoint string, header func() map[string]string, encode func(msgs []Message, opts []Option) ([]byte, error), decode func(body []byte) (*Message, error)) *nativeChatModel {
 	return &nativeChatModel{
-		client:   b.httpClient,
-		baseURL:  baseURL,
-		apiKey:   apiKey,
-		provider: b.name,
-		model:    model,
-		endpoint: endpoint,
-		header:   header,
-		encode:   encode,
-		decode:   decode,
+		client:    b.httpClient,
+		baseURL:   baseURL,
+		apiKey:    apiKey,
+		provider:  b.name,
+		model:     model,
+		endpoint:  endpoint,
+		header:    header,
+		encode:    encode,
+		decode:    decode,
+		buildMode: UnboundLibraryBuild,
 	}
 }
 
@@ -830,7 +1134,10 @@ type NativeProviderOption func(*nativeProviderBase)
 
 // WithNativeBaseURL overrides the provider's default endpoint prefix.
 func WithNativeBaseURL(url string) NativeProviderOption {
-	return func(b *nativeProviderBase) { b.defaultBaseURL = url }
+	return func(b *nativeProviderBase) {
+		b.defaultBaseURL = url
+		b.baseURLConfigured = true
+	}
 }
 
 // WithNativeAPIKey sets the credential used when a ModelConfig does not supply
@@ -841,7 +1148,7 @@ func WithNativeAPIKey(key string) NativeProviderOption {
 
 // WithNativeModels sets the static model list reported by Models().
 func WithNativeModels(models []ModelInfo) NativeProviderOption {
-	return func(b *nativeProviderBase) { b.models = models }
+	return func(b *nativeProviderBase) { b.models = append([]ModelInfo(nil), models...) }
 }
 
 // WithNativeHTTPClient injects a custom *http.Client (tests, proxies, timeouts).
@@ -892,18 +1199,36 @@ func NewOpenAIProvider(opts ...NativeProviderOption) *OpenAIProvider {
 // Name returns the provider identifier.
 func (p *OpenAIProvider) Name() string { return p.name }
 
+// EstimateProtocolFraming uses the same OpenAI-compatible chat envelope
+// accounting as the default provider adapter.
+func (p *OpenAIProvider) EstimateProtocolFraming(messages []Message, options GenerationOptions) (int, error) {
+	return estimateOpenAICompatibleFraming(messages, options)
+}
+
 // Models returns the static model list.
 func (p *OpenAIProvider) Models() []ModelInfo { return p.modelsCopy() }
 
 // Build returns a native HTTP chat model bound to the OpenAI chat completions
 // endpoint.
 func (p *OpenAIProvider) Build(_ context.Context, cfg ModelConfig) (BaseChatModel, func(), error) {
+	return p.build(cfg, UnboundLibraryBuild, nil)
+}
+
+func (p *OpenAIProvider) buildGuarded(_ context.Context, cfg ModelConfig, candidate *resolvedCandidateHandle) (BaseChatModel, func(), error) {
+	return p.build(cfg, GuardedCandidateBuild, candidate)
+}
+
+func (p *OpenAIProvider) build(cfg ModelConfig, mode ProviderBuildMode, candidate *resolvedCandidateHandle) (BaseChatModel, func(), error) {
 	model, err := p.buildCommon(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
 	baseURL := p.resolveBaseURL(cfg)
 	apiKey := p.resolveAPIKey(cfg)
+	client, err := httpClientForResolvedScope(p.httpClient, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("llm: build provider for resolved scope: %w", err)
+	}
 	endpoint := strings.TrimRight(baseURL, "/") + openaiChatPath
 
 	header := func() map[string]string {
@@ -919,7 +1244,11 @@ func (p *OpenAIProvider) Build(_ context.Context, cfg ModelConfig) (BaseChatMode
 	decode := func(body []byte) (*Message, error) {
 		return decodeOpenAIResponse(body)
 	}
-	return p.newChatModel(cfg, model, baseURL, apiKey, endpoint, header, encode, decode), func() {}, nil
+	chatModel := p.newChatModel(cfg, model, baseURL, apiKey, endpoint, header, encode, decode)
+	chatModel.client = client
+	chatModel.buildMode = mode
+	chatModel.candidate = candidate
+	return chatModel, func() {}, nil
 }
 
 // encodeOpenAIRequest marshals the OpenAI request body, reusing the shared
@@ -956,18 +1285,11 @@ func encodeOpenAIRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 		reqMsgs = append(reqMsgs, om)
 	}
 	req := openAIRequest{
-		Model:     model,
-		Messages:  reqMsgs,
-		MaxTokens: cfg.MaxTokens,
+		Model:    model,
+		Messages: reqMsgs,
 	}
-	if genOpts.Temperature != nil {
-		req.Temperature = *genOpts.Temperature
-	} else {
-		req.Temperature = cfg.Temperature
-	}
-	if genOpts.MaxTokens != nil {
-		req.MaxTokens = *genOpts.MaxTokens
-	}
+	req.Temperature = samplingTemperature(cfg, genOpts.Temperature)
+	req.MaxTokens = samplingMaxTokens(cfg, genOpts.MaxTokens)
 	if len(genOpts.StopStrings) > 0 {
 		req.Stop = genOpts.StopStrings
 	}
@@ -1009,13 +1331,7 @@ func decodeOpenAIResponse(body []byte) (*Message, error) {
 		msg.ToolCalls = convertAssistantToolCalls(choice.Message.ToolCalls)
 		msg.FinishReason = choice.FinishReason
 	}
-	if parsed.Usage != nil {
-		msg.Usage = &Usage{
-			InputTokens:  parsed.Usage.PromptTokens,
-			OutputTokens: parsed.Usage.CompletionTokens,
-			TotalTokens:  parsed.Usage.PromptTokens + parsed.Usage.CompletionTokens,
-		}
-	}
+	msg.Usage = parsed.Usage.toUsage()
 	return msg, nil
 }
 
@@ -1086,6 +1402,7 @@ type claudeRequest struct {
 	MaxTokens int                 `json:"max_tokens"`
 	System    string              `json:"system,omitempty"`
 	Messages  []claudeUserMessage `json:"messages"`
+	Tools     []claudeToolDef     `json:"tools,omitempty"`
 }
 
 // claudeUserMessage is a single user/assistant turn in the Anthropic protocol.
@@ -1094,11 +1411,22 @@ type claudeUserMessage struct {
 	Content []claudeBlock `json:"content"`
 }
 
-// claudeBlock is a single content item (text or image).
+// claudeBlock is a single content item in the Claude Messages API.
 type claudeBlock struct {
-	Type   string             `json:"type"`
-	Text   string             `json:"text,omitempty"`
-	Source *claudeImageSource `json:"source,omitempty"` // when Type == "image"
+	Type      string             `json:"type"`
+	Text      string             `json:"text,omitempty"`
+	Source    *claudeImageSource `json:"source,omitempty"` // when Type == "image"
+	ID        string             `json:"id,omitempty"`
+	Name      string             `json:"name,omitempty"`
+	Input     json.RawMessage    `json:"input,omitempty"`
+	ToolUseID string             `json:"tool_use_id,omitempty"`
+	Content   string             `json:"content,omitempty"`
+}
+
+type claudeToolDef struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	InputSchema json.RawMessage `json:"input_schema"`
 }
 
 // claudeImageSource is the Anthropic image source: a base64-encoded blob with
@@ -1111,24 +1439,38 @@ type claudeImageSource struct {
 
 // claudeResponse is the Anthropic messages response body.
 type claudeResponse struct {
+	Role       string        `json:"role"`
 	Content    []claudeBlock `json:"content"`
 	Usage      *claudeUsage  `json:"usage,omitempty"`
-	StopReason string        `json:"stop_reason,omitempty"`
+	StopReason string        `json:"stop_reason"`
 }
 
 // claudeUsage reports token consumption.
 type claudeUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens  *int `json:"input_tokens,omitempty"`
+	OutputTokens *int `json:"output_tokens,omitempty"`
 }
 
-// buildClaudeBlocks converts a Message into a slice of claudeBlock values.
-// When ContentBlocks is non-nil, it maps text and image blocks to the Anthropic
-// format (image blocks require a base64 data URI). Otherwise it falls back to a
-// single text block built from Content.
-func buildClaudeBlocks(msg Message) []claudeBlock {
+func (u *claudeUsage) toUsage() *Usage {
+	if u == nil || u.InputTokens == nil || u.OutputTokens == nil {
+		return nil
+	}
+	return &Usage{
+		InputTokens:  *u.InputTokens,
+		OutputTokens: *u.OutputTokens,
+		TotalTokens:  *u.InputTokens + *u.OutputTokens,
+	}
+}
+
+// buildClaudeBlocks converts supported text and base64 image content into
+// Anthropic content blocks. Unsupported blocks return an error instead of
+// silently changing the conversation sent to the provider.
+func buildClaudeBlocks(msg Message) ([]claudeBlock, error) {
 	if msg.ContentBlocks == nil {
-		return []claudeBlock{{Type: "text", Text: msg.Content}}
+		if msg.Content == "" {
+			return nil, nil
+		}
+		return []claudeBlock{{Type: "text", Text: msg.Content}}, nil
 	}
 	blocks := make([]claudeBlock, 0, len(msg.ContentBlocks))
 	for _, cb := range msg.ContentBlocks {
@@ -1137,11 +1479,11 @@ func buildClaudeBlocks(msg Message) []claudeBlock {
 			blocks = append(blocks, claudeBlock{Type: "text", Text: cb.Text})
 		case "image_url":
 			if cb.ImageURL == nil {
-				continue
+				return nil, errors.New("llm: Claude image content is missing its source")
 			}
 			mediaType, data, ok := parseDataURI(cb.ImageURL.URL)
 			if !ok {
-				continue // Claude requires base64 data URIs
+				return nil, errors.New("llm: Claude images require a base64 data URI")
 			}
 			blocks = append(blocks, claudeBlock{
 				Type: "image",
@@ -1151,9 +1493,64 @@ func buildClaudeBlocks(msg Message) []claudeBlock {
 					Data:      data,
 				},
 			})
+		default:
+			return nil, errors.New("llm: Claude content contains an unsupported block type")
 		}
 	}
-	return blocks
+	return blocks, nil
+}
+
+func marshalClaudeJSONObject(value any, nilAsEmptyObject bool, description string) (json.RawMessage, error) {
+	if value == nil && nilAsEmptyObject {
+		return json.RawMessage(`{}`), nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("llm: %s must be a JSON object", description)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return nil, fmt.Errorf("llm: %s must be a JSON object", description)
+	}
+	return json.RawMessage(raw), nil
+}
+
+func decodeClaudeJSONObject(raw json.RawMessage) (map[string]any, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("llm: Claude tool input is missing")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var object map[string]any
+	if err := decoder.Decode(&object); err != nil || object == nil {
+		return nil, errors.New("llm: Claude tool input must be a JSON object")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, errors.New("llm: Claude tool input must be a single JSON object")
+	}
+	return object, nil
+}
+
+func validClaudeToolName(name string) bool {
+	if len(name) == 0 || len(name) > 128 {
+		return false
+	}
+	for _, char := range name {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func claudeFinishReason(stopReason string) string {
+	if stopReason == "max_tokens" {
+		return finishReasonLength
+	}
+	return stopReason
 }
 
 // encodeClaudeRequest marshals a conversation into the Anthropic message body.
@@ -1173,6 +1570,9 @@ func encodeClaudeRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 	conv := make([]Message, 0, len(msgs))
 	for _, msg := range msgs {
 		if msg.Role == RoleSystem {
+			if len(msg.ToolCalls) != 0 || msg.ToolCallID != "" || msg.Name != "" || msg.ContentBlocks != nil {
+				return nil, errors.New("llm: invalid Claude system message fields")
+			}
 			// Anthropic takes system as a top-level field; concatenate any
 			// system messages there.
 			if system != "" {
@@ -1184,11 +1584,121 @@ func encodeClaudeRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 		conv = append(conv, msg)
 	}
 
+	toolDefs := make([]claudeToolDef, 0, len(genOpts.Tools))
+	toolNames := make(map[string]struct{}, len(genOpts.Tools))
+	for _, def := range genOpts.Tools {
+		if !validClaudeToolName(def.Name) {
+			return nil, errors.New("llm: Claude tool name is invalid")
+		}
+		if _, exists := toolNames[def.Name]; exists {
+			return nil, errors.New("llm: Claude tool names must be unique")
+		}
+		toolNames[def.Name] = struct{}{}
+		schema := def.Parameters
+		if schema == nil {
+			schema = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+		inputSchema, err := marshalClaudeJSONObject(schema, false, "Claude tool schema")
+		if err != nil {
+			return nil, err
+		}
+		toolDefs = append(toolDefs, claudeToolDef{
+			Name:        def.Name,
+			Description: def.Description,
+			InputSchema: inputSchema,
+		})
+	}
+
 	reqMsgs := make([]claudeUserMessage, 0, len(conv))
-	for _, msg := range conv {
-		role := string(msg.Role)
-		blocks := buildClaudeBlocks(msg)
-		reqMsgs = append(reqMsgs, claudeUserMessage{Role: role, Content: blocks})
+	for i := 0; i < len(conv); {
+		msg := conv[i]
+		switch msg.Role {
+		case RoleUser:
+			if len(msg.ToolCalls) != 0 || msg.ToolCallID != "" || msg.Name != "" {
+				return nil, errors.New("llm: invalid Claude user message fields")
+			}
+			blocks, err := buildClaudeBlocks(msg)
+			if err != nil {
+				return nil, err
+			}
+			reqMsgs = append(reqMsgs, claudeUserMessage{Role: string(RoleUser), Content: blocks})
+			i++
+
+		case RoleAssistant:
+			if msg.ToolCallID != "" || msg.Name != "" {
+				return nil, errors.New("llm: invalid Claude assistant message fields")
+			}
+			blocks, err := buildClaudeBlocks(msg)
+			if err != nil {
+				return nil, err
+			}
+			if len(msg.ToolCalls) == 0 {
+				reqMsgs = append(reqMsgs, claudeUserMessage{Role: string(RoleAssistant), Content: blocks})
+				i++
+				continue
+			}
+
+			callIDs := make(map[string]int, len(msg.ToolCalls))
+			for callIndex, call := range msg.ToolCalls {
+				if call.ID == "" || call.Name == "" {
+					return nil, errors.New("llm: Claude tool call is missing its ID or name")
+				}
+				if _, exists := callIDs[call.ID]; exists {
+					return nil, errors.New("llm: Claude tool call IDs must be unique")
+				}
+				args, err := marshalClaudeJSONObject(call.Args, true, "Claude tool-call arguments")
+				if err != nil {
+					return nil, err
+				}
+				callIDs[call.ID] = callIndex
+				blocks = append(blocks, claudeBlock{Type: "tool_use", ID: call.ID, Name: call.Name, Input: args})
+			}
+			reqMsgs = append(reqMsgs, claudeUserMessage{Role: string(RoleAssistant), Content: blocks})
+
+			resultCount := len(msg.ToolCalls)
+			if resultCount > len(conv)-i-1 {
+				return nil, errors.New("llm: Claude assistant tool calls have incomplete results")
+			}
+			resultsByID := make(map[string]Message, resultCount)
+			for resultIndex := i + 1; resultIndex <= i+resultCount; resultIndex++ {
+				result := conv[resultIndex]
+				if result.Role != RoleTool || result.ToolCallID == "" || len(result.ToolCalls) != 0 || result.ContentBlocks != nil {
+					return nil, errors.New("llm: Claude tool results must immediately follow their assistant tool calls")
+				}
+				callIndex, exists := callIDs[result.ToolCallID]
+				if !exists {
+					return nil, errors.New("llm: Claude tool result has an unknown tool call ID")
+				}
+				if _, exists := resultsByID[result.ToolCallID]; exists {
+					return nil, errors.New("llm: Claude tool result IDs must be unique")
+				}
+				call := msg.ToolCalls[callIndex]
+				if result.Name != "" && result.Name != call.Name {
+					return nil, errors.New("llm: Claude tool result name does not match its tool call")
+				}
+				resultsByID[result.ToolCallID] = result
+			}
+			toolResultBlocks := make([]claudeBlock, 0, resultCount)
+			for _, call := range msg.ToolCalls {
+				result, exists := resultsByID[call.ID]
+				if !exists {
+					return nil, errors.New("llm: Claude assistant tool calls have incomplete results")
+				}
+				toolResultBlocks = append(toolResultBlocks, claudeBlock{
+					Type:      "tool_result",
+					ToolUseID: call.ID,
+					Content:   result.Content,
+				})
+			}
+			reqMsgs = append(reqMsgs, claudeUserMessage{Role: string(RoleUser), Content: toolResultBlocks})
+			i += resultCount + 1
+
+		case RoleTool:
+			return nil, errors.New("llm: Claude tool result has no preceding assistant tool call")
+
+		default:
+			return nil, errors.New("llm: unsupported Claude message role")
+		}
 	}
 
 	req := claudeRequest{
@@ -1196,12 +1706,13 @@ func encodeClaudeRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 		MaxTokens: maxTokens,
 		System:    system,
 		Messages:  reqMsgs,
+		Tools:     toolDefs,
 	}
 	data, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("llm: marshal request: %w", err)
+		return nil, errors.New("llm: marshal Claude request")
 	}
-	return injectThinking(data, genOpts, ClaudeThinkingAdapter{}, "")
+	return injectClaudeThinking(data, genOpts)
 }
 
 // decodeClaudeResponse parses an Anthropic messages response, joining any text
@@ -1209,23 +1720,49 @@ func encodeClaudeRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 func decodeClaudeResponse(body []byte) (*Message, error) {
 	var parsed claudeResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("llm: decode response: %w", err)
+		return nil, errors.New("llm: decode Claude response JSON")
+	}
+	if parsed.Role != string(RoleAssistant) {
+		return nil, errors.New("llm: Claude response role must be assistant")
+	}
+	if parsed.StopReason == "" {
+		return nil, errors.New("llm: Claude response is missing a terminal stop reason")
 	}
 	var sb strings.Builder
+	toolCalls := make([]ToolCall, 0)
+	toolIDs := make(map[string]struct{})
+	sawToolUse := false
 	for _, block := range parsed.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
+			if sawToolUse {
+				return nil, errors.New("llm: Claude response content blocks use an unsupported order")
+			}
 			sb.WriteString(block.Text)
+		case "tool_use":
+			sawToolUse = true
+			if block.ID == "" || block.Name == "" {
+				return nil, errors.New("llm: Claude tool call is missing its ID or name")
+			}
+			if _, exists := toolIDs[block.ID]; exists {
+				return nil, errors.New("llm: Claude response contains duplicate tool call IDs")
+			}
+			args, err := decodeClaudeJSONObject(block.Input)
+			if err != nil {
+				return nil, errors.New("llm: Claude tool input must be a JSON object")
+			}
+			toolIDs[block.ID] = struct{}{}
+			toolCalls = append(toolCalls, ToolCall{ID: block.ID, Name: block.Name, Args: args})
+		default:
+			return nil, errors.New("llm: Claude response contains an unsupported content block")
 		}
 	}
-	msg := &Message{Role: RoleAssistant, Content: sb.String()}
-	msg.FinishReason = parsed.StopReason
-	if parsed.Usage != nil {
-		msg.Usage = &Usage{
-			InputTokens:  parsed.Usage.InputTokens,
-			OutputTokens: parsed.Usage.OutputTokens,
-			TotalTokens:  parsed.Usage.InputTokens + parsed.Usage.OutputTokens,
-		}
+	if (parsed.StopReason == "tool_use") != (len(toolCalls) > 0) {
+		return nil, errors.New("llm: Claude tool calls do not match the terminal stop reason")
 	}
+	msg := &Message{Role: RoleAssistant, Content: sb.String(), ToolCalls: toolCalls}
+	msg.FinishReason = claudeFinishReason(parsed.StopReason)
+	msg.Usage = parsed.Usage.toUsage()
 	return msg, nil
 }
 
@@ -1333,7 +1870,7 @@ type geminiInlineData struct {
 // field name used by the Google GenAI generateContent API.
 type geminiGenConfig struct {
 	Temperature     float64 `json:"temperature,omitempty"`
-	MaxOutputTokens int     `json:"maxOutputTokens,omitempty"`
+	MaxOutputTokens *int    `json:"maxOutputTokens,omitempty"`
 }
 
 // geminiResponse is the Google GenAI generateContent response body.
@@ -1350,8 +1887,20 @@ type geminiCandidate struct {
 
 // geminiUsage reports token consumption.
 type geminiUsage struct {
-	PromptTokenCount     int `json:"promptTokenCount"`
-	CandidatesTokenCount int `json:"candidatesTokenCount"`
+	PromptTokenCount     *int `json:"promptTokenCount,omitempty"`
+	CandidatesTokenCount *int `json:"candidatesTokenCount,omitempty"`
+	TotalTokenCount      *int `json:"totalTokenCount,omitempty"`
+}
+
+func (u *geminiUsage) toUsage() *Usage {
+	if u == nil || u.PromptTokenCount == nil || u.CandidatesTokenCount == nil {
+		return nil
+	}
+	total := *u.PromptTokenCount + *u.CandidatesTokenCount
+	if u.TotalTokenCount != nil {
+		total = *u.TotalTokenCount
+	}
+	return &Usage{InputTokens: *u.PromptTokenCount, OutputTokens: *u.CandidatesTokenCount, TotalTokens: total}
 }
 
 // buildGeminiParts converts a Message into a slice of geminiPart values.
@@ -1463,6 +2012,7 @@ func encodeGeminiRequest(cfg ModelConfig, msgs []Message, opts []Option) ([]byte
 	for _, opt := range opts {
 		opt(genOpts)
 	}
+	maxOutputTokens := samplingMaxTokens(cfg, genOpts.MaxTokens)
 
 	contents := make([]geminiContent, 0, len(msgs))
 	for _, msg := range msgs {
@@ -1482,17 +2032,16 @@ func encodeGeminiRequest(cfg ModelConfig, msgs []Message, opts []Option) ([]byte
 	}
 
 	var gc *geminiGenConfig
-	if genOpts.Temperature != nil || cfg.Temperature > 0 || (genOpts.MaxTokens != nil || cfg.MaxTokens > 0) {
+	if genOpts.Temperature != nil || cfg.Temperature > 0 || maxOutputTokens != nil {
 		gc = &geminiGenConfig{}
 		if genOpts.Temperature != nil {
 			gc.Temperature = *genOpts.Temperature
 		} else {
 			gc.Temperature = cfg.Temperature
 		}
-		if genOpts.MaxTokens != nil {
-			gc.MaxOutputTokens = *genOpts.MaxTokens
-		} else {
-			gc.MaxOutputTokens = cfg.MaxTokens
+		if maxOutputTokens != nil {
+			value := *maxOutputTokens
+			gc.MaxOutputTokens = &value
 		}
 	}
 
@@ -1531,12 +2080,6 @@ func decodeGeminiResponse(body []byte) (*Message, error) {
 			msg.Content = sb.String()
 		}
 	}
-	if parsed.UsageMetadata != nil {
-		msg.Usage = &Usage{
-			InputTokens:  parsed.UsageMetadata.PromptTokenCount,
-			OutputTokens: parsed.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:  parsed.UsageMetadata.PromptTokenCount + parsed.UsageMetadata.CandidatesTokenCount,
-		}
-	}
+	msg.Usage = parsed.UsageMetadata.toUsage()
 	return msg, nil
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"strings"
 )
@@ -16,6 +17,10 @@ type SSEEvent struct {
 	// Data is the data payload, typically a JSON string. When multiple
 	// "data:" lines precede a blank-line dispatch, they are joined with "\n".
 	Data string
+	// Error reports a read or scanner failure encountered after parsing began.
+	// It is delivered on the event channel because those failures happen in the
+	// parser goroutine, after Parse has returned.
+	Error error
 }
 
 // SSEParser parses Server-Sent Events from an io.Reader.
@@ -29,6 +34,8 @@ type SSEParser interface {
 // lines starting with ":" are comments.
 type DefaultSSEParser struct{}
 
+const maxSSEFrameLines = GuardedStreamMaxChunks
+
 // Compile-time assertion that DefaultSSEParser satisfies SSEParser.
 var _ SSEParser = (*DefaultSSEParser)(nil)
 
@@ -38,33 +45,41 @@ func NewDefaultSSEParser() *DefaultSSEParser {
 }
 
 // Parse reads SSE events from reader and sends them to the returned buffered
-// channel. The channel is closed when the reader is exhausted. The returned
-// error is always nil; malformed lines are silently skipped. Parse respects
-// ctx: when ctx is canceled the goroutine stops scanning and closes the
-// channel promptly.
+// channel. The channel is closed when the reader is exhausted. Scanner errors
+// are delivered as SSEEvent.Error. Parse respects ctx: when ctx is canceled
+// the goroutine stops scanning and closes the channel promptly.
 func (p *DefaultSSEParser) Parse(ctx context.Context, reader io.Reader) (<-chan SSEEvent, error) {
 	ch := make(chan SSEEvent, 4)
 
 	go func() {
 		defer close(ch)
 		scanner := bufio.NewScanner(reader)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		scanner.Buffer(make([]byte, 64*1024), GuardedStreamMaxBytes)
 
 		var eventType string
-		var dataLines []string
+		var data strings.Builder
+		dataLines := 0
+		var frameErr error
+		sendErr := func(err error) {
+			select {
+			case ch <- SSEEvent{Error: err}:
+			case <-ctx.Done():
+			}
+		}
 
 		dispatch := func() {
 			// Only emit when we have data or an explicit event type.
-			if eventType == "" && len(dataLines) == 0 {
+			if eventType == "" && dataLines == 0 {
 				return
 			}
 			select {
-			case ch <- SSEEvent{Type: eventType, Data: strings.Join(dataLines, "\n")}:
+			case ch <- SSEEvent{Type: eventType, Data: data.String()}:
 			case <-ctx.Done():
 				return
 			}
 			eventType = ""
-			dataLines = dataLines[:0]
+			data.Reset()
+			dataLines = 0
 		}
 
 		for scanner.Scan() {
@@ -88,7 +103,12 @@ func (p *DefaultSSEParser) Parse(ctx context.Context, reader io.Reader) (<-chan 
 
 			// event: field
 			if strings.HasPrefix(line, "event:") {
-				eventType = strings.TrimSpace(line[len("event:"):])
+				nextType := strings.TrimSpace(line[len("event:"):])
+				if len(nextType)+data.Len() > GuardedStreamMaxBytes {
+					frameErr = fmt.Errorf("llm: SSE event exceeds %d-byte limit", GuardedStreamMaxBytes)
+					break
+				}
+				eventType = nextType
 				continue
 			}
 
@@ -99,14 +119,42 @@ func (p *DefaultSSEParser) Parse(ctx context.Context, reader io.Reader) (<-chan 
 				if len(val) > 0 && val[0] == ' ' {
 					val = val[1:]
 				}
-				dataLines = append(dataLines, val)
+				if dataLines >= maxSSEFrameLines {
+					frameErr = fmt.Errorf("llm: SSE event exceeds %d data lines", maxSSEFrameLines)
+					break
+				}
+				extra := len(val)
+				if dataLines > 0 {
+					extra++
+				}
+				if len(eventType)+data.Len()+extra > GuardedStreamMaxBytes {
+					frameErr = fmt.Errorf("llm: SSE event exceeds %d-byte limit", GuardedStreamMaxBytes)
+					break
+				}
+				if dataLines > 0 {
+					data.WriteByte('\n')
+				}
+				data.WriteString(val)
+				dataLines++
 				continue
 			}
 
 			// id: and retry: fields are ignored.
 		}
+		if frameErr != nil {
+			sendErr(frameErr)
+			return
+		}
 
-		// Dispatch any remaining buffered event when the stream ends
+		if ctx.Err() != nil {
+			return
+		}
+		if err := scanner.Err(); err != nil {
+			sendErr(fmt.Errorf("llm: read SSE stream: %w", err))
+			return
+		}
+
+		// Dispatch any remaining buffered event when the stream ends cleanly
 		// without a trailing blank line.
 		dispatch()
 	}()
@@ -126,9 +174,12 @@ func detectJSONResponse(reader *bufio.Reader) (bool, []byte, error) {
 	}
 	trimmed := bytes.TrimLeft(peeked, " \t\r\n")
 	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
-		all, err := io.ReadAll(reader)
+		all, err := io.ReadAll(io.LimitReader(reader, GuardedStreamMaxBytes+1))
 		if err != nil {
 			return false, nil, err
+		}
+		if len(all) > GuardedStreamMaxBytes {
+			return false, nil, fmt.Errorf("llm: JSON stream response exceeds %d-byte limit", GuardedStreamMaxBytes)
 		}
 		return true, all, nil
 	}

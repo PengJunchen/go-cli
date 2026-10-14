@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 
@@ -210,6 +211,151 @@ func TestLoopAgent_SetToolInterceptor(t *testing.T) {
 
 	assert.False(t, tool.executed.Load(), "tool should not execute")
 	require.Len(t, findEvents(events, "tool_canceled"), 1)
+}
+
+func TestLoopAgentInterceptorIsScopedToInstance(t *testing.T) {
+	t.Cleanup(ClearToolInterceptors)
+
+	toolA := &trackingTool{name: "mutate"}
+	toolB := &trackingTool{name: "mutate"}
+	modelA := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "a-call", Name: "mutate", Args: map[string]any{}}}},
+		{Role: llm.RoleAssistant, Content: "done A"},
+	}}
+	modelB := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "b-call", Name: "mutate", Args: map[string]any{}}}},
+		{Role: llm.RoleAssistant, Content: "done B"},
+	}}
+	loopA := NewLoopAgent(WithLLM(modelA), WithTools(scriptedRegistry(toolA)))
+	loopB := NewLoopAgent(WithLLM(modelB), WithTools(scriptedRegistry(toolB)))
+	loopA.SetToolInterceptor(func(string, string, map[string]any) error {
+		return errors.New("assembly A blocks its mutation")
+	})
+
+	_, err := loopB.Run(context.Background(), Submission{Content: "run B"})
+	require.NoError(t, err)
+	assert.True(t, toolB.executed.Load(), "loop A's interceptor must not cancel loop B's tool call")
+	assert.False(t, toolA.executed.Load(), "setting loop A's interceptor must not execute A's tool")
+}
+
+func TestWithToolInterceptorBlocksToolExecution(t *testing.T) {
+	tool := &trackingTool{name: "blocked"}
+	model := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "call", Name: "blocked", Args: map[string]any{}}}},
+		{Role: llm.RoleAssistant, Content: "done"},
+	}}
+	loop := NewLoopAgent(
+		WithLLM(model),
+		WithTools(scriptedRegistry(tool)),
+		WithToolInterceptor(func(string, string, map[string]any) error {
+			return errors.New("blocked by loop option")
+		}),
+	)
+
+	events, err := loop.Run(context.Background(), Submission{Content: "run"})
+	require.NoError(t, err)
+	assert.False(t, tool.executed.Load())
+	require.Len(t, findEvents(events, "tool_canceled"), 1)
+}
+
+func TestContextToolInterceptorReceivesRunContext(t *testing.T) {
+	type contextKey struct{}
+	tool := &trackingTool{name: "context-aware"}
+	model := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "call", Name: "context-aware", Args: map[string]any{}}}},
+		{Role: llm.RoleAssistant, Content: "done"},
+	}}
+	loop := NewLoopAgent(WithLLM(model), WithTools(scriptedRegistry(tool)))
+	var observed any
+	loop.SetContextToolInterceptor(func(ctx context.Context, _, _ string, _ map[string]any) error {
+		observed = ctx.Value(contextKey{})
+		return nil
+	})
+
+	_, err := loop.Run(context.WithValue(context.Background(), contextKey{}, "run-context"), Submission{Content: "run"})
+	require.NoError(t, err)
+	require.Equal(t, "run-context", observed)
+	require.True(t, tool.executed.Load())
+}
+
+func TestToolInterceptionReceiptsExposeOnlyTypedSafeMessages(t *testing.T) {
+	for _, execution := range []struct {
+		name  string
+		mode  ExecutionMode
+		calls int
+	}{
+		{name: "sequential", mode: ExecutionModeSequential, calls: 1},
+		{name: "parallel", mode: ExecutionModeParallel, calls: 2},
+	} {
+		for _, denial := range []struct {
+			name     string
+			err      error
+			wantText string
+		}{
+			{name: "typed-safe", err: testSafeToolInterceptionDenial{}, wantText: "safe policy denial"},
+			{name: "arbitrary", err: errors.New("private interceptor details"), wantText: toolInterceptorCanceledOutput},
+		} {
+			t.Run(execution.name+"/"+denial.name, func(t *testing.T) {
+				calls := make([]llm.ToolCall, execution.calls)
+				for index := range calls {
+					calls[index] = llm.ToolCall{ID: fmt.Sprintf("call-%d", index), Name: "blocked", Args: map[string]any{}}
+				}
+				model := &scriptedChatModel{seq: []*llm.Message{
+					{Role: llm.RoleAssistant, ToolCalls: calls},
+					{Role: llm.RoleAssistant, Content: "done"},
+				}}
+				loop := NewLoopAgent(WithLLM(model), WithTools(scriptedRegistry(&trackingTool{name: "blocked"})), WithExecutionMode(execution.mode))
+				loop.SetContextToolInterceptor(func(context.Context, string, string, map[string]any) error {
+					return denial.err
+				})
+
+				_, err := loop.Run(context.Background(), Submission{Content: "run"})
+				require.NoError(t, err)
+
+				model.mu.Lock()
+				requests := append([][]llm.Message(nil), model.requests...)
+				model.mu.Unlock()
+				require.GreaterOrEqual(t, len(requests), 2)
+				var receipts []string
+				for _, message := range requests[1] {
+					if message.Role == llm.RoleTool {
+						receipts = append(receipts, message.Content)
+					}
+				}
+				require.Len(t, receipts, execution.calls)
+				for _, receipt := range receipts {
+					assert.Equal(t, denial.wantText, receipt)
+					assert.NotContains(t, receipt, "private interceptor details")
+				}
+			})
+		}
+	}
+}
+
+func TestPreToolCallEventRetainsContextDenialWithoutExposingArbitraryMessages(t *testing.T) {
+	secret := errors.New("private interceptor details")
+	event := &PreToolCallEvent{
+		ctx: context.Background(),
+		contextInterceptors: []ContextToolInterceptor{func(context.Context, string, string, map[string]any) error {
+			return secret
+		}},
+	}
+	require.True(t, event.IsCancelled())
+	require.ErrorIs(t, event.CancellationError(), secret)
+	_, safe := SafeToolInterceptionMessage(event.CancellationError())
+	require.False(t, safe, "arbitrary interceptor errors must not become user-facing tool receipts")
+
+	message, safe := SafeToolInterceptionMessage(testSafeToolInterceptionDenial{})
+	require.True(t, safe)
+	require.Equal(t, "safe policy denial", message)
+}
+
+type testSafeToolInterceptionDenial struct{}
+
+func (testSafeToolInterceptionDenial) Error() string { return "internal error details" }
+
+func (testSafeToolInterceptionDenial) SafeToolInterceptionMessage() string {
+	return "safe policy denial"
 }
 
 // Verify interceptors run exactly once per event (idempotency).

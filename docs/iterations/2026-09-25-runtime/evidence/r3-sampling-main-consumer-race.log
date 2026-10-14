@@ -1,0 +1,8 @@
+source_head=1a45297ff1d547b6ea7d54a8d3fd41a61e922002
+command=go test -race -p 2 -count=1 ./internal/config ./internal/llm ./internal/cli ./tests
+ok  	github.com/pengjunchen/go-cli/internal/config	1.077s
+ok  	github.com/pengjunchen/go-cli/internal/llm	2.718s
+ok  	github.com/pengjunchen/go-cli/internal/cli	17.446s
+ok  	github.com/pengjunchen/go-cli/tests	24.728s
+
+exit=0 elapsed_seconds=60.64

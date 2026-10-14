@@ -9,17 +9,21 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // fakeClient is a minimal in-process MCPClient used to exercise MCPToolAdapter
 // end-to-end. It mirrors the behavior of the mock server (server/tool names,
 // argument-aware results) without importing internal/mock.
 type fakeClient struct {
-	name    string
-	mu      sync.Mutex
-	last    string
-	errored bool
-	content string // if non-empty, overrides the default echo content
+	name      string
+	mu        sync.Mutex
+	last      string
+	errored   bool
+	content   string // if non-empty, overrides the default echo content
+	result    *MCPToolResult
+	nilResult bool
+	probeSpan bool
 }
 
 func (f *fakeClient) Connect(context.Context) error    { return nil }
@@ -28,15 +32,30 @@ func (f *fakeClient) ListTools(context.Context) ([]MCPTool, error) {
 	return []MCPTool{{Name: "echo", Description: "echoes a message"}}, nil
 }
 
-func (f *fakeClient) CallTool(_ context.Context, name string, args map[string]any) (*MCPToolResult, error) {
+func (f *fakeClient) CallTool(ctx context.Context, name string, args map[string]any) (*MCPToolResult, error) {
 	f.mu.Lock()
 	f.last = name
+	result := f.result
+	nilResult := f.nilResult
+	probeSpan := f.probeSpan
+	errored := f.errored
+	content := f.content
 	f.mu.Unlock()
-	if f.errored {
+	if probeSpan {
+		span, _ := tracing.SpanFromContext(ctx, "mcp.fake_client.call", tracing.SpanKindInternal)
+		span.End()
+	}
+	if errored {
 		return nil, assert.AnError
 	}
-	if f.content != "" {
-		return &MCPToolResult{Content: f.content}, nil
+	if nilResult {
+		return nil, nil
+	}
+	if result != nil {
+		return result, nil
+	}
+	if content != "" {
+		return &MCPToolResult{Content: content}, nil
 	}
 	return &MCPToolResult{Content: "echo:" + stringOf(args["msg"])}, nil
 }
@@ -70,6 +89,183 @@ func TestMCPToolAdapterExecuteEndToEnd(t *testing.T) {
 	client.mu.Unlock()
 }
 
+func TestMCPGenerationCandidateDoesNotRetainMutableAdapterReceiver(t *testing.T) {
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry)
+	registry := tools.NewDeferredToolRegistryAdapter(base)
+	client := &fakeClient{name: "srv"}
+	tool := MCPTool{
+		Name:        "original",
+		Description: "original description",
+		ArgsSchema: map[string]any{
+			"type":                 "object",
+			"properties":           map[string]any{},
+			"additionalProperties": false,
+		},
+	}
+	legacyAdapter := NewMCPToolAdapter(client, tool)
+	_, err := legacyAdapter.MCPGenerationCandidate()
+	assert.ErrorIs(t, err, ErrMCPClientGenerationUnavailable, "a generic adapter must not create a generation candidate")
+	invalidAdapter := (&MCPClientGeneration{}).NewToolAdapter(tool)
+	assert.Nil(t, invalidAdapter, "a zero-value generation must not produce an adapter whose methods can panic")
+	_, err = invalidAdapter.MCPGenerationCandidate()
+	assert.ErrorIs(t, err, ErrMCPClientGenerationUnavailable, "a zero-value generation cannot create a candidate")
+	generation, err := NewMCPClientGeneration(client)
+	require.NoError(t, err)
+	adapter := generation.NewToolAdapter(tool)
+	originalSchemaType := adapter.tool.ArgsSchema["type"]
+	candidate, err := adapter.MCPGenerationCandidate()
+	require.NoError(t, err)
+	update, err := registry.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []tools.MCPToolCandidate{candidate})
+	require.NoError(t, err)
+
+	adapter.tool.Name = "mutated"
+	adapter.tool.Description = "mutated description"
+	adapter.tool.ArgsSchema["type"] = "string"
+	adapter.client = &fakeClient{name: "replacement"}
+	adapter.generation = nil
+	require.NoError(t, update.Publish())
+
+	loaded, err := registry.Get(context.Background(), "mcp__srv__original")
+	require.NoError(t, err)
+	assert.Equal(t, "original description", loaded.Description())
+	parameterized, ok := loaded.(tools.Parameterized)
+	require.True(t, ok)
+	frozenSchema, ok := parameterized.Parameters().(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, originalSchemaType, frozenSchema["type"])
+	result, err := loaded.Execute(context.Background(), tools.ToolCall{
+		ID:   "call-original",
+		Name: "mcp__srv__original",
+		Args: map[string]any{"msg": "hello"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	assert.Equal(t, "original", client.last, "published execution must retain the captured remote tool name")
+}
+
+func TestMCPGenerationCandidatePreservesInputSchemaPresence(t *testing.T) {
+	generation, err := NewMCPClientGeneration(&fakeClient{name: "srv"})
+	require.NoError(t, err)
+
+	emptySchema := MCPTool{Name: "zero-args", ArgsSchema: map[string]any{}}
+	adapter := generation.NewToolAdapter(emptySchema)
+	parameters, ok := adapter.Parameters().(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "object", parameters["type"])
+	assert.Equal(t, map[string]any{}, parameters["properties"])
+	assert.Equal(t, false, parameters["additionalProperties"])
+	candidate, err := adapter.MCPGenerationCandidate()
+	require.NoError(t, err, "a present empty object schema represents a zero-argument tool")
+
+	missing := generation.NewToolAdapter(MCPTool{Name: "missing-schema"})
+	_, err = missing.MCPGenerationCandidate()
+	assert.ErrorIs(t, err, ErrMCPToolInputSchemaMissing)
+
+	for name, schema := range map[string]any{"null": nil, "string": "not-an-object", "array": []any{}} {
+		tool := mcpToolFromProtocolObject(map[string]any{"name": name, "inputSchema": schema})
+		_, err := generation.NewToolAdapter(tool).MCPGenerationCandidate()
+		assert.ErrorIs(t, err, ErrMCPToolInputSchemaInvalid, name)
+	}
+
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry)
+	registry := tools.NewDeferredToolRegistryAdapter(base)
+	update, err := registry.BeginMCPGenerationUpdate(context.Background(), "schema-presence", 1, []tools.MCPToolCandidate{candidate})
+	require.NoError(t, err)
+	require.NoError(t, update.Publish())
+	loaded, err := registry.Get(context.Background(), "mcp__srv__zero-args")
+	require.NoError(t, err)
+	loadedSchema, ok := loaded.(tools.Parameterized).Parameters().(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "object", loadedSchema["type"])
+	assert.Equal(t, false, loadedSchema["additionalProperties"])
+}
+
+func TestMCPProtocolToolDecoderDistinguishesMissingNullAndEmptySchema(t *testing.T) {
+	missing := mcpToolFromProtocolObject(map[string]any{"name": "missing"})
+	assert.False(t, missing.inputSchemaPresent)
+	assert.False(t, missing.inputSchemaInvalid)
+
+	invalid := mcpToolFromProtocolObject(map[string]any{"name": "null", "inputSchema": nil})
+	assert.True(t, invalid.inputSchemaPresent)
+	assert.True(t, invalid.inputSchemaInvalid)
+
+	empty := mcpToolFromProtocolObject(map[string]any{"name": "empty", "inputSchema": map[string]any{}})
+	assert.True(t, empty.inputSchemaPresent)
+	assert.False(t, empty.inputSchemaInvalid)
+	assert.NotNil(t, empty.ArgsSchema)
+	assert.Empty(t, empty.ArgsSchema)
+}
+
+func TestMCPClientGenerationRetirementJoinsPreparedLeases(t *testing.T) {
+	generation, err := NewMCPClientGeneration(&fakeClient{name: "srv"})
+	require.NoError(t, err)
+	release, err := generation.Acquire()
+	require.NoError(t, err)
+	drained := generation.Retire()
+	select {
+	case <-drained:
+		t.Fatal("retirement completed while a prepared dispatch still held a lease")
+	default:
+	}
+	_, err = generation.Acquire()
+	assert.ErrorIs(t, err, ErrMCPClientGenerationRetired, "retirement closes admission before waiting for active calls")
+	assert.Nil(t, generation.NewToolAdapter(MCPTool{Name: "late"}), "retired generations cannot produce new candidate adapters")
+
+	release()
+	select {
+	case <-drained:
+	default:
+		t.Fatal("retirement did not complete after the active dispatch released its lease")
+	}
+	release()
+	assert.NoError(t, generation.WaitForRetirement(context.Background()))
+}
+
+func TestMCPGenerationCandidateUsesItsOwnRetirementLease(t *testing.T) {
+	client := &fakeClient{name: "srv"}
+	generation, err := NewMCPClientGeneration(client)
+	require.NoError(t, err)
+	tool := MCPTool{
+		Name:        "echo",
+		Description: "echo",
+		ArgsSchema: map[string]any{
+			"type":                 "object",
+			"properties":           map[string]any{},
+			"additionalProperties": false,
+		},
+	}
+	adapter := generation.NewToolAdapter(tool)
+	candidate, err := adapter.MCPGenerationCandidate()
+	require.NoError(t, err)
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry)
+	deferred := tools.NewDeferredToolRegistryAdapter(base)
+	update, err := deferred.BeginMCPGenerationUpdate(context.Background(), "project-mcp", 1, []tools.MCPToolCandidate{candidate})
+	require.NoError(t, err)
+	require.NoError(t, update.Publish())
+
+	registry := tools.NewMiddlewareToolRegistry(deferred)
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+	require.NoError(t, registry.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}))
+	invocation, err := registry.PrepareToolCall(context.Background(), tools.ToolCall{
+		ID:   "call-retired",
+		Name: "mcp__srv__echo",
+		Args: map[string]any{},
+	})
+	require.NoError(t, err)
+	<-generation.Retire()
+	_, err = invocation.Dispatch(context.Background())
+	assert.ErrorIs(t, err, tools.ErrPreparedDispatchLeaseUnavailable)
+	assert.ErrorIs(t, err, ErrMCPClientGenerationRetired)
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	assert.Empty(t, client.last, "a retired generation candidate must not execute without acquiring its own lease")
+}
+
 func TestMCPToolAdapterExecutePropagatesError(t *testing.T) {
 	client := &fakeClient{name: "srv", errored: true}
 	adapter := NewMCPToolAdapter(client, MCPTool{Name: "echo", Description: "echoes a message"})
@@ -80,6 +276,83 @@ func TestMCPToolAdapterExecutePropagatesError(t *testing.T) {
 		Args: map[string]any{"msg": "hi"},
 	})
 	require.Error(t, err)
+}
+
+func TestMCPIsErrorAndNilPropagate(t *testing.T) {
+	t.Run("server error flag", func(t *testing.T) {
+		client := &fakeClient{
+			name:   "srv",
+			result: &MCPToolResult{Content: "remote tool failed", IsError: true},
+		}
+		adapter := NewMCPToolAdapter(client, MCPTool{Name: "echo"})
+
+		result, err := adapter.Execute(context.Background(), tools.ToolCall{ID: "call-error", Name: adapter.Name()})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, "remote tool failed", result.Output)
+		assert.True(t, result.IsError)
+	})
+
+	t.Run("nil result is an error", func(t *testing.T) {
+		client := &fakeClient{name: "srv", nilResult: true}
+		adapter := NewMCPToolAdapter(client, MCPTool{Name: "echo"})
+
+		var result *tools.ToolResult
+		var err error
+		require.NotPanics(t, func() {
+			result, err = adapter.Execute(context.Background(), tools.ToolCall{ID: "call-nil", Name: adapter.Name()})
+		})
+		assert.Nil(t, result)
+		require.ErrorIs(t, err, ErrInvalidToolResult)
+	})
+}
+
+func TestMCPToolAdapterPassesSpanContext(t *testing.T) {
+	exporter := &recordingTraceExporter{}
+	tracer := tracing.NewTracer("mcp-tool-adapter-test", exporter)
+	parentSpan, ctx := tracer.Start(context.Background(), "parent", tracing.SpanKindInternal)
+	client := &fakeClient{name: "srv", probeSpan: true}
+	adapter := NewMCPToolAdapter(client, MCPTool{Name: "echo"})
+
+	_, err := adapter.Execute(ctx, tools.ToolCall{ID: "call-span", Name: adapter.Name()})
+	require.NoError(t, err)
+	parentSpan.End()
+
+	var adapterSpan, clientSpan *tracing.SpanData
+	for _, span := range exporter.snapshot() {
+		span := span
+		switch span.Name {
+		case "tool.call":
+			adapterSpan = &span
+		case "mcp.fake_client.call":
+			clientSpan = &span
+		}
+	}
+	require.NotNil(t, adapterSpan, "adapter span should be ended and exported")
+	require.NotNil(t, clientSpan, "fake client should observe the propagated span context")
+	assert.Equal(t, parentSpan.SpanID(), adapterSpan.ParentSpanID)
+	assert.Equal(t, adapterSpan.SpanID, clientSpan.ParentSpanID)
+	assert.Equal(t, adapterSpan.TraceID, clientSpan.TraceID)
+}
+
+type recordingTraceExporter struct {
+	mu    sync.Mutex
+	spans []tracing.SpanData
+}
+
+func (exporter *recordingTraceExporter) ExportSpan(_ context.Context, span tracing.TraceSpan) error {
+	exporter.mu.Lock()
+	defer exporter.mu.Unlock()
+	exporter.spans = append(exporter.spans, tracing.SpanToData(span))
+	return nil
+}
+
+func (exporter *recordingTraceExporter) Shutdown(context.Context) error { return nil }
+
+func (exporter *recordingTraceExporter) snapshot() []tracing.SpanData {
+	exporter.mu.Lock()
+	defer exporter.mu.Unlock()
+	return append([]tracing.SpanData(nil), exporter.spans...)
 }
 
 func TestMCPToolAdapterThroughRegistry(t *testing.T) {

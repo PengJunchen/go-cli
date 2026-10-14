@@ -43,6 +43,19 @@ func classifyError(err error) *UserFriendlyError {
 		return nil
 	}
 
+	if errors.Is(err, ErrPreparedPostToolUseHookUnsupported) {
+		hint := "Remove or disable the configured PostToolUse hook; prepared execution cannot run it."
+		var hookErr *UnsupportedPostToolUseHookError
+		if errors.As(err, &hookErr) {
+			hint = fmt.Sprintf("Remove or disable the PostToolUse hook at %s (hook %d); prepared execution cannot run it.", hookErr.Path, hookErr.Index)
+		}
+		return &UserFriendlyError{
+			Err:    err,
+			Action: "unsupported PostToolUse hook",
+			Hint:   hint,
+		}
+	}
+
 	// --- Structured provider errors ---
 	var pe *llm.ProviderError
 	if errors.As(err, &pe) {

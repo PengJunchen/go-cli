@@ -35,9 +35,29 @@ func TestPathWhitelist_EmptyAllowsAll(t *testing.T) {
 	assert.True(t, wl.IsAllowed("/etc/passwd"))
 }
 
+func TestPathWhitelist_InvalidScopeFailsClosed(t *testing.T) {
+	wl := PathWhitelist{invalid: true}
+	assert.False(t, wl.IsAllowed("/tmp"))
+}
+
 func TestPathWhitelist_ExactPathAllowed(t *testing.T) {
 	wl := NewPathWhitelist([]string{"/tmp"})
 	assert.True(t, wl.IsAllowed("/tmp"))
+}
+
+func TestPathWhitelist_RelativeRootMatchesAbsoluteAndRelativeCandidates(t *testing.T) {
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+
+	base := filepath.Join(t.TempDir(), "scope")
+	require.NoError(t, os.MkdirAll(base, 0o750))
+	relativeBase, err := filepath.Rel(cwd, base)
+	require.NoError(t, err)
+
+	wl := NewPathWhitelist([]string{relativeBase})
+	assert.True(t, wl.IsAllowed(base))
+	assert.True(t, wl.IsAllowed(filepath.Join(relativeBase, "nested")))
+	assert.False(t, wl.IsAllowed(filepath.Join(t.TempDir(), "outside")))
 }
 
 // --- CommandFilter tests ---
@@ -221,6 +241,20 @@ func TestSandbox_WithAllowedPaths_SpecificPaths(t *testing.T) {
 	err = sb.Validate(context.Background(), "echo hello", "/etc")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "whitelist")
+}
+
+func TestSandbox_WithAllowedPaths_RelativeRootUsesCurrentWorkingDirectory(t *testing.T) {
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+
+	allowedDir := filepath.Join(t.TempDir(), "allowed")
+	require.NoError(t, os.MkdirAll(allowedDir, 0o750))
+	relativeAllowedDir, err := filepath.Rel(cwd, allowedDir)
+	require.NoError(t, err)
+
+	sb := NewDefaultBashSandbox(WithAllowedPaths([]string{relativeAllowedDir}))
+	require.NoError(t, sb.Validate(context.Background(), "echo hello", allowedDir))
+	assert.ErrorContains(t, sb.Validate(context.Background(), "echo hello", t.TempDir()), "whitelist")
 }
 
 func TestSandbox_WithAllowedPaths_NestedDirectoryAllowed(t *testing.T) {

@@ -272,7 +272,7 @@ func TestPhase39_EventStreamOverflow256(t *testing.T) {
 func TestPhase39_REPLSessionCompleteTurn(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	srv := newMemoryTestServer(t, memoryExtractionResponse, 0, 0)
+	srv := newMemoryTestServer(t)
 	defer srv.Close()
 
 	cfg, homeDir := newMemoryTestConfig(t, srv.URL)
@@ -290,11 +290,10 @@ func TestPhase39_REPLSessionCompleteTurn(t *testing.T) {
 	// Verify the assistant response was printed (non-TTY mode prints "AI: <msg>").
 	assert.Contains(t, out.String(), "AI:")
 
-	// Verify memory extraction occurred and the memory was persisted.
+	// Default REPL turns do not trigger automatic memory extraction.
 	memPath := filepath.Join(homeDir, ".go-cli", "memories.jsonl")
-	data, err := os.ReadFile(memPath)
-	require.NoError(t, err)
-	assert.Contains(t, string(data), "user prefers Go")
+	assert.Zero(t, srv.extractionRequests.Load())
+	assert.Empty(t, readStoredMemories(t, memPath))
 }
 
 // TestPhase39_HITLApprovalChannel verifies that the HITL approval channel

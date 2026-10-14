@@ -1,0 +1,42 @@
+{
+  "source": {
+    "commit": "d5052d5612907f9fe073942ea7a7004b27c39958",
+    "worktree": "/Users/pengjunchen/.codex/worktrees/r8-pty-acceptance/go-cli",
+    "working_tree_clean_before_evidence_candidate": true,
+    "go_runtime": "go1.26.4 darwin/arm64",
+    "sha256": {
+      "internal/core/loop.go": "918a4eb02fa71e7b6ae008e3f1e14350addd533d63739b9b9dc0da462ef1dd45",
+      "internal/production/output_guard_redact.go": "ddd5817db65e2315a21178a801979e75ca8cd2ad01e409d69bb304975e1ecaff",
+      "internal/tui/app.go": "93845e046f0ce3f7549ea99fdc34507f0eac86ba3a6fc1396d334ee78bba669b",
+      "internal/cli/repl_session.go": "c85d4faf21122f053f669af071f38e37c48801acc678232035b6e3206052c73b"
+    }
+  },
+  "binary": {
+    "build_command": "go build -trimpath -o <external-path>/go-cli ./cmd/cli",
+    "sha256": "be9c088591dee4eae80ce832dec9516cdbdd14e7245d8f1c7b3f23862adf9b33"
+  },
+  "harness": {
+    "path": "docs/iterations/2026-10-01-completion/evidence/r8-guarded-output-pty-d5052/r8_guarded_pty.py",
+    "sha256": "7f5715911dcfd567824bc60db25755123e90768e0fd26a515875fcd43f059612",
+    "python_runtime": "Python 3.14.5",
+    "pty_decoder": "pyte 0.8.2",
+    "provider": "loopback deterministic HTTP/SSE fixture; synthetic canary only"
+  },
+  "execution": {
+    "result_file": "/Users/pengjunchen/.codex/go-cli-validation/autonomous-20261001/r8/d5052-pty-acceptance/repro-run/acceptance-results.json",
+    "result_sha256": "4462e6c50fa694286f1126de0726802508e8f9edc2ef89650fbd45ea146e1cbe",
+    "journeys_passed": 3,
+    "journeys_total": 3,
+    "evidence_contains_binary_or_raw_logs": false
+  },
+  "tests": [
+    {
+      "command": "go test ./internal/cli -run 'TestOutputGuardRunsBeforeVisibleDelta|TestDefaultAssemblyShowsGenerationStatusWithoutProviderContent' -count=1",
+      "result": "passed"
+    },
+    {
+      "command": "go test -tags=e2e ./tests/e2e_20260802 -run '^TestET_Phase20_Interrupt$' -count=1",
+      "result": "passed; includes AssertNoGoroutineLeak"
+    }
+  ]
+}

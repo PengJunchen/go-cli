@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -72,7 +73,9 @@ type MutationHandler func(ctx context.Context, m FileMutation) (*ToolResult, err
 type queuedMutation struct {
 	mutation FileMutation
 	result   chan FileMutationResult
+	done     chan struct{}
 	ctx      context.Context
+	prepared *preparedInvocation
 }
 
 // DefaultFileMutationQueue routes each mutation to a per-file worker goroutine.
@@ -170,6 +173,25 @@ func resolveRealPath(p string) string {
 // per-file worker, and hands the mutation off for FIFO processing. It returns a
 // receive-only result channel that yields a single FileMutationResult.
 func (q *DefaultFileMutationQueue) Enqueue(ctx context.Context, mutation FileMutation) (<-chan FileMutationResult, error) {
+	result, _, err := q.enqueue(ctx, mutation, nil)
+	return result, err
+}
+
+func (q *DefaultFileMutationQueue) enqueuePrepared(ctx context.Context, mutation FileMutation, invocation *preparedInvocation) (<-chan FileMutationResult, error) {
+	if invocation == nil {
+		return nil, ErrPreparedInvocationUnavailable
+	}
+	result, done, err := q.enqueue(ctx, mutation, invocation)
+	if err != nil {
+		return nil, err
+	}
+	if done != nil {
+		invocation.completion.attach(CompletionQueuedJobJoined, done)
+	}
+	return result, nil
+}
+
+func (q *DefaultFileMutationQueue) enqueue(ctx context.Context, mutation FileMutation, invocation *preparedInvocation) (<-chan FileMutationResult, <-chan struct{}, error) {
 	span, _ := tracing.SpanFromContext(ctx, mutationSpanName, tracing.SpanKindClient)
 	defer span.End()
 
@@ -183,12 +205,16 @@ func (q *DefaultFileMutationQueue) Enqueue(ctx context.Context, mutation FileMut
 	logger.Info("mutation.enqueue", "path", realPath, "operation", mutation.Operation)
 
 	resultCh := make(chan FileMutationResult, 1)
+	var doneCh chan struct{}
+	if invocation != nil && invocation.completionProof == CompletionQueuedJobJoined {
+		doneCh = make(chan struct{})
+	}
 
 	q.mu.Lock()
 	input, err := q.workerForLocked(realPath)
 	if err != nil {
 		q.mu.Unlock()
-		return nil, err
+		return nil, nil, err
 	}
 	// Track the in-flight send so Close can wait for it before closing
 	// the worker channel. Add must happen under the lock so that Close's
@@ -198,13 +224,13 @@ func (q *DefaultFileMutationQueue) Enqueue(ctx context.Context, mutation FileMut
 	q.mu.Unlock()
 
 	select {
-	case input <- queuedMutation{mutation: mutation, result: resultCh, ctx: ctx}:
+	case input <- queuedMutation{mutation: mutation, result: resultCh, done: doneCh, ctx: ctx, prepared: invocation}:
 		q.sendWG.Done()
 	case <-ctx.Done():
 		q.sendWG.Done()
-		return nil, fmt.Errorf("mutation: enqueue %s: %w", realPath, ctx.Err())
+		return nil, nil, fmt.Errorf("mutation: enqueue %s: %w", realPath, ctx.Err())
 	}
-	return resultCh, nil
+	return resultCh, doneCh, nil
 }
 
 // workerForLocked returns the worker channel for realPath, creating it lazily
@@ -242,14 +268,57 @@ func (q *DefaultFileMutationQueue) startWorker(input chan queuedMutation) {
 	go func() {
 		defer q.workerWG.Done()
 		for qm := range input {
-			tr, err := q.applySafe(qm.ctx, qm.mutation)
+			var tr *ToolResult
+			var err error
+			var nestedExecutionDone <-chan struct{}
+			if qm.prepared != nil {
+				panicked := false
+				func() {
+					defer func() {
+						if recover() != nil {
+							panicked = true
+							tr = nil
+							err = fmt.Errorf("mutation: prepared executor panicked")
+						}
+					}()
+					tr, err = qm.prepared.commitAndInvoke(qm.ctx)
+				}()
+				if panicked {
+					qm.prepared.invalidateCompletionProof()
+				}
+			} else {
+				tr, err = q.applySafe(qm.ctx, qm.mutation)
+			}
+			if err != nil {
+				var pending PendingExecutionError
+				if errors.As(err, &pending) {
+					nestedExecutionDone = pending.ExecutionDone()
+					if qm.prepared != nil && (nestedExecutionDone == nil || errors.Is(err, errProcessContainmentUnconfirmed)) {
+						qm.prepared.invalidateCompletionProof()
+					}
+				} else if qm.prepared != nil && errors.Is(err, errProcessContainmentUnconfirmed) {
+					qm.prepared.invalidateCompletionProof()
+				}
+			}
 			res := FileMutationResult{
 				Success:    err == nil,
 				Error:      err,
 				ToolResult: tr,
 			}
+			// A returned executor with no pending resource is already joined.
+			// Publish that fact before its result can trigger terminal observers.
+			if nestedExecutionDone == nil && qm.done != nil {
+				close(qm.done)
+				qm.done = nil
+			}
 			qm.result <- res
 			close(qm.result)
+			if nestedExecutionDone != nil {
+				<-nestedExecutionDone
+			}
+			if qm.done != nil {
+				close(qm.done)
+			}
 		}
 	}()
 }

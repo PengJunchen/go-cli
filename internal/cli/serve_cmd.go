@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,18 +13,40 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/pengjunchen/go-cli/internal/acp"
 	"github.com/pengjunchen/go-cli/internal/config"
-	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/privatefile"
 )
 
 // serveCmd implements Command and starts an ACP HTTP server.
+type serveAssemblyFactory func(context.Context, *config.Config, string, string, io.Writer, ...AssembleOption) (*AgentAssembly, error)
+
 type serveCmd struct {
-	out    io.Writer
-	errOut io.Writer
+	out             io.Writer
+	errOut          io.Writer
+	assemblyFactory serveAssemblyFactory
 }
+
+// ErrServeRemoteApprovalUnsupported indicates that remote approval is not
+// available through the current ACP HTTP profile.
+var ErrServeRemoteApprovalUnsupported = errors.New("serve: remote approval is unsupported")
+
+// UnsupportedServeApprovalError reports a serve approval mode that requires a
+// remote approval round-trip which this CLI profile does not provide.
+type UnsupportedServeApprovalError struct{}
+
+// Error implements error.
+func (UnsupportedServeApprovalError) Error() string {
+	return "serve: --approve ask is unsupported for remote clients; use --approve auto or --approve deny"
+}
+
+// Unwrap identifies the unsupported serve capability.
+func (UnsupportedServeApprovalError) Unwrap() error { return ErrServeRemoteApprovalUnsupported }
+
+// ErrServeRuntimeUnavailable indicates that serve cannot dispatch without a
+// successfully assembled agent runtime.
+var ErrServeRuntimeUnavailable = errors.New("serve: a configured agent runtime is required")
 
 // newServeCmd creates a serve command writing to out.
 func newServeCmd(out io.Writer) *serveCmd {
@@ -45,12 +68,9 @@ func (c *serveCmd) Name() string { return "serve" }
 // Synopsis implements Command.
 func (c *serveCmd) Synopsis() string { return "Start ACP HTTP server" }
 
-// Run implements Command. It parses the --addr flag, creates an HTTPServer
-// with a CoreHandler, and serves until interrupted. When a valid config and
-// model are available, the server assembles a full agent runtime and wires
-// the SubagentDispatcher and EventBus into the CoreHandler for SSE event
-// bridging. When assembly fails (e.g. no config), the server falls back to
-// echo/ack mode.
+// Run implements Command. It parses the --addr flag, assembles a full agent
+// runtime, creates an HTTPServer with a CoreHandler, and serves until
+// interrupted.
 func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(c.out)
@@ -71,7 +91,7 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	fs.StringVar(&addr, "addr", "127.0.0.1:9090", "listen address for the ACP HTTP server")
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
-	fs.Var(&approveMode, "approve", "approval mode: auto|deny|ask (default ask)")
+	fs.Var(&approveMode, "approve", "approval mode: auto|deny (ask is unsupported; choose explicitly)")
 	fs.StringVar(&tokenFlag, "token", "", "bearer token for HTTP auth (auto-generated if empty)")
 	fs.StringVar(&tokenFile, "token-file", "", "path to write the auto-generated auth token (default ~/.config/go-cli/serve-token)")
 	fs.BoolVar(&showToken, "show-token", false, "print the auth token to stderr")
@@ -82,7 +102,9 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return newUsageError("serve: %v", err)
 	}
-
+	if approveMode == ApproveAsk {
+		return &UnsupportedServeApprovalError{}
+	}
 	// --approve auto is dangerous: it automatically approves all tool
 	// calls. Refuse to start if auth is disabled, since that would
 	// allow unauthenticated remote RCE.
@@ -115,12 +137,57 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 			return newExecutionError("serve: TLS configuration", err)
 		}
 	}
+	// A missing config cannot produce the real dispatcher required by serve.
+	// Reject before generating or writing an authentication token.
+	var assembly *AgentAssembly
+	var rc *config.Config
+	if v, ok := cfg.(*config.Config); ok {
+		rc = v
+	}
+	if rc == nil {
+		return newExecutionError("serve: runtime unavailable", ErrServeRuntimeUnavailable)
+	}
+	if rc.Session.StorePath != "" {
+		return &UnsupportedDurableCLIError{Feature: "durable ACP sessions"}
+	}
 
-	// Determine the auth token. When auth is enabled (default), a token
-	// is either provided via --token or auto-generated. The token and
-	// associated subject are wired into the HTTP server so that all
-	// routes require a Bearer header and /stream, /events are bound to
-	// the authenticated subject.
+	modelName := resolveModelName(modelFlag, rc)
+	providerName := resolveProviderName(providerFlag, rc)
+	assembleOpts := []AssembleOption{WithApproveMode(approveMode)}
+	if noSandbox {
+		assembleOpts = append(assembleOpts, WithNoSandbox())
+	}
+	assemblyFactory := c.assemblyFactory
+	if assemblyFactory == nil {
+		assemblyFactory = AssembleAgent
+	}
+	var assembleErr error
+	assembly, assembleErr = assemblyFactory(ctx, rc, providerName, modelName, c.out,
+		assembleOpts...,
+	)
+	if assembleErr != nil {
+		return errors.Join(
+			newExecutionError("serve: assemble agent", assembleErr),
+			closeAssemblyForCommand(context.Background(), assembly, "serve"),
+		)
+	}
+	if assembly == nil || assembly.Dispatcher == nil {
+		return errors.Join(
+			newExecutionError("serve: runtime unavailable", ErrServeRuntimeUnavailable),
+			closeAssemblyForCommand(context.Background(), assembly, "serve"),
+		)
+	}
+	handler := acp.NewCoreHandler(assembly.Dispatcher, nil)
+	handler.SetEventBus(assembly.EventBus)
+	slog.Info("serve: agent dispatch enabled",
+		"model", modelName,
+		"provider", providerName,
+	)
+
+	// Generate and persist an auth token only after the runtime is ready. The
+	// token and associated subject are wired into the HTTP server so all routes
+	// require a Bearer header and stream routes are bound to the authenticated
+	// subject.
 	authToken := ""
 	authSubject := "cli"
 	tokenWrittenTo := ""
@@ -130,80 +197,26 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		} else {
 			generated, err := generateServeToken()
 			if err != nil {
-				return newExecutionError("serve: generate token", err)
+				return errors.Join(
+					newExecutionError("serve: generate token", err),
+					closeAssemblyForCommand(context.Background(), assembly, "serve"),
+				)
 			}
 			authToken = generated
 
-			// Write the auto-generated token to a file with 0600
-			// permissions so it never leaks to stdout.
+			// Write the auto-generated token to a file with 0600 permissions
+			// so it never leaks to stdout.
 			path := tokenFile
 			if path == "" {
 				path = defaultServeTokenPath()
-			}
-			if err := writeTokenFile(path, authToken); err != nil {
-				return newExecutionError("serve: write token file", err)
 			}
 			tokenWrittenTo = path
 		}
 	}
 
-	// Attempt to assemble a full agent runtime. When successful, the
-	// dispatcher and EventBus are wired into the CoreHandler so that
-	// /send dispatches to a real agent and /events streams agent events
-	// via SSE. When assembly fails (e.g. no config), the server falls
-	// back to echo/ack mode with a nil dispatcher.
-	var handler *acp.CoreHandler
-	var cleanup func()
-	var eventBus core.EventBus
-
-	var rc *config.Config
-	if v, ok := cfg.(*config.Config); ok {
-		rc = v
-	}
-
-	if rc != nil {
-		modelName := resolveModelName(modelFlag, rc)
-		providerName := resolveProviderName(providerFlag, rc)
-
-		assembleOpts := []AssembleOption{WithApproveMode(approveMode)}
-		if noSandbox {
-			assembleOpts = append(assembleOpts, WithNoSandbox())
-		}
-		assembly, err := AssembleAgent(ctx, rc, providerName, modelName, c.out,
-			assembleOpts...,
-		)
-		if err != nil {
-			slog.Warn("serve: agent assembly failed, falling back to echo mode", "err", err)
-			fmt.Fprintf(c.out, "WARNING: Agent assembly failed — falling back to echo mode (no agent dispatch).\n") //nolint:errcheck
-			if ufe := classifyError(err); ufe != nil {
-				fmt.Fprintf(c.out, "  Error: %s\n", ufe.Action) //nolint:errcheck
-				fmt.Fprintf(c.out, "  Hint: %s\n", ufe.Hint)    //nolint:errcheck
-			} else {
-				fmt.Fprintf(c.out, "  Error: %v\n", err) //nolint:errcheck
-			}
-		} else {
-			cleanup = assembly.Cleanup
-			handler = acp.NewCoreHandler(assembly.Dispatcher, nil)
-			handler.SetEventBus(assembly.EventBus)
-			eventBus = assembly.EventBus
-			slog.Info("serve: agent dispatch enabled",
-				"model", modelName,
-				"provider", providerName,
-			)
-		}
-	}
-
-	if handler == nil {
-		if rc == nil {
-			slog.Warn("serve: no config available, falling back to echo mode")
-			fmt.Fprintf(c.out, "WARNING: No configuration found — running in echo mode (no agent dispatch).\n") //nolint:errcheck
-		}
-		handler = acp.NewCoreHandler(nil, nil)
-	}
-
 	server := acp.NewHTTPServer("acp-server", addr, handler)
-	if eventBus != nil {
-		server.SetEventBus(eventBus)
+	if noAuth {
+		server.SetNoAuthLoopbackPolicy()
 	}
 	if authToken != "" {
 		server.SetAuth(authToken, authSubject)
@@ -211,12 +224,26 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	if tlsCert != "" && tlsKey != "" {
 		server.SetTLS(tlsCert, tlsKey)
 	}
+	if err := assembly.setHTTPServer(server); err != nil {
+		return errors.Join(
+			newExecutionError("serve: register server owner", err),
+			closeAssemblyForCommand(context.Background(), assembly, "serve"),
+		)
+	}
 
 	if err := server.Start(ctx); err != nil {
-		if cleanup != nil {
-			cleanup()
+		return errors.Join(
+			newExecutionError("serve: start server", err),
+			closeAssemblyForCommand(context.Background(), assembly, "serve"),
+		)
+	}
+	if tokenWrittenTo != "" {
+		if err := writeTokenFile(tokenWrittenTo, authToken); err != nil {
+			return errors.Join(
+				newExecutionError("serve: write token file", err),
+				closeAssemblyForCommand(context.Background(), assembly, "serve"),
+			)
 		}
-		return newExecutionError("serve: start server", err)
 	}
 
 	fmt.Fprintf(c.out, "ACP HTTP server listening on %s\n", addr) //nolint:errcheck
@@ -252,18 +279,15 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	}
 	signal.Stop(sigCh)
 
-	// Use a fresh context for shutdown so in-flight requests can complete
-	// even if the parent context was canceled.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := server.Stop(shutdownCtx); err != nil {
-		slog.Warn("serve: server stop error", "err", err)
+	closeErr := closeAssemblyForCommand(context.Background(), assembly, "serve")
+	if errors.Is(closeErr, ErrAssemblyClosePending) {
+		fmt.Fprintf(c.out, "ACP HTTP server shutdown is still pending.\n") //nolint:errcheck
+	} else if closeErr != nil {
+		slog.Warn("serve: shutdown error", "err", closeErr)
+	} else {
+		fmt.Fprintf(c.out, "ACP HTTP server stopped.\n") //nolint:errcheck
 	}
-	if cleanup != nil {
-		cleanup()
-	}
-	fmt.Fprintf(c.out, "ACP HTTP server stopped.\n") //nolint:errcheck
-	return nil
+	return closeErr
 }
 
 // defaultServeTokenPath returns the default path for the serve token file,
@@ -279,11 +303,7 @@ func defaultServeTokenPath() string {
 // writeTokenFile writes the token to path with 0600 permissions, creating
 // the parent directory (0700) if necessary.
 func writeTokenFile(path, token string) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(token), 0o600)
+	return privatefile.WriteAtomic(path, []byte(token))
 }
 
 // generateServeToken generates a cryptographically random hex token for

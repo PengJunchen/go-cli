@@ -1,7 +1,7 @@
 // Package e2e_20260802 contains end-to-end integration tests for the MCP
 // HTTPClientAdapter and Skill loading pipelines. It exercises:
-//  1. SSE-style MCP server handshake and tool listing
-//  2. Plain JSON MCP server connection and tool listing
+//  1. Explicit rejection of the unsupported legacy SSE transport
+//  2. Streamable HTTP JSON-RPC initialize, tool listing and tool execution
 //  3. Full MCP tool execution through the tool registry
 //  4. Skill loading from a directory with YAML frontmatter
 //  5. Combined MCP + Skill pipeline in a single tool registry
@@ -16,7 +16,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,20 +41,31 @@ type mcpHTTPCallLog struct {
 	Result   any
 }
 
-// mockHTTPMCPServer is an in-process MCP server that speaks the streamable
-// HTTP and SSE transports over net/http/httptest. It supports:
-//   - SSE-style handshake (GET returns an "endpoint" event)
-//   - Plain JSON mode (no SSE handshake; POST returns raw JSON)
-//   - SSE-wrapped POST responses
+func validMCPJSONRPCRequestID(raw json.RawMessage) bool {
+	var value any
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return false
+	}
+	switch value.(type) {
+	case string, float64:
+		return true
+	default:
+		return false
+	}
+}
+
+// mockHTTPMCPServer is an in-process Streamable HTTP server for protocol
+// version 2025-06-18. It validates JSON-RPC request IDs and negotiated headers,
+// acknowledges the initialized notification with HTTP 202, and returns JSON
+// response envelopes.
 //
 // It also records every tools/call so tests can assert on invocations.
 type mockHTTPMCPServer struct {
-	t            *testing.T
-	sseHandshake bool // GET returns an "event: endpoint" line
-	ssePost      bool // POST responses are SSE-formatted
+	t *testing.T
 
 	mu          sync.Mutex
 	logs        []mcpHTTPCallLog
+	methods     []string
 	tools       []map[string]any // declared tools for tools/list
 	callHandler func(name string, args map[string]any) any
 }
@@ -77,11 +90,15 @@ func (s *mockHTTPMCPServer) callLog() []mcpHTTPCallLog {
 	return out
 }
 
+func (s *mockHTTPMCPServer) methodLog() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.methods...)
+}
+
 // handler dispatches GET (SSE handshake) and POST (JSON-RPC) requests.
 func (s *mockHTTPMCPServer) handler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
-	case http.MethodGet:
-		s.handleGet(w, r)
 	case http.MethodPost:
 		s.handlePost(w, r)
 	default:
@@ -89,19 +106,14 @@ func (s *mockHTTPMCPServer) handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *mockHTTPMCPServer) handleGet(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	if s.sseHandshake {
-		// Return an absolute POST-back URL so the adapter uses it directly
-		// (it starts with "http" and skips the relative-resolution path).
-		postURL := fmt.Sprintf("http://%s/mcp", r.Host)
-		fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", postURL) //nolint:errcheck,gosec
-	}
-	// When sseHandshake is false, we write nothing. The adapter's scanner
-	// reaches EOF, endpoint stays empty, and falls back to cfg.URL.
-}
-
 func (s *mockHTTPMCPServer) handlePost(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Content-Type") != "application/json" ||
+		!strings.Contains(r.Header.Get("Accept"), "application/json") ||
+		!strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+		s.t.Errorf("invalid Streamable HTTP headers: content-type=%q accept=%q", r.Header.Get("Content-Type"), r.Header.Get("Accept"))
+		http.Error(w, "invalid Streamable HTTP headers", http.StatusBadRequest)
+		return
+	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		s.t.Errorf("mock mcp server: read body: %v", err)
@@ -110,45 +122,81 @@ func (s *mockHTTPMCPServer) handlePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		ID     int64           `json:"id"`
-		Method string          `json:"method"`
-		Params json.RawMessage `json:"params"`
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
 	}
 	if decodeErr := json.Unmarshal(body, &req); decodeErr != nil {
 		s.t.Errorf("mock mcp server: decode request: %v", decodeErr)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+	if req.JSONRPC != "2.0" {
+		s.t.Errorf("unexpected JSON-RPC version %q", req.JSONRPC)
+		http.Error(w, "invalid JSON-RPC request", http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	s.methods = append(s.methods, req.Method)
+	s.mu.Unlock()
 
 	var result map[string]any
 	switch req.Method {
 	case "initialize":
+		var params struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil || !validMCPJSONRPCRequestID(req.ID) || params.ProtocolVersion != mcp.LatestProtocolVersion || r.Header.Get("MCP-Protocol-Version") != "" {
+			s.t.Errorf("invalid 2025-06-18 initialize request")
+			http.Error(w, "invalid initialize request", http.StatusBadRequest)
+			return
+		}
 		result = map[string]any{
 			"protocolVersion": "2025-06-18",
 			"capabilities":    map[string]any{},
 			"serverInfo":      map[string]any{"name": "mock", "version": "1.0"},
 		}
 	case "notifications/initialized":
-		result = map[string]any{}
+		if len(req.ID) != 0 || r.Header.Get("MCP-Protocol-Version") != mcp.LatestProtocolVersion {
+			s.t.Errorf("invalid initialized notification")
+			http.Error(w, "invalid initialized notification", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return
 	case "tools/list":
+		if !validMCPJSONRPCRequestID(req.ID) || r.Header.Get("MCP-Protocol-Version") != mcp.LatestProtocolVersion {
+			s.t.Errorf("invalid tools/list request")
+			http.Error(w, "invalid tools/list request", http.StatusBadRequest)
+			return
+		}
 		result = map[string]any{"tools": s.tools}
 	case "tools/call":
+		if !validMCPJSONRPCRequestID(req.ID) || r.Header.Get("MCP-Protocol-Version") != mcp.LatestProtocolVersion {
+			s.t.Errorf("invalid tools/call request")
+			http.Error(w, "invalid tools/call request", http.StatusBadRequest)
+			return
+		}
 		var params struct {
 			Name      string         `json:"name"`
 			Arguments map[string]any `json:"arguments"`
 		}
 		if paramsErr := json.Unmarshal(req.Params, &params); paramsErr != nil {
 			s.t.Errorf("mock mcp server: decode tools/call params: %v", paramsErr)
-			result = map[string]any{"content": "", "isError": true}
+			result = map[string]any{
+				"content": []map[string]any{{"type": "text", "text": "invalid tools/call params"}},
+				"isError": true,
+			}
 		} else {
 			content := s.callTool(params.Name, params.Arguments)
-			result = map[string]any{"content": content}
+			result = map[string]any{"content": []map[string]any{{"type": "text", "text": fmt.Sprint(content)}}}
 		}
 	default:
 		result = map[string]any{}
 	}
 
-	frame := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}
+	frame := map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(req.ID), "result": result}
 	raw, err := json.Marshal(frame)
 	if err != nil {
 		s.t.Errorf("mock mcp server: marshal response: %v", err)
@@ -156,13 +204,8 @@ func (s *mockHTTPMCPServer) handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.ssePost {
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, "id: %d\nevent: message\ndata: %s\n\n", req.ID, raw) //nolint:errcheck,gosec
-	} else {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(raw) //nolint:errcheck,gosec
-	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(raw) //nolint:errcheck,gosec
 }
 
 func (s *mockHTTPMCPServer) callTool(name string, args map[string]any) any {
@@ -185,89 +228,37 @@ func (s *mockHTTPMCPServer) start() *httptest.Server {
 }
 
 // =============================================================================
-// 1. TestE2E_MCPHTTPAdapter_SSEConnectAndListTools
+// 1. TestE2E_MCPHTTPAdapterRejectsLegacySSEBeforeNetwork
 // =============================================================================
 
-// TestE2E_MCPHTTPAdapter_SSEConnectAndListTools verifies that an
-// HTTPClientAdapter can connect to an SSE-style MCP server (GET handshake
-// returning an "endpoint" event, SSE-wrapped POST responses), list its tools,
-// and have those tools registered into a tools.ToolRegistry via MCPToolAdapter.
-func TestE2E_MCPHTTPAdapter_SSEConnectAndListTools(t *testing.T) {
-	srv := newMockHTTPMCPServer(t)
-	srv.sseHandshake = true // GET returns the endpoint event
-	srv.ssePost = true      // POST responses are SSE-formatted
-	srv.declareTool("get_weather", "Get the weather for a city", map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"city": map[string]any{"type": "string"},
-		},
-	})
-	srv.declareTool("get_time", "Get the current time", map[string]any{
-		"type": "object",
-	})
-
-	httpSrv := srv.start()
+// TestE2E_MCPHTTPAdapter_LegacySSERejectedBeforeNetwork verifies that the
+// unsupported legacy SSE transport is rejected before endpoint probing.
+func TestE2E_MCPHTTPAdapterRejectsLegacySSEBeforeNetwork(t *testing.T) {
+	var requests atomic.Int32
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
 	defer httpSrv.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	adapter := mcp.NewHTTPClientAdapter(mcp.MCPServerConfig{
 		Name:      "weather-sse",
 		URL:       httpSrv.URL,
 		Transport: mcp.MCPTransportSSE,
 	})
-
-	// Connect should consume the SSE handshake and resolve the POST endpoint.
-	require.NoError(t, adapter.Connect(ctx), "SSE connect should succeed")
-
-	// List tools should parse both tools from the SSE-wrapped response.
-	got, err := adapter.ListTools(ctx)
-	require.NoError(t, err)
-	require.Len(t, got, 2, "should list both declared tools")
-	assert.Equal(t, "get_weather", got[0].Name)
-	assert.Equal(t, "Get the weather for a city", got[0].Description)
-	assert.Equal(t, "get_time", got[1].Name)
-	// ArgsSchema is parsed from the "inputSchema" field.
-	require.NotEmpty(t, got[0].ArgsSchema)
-	assert.Equal(t, "object", got[0].ArgsSchema["type"])
-
-	// Register each tool through MCPToolAdapter into a ToolRegistry and verify.
-	tr := tools.NewDefaultToolRegistry()
-	for _, tool := range got {
-		adapter2 := mcp.NewMCPToolAdapter(adapter, tool)
-		require.NoError(t, tr.Register(ctx, adapter2))
-	}
-
-	listed, err := tr.List(ctx)
-	require.NoError(t, err)
-	assert.Len(t, listed, 2)
-
-	// The registered names are normalized to mcp__{server}__{tool}.
-	expectedWeather := mcp.NormalizeToolName("weather-sse", "get_weather")
-	expectedTime := mcp.NormalizeToolName("weather-sse", "get_time")
-	names := map[string]bool{}
-	for _, def := range listed {
-		names[def.Name()] = true
-	}
-	assert.True(t, names[expectedWeather], "registry should contain %s", expectedWeather)
-	assert.True(t, names[expectedTime], "registry should contain %s", expectedTime)
-
-	// The adapter is still connected; ensure Disconnect is a no-op-safe call.
-	require.NoError(t, adapter.Disconnect(ctx))
+	err := adapter.Connect(context.Background())
+	require.ErrorIs(t, err, mcp.ErrUnsupportedHTTPTransport)
+	assert.Zero(t, requests.Load())
 }
 
 // =============================================================================
-// 2. TestE2E_MCPHTTPAdapter_PlainJSONConnectAndListTools
+// 2. TestE2E_MCPHTTPAdapter_StreamableHTTPConnectAndListTools
 // =============================================================================
 
-// TestE2E_MCPHTTPAdapter_PlainJSONConnectAndListTools verifies the
-// streamable-HTTP path: GET returns no SSE endpoint (the adapter falls back to
-// the configured URL) and POST responses are plain JSON.
-func TestE2E_MCPHTTPAdapter_PlainJSONConnectAndListTools(t *testing.T) {
+// TestE2E_MCPHTTPAdapter_StreamableHTTPConnectAndListTools verifies the
+// 2025-06-18 initialize/initialized exchange and JSON-RPC tools/list flow.
+func TestE2E_MCPHTTPAdapter_StreamableHTTPConnectAndListTools(t *testing.T) {
 	srv := newMockHTTPMCPServer(t)
-	srv.sseHandshake = false // no endpoint event → fallback to cfg.URL
-	srv.ssePost = false      // plain JSON responses
 	srv.declareTool("echo", "Echo back the input", map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -287,7 +278,7 @@ func TestE2E_MCPHTTPAdapter_PlainJSONConnectAndListTools(t *testing.T) {
 		Transport: mcp.MCPTransportStreamableHTTP,
 	})
 
-	require.NoError(t, adapter.Connect(ctx), "plain JSON connect should succeed")
+	require.NoError(t, adapter.Connect(ctx), "Streamable HTTP connect should succeed")
 
 	got, err := adapter.ListTools(ctx)
 	require.NoError(t, err)
@@ -306,6 +297,7 @@ func TestE2E_MCPHTTPAdapter_PlainJSONConnectAndListTools(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, listed, 1)
 	assert.Equal(t, toolAdapter.Name(), listed[0].Name())
+	assert.Equal(t, []string{"initialize", "notifications/initialized", "tools/list"}, srv.methodLog())
 }
 
 // =============================================================================
@@ -318,8 +310,6 @@ func TestE2E_MCPHTTPAdapter_PlainJSONConnectAndListTools(t *testing.T) {
 // through the registry's Execute path back to the caller.
 func TestE2E_MCPHTTPAdapter_CallToolThroughRegistry(t *testing.T) {
 	srv := newMockHTTPMCPServer(t)
-	srv.sseHandshake = false
-	srv.ssePost = false
 	srv.declareTool("calculate", "Run a calculation", map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -338,8 +328,9 @@ func TestE2E_MCPHTTPAdapter_CallToolThroughRegistry(t *testing.T) {
 	defer cancel()
 
 	adapter := mcp.NewHTTPClientAdapter(mcp.MCPServerConfig{
-		Name: "calc-srv",
-		URL:  httpSrv.URL,
+		Name:      "calc-srv",
+		URL:       httpSrv.URL,
+		Transport: mcp.MCPTransportStreamableHTTP,
 	})
 	require.NoError(t, adapter.Connect(ctx))
 
@@ -363,7 +354,7 @@ func TestE2E_MCPHTTPAdapter_CallToolThroughRegistry(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	assert.Equal(t, "result(6 * 7) = 42", result.Output)
+	assert.Contains(t, result.Output, "result(6 * 7) = 42")
 	assert.Equal(t, "call-calc-1", result.ToolCallID)
 
 	// Verify the mock server observed the call.
@@ -382,6 +373,9 @@ func TestE2E_MCPHTTPAdapter_CallToolThroughRegistry(t *testing.T) {
 	logs = srv.callLog()
 	require.Len(t, logs, 2)
 	assert.Equal(t, "1 + 1", logs[1].Args["expression"])
+	assert.Equal(t, []string{
+		"initialize", "notifications/initialized", "tools/list", "tools/call", "tools/call",
+	}, srv.methodLog())
 
 	// Calling an unknown tool should surface ErrToolNotFound.
 	_, err = tr.Execute(ctx, tools.ToolCall{Name: "mcp__calc-srv__missing"})
@@ -468,8 +462,8 @@ Summarize the provided text concisely.`
 	assert.Equal(t, "deploy-helper", deployDef.Name())
 	desc := deployDef.Description()
 	assert.Contains(t, desc, "Helps deploy services")
-	assert.Contains(t, desc, "tools: bash, read")
-	assert.Contains(t, desc, "parameters: dry_run, max_retries")
+	assert.Contains(t, desc, "suggested tools (not enforced): bash, read")
+	assert.Contains(t, desc, "legacy parameter metadata (not accepted as arguments): dry_run, max_retries")
 
 	// Execute the skill through the registry and verify the output marker.
 	result, err := tr.Execute(ctx, tools.ToolCall{
@@ -513,8 +507,6 @@ Summarize the provided text concisely.`
 func TestE2E_SkillAndMCPCombinedPipeline(t *testing.T) {
 	// --- Set up the MCP HTTP mock server with two tools. ---
 	srv := newMockHTTPMCPServer(t)
-	srv.sseHandshake = true
-	srv.ssePost = true
 	srv.declareTool("search_docs", "Search the documentation", map[string]any{
 		"type":       "object",
 		"properties": map[string]any{"query": map[string]any{"type": "string"}},
@@ -542,8 +534,9 @@ func TestE2E_SkillAndMCPCombinedPipeline(t *testing.T) {
 
 	// Connect the HTTPClientAdapter and register its tools.
 	adapter := mcp.NewHTTPClientAdapter(mcp.MCPServerConfig{
-		Name: "docs-srv",
-		URL:  httpSrv.URL,
+		Name:      "docs-srv",
+		URL:       httpSrv.URL,
+		Transport: mcp.MCPTransportStreamableHTTP,
 	})
 	require.NoError(t, adapter.Connect(ctx))
 

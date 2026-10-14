@@ -58,11 +58,13 @@ func TestTrustProject_UsesContentFingerprint(t *testing.T) {
 	store := NewInMemoryTrustStore()
 	tm := NewDefaultTrustManager(store)
 	require.NoError(t, tm.TrustProject(t.Context(), dir))
+	canonicalDir, err := canonicalProjectRoot(dir)
+	require.NoError(t, err)
 
 	// The fingerprint should match the content hash of the config file.
 	entries, err := store.Load()
 	require.NoError(t, err)
-	entry, ok := entries[dir]
+	entry, ok := entries[canonicalDir]
 	require.True(t, ok, "trusted project must have an entry")
 	assert.Equal(t, contentFingerprint(configPath), entry.Fingerprint,
 		"fingerprint must be content hash of .go-cli/mcp.json")

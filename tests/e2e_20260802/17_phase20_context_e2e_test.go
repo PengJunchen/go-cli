@@ -219,8 +219,8 @@ func buildTestCompactionHook(
 		if err != nil {
 			return nil, err
 		}
-		result := make([]core.AgentMessage, len(compacted))
-		for i, item := range compacted {
+		result := make([]core.AgentMessage, len(compacted.Items))
+		for i, item := range compacted.Items {
 			result[i] = core.AgentMessage{Role: item.Role, Content: item.Content}
 		}
 		return result, nil

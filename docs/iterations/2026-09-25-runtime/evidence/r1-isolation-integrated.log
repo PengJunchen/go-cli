@@ -1,0 +1,17 @@
+Commit: 3fe4389ecc5792c93d3f4f1a04af08ad2c77226b
+Command: go test -p 2 -race -count=1 ./internal/core ./internal/cli -run Test(AssemblyInterceptorsAreIsolated|Loop.*Interceptor|ToolInterceptor)
+ok  	github.com/pengjunchen/go-cli/internal/core	1.024s
+ok  	github.com/pengjunchen/go-cli/internal/cli	1.088s
+Exit: 0
+
+Registered tests:
+TestToolInterceptor_CancelsBeforeExecution
+TestToolInterceptor_AllowsExecution
+TestToolInterceptor_WorksWithoutEventStream
+TestToolInterceptor_TimingInterceptorBeforeExecute
+TestLoopAgent_SetToolInterceptor
+TestLoopAgentInterceptorIsScopedToInstance
+TestToolInterceptor_MultipleFirstErrorCancels
+ok  	github.com/pengjunchen/go-cli/internal/core	0.007s
+TestAssemblyInterceptorsAreIsolated
+ok  	github.com/pengjunchen/go-cli/internal/cli	0.014s

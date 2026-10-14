@@ -2,11 +2,16 @@
 
 package session
 
-import "os"
+import (
+	"context"
+	"os"
+)
 
-// flockExclusive is a no-op on platforms that do not support flock (e.g.
-// Windows). Concurrent-write safety relies solely on the in-process mutex.
-func flockExclusive(_ *os.File) error { return nil }
+// flockExclusive fails closed when the platform cannot provide the durable
+// session lock required by R2.
+func flockExclusive(_ *os.File) error { return ErrUnsupportedSessionLock }
+
+func flockExclusiveContext(_ context.Context, _ *os.File) error { return ErrUnsupportedSessionLock }
 
 // flockUnlock is a no-op on platforms that do not support flock.
 func flockUnlock(_ *os.File) error { return nil }

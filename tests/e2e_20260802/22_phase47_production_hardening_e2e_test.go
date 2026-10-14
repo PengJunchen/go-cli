@@ -29,6 +29,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/cli"
 	"github.com/pengjunchen/go-cli/internal/compaction"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mcp"
 	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
@@ -76,13 +77,19 @@ func phase47SetupNoTrust(t *testing.T) {
 }
 
 // phase47MockMCPHandler returns an http.HandlerFunc that handles the MCP
-// initialize handshake (initialize + notifications/initialized) and tools/list.
+// Streamable HTTP 2025-06-18 initialize/initialized exchange and tools/list.
 // The tools parameter defines the tool names and descriptions the server
 // advertises.
 func phase47MockMCPHandler(tools []mcp.MCPTool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusOK)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if r.Header.Get("Content-Type") != "application/json" ||
+			!strings.Contains(r.Header.Get("Accept"), "application/json") ||
+			!strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+			http.Error(w, "invalid Streamable HTTP headers", http.StatusBadRequest)
 			return
 		}
 		body, err := io.ReadAll(r.Body)
@@ -92,10 +99,12 @@ func phase47MockMCPHandler(tools []mcp.MCPTool) http.HandlerFunc {
 		}
 
 		var req struct {
-			ID     any    `json:"id"`
-			Method string `json:"method"`
+			JSONRPC string          `json:"jsonrpc"`
+			ID      json.RawMessage `json:"id"`
+			Method  string          `json:"method"`
+			Params  json.RawMessage `json:"params"`
 		}
-		if decodeErr := json.Unmarshal(body, &req); decodeErr != nil {
+		if decodeErr := json.Unmarshal(body, &req); decodeErr != nil || req.JSONRPC != "2.0" {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -103,9 +112,17 @@ func phase47MockMCPHandler(tools []mcp.MCPTool) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		switch req.Method {
 		case "initialize":
+			var params struct {
+				ProtocolVersion string `json:"protocolVersion"`
+			}
+			if !validMCPJSONRPCRequestID(req.ID) || r.Header.Get("MCP-Protocol-Version") != "" ||
+				json.Unmarshal(req.Params, &params) != nil || params.ProtocolVersion != mcp.LatestProtocolVersion {
+				http.Error(w, "invalid initialize request", http.StatusBadRequest)
+				return
+			}
 			resp := map[string]any{
 				"jsonrpc": "2.0",
-				"id":      req.ID,
+				"id":      json.RawMessage(req.ID),
 				"result": map[string]any{
 					"protocolVersion": mcp.LatestProtocolVersion,
 					"capabilities":    map[string]any{},
@@ -114,8 +131,16 @@ func phase47MockMCPHandler(tools []mcp.MCPTool) http.HandlerFunc {
 			}
 			_ = json.NewEncoder(w).Encode(resp)
 		case "notifications/initialized":
-			w.WriteHeader(http.StatusOK)
+			if len(req.ID) != 0 || r.Header.Get("MCP-Protocol-Version") != mcp.LatestProtocolVersion {
+				http.Error(w, "invalid initialized notification", http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
 		case "tools/list":
+			if !validMCPJSONRPCRequestID(req.ID) || r.Header.Get("MCP-Protocol-Version") != mcp.LatestProtocolVersion {
+				http.Error(w, "invalid tools/list request", http.StatusBadRequest)
+				return
+			}
 			toolList := make([]map[string]any, len(tools))
 			for i, t := range tools {
 				toolList[i] = map[string]any{
@@ -126,14 +151,31 @@ func phase47MockMCPHandler(tools []mcp.MCPTool) http.HandlerFunc {
 			}
 			resp := map[string]any{
 				"jsonrpc": "2.0",
-				"id":      req.ID,
+				"id":      json.RawMessage(req.ID),
 				"result":  map[string]any{"tools": toolList},
 			}
 			_ = json.NewEncoder(w).Encode(resp)
-		default:
+		case "tools/call":
+			if !validMCPJSONRPCRequestID(req.ID) || r.Header.Get("MCP-Protocol-Version") != mcp.LatestProtocolVersion {
+				http.Error(w, "invalid tools/call request", http.StatusBadRequest)
+				return
+			}
 			resp := map[string]any{
 				"jsonrpc": "2.0",
-				"id":      req.ID,
+				"id":      json.RawMessage(req.ID),
+				"result": map[string]any{
+					"content": []map[string]any{{"type": "text", "text": "ok"}},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		default:
+			if len(req.ID) == 0 || r.Header.Get("MCP-Protocol-Version") != mcp.LatestProtocolVersion {
+				http.Error(w, "invalid JSON-RPC request", http.StatusBadRequest)
+				return
+			}
+			resp := map[string]any{
+				"jsonrpc": "2.0",
+				"id":      json.RawMessage(req.ID),
 				"result":  map[string]any{},
 			}
 			_ = json.NewEncoder(w).Encode(resp)
@@ -161,8 +203,9 @@ func TestE2E_Phase47_MCPInitializeHandshake_EndToEnd(t *testing.T) {
 	defer cancel()
 
 	adapter := mcp.NewHTTPClientAdapter(mcp.MCPServerConfig{
-		Name: "handshake-srv",
-		URL:  httpSrv.URL,
+		Name:      "handshake-srv",
+		URL:       httpSrv.URL,
+		Transport: mcp.MCPTransportStreamableHTTP,
 	})
 
 	// Connect should complete the initialize handshake without error.
@@ -382,8 +425,9 @@ func TestE2E_Phase47_ParallelMCPConnect(t *testing.T) {
 		i, sc := i, sc
 		g.Go(func() error {
 			adapter := mcp.NewHTTPClientAdapter(mcp.MCPServerConfig{
-				Name: sc.name,
-				URL:  servers[i].URL,
+				Name:      sc.name,
+				URL:       servers[i].URL,
+				Transport: mcp.MCPTransportStreamableHTTP,
 			})
 			if err := adapter.Connect(gctx); err != nil {
 				return err
@@ -413,7 +457,7 @@ func TestE2E_Phase47_ParallelMCPConnect(t *testing.T) {
 		// Determine which server this tool belongs to.
 		srvName := strings.SplitN(allNames[i], "__", 3)[1] // extract server from mcp__srv__tool
 		require.NoError(t, tr.Register(ctx, mcp.NewMCPToolAdapter(
-			mcp.NewHTTPClientAdapter(mcp.MCPServerConfig{Name: srvName}),
+			mcp.NewHTTPClientAdapter(mcp.MCPServerConfig{Name: srvName, Transport: mcp.MCPTransportStreamableHTTP}),
 			tool,
 		)))
 	}
@@ -564,16 +608,27 @@ func TestE2E_Phase47_CompactionPreservesContext(t *testing.T) {
 		})
 	}
 
-	// Add 2 tool results with large output.
+	// Add a real assistant tool-call group with 2 large tool results.
+	items = append(items, compaction.TurnItem{
+		ID:      "tool-calls",
+		Role:    compaction.RoleAssistant,
+		Content: "Reading and searching the requested files.",
+		ToolCalls: []llm.ToolCall{
+			{ID: "tool-1", Name: "read"},
+			{ID: "tool-2", Name: "grep"},
+		},
+	})
 	items = append(items, compaction.TurnItem{
 		ID:         "tool-1",
 		Role:       compaction.RoleTool,
+		ToolCallID: "tool-1",
 		ToolName:   "read",
 		ToolResult: fmt.Sprintf("File content: %s", strings.Repeat("This is a line of file content. ", 50)),
 	})
 	items = append(items, compaction.TurnItem{
 		ID:         "tool-2",
 		Role:       compaction.RoleTool,
+		ToolCallID: "tool-2",
 		ToolName:   "grep",
 		ToolResult: fmt.Sprintf("Search results: %s", strings.Repeat("match found at line N. ", 40)),
 	})
@@ -597,13 +652,14 @@ func TestE2E_Phase47_CompactionPreservesContext(t *testing.T) {
 
 	compacted, err := compactor.Compact(ctx, items, maxTokens, estimator)
 	require.NoError(t, err, "compaction should succeed")
+	compactedItems := compacted.Items
 
 	// Compacted history should be shorter than the original.
-	assert.Less(t, len(compacted), len(items), "compacted history should have fewer items")
+	assert.Less(t, len(compactedItems), len(items), "compacted history should have fewer items")
 
 	// System messages must be preserved.
 	systemCount := 0
-	for _, item := range compacted {
+	for _, item := range compactedItems {
 		if item.Role == compaction.RoleSystem {
 			systemCount++
 		}
@@ -617,14 +673,14 @@ func TestE2E_Phase47_CompactionPreservesContext(t *testing.T) {
 		compaction.RoleAssistant: true,
 		compaction.RoleTool:      true,
 	}
-	for _, item := range compacted {
+	for _, item := range compactedItems {
 		assert.True(t, validRoles[item.Role], "role %q should be valid", item.Role)
 	}
 
 	// The compacted token count should be within the budget (or close to it
 	// when the system messages alone exceed the budget).
 	compactedTokens := 0
-	for _, item := range compacted {
+	for _, item := range compactedItems {
 		compactedTokens += estimateItemTokensSimple(item, estimator)
 	}
 	// TruncatingCompactor guarantees the result fits the budget (or is the
@@ -635,7 +691,7 @@ func TestE2E_Phase47_CompactionPreservesContext(t *testing.T) {
 	}
 
 	// Verify the system messages' content is intact.
-	for _, item := range compacted {
+	for _, item := range compactedItems {
 		if item.Role == compaction.RoleSystem {
 			assert.NotEmpty(t, item.Content, "system message content must not be empty")
 		}
@@ -919,8 +975,9 @@ Database helper skill body.`
 
 	// --- Load and register MCP tools ---
 	adapter := mcp.NewHTTPClientAdapter(mcp.MCPServerConfig{
-		Name: "db-srv",
-		URL:  httpSrv.URL,
+		Name:      "db-srv",
+		URL:       httpSrv.URL,
+		Transport: mcp.MCPTransportStreamableHTTP,
 	})
 	require.NoError(t, adapter.Connect(ctx), "MCP connect should succeed")
 	assert.Equal(t, mcp.LatestProtocolVersion, adapter.ProtocolVersion())
@@ -991,11 +1048,10 @@ Database helper skill body.`
 		Name: mcp.NormalizeToolName("db-srv", "query_db"),
 		Args: map[string]any{},
 	})
-	// The mock server returns an empty content for tools/call, so we just
-	// verify no error and a non-nil result.
-	if err == nil && res != nil {
-		assert.Equal(t, "pipeline-mcp-1", res.ToolCallID)
-	}
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Equal(t, "pipeline-mcp-1", res.ToolCallID)
+	assert.Contains(t, res.Output, "ok")
 
 	// --- Execute the skill tool ---
 	resSkill, err := tr.Execute(ctx, tools.ToolCall{

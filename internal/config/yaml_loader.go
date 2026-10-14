@@ -69,7 +69,19 @@ func UnmarshalConfig(data []byte, format ConfigFormat, target any) error {
 	}
 	switch format {
 	case ConfigFormatJSON:
-		return json.Unmarshal(data, target)
+		var values map[string]any
+		if err := json.Unmarshal(data, &values); err != nil {
+			return err
+		}
+		samplingPresence, err := inspectJSONSamplingPresence(target, values)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, target); err != nil {
+			return err
+		}
+		applyJSONSamplingPresence(target, samplingPresence)
+		return nil
 	case ConfigFormatYAML:
 		tree, err := parseYAMLTree(data)
 		if err != nil {
@@ -79,10 +91,209 @@ func UnmarshalConfig(data []byte, format ConfigFormat, target any) error {
 		if !ok {
 			return fmt.Errorf("yaml: top level must be a mapping")
 		}
-		return assignFromMap(target, m)
+		if err := assignFromMap(target, m); err != nil {
+			return err
+		}
+		recordSamplingPresence(target, m)
+		return nil
 	default:
 		return fmt.Errorf("config: unsupported format %s", format)
 	}
+}
+
+type samplingPresenceMarks struct {
+	provider   samplingFieldMarks
+	model      samplingFieldMarks
+	smallModel samplingFieldMarks
+}
+
+type samplingFieldMarks struct {
+	temperature bool
+	maxTokens   bool
+}
+
+func inspectJSONSamplingPresence(target any, values map[string]any) (samplingPresenceMarks, error) {
+	var marks samplingPresenceMarks
+	switch target.(type) {
+	case *Config:
+		for _, section := range []struct {
+			key  string
+			dest *samplingFieldMarks
+		}{
+			{key: "provider", dest: &marks.provider},
+			{key: "model", dest: &marks.model},
+			{key: "small_model", dest: &marks.smallModel},
+		} {
+			value, exists, err := lookupJSONKey(values, section.key, section.key)
+			if err != nil {
+				return samplingPresenceMarks{}, err
+			}
+			if !exists || value == nil {
+				continue
+			}
+			sectionValues, ok := value.(map[string]any)
+			if !ok {
+				continue // json.Unmarshal reports the incompatible section type.
+			}
+			*section.dest, err = inspectJSONSamplingSection(section.key, sectionValues)
+			if err != nil {
+				return samplingPresenceMarks{}, err
+			}
+		}
+	case *ProviderConfig:
+		var err error
+		marks.provider, err = inspectJSONSamplingSection("provider", values)
+		if err != nil {
+			return samplingPresenceMarks{}, err
+		}
+	case *ModelConfig:
+		var err error
+		marks.model, err = inspectJSONSamplingSection("model", values)
+		if err != nil {
+			return samplingPresenceMarks{}, err
+		}
+	case *SmallModelConfig:
+		var err error
+		marks.smallModel, err = inspectJSONSamplingSection("small_model", values)
+		if err != nil {
+			return samplingPresenceMarks{}, err
+		}
+	}
+	return marks, nil
+}
+
+func inspectJSONSamplingSection(section string, values map[string]any) (samplingFieldMarks, error) {
+	var marks samplingFieldMarks
+	for _, field := range []struct {
+		key string
+		set *bool
+	}{
+		{key: "temperature", set: &marks.temperature},
+		{key: "max_tokens", set: &marks.maxTokens},
+	} {
+		value, exists, err := lookupJSONKey(values, section+"."+field.key, field.key)
+		if err != nil {
+			return samplingFieldMarks{}, err
+		}
+		if exists && value == nil {
+			return samplingFieldMarks{}, fmt.Errorf("config: %s.%s cannot be null", section, field.key)
+		}
+		*field.set = exists
+	}
+	return marks, nil
+}
+
+func lookupJSONKey(values map[string]any, path, name string) (any, bool, error) {
+	var matched any
+	found := false
+	for key, value := range values {
+		if !strings.EqualFold(key, name) {
+			continue
+		}
+		if found {
+			return nil, false, fmt.Errorf("config: ambiguous case-folded keys for %s", path)
+		}
+		matched = value
+		found = true
+	}
+	return matched, found, nil
+}
+
+func applyJSONSamplingPresence(target any, marks samplingPresenceMarks) {
+	set := func(temperature, maxTokens *bool, source samplingFieldMarks) {
+		if source.temperature {
+			*temperature = true
+		}
+		if source.maxTokens {
+			*maxTokens = true
+		}
+	}
+	switch cfg := target.(type) {
+	case *Config:
+		if cfg == nil {
+			return
+		}
+		cfg.samplingPresenceKnown = true
+		set(&cfg.Provider.temperatureSet, &cfg.Provider.maxTokensSet, marks.provider)
+		set(&cfg.Model.temperatureSet, &cfg.Model.maxTokensSet, marks.model)
+		set(&cfg.SmallModel.temperatureSet, &cfg.SmallModel.maxTokensSet, marks.smallModel)
+	case *ProviderConfig:
+		if cfg != nil {
+			set(&cfg.temperatureSet, &cfg.maxTokensSet, marks.provider)
+		}
+	case *ModelConfig:
+		if cfg != nil {
+			set(&cfg.temperatureSet, &cfg.maxTokensSet, marks.model)
+		}
+	case *SmallModelConfig:
+		if cfg != nil {
+			set(&cfg.temperatureSet, &cfg.maxTokensSet, marks.smallModel)
+		}
+	}
+}
+
+func recordSamplingPresence(target any, values map[string]any) {
+	switch cfg := target.(type) {
+	case *Config:
+		if cfg == nil {
+			return
+		}
+		cfg.samplingPresenceKnown = true
+		markProviderSamplingPresence(&cfg.Provider, mapValue(values, "provider"))
+		markModelSamplingPresence(&cfg.Model, mapValue(values, "model"))
+		markSmallModelSamplingPresence(&cfg.SmallModel, mapValue(values, "small_model"))
+	case *ProviderConfig:
+		markProviderSamplingPresence(cfg, values)
+	case *ModelConfig:
+		markModelSamplingPresence(cfg, values)
+	case *SmallModelConfig:
+		markSmallModelSamplingPresence(cfg, values)
+	}
+}
+
+func markProviderSamplingPresence(cfg *ProviderConfig, values map[string]any) {
+	if cfg == nil {
+		return
+	}
+	if _, ok := values["temperature"]; ok {
+		cfg.temperatureSet = true
+	}
+	if _, ok := values["max_tokens"]; ok {
+		cfg.maxTokensSet = true
+	}
+}
+
+func markModelSamplingPresence(cfg *ModelConfig, values map[string]any) {
+	if cfg == nil {
+		return
+	}
+	if _, ok := values["temperature"]; ok {
+		cfg.temperatureSet = true
+	}
+	if _, ok := values["max_tokens"]; ok {
+		cfg.maxTokensSet = true
+	}
+}
+
+func markSmallModelSamplingPresence(cfg *SmallModelConfig, values map[string]any) {
+	if cfg == nil {
+		return
+	}
+	if _, ok := values["temperature"]; ok {
+		cfg.temperatureSet = true
+	}
+	if _, ok := values["max_tokens"]; ok {
+		cfg.maxTokensSet = true
+	}
+}
+
+func mapValue(values map[string]any, key string) map[string]any {
+	value, ok := values[key]
+	if !ok || value == nil {
+		return nil
+	}
+	section, _ := value.(map[string]any)
+	return section
 }
 
 // YAMLConfigLoader loads a Config from a configuration file, using its

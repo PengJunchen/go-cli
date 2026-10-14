@@ -14,9 +14,11 @@ const compactedToolResult = "[compacted tool result]"
 
 // MicroCompactor is the cheapest compaction strategy: it performs no LLM calls.
 // It shrinks the context by replacing the results of older tool calls with a
-// fixed placeholder while preserving user and assistant messages verbatim. When
-// even fully compacted tool results cannot bring the list under budget, it
-// returns ErrRequiresTruncating so a caller can fall back to a heavier strategy.
+// fixed placeholder while preserving ordinary conversation messages. Legacy
+// derived summaries are normalized on a defensive copy so they cannot retain
+// system-message authority. When even fully compacted tool results cannot bring
+// the list under budget, it returns ErrRequiresTruncating so a caller can fall
+// back to a heavier strategy.
 type MicroCompactor struct{}
 
 // Compile-time assertion that MicroCompactor satisfies Compactor.
@@ -27,15 +29,27 @@ func NewMicroCompactor() *MicroCompactor {
 	return &MicroCompactor{}
 }
 
-// Compact replaces old tool results with the placeholder until the estimated
-// size fits maxTokens. User and assistant messages are never modified.
-func (c *MicroCompactor) Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) ([]TurnItem, error) {
+// Compact validates tool-call groups, normalizes legacy derived summaries on a
+// copy, checks mandatory system instructions, then replaces old tool results
+// with the placeholder until the estimated size fits maxTokens. It does not
+// mutate caller-owned items.
+func (c *MicroCompactor) Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) (CompactionResult, error) {
 	span, _ := tracing.SpanFromContext(ctx, "compaction.micro", tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, slog.Default())
+	if err := validateDurableCompactionInput(items); err != nil {
+		return CompactionResult{Items: items}, err
+	}
 
-	result := make([]TurnItem, len(items))
-	copy(result, items)
+	// Validate tool-call closure and normalize legacy derived summaries on a
+	// defensive copy, matching the other compaction strategies.
+	result, _, err := groupTurnItems(items)
+	if err != nil {
+		return CompactionResult{}, err
+	}
+	if err := checkMandatorySystemPromptBudget(result, maxTokens, estimator); err != nil {
+		return CompactionResult{Items: items}, err
+	}
 
 	// Pre-compute the total token count once. The loop below maintains this
 	// total incrementally instead of re-estimating the entire list on every
@@ -84,7 +98,7 @@ func (c *MicroCompactor) Compact(ctx context.Context, items []TurnItem, maxToken
 
 	if tokensAfter > maxTokens {
 		logger.Warn("compaction.micro.insufficient", "max_tokens", maxTokens, "tokens_after", tokensAfter)
-		return result, ErrRequiresTruncating
+		return CompactionResult{Items: result, Strategy: StrategyMicro}, ErrRequiresTruncating
 	}
 
 	logger.Info("compaction.micro.done",
@@ -92,5 +106,5 @@ func (c *MicroCompactor) Compact(ctx context.Context, items []TurnItem, maxToken
 		"items_out", len(result),
 		"tokens_before", tokensBefore,
 		"tokens_after", tokensAfter)
-	return result, nil
+	return CompactionResult{Items: result, Strategy: StrategyMicro}, nil
 }

@@ -11,9 +11,9 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +23,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/cli"
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
@@ -37,10 +38,32 @@ func phase19wTestConfig() *config.Config {
 	return &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    "openai",
-			BaseURL: "http://127.0.0.1:0",
+			BaseURL: "http://127.0.0.1:1",
 			APIKey:  "test-key",
 		},
 	}
+}
+
+type phase19wSearchTransport struct {
+	body     string
+	requests []*http.Request
+}
+
+func (transport *phase19wSearchTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	transport.requests = append(transport.requests, request)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(transport.body)),
+		Request:    request,
+	}, nil
+}
+
+func phase19wUseSearchTransport(t *testing.T, transport http.RoundTripper) {
+	t.Helper()
+	previous := http.DefaultTransport
+	http.DefaultTransport = transport
+	t.Cleanup(func() { http.DefaultTransport = previous })
 }
 
 // phase19wAssemble calls AssembleAgent and registers cleanup. The timeout
@@ -48,6 +71,9 @@ func phase19wTestConfig() *config.Config {
 // uses a fresh context.
 func phase19wAssemble(t *testing.T, cfg *config.Config) *cli.AgentAssembly {
 	t.Helper()
+	if cfg.Git.WorkDir == "" {
+		cfg.Git.WorkDir = t.TempDir()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	assembly, err := cli.AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard, cli.WithApproveMode(cli.ApproveAuto))
@@ -56,9 +82,8 @@ func phase19wAssemble(t *testing.T, cfg *config.Config) *cli.AgentAssembly {
 	return assembly
 }
 
-// phase19wFindTool returns the (unwrapped) ToolDefinition with the given name
-// from the registry. List() returns the original definitions without middleware
-// wrapping, so the concrete type is accessible.
+// phase19wFindTool returns the ToolDefinition with the given name. Assembly's
+// middleware registry exposes a protected proxy through List().
 func phase19wFindTool(t *testing.T, tr tools.ToolRegistry, name string) tools.ToolDefinition {
 	t.Helper()
 	defs, err := tr.List(context.Background())
@@ -72,18 +97,31 @@ func phase19wFindTool(t *testing.T, tr tools.ToolRegistry, name string) tools.To
 	return nil
 }
 
+func phase19wExecuteWebSearch(t *testing.T, cfg *config.Config) (*tools.ToolResult, error) {
+	t.Helper()
+	assembly := phase19wAssemble(t, cfg)
+	tool, err := assembly.ToolRegistry.Get(context.Background(), "web_search")
+	if err != nil {
+		return nil, err
+	}
+	return tool.Execute(context.Background(), tools.ToolCall{
+		ID:   "phase19-web-search",
+		Name: "web_search",
+		Args: map[string]any{"query": "provider test"},
+	})
+}
+
 // =============================================================================
 // AC-1: AssembleAgent creates non-nil FileTracker, DiffGenerator, BashSandbox,
 //       HTMLConverter
 // =============================================================================
 
 // TestET_Phase19_AC1_AssembledComponentsNotNil verifies that AssembleAgent
-// creates and wires the four PARTIAL components: FileTracker (D5) and
-// DiffGenerator (D6) are exposed on the assembly; BashSandbox (D7) is wired
-// into the BashTool (public Sandbox field); HTMLConverter (D9) is wired into
-// the WebFetchTool (verified behaviorally via HTML→Markdown conversion).
+// exposes FileTracker (D5) and DiffGenerator (D6), and checks BashSandbox (D7)
+// and WebFetch's default loopback protection (D9) through the public prepared
+// tool proxies. HTML conversion is tested separately with an explicit client
+// for the controlled loopback fixture.
 func TestET_Phase19_AC1_AssembledComponentsNotNil(t *testing.T) {
-	t.Skip("Pre-existing failure: web_fetch blocks private IP 127.0.0.1")
 	assembly := phase19wAssemble(t, phase19wTestConfig())
 
 	// D5: FileTracker must be created and exposed.
@@ -92,46 +130,39 @@ func TestET_Phase19_AC1_AssembledComponentsNotNil(t *testing.T) {
 	// D6: DiffGenerator must be created and exposed.
 	require.NotNil(t, assembly.DiffGenerator, "DiffGenerator must be wired by AssembleAgent")
 
-	// D7: BashSandbox must be wired into the BashTool. AssembleAgent now
-	// uses StreamingBashToolImpl which embeds *BashTool, so Sandbox is
-	// promoted and accessible directly.
+	// D7: the assembled registry exposes a protected streaming proxy, not the
+	// raw BashTool. Verify the public capability and that the assembled sandbox
+	// blocks a blacklisted command without affecting a disposable sentinel.
 	bashDef := phase19wFindTool(t, assembly.ToolRegistry, "bash")
-	streamingBash, ok := bashDef.(*tools.StreamingBashToolImpl)
-	require.True(t, ok, "bash tool should be *tools.StreamingBashToolImpl")
-	require.NotNil(t, streamingBash.Sandbox, "BashSandbox must be wired into BashTool")
-
-	// D9: HTMLConverter must be wired into the WebFetchTool. The converter
-	// field is private, so we verify behaviorally: fetch HTML from a test
-	// server and confirm the output is Markdown (no HTML tags).
-	htmlPage := `<html><head><title>T</title></head><body><h1>Title</h1><p>Para</p></body></html>`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(htmlPage))
+	_, ok := bashDef.(tools.StreamingBashTool)
+	require.True(t, ok, "bash proxy should expose the streaming capability")
+	probeFile := filepath.Join(t.TempDir(), "sandbox-probe")
+	require.NoError(t, os.WriteFile(probeFile, []byte("keep"), 0o600))
+	quotedProbePath := "'" + strings.ReplaceAll(probeFile, "'", "'\\''") + "'"
+	_, err := bashDef.Execute(context.Background(), toolCallWithArgs("bash", map[string]any{
+		"command": "rm -f " + quotedProbePath,
 	}))
-	defer srv.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bash sandbox: command blocked")
+	require.FileExists(t, probeFile, "the sandbox must preserve the probe file")
 
+	// D9: the assembled registry exposes the protected web_fetch definition and
+	// retains its default SSRF protection. HTML conversion uses an explicit test
+	// client only in its dedicated controlled-loopback integration test.
 	fetchDef := phase19wFindTool(t, assembly.ToolRegistry, "web_fetch")
-	fetchTool, ok := fetchDef.(*tools.WebFetchTool)
-	require.True(t, ok, "web_fetch tool should be *tools.WebFetchTool")
-
-	res, err := fetchTool.Execute(context.Background(), toolCallWithArgs("web_fetch", map[string]any{
-		"url": srv.URL,
+	_, err = fetchDef.Execute(context.Background(), toolCallWithArgs("web_fetch", map[string]any{
+		"url": "http://127.0.0.1",
 	}))
-	require.NoError(t, err)
-	// Conversion happened → Markdown heading present, no HTML tags.
-	assert.Contains(t, res.Output, "# Title")
-	assert.NotContains(t, res.Output, "<html>")
-	assert.NotContains(t, res.Output, "<h1>")
+	require.ErrorIs(t, err, tools.ErrPrivateIP)
 }
 
 // =============================================================================
-// AC-2: PlanModeController is exposed in AgentAssembly and wired into tools
+// AC-2: PlanModeController remains exposed while model-facing controls stay absent
 // =============================================================================
 
 // TestET_Phase19_AC2_PlanModeControllerExposedAndWired verifies that
-// PlanModeController (D22) is exposed on AgentAssembly and that the
-// enter_plan_mode / exit_plan_mode tools in the assembled registry share the
-// same controller instance, proving the wiring is live end-to-end.
+// PlanModeController remains available to user-controlled command handling,
+// while model-facing enter_plan_mode / exit_plan_mode tools are not registered.
 func TestET_Phase19_AC2_PlanModeControllerExposedAndWired(t *testing.T) {
 	assembly := phase19wAssemble(t, phase19wTestConfig())
 
@@ -140,33 +171,20 @@ func TestET_Phase19_AC2_PlanModeControllerExposedAndWired(t *testing.T) {
 	assert.False(t, assembly.PlanCtrl.IsActive(), "plan mode should be inactive initially")
 
 	ctx := context.Background()
+	for _, name := range []string{"enter_plan_mode", "exit_plan_mode"} {
+		_, err := assembly.ToolRegistry.Get(ctx, name)
+		require.ErrorIs(t, err, tools.ErrToolNotFound,
+			"model-facing plan control %q must stay unavailable", name)
+	}
 
-	// Execute enter_plan_mode through the wrapped registry (E2E: approval +
-	// mutation middleware). The tool shares the same PlanCtrl as the
-	// assembly, so IsActive must flip to true.
-	enterDef, err := assembly.ToolRegistry.Get(ctx, "enter_plan_mode")
-	require.NoError(t, err)
-	_, err = enterDef.Execute(ctx, toolCallWithArgs("enter_plan_mode", map[string]any{
-		"reason": "e2e planning",
-	}))
-	require.NoError(t, err)
-	assert.True(t, assembly.PlanCtrl.IsActive(), "plan mode must be active after enter_plan_mode")
-
-	// Exit plan mode through the registry.
-	exitDef, err := assembly.ToolRegistry.Get(ctx, "exit_plan_mode")
-	require.NoError(t, err)
-	_, err = exitDef.Execute(ctx, toolCallWithArgs("exit_plan_mode", map[string]any{
-		"summary": "done",
-	}))
-	require.NoError(t, err)
-	assert.False(t, assembly.PlanCtrl.IsActive(), "plan mode must be inactive after exit_plan_mode")
-
-	// ShouldBlockWrite reflects plan-mode semantics while active.
-	require.NoError(t, assembly.PlanCtrl.Enter(ctx, "block check"))
+	// User-controlled Plan Mode transitions still update the exposed controller.
+	require.NoError(t, assembly.PlanCtrl.Enter(ctx, "user requested planning"))
 	assert.True(t, assembly.PlanCtrl.ShouldBlockWrite("write"))
 	assert.True(t, assembly.PlanCtrl.ShouldBlockWrite("bash"))
-	assert.False(t, assembly.PlanCtrl.ShouldBlockWrite("read"))
-	require.NoError(t, assembly.PlanCtrl.Exit(ctx, ""))
+	assert.False(t, assembly.PlanCtrl.ShouldBlockWrite("goal_list"))
+	require.NoError(t, assembly.PlanCtrl.Exit(ctx, "user completed planning"))
+	assert.False(t, assembly.PlanCtrl.IsActive())
+	assert.False(t, assembly.PlanCtrl.ShouldBlockWrite("write"))
 }
 
 // =============================================================================
@@ -175,10 +193,8 @@ func TestET_Phase19_AC2_PlanModeControllerExposedAndWired(t *testing.T) {
 
 // TestET_Phase19_AC3_PermissionModeResolverWired verifies that
 // PermissionModeResolver (D1/D24) is created by AssembleAgent, exposed on the
-// assembly, and functional: it resolves PermissionMode values to the correct
-// classifiers. A middleware built with the resolver + PermissionPlan mode
-// denies write (Ask→Deny with autoApprove=false), proving the resolver drives
-// classification.
+// assembly, resolves modes to the expected classifiers, and drives a prepared
+// middleware decision in PermissionPlan mode.
 func TestET_Phase19_AC3_PermissionModeResolverWired(t *testing.T) {
 	assembly := phase19wAssemble(t, phase19wTestConfig())
 
@@ -202,55 +218,73 @@ func TestET_Phase19_AC3_PermissionModeResolverWired(t *testing.T) {
 	assert.Equal(t, approval.Allow, autoFullClassifier.Classify(ctx, toolCall("write")),
 		"PermissionAutoFull classifier should return Allow for write")
 
-	// Behavioral: a middleware built with the resolver + PermissionPlan mode
-	// denies write (Ask → Deny with autoApprove=false, no callback). This
-	// proves the resolver drives the effective classifier inside the
-	// ApprovalMiddleware.
+	writeTool := &recordingTool{name: "write"}
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	require.NoError(t, base.Register(ctx, writeTool))
+	fence := base.DispatchFence()
+	controller := core.NewDefaultPlanModeController(fence)
+	mutationQueue := tools.NewDefaultFileMutationQueue()
+	defer func() {
+		require.NoError(t, mutationQueue.(*tools.DefaultFileMutationQueue).Close())
+	}()
 	mw := approval.NewApprovalMiddleware(
 		&approval.AllowAllClassifier{}, // static classifier; overridden by resolver
 		approval.NewInMemoryApprovalStore(),
 		approval.WithAutoApprove(false),
+		approval.WithDispatchFence(fence),
+		approval.WithPlanModeController(controller),
 		approval.WithPermissionModeResolver(assembly.ModeResolver),
 		approval.WithPermissionMode(approval.PermissionPlan),
 	)
-	tr := tools.NewDefaultToolRegistry()
-	require.NoError(t, tr.Register(ctx, &recordingTool{name: "write"}))
-	wrapped := tools.NewMiddlewareToolRegistry(tr, mw.WrapToolCall)
+	wrapped := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, wrapped.SetPreparedToolPolicy(mw.PreparedPolicy))
+	require.NoError(t, wrapped.SetPreparedToolStages(tools.PreparedToolStages{MutationQueue: mutationQueue}))
 
 	def, err := wrapped.Get(ctx, "write")
 	require.NoError(t, err)
-	_, err = def.Execute(ctx, toolCall("write"))
+	_, err = def.Execute(ctx, toolCallWithArgs("write", map[string]any{
+		"path":    "denied.txt",
+		"content": "must not be written",
+	}))
 	require.ErrorIs(t, err, approval.ErrToolDenied,
-		"PermissionPlan + resolver should deny write (Ask→Deny)")
+		"PermissionPlan should resolve Ask to Deny on the prepared path")
+	assert.Zero(t, writeTool.calls.Load(), "the resolved PermissionPlan decision must prevent execution")
 }
 
 // =============================================================================
-// AC-4: WebSearchProvider defaults to mock, switches to fetch/brave with config
+// AC-4: WebSearchProvider stays unavailable by default and selects configured providers.
 // =============================================================================
 
 // TestET_Phase19_AC4_WebSearchProviderConfigDriven verifies that the
-// WebSearchProvider (D2) is selected from config.WebSearch: default is mock,
-// "fetch" uses FetchSearchProvider, "brave" with an API key uses
-// BraveSearchProvider, and "brave" without a key falls back to mock.
+// WebSearchProvider (D2) is selected from config.WebSearch: unconfigured or
+// incomplete providers stay hidden, while configured "fetch" and "brave"
+// providers are exposed and use their selected implementation.
 func TestET_Phase19_AC4_WebSearchProviderConfigDriven(t *testing.T) {
-	// Default (no config) → mock.
-	t.Run("default_mock", func(t *testing.T) {
-		assembly := phase19wAssemble(t, phase19wTestConfig())
-		ws := phase19wFindTool(t, assembly.ToolRegistry, "web_search")
-		wst, ok := ws.(*tools.WebSearchTool)
-		require.True(t, ok, "web_search should be *tools.WebSearchTool")
-		assert.Equal(t, "mock", wst.ProviderName())
+	// Default (no config) keeps the unavailable provider out of the callable
+	// registry rather than manufacturing results.
+	t.Run("default_unavailable", func(t *testing.T) {
+		transport := &phase19wSearchTransport{}
+		phase19wUseSearchTransport(t, transport)
+		cfg := phase19wTestConfig()
+		require.Empty(t, cfg.WebSearch.Provider)
+		result, err := phase19wExecuteWebSearch(t, cfg)
+		require.Nil(t, result)
+		require.ErrorIs(t, err, tools.ErrToolNotFound)
+		assert.Empty(t, transport.requests)
 	})
 
 	// fetch provider.
 	t.Run("fetch_provider", func(t *testing.T) {
 		cfg := phase19wTestConfig()
 		cfg.WebSearch.Provider = "fetch"
-		assembly := phase19wAssemble(t, cfg)
-		ws := phase19wFindTool(t, assembly.ToolRegistry, "web_search")
-		wst, ok := ws.(*tools.WebSearchTool)
-		require.True(t, ok)
-		assert.Equal(t, "fetch", wst.ProviderName())
+		transport := &phase19wSearchTransport{body: `<html><body><h2>Result</h2><a href="https://example.org">Link</a><p>Snippet</p></body></html>`}
+		phase19wUseSearchTransport(t, transport)
+		result, err := phase19wExecuteWebSearch(t, cfg)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Contains(t, result.Output, "https://example.org")
+		require.Len(t, transport.requests, 1)
+		assert.Equal(t, "html.duckduckgo.com", transport.requests[0].URL.Host)
 	})
 
 	// brave provider with API key.
@@ -258,22 +292,27 @@ func TestET_Phase19_AC4_WebSearchProviderConfigDriven(t *testing.T) {
 		cfg := phase19wTestConfig()
 		cfg.WebSearch.Provider = "brave"
 		cfg.WebSearch.APIKey = "test-key"
-		assembly := phase19wAssemble(t, cfg)
-		ws := phase19wFindTool(t, assembly.ToolRegistry, "web_search")
-		wst, ok := ws.(*tools.WebSearchTool)
-		require.True(t, ok)
-		assert.Equal(t, "brave", wst.ProviderName())
+		transport := &phase19wSearchTransport{body: `{"web":{"results":[{"title":"Result","url":"https://example.org","description":"Snippet"}]}}`}
+		phase19wUseSearchTransport(t, transport)
+		result, err := phase19wExecuteWebSearch(t, cfg)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Contains(t, result.Output, "https://example.org")
+		require.Len(t, transport.requests, 1)
+		assert.Equal(t, "test-key", transport.requests[0].Header.Get("X-Subscription-Token"))
 	})
 
-	// brave without API key → falls back to mock.
-	t.Run("brave_no_key_falls_back_to_mock", func(t *testing.T) {
+	// Brave without an API key is not exposed as a callable provider.
+	t.Run("brave_no_key_unavailable", func(t *testing.T) {
 		cfg := phase19wTestConfig()
 		cfg.WebSearch.Provider = "brave"
-		assembly := phase19wAssemble(t, cfg)
-		ws := phase19wFindTool(t, assembly.ToolRegistry, "web_search")
-		wst, ok := ws.(*tools.WebSearchTool)
-		require.True(t, ok)
-		assert.Equal(t, "mock", wst.ProviderName())
+		require.Empty(t, cfg.WebSearch.APIKey)
+		transport := &phase19wSearchTransport{}
+		phase19wUseSearchTransport(t, transport)
+		result, err := phase19wExecuteWebSearch(t, cfg)
+		require.Nil(t, result)
+		require.ErrorIs(t, err, tools.ErrToolNotFound)
+		assert.Empty(t, transport.requests, "a missing Brave key must not dispatch HTTP")
 	})
 }
 
@@ -286,7 +325,6 @@ func TestET_Phase19_AC4_WebSearchProviderConfigDriven(t *testing.T) {
 // new file through the assembled (wrapped) registry must produce a checkpoint
 // in the shared FileTracker exposed on the assembly.
 func TestET_Phase19_AC5_WriteToolFileTrackerCheckpoint(t *testing.T) {
-	t.Skip("Pre-existing failure: write tool output format changed (queued → wrote)")
 	assembly := phase19wAssemble(t, phase19wTestConfig())
 
 	dir := t.TempDir()
@@ -304,7 +342,7 @@ func TestET_Phase19_AC5_WriteToolFileTrackerCheckpoint(t *testing.T) {
 		"content": "ac5 content",
 	}))
 	require.NoError(t, err)
-	assert.Contains(t, res.Output, "queued")
+	assert.Equal(t, "wrote 11 bytes to "+filePath, res.Output)
 
 	// Verify the file was created on disk.
 	data, err := os.ReadFile(filePath)
@@ -315,14 +353,21 @@ func TestET_Phase19_AC5_WriteToolFileTrackerCheckpoint(t *testing.T) {
 	// calls Backup before writing; for a new file the checkpoint has
 	// Existed=false.
 	checkpoints := assembly.FileTracker.ListCheckpoints()
-	var found bool
+	var checkpoint *tools.CheckpointMeta
 	for _, cp := range checkpoints {
 		if cp.Path == filePath {
-			found = true
+			checkpoint = &cp
 			break
 		}
 	}
-	assert.True(t, found, "FileTracker must have a checkpoint for the written file")
+	require.NotNil(t, checkpoint, "FileTracker must have a checkpoint for the written file")
+	assert.False(t, checkpoint.Existed, "the checkpoint must record that the target was new")
+	assert.Zero(t, checkpoint.Size)
+	_, hasBackup := assembly.FileTracker.BackupContent(checkpoint.ID)
+	assert.False(t, hasBackup, "a new-file checkpoint has no prior content to back up")
+	require.NoError(t, assembly.FileTracker.Restore(checkpoint.ID))
+	_, err = os.Stat(filePath)
+	assert.True(t, os.IsNotExist(err), "restoring a new-file checkpoint must remove the written file")
 }
 
 // =============================================================================
@@ -335,7 +380,6 @@ func TestET_Phase19_AC5_WriteToolFileTrackerCheckpoint(t *testing.T) {
 // produce a checkpoint in the shared FileTracker, and Restore must revert the
 // content to the original.
 func TestET_Phase19_AC6_EditToolFileTrackerCheckpoint(t *testing.T) {
-	t.Skip("Pre-existing failure: edit tool output format changed (queued → replaced)")
 	assembly := phase19wAssemble(t, phase19wTestConfig())
 
 	dir := t.TempDir()
@@ -356,7 +400,7 @@ func TestET_Phase19_AC6_EditToolFileTrackerCheckpoint(t *testing.T) {
 		"new_string": "line2 delta",
 	}))
 	require.NoError(t, err)
-	assert.Contains(t, res.Output, "queued")
+	assert.Equal(t, "replaced 10-byte block with 11-byte block in "+filePath, res.Output)
 
 	// Verify the file was modified on disk.
 	data, err := os.ReadFile(filePath)
@@ -366,17 +410,22 @@ func TestET_Phase19_AC6_EditToolFileTrackerCheckpoint(t *testing.T) {
 
 	// Verify a checkpoint was created in the shared FileTracker.
 	checkpoints := assembly.FileTracker.ListCheckpoints()
-	var cpID string
+	var checkpoint *tools.CheckpointMeta
 	for _, cp := range checkpoints {
 		if cp.Path == filePath {
-			cpID = cp.ID
+			checkpoint = &cp
 			break
 		}
 	}
-	require.NotEmpty(t, cpID, "FileTracker must have a checkpoint for the edited file")
+	require.NotNil(t, checkpoint, "FileTracker must have a checkpoint for the edited file")
+	assert.True(t, checkpoint.Existed, "the checkpoint must record that the target existed")
+	assert.Equal(t, int64(len(original)), checkpoint.Size)
+	backup, hasBackup := assembly.FileTracker.BackupContent(checkpoint.ID)
+	require.True(t, hasBackup, "an existing-file checkpoint must retain the prior content")
+	assert.Equal(t, original, string(backup))
 
 	// Verify Restore reverts the content (undo).
-	require.NoError(t, assembly.FileTracker.Restore(cpID))
+	require.NoError(t, assembly.FileTracker.Restore(checkpoint.ID))
 	data, err = os.ReadFile(filePath)
 	require.NoError(t, err)
 	assert.Equal(t, original, string(data), "Restore must revert to original content")

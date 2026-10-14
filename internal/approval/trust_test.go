@@ -2,6 +2,7 @@ package approval
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -92,7 +93,7 @@ func TestTrustEmitsDecisionSpanTrustManager(t *testing.T) {
 }
 
 func TestFileTrustStoreRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "trust.json")
+	path := privateTrustStorePath(t)
 
 	store := NewFileTrustStore(path)
 	entry := TrustEntry{Path: "/repo/a", Fingerprint: "abc", TrustedAt: time.Now().Format(time.RFC3339)}
@@ -107,7 +108,7 @@ func TestFileTrustStoreRoundTrip(t *testing.T) {
 }
 
 func TestFileTrustStoreRemovePersists(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "trust.json")
+	path := privateTrustStorePath(t)
 
 	store := NewFileTrustStore(path)
 	require.NoError(t, store.Add("/repo/a", TrustEntry{Path: "/repo/a"}))
@@ -121,7 +122,9 @@ func TestFileTrustStoreRemovePersists(t *testing.T) {
 }
 
 func TestFileTrustStoreMissingFileYieldsEmpty(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "does-not-exist.json")
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	path := filepath.Join(dir, "does-not-exist.json")
 	store := NewFileTrustStore(path)
 	entries, err := store.Load()
 	require.NoError(t, err, "missing file must not error")
@@ -129,7 +132,7 @@ func TestFileTrustStoreMissingFileYieldsEmpty(t *testing.T) {
 }
 
 func TestFileTrustStoreConcurrency(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "trust.json")
+	path := privateTrustStorePath(t)
 	store := NewFileTrustStore(path)
 
 	var wg sync.WaitGroup
@@ -150,6 +153,13 @@ func TestFileTrustStoreConcurrency(t *testing.T) {
 	entries, err := NewFileTrustStore(path).Load()
 	require.NoError(t, err)
 	assert.Empty(t, entries, "every entry was both added and removed")
+}
+
+func privateTrustStorePath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	return filepath.Join(dir, "trust.json")
 }
 
 func TestInMemoryTrustStoreConcurrency(t *testing.T) {

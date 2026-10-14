@@ -9,7 +9,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/memory"
 )
 
-// MemoryHandler manages cross-session memories via /memory subcommands.
+// MemoryHandler manages user-stored memories via /memory subcommands.
 // Subcommands: list (default), add, delete, search, clear.
 type MemoryHandler struct{}
 
@@ -17,7 +17,7 @@ var _ SlashCommandHandler = (*MemoryHandler)(nil)
 
 func (h *MemoryHandler) Name() string { return "memory" }
 func (h *MemoryHandler) Description() string {
-	return "Manage cross-session memories: list, add, delete, search, clear"
+	return "Manage manually stored memories: list, add, delete, search, clear"
 }
 
 // Subcommands returns the subcommands supported by /memory for tab completion.

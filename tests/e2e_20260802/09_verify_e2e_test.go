@@ -831,14 +831,26 @@ func RunCLI() {
 	report := verify.RunVerify(dir)
 	require.NotNil(t, report)
 
-	// Check that VQ-001 and VQ-004 pass based on the source heuristics.
+	// These AST checks only provide static hints; they do not prove behavior.
+	expectedHeuristicIDs := map[string]bool{
+		"VQ-001": true,
+		"VQ-002": true,
+		"VQ-003": true,
+		"VQ-004": true,
+		"VG-001": true,
+		"VG-002": true,
+	}
+	seen := make(map[string]int, len(expectedHeuristicIDs))
 	for _, r := range report.Results {
-		if r.ID == "VQ-001" || r.ID == "VQ-003" || r.ID == "VQ-004" {
-			assert.Equal(t, "PASS", r.Status, "rule %s should pass", r.ID)
+		if !expectedHeuristicIDs[r.ID] {
+			continue
 		}
-		if r.ID == "VG-001" || r.ID == "VG-002" {
-			assert.Equal(t, "PASS", r.Status, "rule %s should pass", r.ID)
-		}
+		seen[r.ID]++
+		assert.Equal(t, "HINT", r.Status, "rule %s only has static heuristic evidence", r.ID)
+		assert.Equal(t, verify.EvidenceStaticHeuristic, r.Evidence, "rule %s evidence kind", r.ID)
+	}
+	for id := range expectedHeuristicIDs {
+		assert.Equal(t, 1, seen[id], "rule %s should be included exactly once", id)
 	}
 }
 
@@ -958,11 +970,29 @@ func TestVerify_ReportWithScanFindings(t *testing.T) {
 func TestVerify_ReportSummaryComputation(t *testing.T) {
 	dir := t.TempDir()
 
-	// No go.mod — some results will FAIL, some will PASS, some SKIP.
+	// No go.mod — results include static PASS/FAIL, unrun SKIP, and heuristic HINT.
 	report := verify.RunVerify(dir)
 
 	assert.Greater(t, report.Summary.Total, 0)
+	counts := verify.VerifySummary{Total: len(report.Results)}
+	for _, result := range report.Results {
+		switch result.Status {
+		case "PASS":
+			counts.Passed++
+		case "FAIL":
+			counts.Failed++
+		case "SKIP":
+			counts.Skipped++
+			assert.Equal(t, verify.EvidenceNotRun, result.Evidence, "unrun rule %s evidence kind", result.ID)
+		case "HINT":
+			counts.Hints++
+			assert.Equal(t, verify.EvidenceStaticHeuristic, result.Evidence, "heuristic rule %s evidence kind", result.ID)
+		default:
+			t.Errorf("rule %s has unclassified status %q", result.ID, result.Status)
+		}
+	}
+	assert.Equal(t, counts, report.Summary, "summary must count every result by status")
 	assert.Equal(t, report.Summary.Total,
-		report.Summary.Passed+report.Summary.Failed+report.Summary.Skipped,
-		"summary must add up")
+		report.Summary.Passed+report.Summary.Failed+report.Summary.Skipped+report.Summary.Hints,
+		"summary totals must include static heuristic hints")
 }

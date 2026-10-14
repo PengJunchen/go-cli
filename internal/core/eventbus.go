@@ -74,7 +74,7 @@ func (b *MemoryEventBus) Publish(event AgentEvent) {
 	}
 	for ch := range b.subscribers {
 		select {
-		case ch <- event:
+		case ch <- cloneAgentEvent(event):
 		default:
 			// Subscriber buffer full, drop event.
 			b.droppedEvents.Add(1)

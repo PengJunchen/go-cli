@@ -119,9 +119,9 @@ func TestAdapterDescriptionOrdersToolsAndParams(t *testing.T) {
 	)
 	desc := skill.NewSkillAdapter(def).Description()
 
-	assert.Contains(t, desc, "tools: bash, read, write")
-	toolsIdx := strings.Index(desc, "tools: bash, read, write")
-	paramsIdx := strings.Index(desc, "parameters: alpha, mid, zeta")
+	assert.Contains(t, desc, "suggested tools (not enforced): bash, read, write")
+	toolsIdx := strings.Index(desc, "suggested tools (not enforced): bash, read, write")
+	paramsIdx := strings.Index(desc, "legacy parameter metadata (not accepted as arguments): alpha, mid, zeta")
 	assert.Greater(t, toolsIdx, 0)
 	assert.Greater(t, paramsIdx, toolsIdx, "parameters section follows the tools section")
 }

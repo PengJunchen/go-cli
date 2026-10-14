@@ -5,8 +5,11 @@
 package llm
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // ErrorType classifies the kind of error returned by a model provider.
@@ -20,6 +23,9 @@ const (
 	// ErrTypeOverflow indicates a 400 response whose body contains a
 	// context-length-overflow indicator.
 	ErrTypeOverflow ErrorType = "overflow"
+	// ErrTypeInvalidRequest indicates a recognized non-retryable request error:
+	// an ordinary 400 response or a 404 response.
+	ErrTypeInvalidRequest ErrorType = "invalid_request"
 	// ErrTypeServer indicates a 5xx server error (or any other retryable HTTP
 	// error that does not fit the categories above).
 	ErrTypeServer ErrorType = "server"
@@ -28,19 +34,40 @@ const (
 )
 
 // ProviderError is a structured error returned by a model provider. It carries
-// the HTTP status code, a typed error category, the provider name and the
-// original error message so that middleware can classify errors without
-// fragile string matching.
+// the HTTP status code, a typed error category, the provider name and a bounded
+// response message so middleware can classify errors without fragile string
+// matching. Error deliberately excludes Message because providers may echo
+// prompts or tool input in response bodies.
 type ProviderError struct {
 	StatusCode int
 	ErrorType  ErrorType
 	Provider   string
 	Message    string
+
+	// BodyTruncated reports that the error response contained bytes beyond the
+	// bounded diagnostic prefix stored in Message.
+	BodyTruncated bool
 }
 
 // Error implements the error interface.
 func (e *ProviderError) Error() string {
-	return fmt.Sprintf("%s error from %s (HTTP %d): %s", e.ErrorType, e.Provider, e.StatusCode, e.Message)
+	return fmt.Sprintf("%s error from %s (HTTP %d)", e.ErrorType, e.Provider, e.StatusCode)
+}
+
+// setProviderErrorSpanAttributes retains bounded provider diagnostics without
+// copying the response body's free-form error message into telemetry.
+func setProviderErrorSpanAttributes(span tracing.TraceSpan, err error) {
+	if span == nil || err == nil {
+		return
+	}
+	var providerErr *ProviderError
+	if !errors.As(err, &providerErr) || providerErr == nil {
+		return
+	}
+	span.SetAttributes(
+		tracing.Attribute{Key: "error_type", Value: string(providerErr.ErrorType)},
+		tracing.Attribute{Key: "http_status_code", Value: providerErr.StatusCode},
+	)
 }
 
 // Unwrap returns nil: ProviderError is a leaf node in the error chain.
@@ -77,6 +104,7 @@ func containsOverflowIndicator(msg string) bool {
 //   - 429 → ErrTypeRateLimit
 //   - 401/403 → ErrTypeAuth
 //   - 400 with overflow indicators in the body → ErrTypeOverflow
+//   - ordinary 400 and 404 → ErrTypeInvalidRequest
 //   - 5xx → ErrTypeServer
 //   - other → ErrTypeServer (default, retryable)
 func newProviderError(statusCode int, provider, payload string) *ProviderError {
@@ -89,6 +117,8 @@ func newProviderError(statusCode int, provider, payload string) *ProviderError {
 		errType = ErrTypeAuth
 	case statusCode == 400 && containsOverflowIndicator(msg):
 		errType = ErrTypeOverflow
+	case statusCode == 400 || statusCode == 404:
+		errType = ErrTypeInvalidRequest
 	case statusCode >= 500:
 		errType = ErrTypeServer
 	default:

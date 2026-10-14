@@ -84,7 +84,7 @@ func TestE2E_Phase21_RetryExhaustedReturnsError(t *testing.T) {
 	wrapped := pw.WrapModel(inner)
 	_, err := wrapped.Generate(context.Background(), nil)
 	require.Error(t, err)
-	assert.Equal(t, int32(4), atomic.LoadInt32(&inner.calls))
+	assert.Equal(t, int32(3), atomic.LoadInt32(&inner.calls))
 }
 
 // TestE2E_Phase21_CostTrackerRecordsUsage verifies that CostTracker records

@@ -4,12 +4,19 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pengjunchen/go-cli/internal/acp"
+	"github.com/pengjunchen/go-cli/internal/config"
 )
 
 // safeBuffer is a thread-safe bytes.Buffer for concurrent read/write.
@@ -59,51 +66,92 @@ func TestServeApproveAutoWithoutAuthRefuses(t *testing.T) {
 	}
 }
 
-// TestServeApproveAskWithoutAuthAllowed verifies that --approve ask (default)
-// with --no-auth does not refuse to start. The server should start normally.
-func TestServeApproveAskWithoutAuthAllowed(t *testing.T) {
+func TestServeApproveAskRejectedBeforeTokenWriteOrListener(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "default ask"},
+		{name: "explicit ask", args: []string{"--approve", "ask"}},
+		{name: "no-auth ask", args: []string{"--no-auth", "--approve", "ask"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := &safeBuffer{}
+			c := newServeCmd(out)
+			tokenPath := privateServeTokenPath(t)
+			const oldToken = "preserve-existing-token"
+			if err := os.WriteFile(tokenPath, []byte(oldToken), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			assemblyCalls := 0
+			c.assemblyFactory = func(context.Context, *config.Config, string, string, io.Writer, ...AssembleOption) (*AgentAssembly, error) {
+				assemblyCalls++
+				return nil, errors.New("assembly must not run for ask mode")
+			}
+
+			args := append([]string{"--addr", "127.0.0.1:0", "--token-file", tokenPath}, tc.args...)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			err := c.Run(ctx, newAssembleTestConfig(t), args)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "unsupported") {
+				t.Fatalf("expected unsupported remote approval error, got %v", err)
+			}
+			var unsupported *UnsupportedServeApprovalError
+			if !errors.As(err, &unsupported) || !errors.Is(err, ErrServeRemoteApprovalUnsupported) {
+				t.Fatalf("expected typed unsupported approval error, got %T: %v", err, err)
+			}
+			if assemblyCalls != 0 {
+				t.Fatalf("agent assembly ran before rejecting ask mode %d time(s)", assemblyCalls)
+			}
+			if !strings.Contains(err.Error(), "--approve auto") || !strings.Contains(err.Error(), "--approve deny") {
+				t.Errorf("unsupported error should give supported alternatives, got %v", err)
+			}
+			if strings.Contains(out.String(), "listening") {
+				t.Fatalf("serve listened despite unsupported ask mode: %s", out.String())
+			}
+			data, readErr := os.ReadFile(tokenPath)
+			if readErr != nil {
+				t.Fatalf("existing token file was removed: %v", readErr)
+			}
+			if string(data) != oldToken {
+				t.Fatalf("token file changed before rejecting ask mode: %q", data)
+			}
+		})
+	}
+}
+
+func TestServeRemoteTUIRejectedBeforeAssemblyOrTokenWrite(t *testing.T) {
 	out := &safeBuffer{}
 	c := newServeCmd(out)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	done := make(chan error, 1)
-	go func() {
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
-			"--no-auth",
-			"--approve", "ask",
-			"--addr", "127.0.0.1:0",
-		})
-	}()
-
-	// Wait for the server to start.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(out.String(), "listening") {
-			break
-		}
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatalf("server failed to start: %v", err)
-			}
-			return // server started and stopped
-		case <-time.After(50 * time.Millisecond):
-		}
+	tokenPath := privateServeTokenPath(t)
+	const oldToken = "preserve-existing-token"
+	if err := os.WriteFile(tokenPath, []byte(oldToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assemblyCalls := 0
+	c.assemblyFactory = func(context.Context, *config.Config, string, string, io.Writer, ...AssembleOption) (*AgentAssembly, error) {
+		assemblyCalls++
+		return nil, errors.New("assembly must not run for unsupported remote TUI")
 	}
 
-	if !strings.Contains(out.String(), "listening") {
-		t.Fatal("server did not start within timeout")
+	err := c.Run(context.Background(), newAssembleTestConfig(t), []string{
+		"--tui",
+		"--addr", "127.0.0.1:0",
+		"--token-file", tokenPath,
+	})
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "flag provided but not defined") {
+		t.Fatalf("expected unsupported remote TUI flag error, got %v", err)
 	}
-
-	// No auth token should be printed with --no-auth.
-	if strings.Contains(out.String(), "Auth token") {
-		t.Error("expected no auth token output with --no-auth")
+	if assemblyCalls != 0 {
+		t.Fatalf("agent assembly ran before rejecting remote TUI %d time(s)", assemblyCalls)
 	}
-
-	cancel()
-	<-done
+	if strings.Contains(out.String(), "listening") {
+		t.Fatalf("serve listened despite unsupported remote TUI: %s", out.String())
+	}
+	data, readErr := os.ReadFile(tokenPath)
+	if readErr != nil || string(data) != oldToken {
+		t.Fatalf("unsupported remote TUI changed the token file: data=%q err=%v", data, readErr)
+	}
 }
 
 // waitForServeStart polls out for the "listening" message and returns when
@@ -129,6 +177,103 @@ func waitForServeStart(t *testing.T, out *safeBuffer, done <-chan error) {
 	}
 }
 
+func TestServeStartsAssembledRuntimeWithExplicitDenyOnLoopback(t *testing.T) {
+	out := &safeBuffer{}
+	c := newServeCmd(out)
+	cfg := newAssembleTestConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Run(ctx, cfg, []string{
+			"--no-auth",
+			"--approve", "deny",
+			"--addr", "127.0.0.1:0",
+		})
+	}()
+
+	waitForServeStart(t, out, done)
+	if strings.Contains(out.String(), "echo mode") || strings.Contains(out.String(), "fallback") {
+		t.Fatalf("serve started without the configured agent runtime: %s", out.String())
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("serve shutdown failed: %v", err)
+	}
+}
+
+func TestServeNoAuthRejectsRebindingAndAllowsNativeLoopbackPeer(t *testing.T) {
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve loopback address: %v", err)
+	}
+	addr := reserved.Addr().String()
+	if err := reserved.Close(); err != nil {
+		t.Fatalf("release loopback address: %v", err)
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split loopback address: %v", err)
+	}
+
+	out := &safeBuffer{}
+	c := newServeCmd(out)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
+			"--no-auth",
+			"--approve", "deny",
+			"--addr", addr,
+		})
+	}()
+	waitForServeStart(t, out, done)
+
+	connect := func(host, origin string) int {
+		t.Helper()
+		request, requestErr := http.NewRequest(http.MethodPost, "http://"+addr+"/connect", strings.NewReader(`{"version":"go-cli-acp-json/1","type":"connect","sender_id":"serve-origin-test"}`))
+		if requestErr != nil {
+			t.Fatalf("create connect request: %v", requestErr)
+		}
+		request.Host = host
+		request.Header.Set(acp.ACPHTTPProfileHeader, acp.ACPHTTPProfileV1)
+		request.Header.Set("Content-Type", "application/json")
+		if origin != "" {
+			request.Header.Set("Origin", origin)
+		}
+		response, doErr := http.DefaultClient.Do(request)
+		if doErr != nil {
+			t.Fatalf("send connect request: %v", doErr)
+		}
+		defer response.Body.Close()
+		return response.StatusCode
+	}
+
+	attackerAuthority := net.JoinHostPort("attacker.example", port)
+	if got := connect(attackerAuthority, "http://"+attackerAuthority); got != http.StatusForbidden {
+		t.Fatalf("DNS-rebinding request got HTTP %d; want %d", got, http.StatusForbidden)
+	}
+	if got := connect(addr, ""); got != http.StatusOK {
+		t.Fatalf("native no-Origin loopback request got HTTP %d; want %d", got, http.StatusOK)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("serve shutdown failed: %v", err)
+	}
+}
+
+func privateServeTokenPath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(dir, "serve-token")
+}
+
 // TestServe_TokenNotInStdout verifies that when a token is auto-generated,
 // the token value does not appear in stdout (SEC-5, AC-1).
 func TestServe_TokenNotInStdout(t *testing.T) {
@@ -137,15 +282,16 @@ func TestServe_TokenNotInStdout(t *testing.T) {
 	c := newServeCmd(out)
 	c.errOut = errOut
 
-	tokenPath := filepath.Join(t.TempDir(), "serve-token")
+	tokenPath := privateServeTokenPath(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "127.0.0.1:0",
+			"--approve", "deny",
 			"--token-file", tokenPath,
 		})
 	}()
@@ -186,8 +332,9 @@ func TestServe_TokenFilePermission(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "127.0.0.1:0",
+			"--approve", "deny",
 			"--token-file", tokenPath,
 		})
 	}()
@@ -212,15 +359,16 @@ func TestServe_TokenFileReadable(t *testing.T) {
 	out := &safeBuffer{}
 	c := newServeCmd(out)
 
-	tokenPath := filepath.Join(t.TempDir(), "serve-token")
+	tokenPath := privateServeTokenPath(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "127.0.0.1:0",
+			"--approve", "deny",
 			"--token-file", tokenPath,
 		})
 	}()
@@ -268,8 +416,9 @@ func TestServe_ExplicitTokenToStderr(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "127.0.0.1:0",
+			"--approve", "deny",
 			"--token", "explicit-secret-token",
 		})
 	}()
@@ -309,8 +458,9 @@ func TestServe_TokenFileCustomPath(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "127.0.0.1:0",
+			"--approve", "deny",
 			"--token-file", customPath,
 		})
 	}()
@@ -357,7 +507,7 @@ func TestServeDefaultAddrIsLocalhost(t *testing.T) {
 	go func() {
 		// Use --no-auth so we don't need to deal with tokens.
 		// Don't pass --addr to test the default.
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{"--no-auth"})
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{"--no-auth", "--approve", "deny"})
 	}()
 
 	// Poll for output or error. The server may fail if port 9090 is
@@ -404,15 +554,16 @@ func TestServeGeneratesAuthToken(t *testing.T) {
 	c := newServeCmd(out)
 	c.errOut = errOut
 
-	tokenPath := filepath.Join(t.TempDir(), "serve-token")
+	tokenPath := privateServeTokenPath(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "127.0.0.1:0",
+			"--approve", "deny",
 			"--token-file", tokenPath,
 		})
 	}()
@@ -475,8 +626,9 @@ func TestServeCustomTokenUsed(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "127.0.0.1:0",
+			"--approve", "deny",
 			"--token", "my-custom-token",
 			"--show-token",
 		})
@@ -517,56 +669,269 @@ func TestServeCustomTokenUsed(t *testing.T) {
 	<-done
 }
 
-// TestServeFallbackWarnsEchoMode verifies that when the server falls back to
-// echo mode (no config available), a prominent WARNING is printed to the
-// output so users notice the degraded mode.
-func TestServeFallbackWarnsEchoMode(t *testing.T) {
+func TestServeMissingRuntimeFailsBeforeTokenOrListener(t *testing.T) {
 	out := &safeBuffer{}
+	tokenPath := privateServeTokenPath(t)
 	c := newServeCmd(out)
+	assemblyCalls := 0
+	c.assemblyFactory = func(context.Context, *config.Config, string, string, io.Writer, ...AssembleOption) (*AgentAssembly, error) {
+		assemblyCalls++
+		return nil, errors.New("assembly must not run without a config")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := c.Run(ctx, NewDefaultConfig(false), []string{
+		"--addr", "127.0.0.1:0",
+		"--approve", "deny",
+		"--token-file", tokenPath,
+	})
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "runtime") {
+		t.Fatalf("expected missing-runtime error, got %v", err)
+	}
+	if strings.Contains(out.String(), "listening") {
+		t.Fatalf("server listened without a configured runtime: %s", out.String())
+	}
+	if _, statErr := os.Stat(tokenPath); !os.IsNotExist(statErr) {
+		t.Fatalf("token file should not be written without a runtime, stat error: %v", statErr)
+	}
+	if assemblyCalls != 0 {
+		t.Fatalf("agent assembly ran without a loaded config %d time(s)", assemblyCalls)
+	}
+}
 
+func TestWriteTokenFileReplacesWideFilePrivately(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "serve-token")
+	if err := os.WriteFile(path, []byte("old-token"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeTokenFile(path, "new-token-secret"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "new-token-secret" {
+		t.Fatalf("unexpected token file contents: %q", data)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("expected token file permission 0600, got %o", info.Mode().Perm())
+	}
+}
+
+func TestServeTokenFileFailureDoesNotStartListener(t *testing.T) {
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := reservation.Addr().String()
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out := &safeBuffer{}
+	errOut := &safeBuffer{}
+	c := newServeCmd(out)
+	c.errOut = errOut
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	done := make(chan error, 1)
 	go func() {
-		// NewDefaultConfig(false) returns a *defaultConfig, not a
-		// *config.Config, so rc will be nil and the server falls back
-		// to echo mode.
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
-			"--no-auth",
-			"--addr", "127.0.0.1:0",
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
+			"--addr", addr,
+			"--approve", "deny",
+			"--token-file", filepath.Join(dir, "serve-token"),
 		})
 	}()
 
-	// Wait for the server to start.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected token file permission failure")
+		}
 		if strings.Contains(out.String(), "listening") {
-			break
+			t.Fatalf("listener started despite token file failure: %s", out.String())
 		}
-		select {
-		case err := <-done:
+		probe, listenErr := net.Listen("tcp", addr)
+		if listenErr != nil {
+			t.Fatalf("token file failure left a listener on %s: %v", addr, listenErr)
+		}
+		if err := probe.Close(); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(300 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("serve did not fail before listener startup")
+	}
+}
+
+func TestServeBindFailureDoesNotPublishTokenOrLeaveListener(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		existingToken string
+	}{
+		{name: "new token"},
+		{name: "preserve existing token", existingToken: "previous-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			occupied, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
-				t.Fatalf("server failed to start: %v", err)
+				t.Fatal(err)
 			}
-			return
-		case <-time.After(50 * time.Millisecond):
-		}
+			addr := occupied.Addr().String()
+			defer occupied.Close()
+
+			tokenPath := privateServeTokenPath(t)
+			if tc.existingToken != "" {
+				if err := os.WriteFile(tokenPath, []byte(tc.existingToken), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			out := &safeBuffer{}
+			errOut := &safeBuffer{}
+			c := newServeCmd(out)
+			c.errOut = errOut
+			err = c.Run(context.Background(), newAssembleTestConfig(t), []string{
+				"--addr", addr,
+				"--approve", "deny",
+				"--token-file", tokenPath,
+			})
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "listen") {
+				t.Fatalf("expected bind failure, got %v", err)
+			}
+			if strings.Contains(out.String(), "listening") {
+				t.Fatalf("serve reported success after bind failure: %s", out.String())
+			}
+			if strings.Contains(errOut.String(), "Auth token:") {
+				t.Fatalf("serve disclosed a token after bind failure: %s", errOut.String())
+			}
+
+			data, readErr := os.ReadFile(tokenPath)
+			if tc.existingToken == "" {
+				if !os.IsNotExist(readErr) {
+					t.Fatalf("failed serve published a token file: data=%q err=%v", data, readErr)
+				}
+			} else if readErr != nil || string(data) != tc.existingToken {
+				t.Fatalf("failed serve replaced the existing token: data=%q err=%v", data, readErr)
+			}
+
+			if err := occupied.Close(); err != nil {
+				t.Fatal(err)
+			}
+			probe, err := net.Listen("tcp", addr)
+			if err != nil {
+				t.Fatalf("failed serve left a listener on %s: %v", addr, err)
+			}
+			if err := probe.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestServeAssemblyFailureDoesNotWriteTokenOrStartListener(t *testing.T) {
+	workDir := t.TempDir()
+	hookDir := filepath.Join(workDir, ".go-cli")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const commandCanary = "PRIVATE_HOOK_COMMAND_CANARY"
+	hooks := "hooks:\n  - event: post_tool_use\n    command: echo " + commandCanary + "\n    timeout: 1s\n"
+	configPath := filepath.Join(hookDir, "hooks.yaml")
+	if err := os.WriteFile(configPath, []byte(hooks), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	output := out.String()
-	if !strings.Contains(output, "listening") {
-		t.Fatal("server did not start within timeout")
+	cfg := newTrustedProjectHookAssembleTestConfig(t, workDir)
+	out := &safeBuffer{}
+	c := newServeCmd(out)
+	tokenPath := privateServeTokenPath(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err := c.Run(ctx, cfg, []string{
+		"--approve", "deny",
+		"--addr", "127.0.0.1:0",
+		"--token-file", tokenPath,
+	})
+	if err == nil {
+		t.Fatal("expected unsupported assembly error")
 	}
+	if !strings.Contains(strings.ToLower(err.Error()), "posttooluse") {
+		t.Errorf("expected error to identify the unsupported hook, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), configPath) || !strings.Contains(err.Error(), "hook 0") {
+		t.Errorf("expected error to identify the configured path and hook index, got: %v", err)
+	}
+	if strings.Contains(err.Error(), commandCanary) {
+		t.Errorf("assembly error must not disclose hook command contents, got: %v", err)
+	}
+	if strings.Contains(out.String(), "listening") {
+		t.Fatalf("server listened after assembly failure: %s", out.String())
+	}
+	if _, statErr := os.Stat(tokenPath); !os.IsNotExist(statErr) {
+		t.Fatalf("token file should not be written after assembly failure, stat error: %v", statErr)
+	}
+}
 
-	// The fallback should produce a prominent WARNING about echo mode.
-	if !strings.Contains(output, "WARNING") {
-		t.Errorf("expected 'WARNING' in output when falling back to echo mode, got: %s", output)
+func TestServeAssemblyErrorClosesReturnedAssembly(t *testing.T) {
+	assembly, err := AssembleAgent(context.Background(), newAssembleTestConfig(t), "openai", "test-model", io.Discard,
+		WithApproveMode(ApproveDeny),
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(output, "echo mode") {
-		t.Errorf("expected 'echo mode' in output when falling back, got: %s", output)
+	t.Cleanup(func() { _ = assembly.Close(context.Background()) })
+	if assembly.closeOwner == nil {
+		t.Fatal("assembled runtime has no close owner")
 	}
+	closeDone := assembly.closeOwner.done
 
-	cancel()
-	<-done
+	fixtureErr := errors.New("fixture failure after partial assembly")
+	out := &safeBuffer{}
+	c := newServeCmd(out)
+	c.assemblyFactory = func(context.Context, *config.Config, string, string, io.Writer, ...AssembleOption) (*AgentAssembly, error) {
+		return assembly, fixtureErr
+	}
+	tokenPath := privateServeTokenPath(t)
+	err = c.Run(context.Background(), newAssembleTestConfig(t), []string{
+		"--approve", "deny",
+		"--addr", "127.0.0.1:0",
+		"--token-file", tokenPath,
+	})
+	if !errors.Is(err, fixtureErr) {
+		t.Fatalf("expected the assembly error to be preserved, got %v", err)
+	}
+	select {
+	case <-closeDone:
+	default:
+		t.Fatal("serve returned without closing the assembly owner")
+	}
+	if strings.Contains(out.String(), "listening") {
+		t.Fatalf("server listened after assembly failure: %s", out.String())
+	}
+	if _, statErr := os.Stat(tokenPath); !os.IsNotExist(statErr) {
+		t.Fatalf("token file should not be written after assembly failure, stat error: %v", statErr)
+	}
 }

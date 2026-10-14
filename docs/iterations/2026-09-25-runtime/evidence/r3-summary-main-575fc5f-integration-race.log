@@ -1,0 +1,5 @@
+ok  	github.com/pengjunchen/go-cli/internal/compaction	1.089s
+ok  	github.com/pengjunchen/go-cli/internal/core	5.675s
+ok  	github.com/pengjunchen/go-cli/internal/session	5.831s
+ok  	github.com/pengjunchen/go-cli/tests	24.760s
+ok  	github.com/pengjunchen/go-cli/tests/e2e_20260802	4.517s

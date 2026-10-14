@@ -10,13 +10,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -158,7 +154,7 @@ func TestInitializeSentFirst(t *testing.T) {
 // initialize handshake and exposes the negotiated protocol version.
 func TestHTTPInitializeHandshake(t *testing.T) {
 	t.Parallel()
-	srv := newHTTPMCPServer(t, http.StatusOK, false)
+	srv := newHTTPMCPServer(t, false)
 	adapter := newHTTPTestAdapter(srv)
 	require.NoError(t, adapter.Connect(context.Background()))
 	assert.Equal(t, LatestProtocolVersion, adapter.ProtocolVersion())
@@ -261,17 +257,16 @@ func httpMCPServerWithAuthCheck(t *testing.T, mu *sync.Mutex, seenAuth *string, 
 			mu.Unlock()
 		}
 
-		if r.Method == http.MethodGet {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
 		var req struct {
-			ID     int64  `json:"id"`
-			Method string `json:"method"`
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &req)
+		if req.Method == "notifications/initialized" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 
 		var result map[string]any
 		switch req.Method {
@@ -344,7 +339,7 @@ func TestHTTPCustomHeadersSent(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AC-4: 401 + WWW-Authenticate triggers OAuth 2.1 authorization code flow
+// AC-4: unsupported OAuth configuration fails before network access
 // ---------------------------------------------------------------------------
 
 // TestHTTP401WithoutOAuthReturnsError verifies that a 401 response without an
@@ -352,8 +347,9 @@ func TestHTTPCustomHeadersSent(t *testing.T) {
 func TestHTTP401WithoutOAuthReturnsError(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected HTTP method %q", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("WWW-Authenticate", `Bearer`)
@@ -371,124 +367,25 @@ func TestHTTP401WithoutOAuthReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "authentication required")
 }
 
-// TestHTTPOAuthFlow verifies the full OAuth 2.1 authorization code flow:
-// 401 → start callback server → authorize → exchange code → retry with token.
-func TestHTTPOAuthFlow(t *testing.T) {
-	// NOT t.Parallel() — captures os.Stderr to extract the authorization URL.
-
-	// Mock token endpoint.
-	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"access_token":"test-token","token_type":"Bearer"}`))
+// TestHTTPOAuthConfigRejectedBeforeNetwork verifies that unsupported OAuth
+// configuration is not silently ignored or followed by any network request.
+func TestHTTPOAuthConfigRejectedBeforeNetwork(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
 	}))
-	t.Cleanup(tokenSrv.Close)
-
-	// Mock authorization endpoint: redirects to the callback URL with a code.
-	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		redirectURI := r.URL.Query().Get("redirect_uri")
-		if redirectURI == "" {
-			http.Error(w, "missing redirect_uri", http.StatusBadRequest)
-			return
-		}
-		// Forward the state parameter to satisfy CSRF verification on the callback.
-		state := r.URL.Query().Get("state")
-		redirectURL := redirectURI + "?code=fake-auth-code"
-		if state != "" {
-			redirectURL += "&state=" + url.QueryEscape(state)
-		}
-		http.Redirect(w, r, redirectURL, http.StatusFound)
-	}))
-	t.Cleanup(authSrv.Close)
-
-	// Mock MCP server: first initialize returns 401, second succeeds with token.
-	var initCount int32
-	mcpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		var req struct {
-			ID     int64  `json:"id"`
-			Method string `json:"method"`
-		}
-		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &req)
-
-		if req.Method == "initialize" {
-			count := atomic.AddInt32(&initCount, 1)
-			if count == 1 {
-				w.Header().Set("WWW-Authenticate", `Bearer`)
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-			// Second attempt: verify the Bearer token is present.
-			if r.Header.Get("Authorization") != "Bearer test-token" {
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-			result := map[string]any{
-				"protocolVersion": LatestProtocolVersion,
-				"capabilities":    map[string]any{},
-				"serverInfo":      map[string]any{"name": "test", "version": "1.0"},
-			}
-			frame := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}
-			b, _ := json.Marshal(frame)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write(b)
-			return
-		}
-
-		// Handle notifications/initialized and other methods.
-		frame := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}}
-		b, _ := json.Marshal(frame)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(b)
-	}))
-	t.Cleanup(mcpSrv.Close)
-
+	t.Cleanup(srv.Close)
 	adapter := NewHTTPClientAdapter(MCPServerConfig{
 		Name:      "srv",
 		Transport: MCPTransportStreamableHTTP,
-		URL:       mcpSrv.URL,
+		URL:       srv.URL,
 		OAuthConfig: &OAuthConfig{
-			AuthorizationURL: authSrv.URL,
-			TokenURL:         tokenSrv.URL,
-			ClientID:         "test-client",
+			AuthorizationURL: "https://auth.invalid/authorize",
+			TokenURL:         "https://auth.invalid/token",
 		},
 	})
-
-	// Capture stderr to extract the authorization URL printed by doOAuthFlow.
-	oldStderr := os.Stderr
-	rPipe, wPipe, _ := os.Pipe()
-	os.Stderr = wPipe
-	t.Cleanup(func() {
-		os.Stderr = oldStderr
-		_ = wPipe.Close()
-		_ = rPipe.Close()
-	})
-
-	// Goroutine simulates the browser: reads the auth URL from stderr and
-	// follows it, causing the auth server to redirect to the local callback.
-	go func() {
-		scanner := bufio.NewScanner(rPipe)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if idx := strings.Index(line, "http://"); idx >= 0 {
-				authURL := strings.TrimSpace(line[idx:])
-				resp, err := http.Get(authURL)
-				if err == nil {
-					_ = resp.Body.Close()
-				}
-				return
-			}
-		}
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	require.NoError(t, adapter.Connect(ctx))
-	assert.Equal(t, "test-token", adapter.token)
-	assert.Equal(t, LatestProtocolVersion, adapter.ProtocolVersion())
+	require.ErrorIs(t, adapter.Connect(context.Background()), ErrUnsupportedOAuth)
+	assert.Zero(t, requests.Load())
 }

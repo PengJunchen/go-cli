@@ -23,6 +23,143 @@ func TestHookSystem_ShellHookPreToolUse_Allow(t *testing.T) {
 	}
 }
 
+func TestShellHookStartGuardReturnsBeforeWaitingForChild(t *testing.T) {
+	started := make(chan struct{})
+	guardReturned := make(chan struct{})
+	tempDir := t.TempDir()
+	marker := filepath.Join(tempDir, "hook-ran")
+	childStarted := filepath.Join(tempDir, "child-started")
+	releaseChild := filepath.Join(tempDir, "release-child")
+	t.Cleanup(func() {
+		if err := os.WriteFile(releaseChild, []byte("release"), 0o600); err != nil {
+			t.Errorf("release shell-hook child during cleanup: %v", err)
+		}
+	})
+	controller := NewDefaultPlanModeController()
+	guard := ShellHookStartGuard(func(_ context.Context, start func() error) error {
+		close(started)
+		run, err := controller.StartIfInactive(start)
+		if err != nil {
+			return err
+		}
+		if !run {
+			return errors.New("Plan mode unexpectedly blocked the lifecycle hook")
+		}
+		close(guardReturned)
+		return nil
+	})
+	hook := NewShellHookWithStartGuard("guarded", EventSessionStart,
+		"printf started > '"+childStarted+"'; while [ ! -f '"+releaseChild+"' ]; do sleep 0.01; done; printf done > '"+marker+"'", 3*time.Second, guard)
+	done := make(chan struct{})
+	go func() {
+		hook.SessionStart(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("shell hook did not enter its start guard")
+	}
+	select {
+	case <-guardReturned:
+	case <-time.After(time.Second):
+		t.Fatal("start guard did not return after starting the child")
+	}
+	childStartDeadline := time.After(time.Second)
+	childStartPoll := time.NewTicker(10 * time.Millisecond)
+	defer childStartPoll.Stop()
+	for {
+		if _, err := os.Stat(childStarted); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("inspect child-start marker: %v", err)
+		}
+		select {
+		case <-childStartPoll.C:
+		case <-childStartDeadline:
+			t.Fatal("child did not reach its controlled wait")
+		}
+	}
+	select {
+	case <-done:
+		t.Fatal("shell hook waited for the child while still inside its start guard")
+	default:
+	}
+	planEntryResult := make(chan error, 1)
+	go func() { planEntryResult <- controller.Enter(context.Background(), "planning") }()
+	select {
+	case err := <-planEntryResult:
+		if err != nil {
+			t.Fatalf("Plan entry failed while the child was running: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Plan entry remained blocked until the lifecycle child finished")
+	}
+	if err := os.WriteFile(releaseChild, []byte("release"), 0o600); err != nil {
+		t.Fatalf("release shell-hook child: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shell hook did not join its child")
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "done" {
+		t.Fatalf("guarded child output = %q, error = %v", data, err)
+	}
+}
+
+func TestShellHookStartGuardErrorStillJoinsStartedChild(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	guardErr := errors.New("trust state changed after launch")
+	guard := ShellHookStartGuard(func(_ context.Context, start func() error) error {
+		if err := start(); err != nil {
+			return err
+		}
+		return guardErr
+	})
+	hook := NewShellHookWithStartGuard("guarded", EventSessionStart,
+		"sleep 0.15; printf done > '"+marker+"'", time.Second, guard)
+	_, err := hook.execCommand(context.Background(), hookPayload{Event: string(EventSessionStart)})
+	if !errors.Is(err, guardErr) {
+		t.Fatalf("expected launch guard error, got %v", err)
+	}
+	if data, readErr := os.ReadFile(marker); readErr != nil || string(data) != "done" {
+		t.Fatalf("started child was not joined: data=%q error=%v", data, readErr)
+	}
+}
+
+func TestHookManagerKeepsAC5ForAuthorizedStartFailure(t *testing.T) {
+	controller := NewDefaultPlanModeController()
+	startErr := errors.New("private child start detail")
+	hook := NewShellHookWithStartGuard("authorized-start-failure", EventPreToolUse, "unused", time.Second,
+		func(_ context.Context, _ func() error) error {
+			authorized, err := controller.StartIfInactive(func() error { return startErr })
+			if !authorized && err == nil {
+				return errors.New("Plan mode unexpectedly blocked the test hook")
+			}
+			if err == nil {
+				return startErr
+			}
+			return err
+		})
+	manager := NewHookManager(hook)
+
+	err := manager.PreToolUseContextInterceptor()(context.Background(), "read", "call-1", nil)
+	if err != nil {
+		t.Fatalf("ordinary child-start failures must retain AC-5 allow behavior: %v", err)
+	}
+}
+
+func TestShellHookStartGuardCannotSilentlySkipLaunch(t *testing.T) {
+	hook := NewShellHookWithStartGuard("guarded", EventSessionStart, "exit 0", time.Second,
+		func(context.Context, func() error) error { return nil })
+	_, err := hook.execCommand(context.Background(), hookPayload{Event: string(EventSessionStart)})
+	if !errors.Is(err, errShellHookGuardDidNotStart) {
+		t.Fatalf("expected a fail-closed guard error, got %v", err)
+	}
+}
+
 func TestHookSystem_ShellHookPreToolUse_Deny(t *testing.T) {
 	hook := NewShellHook("test", EventPreToolUse, "exit 1", 5*time.Second)
 	allow, err := hook.PreToolUse(context.Background(), "bash", nil)
@@ -129,6 +266,33 @@ func TestHookSystem_HookManagerExecutionFailureContinues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil on hook error (AC-5), got %v", err)
 	}
+}
+
+func TestHookManagerPropagatesTypedSafeShellHookDenial(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	denial := testSafeHookDenial{}
+	hook := NewShellHookWithStartGuard("guarded", EventPreToolUse, "printf ran > '"+marker+"'", time.Second,
+		func(context.Context, func() error) error { return denial })
+	manager := NewHookManager(hook)
+
+	err := manager.PreToolUseContextInterceptor()(context.Background(), "read", "call-1", nil)
+	if err == nil {
+		t.Fatal("expected typed safe shell-hook denial to cancel the tool call")
+	}
+	if message, ok := SafeToolInterceptionMessage(err); !ok || message != denial.SafeToolInterceptionMessage() {
+		t.Fatalf("safe denial message = %q, ok=%v; want %q", message, ok, denial.SafeToolInterceptionMessage())
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("denied shell hook started its child: stat error = %v", statErr)
+	}
+}
+
+type testSafeHookDenial struct{}
+
+func (testSafeHookDenial) Error() string { return "opaque internal denial" }
+
+func (testSafeHookDenial) SafeToolInterceptionMessage() string {
+	return "fixed safe denial"
 }
 
 func TestHookSystem_HookManagerPostToolUse(t *testing.T) {

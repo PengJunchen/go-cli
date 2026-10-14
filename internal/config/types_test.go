@@ -81,7 +81,7 @@ func TestWebSearchConfigFields(t *testing.T) {
 
 func TestWebSearchConfigDefaultsToEmpty(t *testing.T) {
 	cfg := defaultConfig()
-	assert.Equal(t, "", cfg.WebSearch.Provider, "default provider should be empty (treated as mock)")
+	assert.Equal(t, "", cfg.WebSearch.Provider, "default provider stays unset until a real provider is selected")
 	assert.Equal(t, "", cfg.WebSearch.APIKey)
 	assert.Equal(t, "", cfg.WebSearch.Timeout)
 }

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"reflect"
 	"time"
 )
 
@@ -42,10 +43,16 @@ func (s TurnStatus) String() string {
 type Turn struct {
 	// ID uniquely identifies the turn within its runner.
 	ID string
+	// RunID identifies the run claim owned by this turn.
+	RunID string
 	// Submission is the request that started the turn.
 	Submission Submission
 	// Status is the current lifecycle state of the turn.
 	Status TurnStatus
+	// Outcome records logical completion independently from resource cleanup.
+	Outcome RunOutcome
+	// ExecutionState reports whether owned execution resources have quiesced.
+	ExecutionState RunExecutionState
 	// StartTime records when the turn began running.
 	StartTime time.Time
 	// EndTime records when the turn finished (zero while running).
@@ -60,6 +67,44 @@ type Turn struct {
 	Steerings []Submission
 	// FollowUps holds the follow-up submissions applied while running.
 	FollowUps []Submission
+}
+
+func cloneSubmission(submission Submission) Submission {
+	submission.Metadata = cloneStringAnyMap(submission.Metadata)
+	submission.History = cloneAgentMessages(submission.History)
+	return submission
+}
+
+func cloneTurn(turn Turn) Turn {
+	turn.Submission = cloneSubmission(turn.Submission)
+	if turn.Steerings != nil {
+		steerings := make([]Submission, len(turn.Steerings))
+		for i := range turn.Steerings {
+			steerings[i] = cloneSubmission(turn.Steerings[i])
+		}
+		turn.Steerings = steerings
+	}
+	if turn.FollowUps != nil {
+		followUps := make([]Submission, len(turn.FollowUps))
+		for i := range turn.FollowUps {
+			followUps[i] = cloneSubmission(turn.FollowUps[i])
+		}
+		turn.FollowUps = followUps
+	}
+	return turn
+}
+
+func cloneAgentMessage(message AgentMessage) AgentMessage {
+	return cloneAgentMessages([]AgentMessage{message})[0]
+}
+
+func cloneStringAnyMap(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	var cloned map[string]any
+	reflect.ValueOf(&cloned).Elem().Set(cloneJSONValue(reflect.ValueOf(input), make(map[jsonCloneIdentity]reflect.Value)))
+	return cloned
 }
 
 // Done reports whether the turn has reached a terminal state.

@@ -30,6 +30,7 @@ type AgentAccessor interface {
 	CostTracker() *production.CostTracker
 	StatsRegistry() *production.StatsRegistry
 	ContextWindow() int
+	LocalCompactionCeiling() int
 	ModelName() string
 }
 
@@ -110,6 +111,7 @@ type slashContext struct {
 	costTracker    *production.CostTracker
 	statsRegistry  *production.StatsRegistry
 	sessionID      string
+	durableMode    bool
 	toolRegistry   tools.ToolRegistry
 	modelName      string
 	sessionHandler *session.SessionSlashHandler
@@ -118,13 +120,14 @@ type slashContext struct {
 	// Dependencies for the extended slash commands. Any of these may be nil
 	// when the corresponding subsystem is not wired; handlers print a helpful
 	// diagnostic in that case.
-	fileTracker   *tools.FileTracker
-	diffGenerator tools.DiffGenerator
-	planCtrl      core.PlanModeController
-	config        *config.Config
-	sessionStore  *session.JSONLSessionStore
-	memoryStore   memory.MemoryStore
-	contextWindow int
+	fileTracker            *tools.FileTracker
+	diffGenerator          tools.DiffGenerator
+	planCtrl               core.PlanModeController
+	config                 *config.Config
+	sessionStore           *session.JSONLSessionStore
+	memoryStore            memory.MemoryStore
+	contextWindow          int
+	localCompactionCeiling int
 	// thinkingVisibility controls how thinking entries are displayed in the TUI.
 	// "show" (default) expands them, "collapse" folds them to a summary, "hide"
 	// suppresses them entirely. Set by the /thinking slash command.
@@ -151,6 +154,7 @@ type slashContext struct {
 	// contextLoader loads CLAUDE.md / AGENTS.md files for the /context
 	// command. It is nil when not wired; /context degrades gracefully.
 	contextLoader core.ProjectContextLoader
+	mcpResources  *assemblyMCPResources
 }
 
 // Compile-time assertion that *slashContext satisfies Dependencies.
@@ -161,7 +165,13 @@ var _ Dependencies = (*slashContext)(nil)
 func (sc *slashContext) Agent() *core.AgentImpl                   { return sc.agent }
 func (sc *slashContext) CostTracker() *production.CostTracker     { return sc.costTracker }
 func (sc *slashContext) StatsRegistry() *production.StatsRegistry { return sc.statsRegistry }
-func (sc *slashContext) ContextWindow() int                       { return sc.contextWindow }
+func (sc *slashContext) ContextWindow() int {
+	if sc.modelSelector != nil {
+		return sc.modelSelector.ActiveModelSnapshot().ContextWindow
+	}
+	return sc.contextWindow
+}
+func (sc *slashContext) LocalCompactionCeiling() int { return sc.localCompactionCeiling }
 func (sc *slashContext) ModelName() string {
 	if sc.modelSelector != nil {
 		return sc.modelSelector.PrimaryModelName()
@@ -212,6 +222,13 @@ func (sc *slashContext) Estimator() compaction.TokenEstimator { return sc.estima
 func (sc *slashContext) PromptBuilder() core.SystemPromptBuilder  { return sc.promptBuilder }
 func (sc *slashContext) ContextLoader() core.ProjectContextLoader { return sc.contextLoader }
 
+func (sc *slashContext) ReloadMCP(ctx context.Context) (int, error) {
+	if sc.mcpResources == nil {
+		return 0, nil
+	}
+	return sc.mcpResources.Reload(ctx)
+}
+
 // defaultSlashReg is the fully populated registry shared by all interactive
 // sessions. It is built once at package initialization; the handlers it
 // contains are stateless and operate on the slashContext passed to each
@@ -231,6 +248,12 @@ func (c *interactiveCmd) handleSlashCommand(ctx context.Context, cmd session.Sla
 	if !ok {
 		fmt.Fprintf(deps.Out(), "Unknown command: /%s. Type /help for available commands.\n", cmd.Name) //nolint:errcheck
 		return ""
+	}
+	if slashDeps, ok := deps.(*slashContext); ok && slashDeps.durableMode {
+		if err := durableHistoryMutationUnsupported(handler.Name()); err != nil {
+			fmt.Fprintf(deps.Out(), "Error: %v\n", err) //nolint:errcheck
+			return ""
+		}
 	}
 	pendingInput, err := handler.Handle(spanCtx, cmd.Args, deps)
 	if err != nil {

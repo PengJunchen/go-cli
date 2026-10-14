@@ -1,0 +1,13 @@
+{
+  "target": "test-e2e",
+  "command": "make test-e2e",
+  "exitCode": 0,
+  "durationSeconds": 166.685,
+  "baselineCommit": "e77e8058c51e5370a2ecc3eacb5fce0419829bcf",
+  "worktreeDiffSHA256": "eddf935c0c4f393d731670fff40cf84cd534d1fc1e6639231690c58cb02e7854",
+  "log": "test-e2e-e77.log",
+  "logSHA256": "6a135b419e75b0f84e5950f719e886c78ef6a0b680d5720fa395d6b7e07cbf06",
+  "signals": [
+    "go test gate passed: 4781 test function(s) started, 4775 passed, 0 benchmarked, 0 failed, 6 skipped across 7 package(s)"
+  ]
+}

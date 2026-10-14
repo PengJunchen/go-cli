@@ -10,6 +10,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 // TestCompactionHook_ReducesHistory verifies that the hook, when given a
@@ -80,4 +81,49 @@ func TestCompactionHook_PreservesRoles(t *testing.T) {
 	for _, m := range result {
 		assert.True(t, validRoles[m.Role], "invalid role after compaction: %q", m.Role)
 	}
+}
+
+func TestCompactionHook_PreservesCanonicalMetadataWithoutCompacting(t *testing.T) {
+	compactor := compaction.NewUnifiedCompactor()
+	estimator := compaction.NewHeuristicTokenEstimator()
+	hook := newCompactionHook(compactor, estimator, 10000)
+
+	messages := []core.AgentMessage{
+		{
+			Role:      "user",
+			Content:   "follow up",
+			InputKind: core.InputKindFollowUp,
+		},
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{{
+				ID: "call-1", Name: "write", Args: map[string]any{"path": "/tmp", "nested": map[string]any{"enabled": true}},
+			}},
+			ContentBlocks: []llm.ContentBlock{{Type: "image_url", ImageURL: &llm.ImageURL{URL: "data:image/png;base64,abc", Detail: "low"}}},
+			Usage:         &llm.Usage{InputTokens: 17, OutputTokens: 4, TotalTokens: 21},
+		},
+		{
+			Role:           "tool",
+			Content:        "uncertain",
+			ToolCallID:     "call-1",
+			ToolName:       "write",
+			ReceiptOutcome: core.ReceiptOutcomeUnknown,
+		},
+	}
+
+	result, err := hook(context.Background(), messages)
+	require.NoError(t, err)
+	require.Equal(t, messages, result)
+
+	args := result[1].ToolCalls[0].Args.(map[string]any)
+	args["new-key"] = "result mutation"
+	nested := args["nested"].(map[string]any)
+	nested["enabled"] = false
+	result[1].ToolCalls[0].Args = args
+	result[1].Usage.InputTokens = 100
+	assert.NotContains(t, messages[1].ToolCalls[0].Args.(map[string]any), "new-key")
+	assert.Equal(t, true, messages[1].ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["enabled"])
+	assert.Equal(t, 17, messages[1].Usage.InputTokens)
+	result[1].ContentBlocks[0].ImageURL.URL = "changed"
+	assert.Equal(t, "data:image/png;base64,abc", messages[1].ContentBlocks[0].ImageURL.URL)
 }

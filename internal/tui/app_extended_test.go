@@ -48,30 +48,24 @@ func TestIsStreamingRenderContentType(t *testing.T) {
 	assert.False(t, isStreamingRenderContentType(ContentTypeToolCall))
 }
 
-// TestAppSendDropsWhenFull verifies Send drops a message rather than blocking
-// when the internal queue is saturated. It must never block the caller.
-func TestAppSendDropsWhenFull(t *testing.T) {
+// TestAppSendReturnsQueueFull verifies Send reports saturation without
+// blocking the caller.
+func TestAppSendReturnsQueueFull(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
 	ch := app.model.msgCh
 	require.Len(t, ch, 0)
 
 	// Fill the buffered (capacity 16) queue completely.
 	for i := 0; i < cap(ch); i++ {
-		app.Send(i)
+		require.NoError(t, app.Send(i))
 	}
 	require.Len(t, ch, cap(ch))
 
-	// The next Send must drop (default branch) without blocking.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		app.Send("overflow")
-	}()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("Send blocked on a full queue; expected non-blocking drop")
-	}
+	// The next Send reports the rejected message immediately.
+	start := time.Now()
+	err := app.Send("overflow")
+	require.ErrorIs(t, err, ErrSendQueueFull)
+	require.Less(t, time.Since(start), time.Second)
 	assert.Len(t, ch, cap(ch), "overflow message should have been dropped")
 }
 
@@ -103,18 +97,31 @@ func TestAppCleanupSingleRelease(t *testing.T) {
 	require.True(t, app.cleaned)
 }
 
-// TestAppRunWithNilEventsChannel verifies Run returns promptly when the event
-// channel is (nil) closed, exercising the events-closed exit path.
-func TestAppRunWithNilEventsChannel(t *testing.T) {
+// TestAppRunWithClosedEventsWaitsForQuit keeps the model available for a final
+// durable snapshot refresh after the producer has closed its event stream.
+func TestAppRunWithClosedEventsWaitsForQuit(t *testing.T) {
 	closed := make(chan AgentEvent)
 	close(closed)
-	app := NewBubbleteaApp(closed)
-	require.NoError(t, app.Run(context.Background()))
+	app := NewBubbleteaApp(closed, WithInitialTranscript(appControlSnapshot("session-1", "main", "initial")))
+	runDone := make(chan error, 1)
+	go func() { runDone <- app.Run(context.Background()) }() //nolint:errcheck
+	select {
+	case <-app.ProgramReady():
+	case <-time.After(time.Second):
+		t.Fatal("program did not become ready")
+	}
 	assert.Equal(t, int64(0), app.EventsProcessed())
 	select {
-	case <-app.Done():
+	case err := <-runDone:
+		t.Fatalf("Run exited when only its event source closed: %v", err)
 	default:
-		t.Fatal("Done not closed after events channel closed")
+	}
+	app.Quit()
+	select {
+	case err := <-runDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after Quit")
 	}
 }
 
@@ -166,8 +173,8 @@ func TestAppSendAndEventsBothConsumed(t *testing.T) {
 	go func() { runErr <- app.Run(context.Background()) }() //nolint:errcheck
 
 	events <- AgentEvent{ContentType: ContentTypeCode, Content: "x"}
-	app.Send("msg1")
-	app.Send("msg2")
+	require.NoError(t, app.Send("msg1"))
+	require.NoError(t, app.Send("msg2"))
 	events <- AgentEvent{ContentType: ContentTypeCode, Content: "y"}
 
 	require.Eventually(t, func() bool {
@@ -187,15 +194,18 @@ func TestAppToolOutputAppendsToToolCall(t *testing.T) {
 	m.handleEvent(AgentEvent{
 		ContentType: ContentTypeToolCall,
 		Content:     "bash echo hi",
+		ToolCallID:  "call-1",
 	})
 	m.handleEvent(AgentEvent{
 		ContentType: ContentTypeToolOutput,
 		Content:     "line one",
+		ToolCallID:  "call-1",
 		Stream:      "stdout",
 	})
 	m.handleEvent(AgentEvent{
 		ContentType: ContentTypeToolOutput,
 		Content:     "line two",
+		ToolCallID:  "call-1",
 		Stream:      "stderr",
 	})
 

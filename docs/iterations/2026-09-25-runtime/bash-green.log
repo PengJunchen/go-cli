@@ -1,0 +1,13 @@
+Targeted StreamingBash and readPipe suite
+Command:
+  rtk env GOMAXPROCS=2 go test -p 2 ./internal/tools -run '^(TestStreamingBashEcho|TestStreamingBashStdoutStderrSeparated|TestStreamingBashStreamSink|TestStreamingBashTimeout|TestStreamingBashTruncation|TestReadPipeReportsReaderErrorAfterDraining|TestReadPipeReportsDrainFailure|TestStreamingBashDrainsPastMaxOutput|TestStreamingBashDrainsConcurrentStdoutStderr|TestStreamingBashLongLineReportsScannerErrorAndDrains|TestStreamingBashCancellationWaitsForReaders|TestStreamingBashSandbox|TestStreamingBashBackwardCompatible|TestStreamingBashExitCode|TestStreamingBashMissingCommand|TestStreamingBashMultilineOutput|TestStreamingBashImplementsInterfaces)$' -count=1 -timeout 30s -v
+Exit code: 0
+Result: PASS; all 17 selected tests passed in 1.119s.
+The injected non-EOF reader error was surfaced after a successful EOF drain; an
+injected second drain error was preserved and returned with `drained=false`.
+
+Full internal/tools race suite
+Command:
+  rtk env GOMAXPROCS=2 go test -race -p 2 ./internal/tools -count=1 -timeout 120s
+Exit code: 0
+Result: `ok github.com/pengjunchen/go-cli/internal/tools 36.602s`.

@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
@@ -45,8 +46,8 @@ func TestListBranches_Empty(t *testing.T) {
 	assert.Empty(t, branches)
 }
 
-// TestClone verifies Clone deep-copies entries into a new id space, sets the new
-// leaf as current, and records branch metadata.
+// TestClone verifies Clone shares the canonical prefix, appends one branch
+// checkpoint, and records branch metadata.
 func TestClone(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -60,22 +61,23 @@ func TestClone(t *testing.T) {
 
 	require.NoError(t, tree.Clone(ctx, "e2", "copy"))
 
-	// New entries were added (deep copy, not zero-copy).
-	assert.Equal(t, before+3, tree.EntryCount(), "clone must add new entries")
+	assert.Equal(t, before+1, tree.EntryCount(), "clone must append exactly one branch checkpoint")
 	// The new branch's leaf became the current leaf.
 	assert.Equal(t, "copy-e2", tree.CurrentLeaf())
 
-	// The cloned branch is reconstructable and independent.
+	// The cloned branch reuses its source entries and ends at the checkpoint.
 	branch, err := tree.GetBranch(ctx, "copy-e2")
 	require.NoError(t, err)
-	require.Len(t, branch, 3)
-	assert.Equal(t, "copy-e0", branch[0].ID)
-	assert.Equal(t, "copy-e1", branch[1].ID)
-	assert.Equal(t, "copy-e2", branch[2].ID)
-	// Parent links were remapped to the new id space.
-	assert.Equal(t, "", branch[0].ParentID)
-	assert.Equal(t, "copy-e0", branch[1].ParentID)
-	assert.Equal(t, "copy-e1", branch[2].ParentID)
+	require.Len(t, branch, 4)
+	assert.Equal(t, "e0", branch[0].ID)
+	assert.Equal(t, "e1", branch[1].ID)
+	assert.Equal(t, "e2", branch[2].ID)
+	assert.Equal(t, "copy-e2", branch[3].ID)
+	assert.Equal(t, "e2", branch[3].ParentID)
+	assert.Equal(t, EntryTypeCheckpoint, branch[3].Type)
+	assert.Equal(t, CheckpointBranch, branch[3].CheckpointKind)
+	assert.Equal(t, "e2", branch[3].BaseLeafEntryID)
+	assert.Equal(t, "copy-e2", branch[3].ActiveLeafEntryID)
 	// Content is preserved.
 	assert.Equal(t, "content-e0", branch[0].Content)
 
@@ -84,7 +86,7 @@ func TestClone(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "copy", meta.BranchID)
 	assert.Equal(t, "e2", meta.ParentID)
-	assert.Equal(t, "copy-e2", meta.BaseLeafID)
+	assert.Equal(t, "e2", meta.BaseLeafID)
 	assert.False(t, meta.CreatedAt.IsZero())
 
 	// The original branch is untouched.
@@ -94,9 +96,9 @@ func TestClone(t *testing.T) {
 	assert.Equal(t, "e0", orig[0].ID)
 }
 
-// TestClone_DeepCopyIndependence verifies that the cloned entries are distinct
-// objects; appending to the clone does not alter the original branch.
-func TestClone_DeepCopyIndependence(t *testing.T) {
+// TestClone_FutureAppendOnlyAffectsSelectedBranch verifies appending to the
+// clone's checkpoint path does not alter the original branch.
+func TestClone_FutureAppendOnlyAffectsSelectedBranch(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	ctx := context.Background()
@@ -107,7 +109,7 @@ func TestClone_DeepCopyIndependence(t *testing.T) {
 
 	require.NoError(t, tree.Clone(ctx, "a", "dup"))
 
-	// Append a new entry only to the cloned branch.
+	// Append a new entry only to the cloned branch, after its checkpoint.
 	require.NoError(t, tree.Append(ctx, newTestEntry("dup-extra", "dup-a", EntryTypeUser)))
 	require.NoError(t, tree.MoveTo(ctx, "dup-extra"))
 
@@ -120,8 +122,139 @@ func TestClone_DeepCopyIndependence(t *testing.T) {
 	// The cloned branch now has the extra entry.
 	clone, err := tree.GetBranch(ctx, "dup-extra")
 	require.NoError(t, err)
-	assert.Len(t, clone, 3)
+	assert.Len(t, clone, 4)
 	assert.Equal(t, "dup-extra", clone[len(clone)-1].ID)
+}
+
+func TestCloneAppendsDivergeFromSharedLeaf(t *testing.T) {
+	ctx := context.Background()
+	tree := newConcreteTree()
+	require.NoError(t, tree.Append(ctx, newTestEntry("root", "", EntryTypeUser)))
+	require.NoError(t, tree.Append(ctx, newTestEntry("base", "root", EntryTypeAssistant)))
+	require.NoError(t, tree.MoveTo(ctx, "base"))
+	require.NoError(t, tree.Clone(ctx, "base", "copy"))
+	checkpointID := "copy-base"
+
+	require.NoError(t, tree.MoveTo(ctx, "base"))
+	require.NoError(t, tree.Append(ctx, newTestEntry("main-child", "base", EntryTypeUser)))
+	require.NoError(t, tree.MoveTo(ctx, "main-child"))
+	require.NoError(t, tree.MoveTo(ctx, checkpointID))
+	require.NoError(t, tree.Append(ctx, newTestEntry("copy-child", checkpointID, EntryTypeUser)))
+	require.NoError(t, tree.MoveTo(ctx, "copy-child"))
+
+	original, err := tree.GetBranch(ctx, "main-child")
+	require.NoError(t, err)
+	cloned, err := tree.GetBranch(ctx, "copy-child")
+	require.NoError(t, err)
+	require.Len(t, original, 3)
+	require.Len(t, cloned, 4)
+	assert.Equal(t, "main-child", original[2].ID)
+	assert.Equal(t, "copy-child", cloned[3].ID)
+	assert.Equal(t, checkpointID, cloned[2].ID)
+	assert.NotSame(t, original[0], cloned[0], "public reads return independent copies")
+	assert.NotSame(t, original[1], cloned[1], "public reads return independent copies")
+
+	tree.mu.RLock()
+	originalCanonical, originalOK := tree.walkBranchLocked("main-child")
+	clonedCanonical, clonedOK := tree.walkBranchLocked("copy-child")
+	tree.mu.RUnlock()
+	require.True(t, originalOK)
+	require.True(t, clonedOK)
+	assert.Same(t, originalCanonical[0], clonedCanonical[0], "the internal root remains shared")
+	assert.Same(t, originalCanonical[1], clonedCanonical[1], "the internal prefix remains shared")
+}
+
+func TestSessionTreeCloneDoesNotAliasNestedArgs(t *testing.T) {
+	ctx := context.Background()
+	tree := newConcreteTree()
+	nested := map[string]any{"value": "original"}
+	entry := newToolCallEntry("assistant", "", []llm.ToolCall{{
+		ID:   "provider-call-id",
+		Name: "inspect",
+		Args: map[string]any{"nested": nested},
+	}})
+	require.NoError(t, tree.Append(ctx, entry))
+	nested["value"] = "caller mutation"
+	entry.ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["value"] = "entry mutation"
+	require.NoError(t, tree.MoveTo(ctx, "assistant"))
+	require.NoError(t, tree.Clone(ctx, "assistant", "copy"))
+
+	branch, err := tree.GetBranch(ctx, "copy-assistant")
+	require.NoError(t, err)
+	require.Len(t, branch, 2)
+	args := branch[0].ToolCalls[0].Args.(map[string]any)
+	assert.Equal(t, "original", args["nested"].(map[string]any)["value"])
+}
+
+func TestGetBranchReturnsDefensiveCopiesForSharedPrefix(t *testing.T) {
+	ctx := context.Background()
+	tree := newConcreteTree()
+	entry := newToolCallEntry("assistant", "", []llm.ToolCall{{
+		ID:   "provider-call-id",
+		Name: "inspect",
+		Args: map[string]any{"nested": []any{map[string]any{"value": "canonical"}}},
+	}})
+	entry.ContentBlocks = []llm.ContentBlock{{Type: "text", Text: "canonical block"}}
+	entry.ActionID = "action-1"
+	require.NoError(t, tree.Append(ctx, entry))
+	require.NoError(t, tree.Clone(ctx, "assistant", "copy"))
+
+	original, err := tree.GetBranch(ctx, "assistant")
+	require.NoError(t, err)
+	cloned, err := tree.GetBranch(ctx, "copy-assistant")
+	require.NoError(t, err)
+	require.Len(t, original, 1)
+	require.Len(t, cloned, 2)
+	assert.NotSame(t, original[0], cloned[0], "the accessor must not expose the canonical entry")
+
+	tree.mu.RLock()
+	originalCanonical, originalOK := tree.walkBranchLocked("assistant")
+	clonedCanonical, clonedOK := tree.walkBranchLocked("copy-assistant")
+	tree.mu.RUnlock()
+	require.True(t, originalOK)
+	require.True(t, clonedOK)
+	assert.Same(t, originalCanonical[0], clonedCanonical[0], "cloning shares the internal immutable prefix")
+
+	originalArgs := original[0].ToolCalls[0].Args.(map[string]any)
+	originalArgs["nested"].([]any)[0].(map[string]any)["value"] = "mutated original view"
+	original[0].Content = "mutated original view"
+	clonedArgs := cloned[0].ToolCalls[0].Args.(map[string]any)
+	clonedArgs["nested"].([]any)[0].(map[string]any)["value"] = "mutated cloned view"
+	cloned[0].ContentBlocks[0].Text = "mutated cloned view"
+	cloned[0].ToolCalls[0].ID = "mutated provider ID"
+	cloned[0].ActionID = "mutated action ID"
+
+	originalAgain, err := tree.GetBranch(ctx, "assistant")
+	require.NoError(t, err)
+	clonedAgain, err := tree.GetBranch(ctx, "copy-assistant")
+	require.NoError(t, err)
+	for _, branch := range [][]*SessionEntry{originalAgain, clonedAgain} {
+		assert.Equal(t, "canonical", branch[0].ToolCalls[0].Args.(map[string]any)["nested"].([]any)[0].(map[string]any)["value"])
+		assert.Equal(t, "content-assistant", branch[0].Content)
+		assert.Equal(t, "provider-call-id", branch[0].ToolCalls[0].ID)
+		assert.Equal(t, "action-1", branch[0].ActionID)
+		assert.Equal(t, "canonical block", branch[0].ContentBlocks[0].Text)
+	}
+}
+
+func TestTreeBuildContextReturnsDefensiveCopyForNestedArgs(t *testing.T) {
+	ctx := context.Background()
+	tree := newConcreteTree()
+	entry := newToolCallEntry("assistant", "", []llm.ToolCall{{
+		ID:   "provider-call-id",
+		Name: "inspect",
+		Args: map[string]any{"nested": map[string]any{"value": "canonical"}},
+	}})
+	require.NoError(t, tree.Append(ctx, entry))
+
+	sc, err := tree.BuildContext(ctx, "assistant")
+	require.NoError(t, err)
+	require.Len(t, sc.Messages, 1)
+	sc.Messages[0].ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["value"] = "mutated context"
+
+	branch, err := tree.GetBranch(ctx, "assistant")
+	require.NoError(t, err)
+	assert.Equal(t, "canonical", branch[0].ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["value"])
 }
 
 // TestClone_UnknownSource verifies cloning a non-existent leaf errors.
@@ -134,8 +267,8 @@ func TestClone_UnknownSource(t *testing.T) {
 	require.ErrorIs(t, err, ErrLeafNotFound)
 }
 
-// TestClone_CloneOfClone verifies cloning a previously cloned branch works and
-// preserves the remapped parent chain.
+// TestClone_CloneOfClone verifies cloning a previously cloned branch retains
+// the full shared chain and appends another checkpoint.
 func TestClone_CloneOfClone(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -150,10 +283,12 @@ func TestClone_CloneOfClone(t *testing.T) {
 
 	branch, err := tree.GetBranch(ctx, "c2-c1-e1")
 	require.NoError(t, err)
-	require.Len(t, branch, 2)
-	assert.Equal(t, "c2-c1-e0", branch[0].ID)
-	assert.Equal(t, "c2-c1-e1", branch[1].ID)
-	assert.Equal(t, "c2-c1-e0", branch[1].ParentID)
+	require.Len(t, branch, 4)
+	assert.Equal(t, "e0", branch[0].ID)
+	assert.Equal(t, "e1", branch[1].ID)
+	assert.Equal(t, "c1-e1", branch[2].ID)
+	assert.Equal(t, "c2-c1-e1", branch[3].ID)
+	assert.Equal(t, "c1-e1", branch[3].ParentID)
 }
 
 // TestSlashClone verifies the /clone slash command handler clones a branch.
@@ -172,10 +307,10 @@ func TestSlashClone(t *testing.T) {
 	assert.Contains(t, out, "snap")
 	assert.Equal(t, "snap-e1", tree.CurrentLeaf())
 
-	// The clone is reconstructable.
+	// The cloned view retains the source prefix and adds one checkpoint.
 	branch, err := tree.GetBranch(ctx, "snap-e1")
 	require.NoError(t, err)
-	require.Len(t, branch, 2)
+	require.Len(t, branch, 3)
 }
 
 // TestSlashClone_MissingArgs verifies /clone without enough args errors.

@@ -51,6 +51,23 @@ func mutationContentFromCall(call ToolCall) any {
 	}
 }
 
+func validateMutationPayload(call ToolCall) error {
+	switch call.Name {
+	case "write":
+		if _, ok := call.Args["content"].(string); !ok {
+			return fmt.Errorf("write requires a string argument 'content'")
+		}
+	case "edit":
+		if _, ok := call.Args["old_string"].(string); !ok {
+			return fmt.Errorf("edit requires a string argument 'old_string'")
+		}
+		if _, ok := call.Args["new_string"].(string); !ok {
+			return fmt.Errorf("edit requires a string argument 'new_string'")
+		}
+	}
+	return nil
+}
+
 // WithMutationQueue wraps a tool execution function so that mutation-producing
 // tool calls (write/edit) are serialized per file through the given
 // FileMutationQueue instead of running inline. Calls for non-mutation tools are
@@ -67,6 +84,9 @@ func WithMutationQueue(queue FileMutationQueue, next func(ctx context.Context, c
 		if !mutationToolNames[call.Name] {
 			slog.Debug("tools: passing non-mutation call through", "name", call.Name)
 			return next(ctx, call)
+		}
+		if err := validateMutationPayload(call); err != nil {
+			return nil, fmt.Errorf("tools: invalid mutation payload: %w", err)
 		}
 
 		path := mutationPathFromCall(call)

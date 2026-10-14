@@ -399,10 +399,9 @@ func TestFollowUpReturnsErrorWhenFull(t *testing.T) {
 	<-done
 }
 
-// TestNilChannelStillWorks verifies that Steer and FollowUp return nil (and
-// record the submission on the turn) when no channel is set. Without a channel
-// there is nothing to send to, so no error should be returned.
-func TestNilChannelStillWorks(t *testing.T) {
+// TestNilChannelsRejectSteerAndFollowUp verifies that unconfigured delivery
+// channels do not produce accepted turn inputs.
+func TestNilChannelsRejectSteerAndFollowUp(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	bl := newBlockingTurnLoop()
@@ -419,17 +418,15 @@ func TestNilChannelStillWorks(t *testing.T) {
 	id := runningTurnID(t, runner)
 	require.NotEmpty(t, id)
 
-	// Steer and FollowUp should succeed even without channels.
-	require.NoError(t, runner.Steer(context.Background(), id, "steer msg"))
-	require.NoError(t, runner.FollowUp(context.Background(), id, "followup msg"))
+	// Neither input can be accepted without a delivery channel.
+	require.Error(t, runner.Steer(context.Background(), id, "steer msg"))
+	require.Error(t, runner.FollowUp(context.Background(), id, "followup msg"))
 
 	// The submissions should still be recorded on the turn.
 	turn, err := runner.Get(context.Background(), id)
 	require.NoError(t, err)
-	require.Len(t, turn.Steerings, 1)
-	assert.Equal(t, "steer msg", turn.Steerings[0].Content)
-	require.Len(t, turn.FollowUps, 1)
-	assert.Equal(t, "followup msg", turn.FollowUps[0].Content)
+	assert.Empty(t, turn.Steerings)
+	assert.Empty(t, turn.FollowUps)
 
 	close(bl.release)
 	<-done

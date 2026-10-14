@@ -233,7 +233,7 @@ func TestHookAndHookActions(t *testing.T) {
 	// All four actions are representable.
 	actions := []HookAction{
 		HookActionPass,
-		hookActionBlock,
+		HookActionBlock,
 		hookActionTerminate,
 		hookActionReplace,
 	}

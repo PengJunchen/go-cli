@@ -94,6 +94,36 @@ func TestSlashHelp(t *testing.T) {
 	} {
 		assert.Contains(t, output, want, "help output should list %s", want)
 	}
+	for _, want := range []string{
+		"Capability boundaries",
+		"Memory: user-managed with /memory only",
+		"no automatic extraction or prompt injection",
+		"Goal, Task, and Todo: stored only in memory for this process",
+		"Session storage: without session.store_path, /session is unsupported.",
+		"Durable mode exposes /session tree, branches, pending, and explicit one-action reconciliation; resume uses --resume-session <physical-id> at startup.",
+		"Durable /session resume, fork, clone, and switch are unsupported.",
+		"Legacy mutable mode supports /session tree, branches, resume, fork, clone, and switch with a wired mutable tree; resume listing needs a session store.",
+		"Session snapshot and schema migration are unavailable.",
+		"Image reading and Web Agent UI: unavailable",
+		"Web Search requires a configured provider",
+		"Remote TUI is unavailable",
+		"private go-cli-acp-json/1 profile",
+		"official ACP and ask approvals are unavailable",
+		"Hard cost budgets are unsupported",
+		"a displayed $0 is not proof of zero spend",
+		"Plan Mode changes only through the user's /plan enter|exit commands",
+		"Themes cover a renderer subset",
+		"Diffs are unified; ASCII mode is unsupported",
+		"NO_COLOR only disables color",
+		"MCP server configuration hot reload is unsupported",
+		"Darwin arm64",
+		"Linux and Windows are unverified",
+		"Docker target is linux/amd64; runtime support is unverified",
+	} {
+		assert.Contains(t, output, want, "help output must state boundary: %s", want)
+	}
+	assert.NotContains(t, output, "Fork, branch switch, snapshot, and migration are unsupported",
+		"legacy mutable handlers support fork and switch, so the boundary must distinguish durable mode")
 }
 
 func TestThemeHandler(t *testing.T) {
@@ -143,6 +173,127 @@ func TestSlashCost(t *testing.T) {
 
 	assert.Contains(t, output, "Total cost:")
 	assert.Contains(t, output, "Total calls: 1")
+}
+
+func TestSlashCostShowsKnownSubtotalsAndUnknownAttemptCounts(t *testing.T) {
+	tracker := production.NewCostTracker(nil)
+	result := llm.ProviderAttemptResult{
+		OperationID: "op-cost-report",
+		AttemptID:   "attempt-cost-report",
+		Identity: llm.AttemptIdentity{
+			ProviderID: "openai",
+			ModelID:    "gpt-4o",
+			ProtocolID: llm.ProtocolOpenAICompatible,
+			OriginKind: llm.OriginResolverDefaultEndpoint,
+			Candidate:  "candidate-cost-report",
+		},
+		Outcome: llm.AttemptTransportFailure,
+		Failure: llm.FailureTransientProvider,
+		Usage:   llm.UnknownUsageEvidence(),
+	}
+	_, err := tracker.RecordAttempt(result)
+	require.NoError(t, err)
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, costTracker: tracker}
+	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "cost"}, sc)
+	output := buf.String()
+
+	assert.Contains(t, output, "Known cost subtotal: $0.0000")
+	assert.Contains(t, output, "Provider attempts: 1")
+	assert.Contains(t, output, "Unknown usage attempts: 1")
+	assert.Contains(t, output, "Unknown cost attempts: 1")
+	assert.Contains(t, output, `provider="openai" model="gpt-4o" usage=unknown`)
+	assert.Contains(t, output, "cost=unknown price_source=unknown")
+	assert.Contains(t, output, `attempt_id="attempt-cost-report" outcome=transport_failure amount=unknown`)
+	assert.NotContains(t, output, "Total cost: $0.0000", "unknown cost must not be represented as a complete zero total")
+}
+
+func TestSlashCostShowsActualProviderModelAndEvidenceSources(t *testing.T) {
+	tracker := production.NewCostTracker(nil)
+	result := llm.ProviderAttemptResult{
+		OperationID: "op-cost-source",
+		AttemptID:   "attempt-cost-source",
+		Identity: llm.AttemptIdentity{
+			ProviderID: "actual-provider",
+			ModelID:    "gpt-4o",
+			ProtocolID: llm.ProtocolOpenAICompatible,
+			OriginKind: llm.OriginResolverDefaultEndpoint,
+			Candidate:  "candidate-private-marker",
+		},
+		Outcome: llm.AttemptSuccess,
+		Usage: llm.UsageEvidence{
+			State:  llm.UsageKnown,
+			Usage:  &llm.Usage{InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
+			Source: llm.UsageProviderResponse,
+		},
+	}
+	_, err := tracker.RecordAttempt(result)
+	require.NoError(t, err)
+	reportedCost := 0.03
+	providerReported := result
+	providerReported.OperationID = "op-cost-reported"
+	providerReported.AttemptID = "attempt-cost-reported"
+	providerReported.Identity.ProviderID = "reported-provider"
+	providerReported.Identity.ModelID = "unpriced-model"
+	providerReported.Identity.Candidate = "candidate-reported"
+	providerReported.Usage = llm.UnknownUsageEvidence()
+	providerReported.ProviderReportedCostUSD = &reportedCost
+	_, err = tracker.RecordAttempt(providerReported)
+	require.NoError(t, err)
+
+	_, buf := newTestCmd()
+	sc := &slashContext{out: buf, costTracker: tracker}
+	_, err = (&CostHandler{}).Handle(context.Background(), nil, sc)
+	require.NoError(t, err)
+
+	output := buf.String()
+	assert.Contains(t, output, `provider="actual-provider" model="gpt-4o" usage=reported (100 in / 10 out)`)
+	assert.Contains(t, output, "cost=estimated")
+	assert.Contains(t, output, "price_source=default_tier")
+	assert.Contains(t, output, `provider="reported-provider" model="unpriced-model" usage=unknown cost=reported price_source=provider`)
+	assert.NotContains(t, output, "candidate-private-marker")
+	assert.NotContains(t, output, "candidate-reported")
+	assert.NotContains(t, output, "https://")
+}
+
+func TestSlashCostCombinesLegacyAndAttemptCostsWithoutDoubleCounting(t *testing.T) {
+	tracker := production.NewCostTracker(nil)
+	legacyCost, err := tracker.Record("gpt-4o", 1000, 500)
+	require.NoError(t, err)
+	_, err = tracker.RecordAttempt(llm.ProviderAttemptResult{
+		OperationID: "op-mixed-cost-report",
+		AttemptID:   "attempt-mixed-cost-report",
+		Identity: llm.AttemptIdentity{
+			ProviderID: "actual-provider",
+			ModelID:    "gpt-4o",
+			ProtocolID: llm.ProtocolOpenAICompatible,
+			OriginKind: llm.OriginResolverDefaultEndpoint,
+			Candidate:  "candidate-private",
+		},
+		Outcome: llm.AttemptSuccess,
+		Usage: llm.UsageEvidence{
+			State:  llm.UsageKnown,
+			Usage:  &llm.Usage{InputTokens: 1000, OutputTokens: 500, TotalTokens: 1500},
+			Source: llm.UsageProviderResponse,
+		},
+	})
+	require.NoError(t, err)
+
+	_, buf := newTestCmd()
+	_, err = (&CostHandler{}).Handle(context.Background(), nil, &slashContext{out: buf, costTracker: tracker})
+	require.NoError(t, err)
+
+	output := buf.String()
+	assert.InDelta(t, 0.015, tracker.Total(), 0.000001)
+	assert.InDelta(t, 0.0075, legacyCost, 0.000001)
+	assert.Contains(t, output, "Known cost subtotal: $0.0150",
+		"the aggregate must include both the legacy record and the attempt once each")
+	assert.Contains(t, output, "Attempt known cost subtotal: $0.0075")
+	assert.Contains(t, output, "Legacy cost records: 1; known subtotal: $0.0075")
+	assert.Contains(t, output, "provider/model and usage provenance not retained; price_source=default_tier")
+	assert.Contains(t, output, `attempt_id="attempt-mixed-cost-report" outcome=success amount=$0.0075`)
+	assert.NotContains(t, output, "candidate-private")
 }
 
 // TestCostHandlerWorksWithSnapshot verifies that CostHandler.Handle renders the
@@ -370,7 +521,9 @@ func TestSlashSessionNotConfigured(t *testing.T) {
 	sc := &slashContext{out: buf, sessionHandler: nil}
 	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "session"}, sc)
 
-	assert.Contains(t, buf.String(), "Session tree not configured")
+	assert.Contains(t, buf.String(), "Unsupported:")
+	assert.Contains(t, buf.String(), "session.store_path")
+	assert.NotContains(t, buf.String(), "Session tree not configured")
 }
 
 func TestSlashSessionWithHandler(t *testing.T) {

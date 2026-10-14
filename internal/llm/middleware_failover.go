@@ -5,6 +5,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 )
 
@@ -87,6 +88,9 @@ func (m *failoverModel) orderedModels() []BaseChatModel {
 // permission) short-circuit: the error is returned immediately without trying
 // fallbacks. Each failover attempt is traced at debug level.
 func (m *failoverModel) Generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
+	if _, operationActive := OperationDispatchAuthorityFromContext(ctx); operationActive {
+		return m.generateWithOperation(ctx, msgs, opts...)
+	}
 	models := m.orderedModels()
 	var lastErr error
 	for i, model := range models {
@@ -95,6 +99,9 @@ func (m *failoverModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 			return resp, nil
 		}
 		lastErr = err
+		if ContinuationNoReplay(ctx) {
+			return nil, lastErr
+		}
 		// Fatal errors (auth, permission) should not trigger a fallback.
 		if classifyError(err) == categoryFatal {
 			return nil, err
@@ -113,14 +120,33 @@ func (m *failoverModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 // (auth, permission) short-circuit: the error is returned immediately without
 // trying fallbacks. Each failover attempt is traced at debug level.
 func (m *failoverModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
+	if _, operationActive := OperationDispatchAuthorityFromContext(ctx); operationActive {
+		return m.streamWithOperation(ctx, msgs, opts...)
+	}
 	models := m.orderedModels()
 	var lastErr error
 	for i, model := range models {
-		ch, err := model.Stream(ctx, msgs, opts...)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		attemptCtx, cancel := context.WithCancelCause(ctx)
+		ch, err := model.Stream(attemptCtx, msgs, opts...)
+		if err == nil && ch != nil {
+			return forwardMessageStreamAttempt(ctx, cancel, ch), nil
+		}
 		if err == nil {
-			return ch, nil
+			err = errors.New("failover: model returned a nil stream without an error")
+			cancelStreamAttempt(ctx, cancel, err)
+			return nil, err
+		}
+		cancelStreamAttempt(ctx, cancel, err)
+		if ch != nil {
+			drainMessageChunks(ch)
 		}
 		lastErr = err
+		if ContinuationNoReplay(ctx) {
+			return nil, lastErr
+		}
 		// Fatal errors (auth, permission) should not trigger a fallback.
 		if classifyError(err) == categoryFatal {
 			return nil, err
@@ -131,4 +157,72 @@ func (m *failoverModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 		}
 	}
 	return nil, lastErr
+}
+
+func (m *failoverModel) generateWithOperation(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
+	models := m.orderedModels()
+	if len(models) == 0 {
+		return nil, errors.New("llm: failover has no candidate models")
+	}
+	start := 0
+	proposal, hasProposal := CandidateProposalFromContext(ctx)
+	if hasProposal {
+		var found bool
+		start, found = failoverModelIndex(models, proposal.Candidate)
+		if !found {
+			return nil, ErrDispatchPermitRequired
+		}
+	} else if len(ProviderCandidatesFromModel(models[0])) == 0 {
+		return nil, ErrOperationAuthorityRequired
+	}
+
+	// One active call corresponds to one Core-authorized proposal. Candidate
+	// order and subsequent calls belong to the Loop scheduler.
+	return models[start].Generate(ctx, msgs, opts...)
+}
+
+func (m *failoverModel) streamWithOperation(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
+	models := m.orderedModels()
+	if len(models) == 0 {
+		return nil, errors.New("llm: failover has no candidate models")
+	}
+	start := 0
+	proposal, hasProposal := CandidateProposalFromContext(ctx)
+	if hasProposal {
+		var found bool
+		start, found = failoverModelIndex(models, proposal.Candidate)
+		if !found {
+			return nil, ErrDispatchPermitRequired
+		}
+	} else if len(ProviderCandidatesFromModel(models[0])) == 0 {
+		return nil, ErrOperationAuthorityRequired
+	}
+
+	// The caller has attached either the initial candidate proposal or a
+	// Loop-planned follow-up. Dispatch only that candidate once.
+	attemptCtx, cancel := context.WithCancelCause(ctx)
+	stream, err := models[start].Stream(attemptCtx, msgs, opts...)
+	if err == nil && stream != nil {
+		return forwardMessageStreamAttempt(ctx, cancel, stream), nil
+	}
+	if err == nil {
+		err = errors.New("failover: model returned a nil stream without an error")
+	}
+	cancelStreamAttempt(ctx, cancel, err)
+	drainMessageChunks(stream)
+	return nil, err
+}
+
+func failoverModelIndex(models []BaseChatModel, candidate ResolvedCandidateHandle) (int, bool) {
+	if candidate == nil {
+		return 0, false
+	}
+	for index, model := range models {
+		for _, current := range ProviderCandidatesFromModel(model) {
+			if current == candidate {
+				return index, true
+			}
+		}
+	}
+	return 0, false
 }

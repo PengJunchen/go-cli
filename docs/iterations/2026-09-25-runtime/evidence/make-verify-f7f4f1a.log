@@ -1,0 +1,107 @@
+snapshot=f7f4f1a command=make verify GOMAXPROCS=2 NO_COLOR=1 TERM=dumb GOFLAGS=-p=2
+gofmt -s -w .
+Note: goimports not found, skipping (install with: go install golang.org/x/tools/cmd/goimports@latest)
+go vet ./...
+golangci-lint run ./...
+internal/session/durable_jsonl.go:1015:23: Error return value of `directory.Close` is not checked (errcheck)
+	defer directory.Close()
+	                     ^
+internal/session/jsonl.go:231:23: Error return value of `directory.Close` is not checked (errcheck)
+	defer directory.Close()
+	                     ^
+internal/session/jsonl.go:541:23: Error return value of `directory.Close` is not checked (errcheck)
+	defer directory.Close()
+	                     ^
+internal/session/session_open_unix.go:29:27: Error return value of `directoryFile.Close` is not checked (errcheck)
+	defer directoryFile.Close()
+	                         ^
+internal/session/workspace_index.go:734:18: Error return value of `file.Close` is not checked (errcheck)
+	defer file.Close()
+	                ^
+internal/tools/prepared.go:457:9: Error return value is not checked (errcheck)
+	return cloned.(map[string]any)
+	       ^
+internal/tools/prepared_registry.go:164:10: Error return value is not checked (errcheck)
+	root := schema.(map[string]any)
+	        ^
+internal/tools/prepared_registry.go:165:16: Error return value is not checked (errcheck)
+	properties := root["properties"].(map[string]any)
+	              ^
+internal/approval/prepared_policy_failclosed_test.go:7:1: File is not properly formatted (goimports)
+	"github.com/pengjunchen/go-cli/internal/core"
+^
+internal/approval/prepared_policy_plan_network_test.go:10:1: File is not properly formatted (goimports)
+	"github.com/pengjunchen/go-cli/internal/core"
+^
+internal/approval/prepared_policy_runtime_test.go:10:1: File is not properly formatted (goimports)
+	"github.com/pengjunchen/go-cli/internal/core"
+^
+internal/llm/model_resolver_test.go:221:21: G119: Sensitive headers should not be re-added in redirect policy callbacks (gosec)
+		request.Header.Set("Authorization", "Bearer "+secret)
+		                  ^
+internal/tools/prepared.go:369:2: ineffectual assignment to args (ineffassign)
+	args := make(map[string]any, len(call.Args))
+	^
+internal/core/run_status.go:10:36: `cancelled` is a misspelling of `canceled` (misspell)
+	RunOutcomeCancelled RunOutcome = "cancelled"
+	                                  ^
+internal/core/run_owner.go:374:1: error-return: error should be the last type when returning multiple items (revive)
+func invokeRunCallback(ctx context.Context, fn func(context.Context) (Result, error)) (result Result, err error, panicked bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			_ = recovered
+			err = runCallbackPanicError{}
+			panicked = true
+		}
+	}()
+	result, err = fn(ctx)
+	return result, err, false
+}
+internal/tui/app.go:1984:45: context-as-argument: context.Context should be the first parameter of a function (revive)
+func waitForInteractionCancel(token uint64, ctx context.Context, finished, runDone <-chan struct{}) tea.Cmd {
+                                            ^
+internal/verify/cmd/gatecapture/run_test.go:102:59: context-as-argument: context.Context should be the first parameter of a function (revive)
+func runFixture(t *testing.T, mode string, limits Limits, ctx context.Context) (Result, error) {
+                                                          ^
+internal/verify/cmd/gatecapture/run_test.go:107:76: context-as-argument: context.Context should be the first parameter of a function (revive)
+func runFixtureWithEnv(t *testing.T, mode, extraEnv string, limits Limits, ctx context.Context) (Result, error) {
+                                                                           ^
+internal/approval/store.go:133:3: SA4004: the surrounding loop is unconditionally terminated (staticcheck)
+		return nil
+		^
+internal/cli/output_guard_adapter.go:149:6: SA4011: ineffective break statement. Did you mean to break out of the outer loop? (staticcheck)
+					break
+					^
+internal/core/loop.go:1047:5: SA4011: ineffective break statement. Did you mean to break out of the outer loop? (staticcheck)
+				break
+				^
+internal/core/turnrunner.go:430:1: ST1020: comment on exported method Get should be of the form "Get ..." (staticcheck)
+// inject appends a submission of the given kind to a running turn's
+^
+internal/llm/middleware_loopdetect.go:171:6: SA4011: ineffective break statement. Did you mean to break out of the outer loop? (staticcheck)
+					break
+					^
+internal/session/durable_recovery.go:123:18: SA4010: this result of append is never used, except maybe in other appends (staticcheck)
+			resolutions = append(resolutions, entry)
+			              ^
+internal/config/auth_chain.go:674:6: func configFilePath is unused (unused)
+func configFilePath(name string) string {
+     ^
+internal/extension/registry.go:182:36: func (*DefaultExtensionRegistry).commitFrom is unused (unused)
+func (r *DefaultExtensionRegistry) commitFrom(staging *DefaultExtensionRegistry) error {
+                                   ^
+internal/tools/process_scope.go:23:2: var errProcessContainmentUnsupported is unused (unused)
+	errProcessContainmentUnsupported = errors.New("process containment is unsupported on this operating system")
+	^
+27 issues:
+* errcheck: 8
+* goimports: 3
+* gosec: 1
+* ineffassign: 1
+* misspell: 1
+* revive: 4
+* staticcheck: 6
+* unused: 3
+make: *** [lint] Error 1
+
+exit=2 elapsed_seconds=82.50

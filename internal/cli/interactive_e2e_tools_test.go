@@ -3,8 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -33,38 +37,79 @@ func newE2ETestConfig(t *testing.T, srvURL string) *config.Config {
 	}
 }
 
-// TestE2E_ToolExecutionViaInteractive drives a full tool-call cycle through
-// the interactive REPL. The mock LLM first returns a bash tool call; after the
-// loop executes (or denies) the tool and feeds the result back, the LLM
-// returns a final text response. The test verifies that the session completes
-// normally and the expected content reaches stdout.
-func TestE2E_ToolExecutionViaInteractive(t *testing.T) {
+// TestE2E_NonTTYApprovalDenied drives a tool-call cycle through the
+// non-TTY interactive REPL. The mock LLM requests a workspace read, but the
+// interactive approval callback denies requests when stdin is not a terminal.
+// The test verifies that the denial result is returned to the model and the
+// file contents are not disclosed.
+func TestE2E_NonTTYApprovalDenied(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
+
+	workspaceDir := t.TempDir()
+	fixtureContent := "interactive read fixture"
+	fixturePath := filepath.Join(workspaceDir, "fixture.txt")
+	require.NoError(t, os.WriteFile(fixturePath, []byte(fixtureContent), 0o600))
+	relativePath, err := filepath.Rel(workspaceDir, fixturePath)
+	require.NoError(t, err)
+	toolArgs, err := json.Marshal(map[string]string{"path": filepath.ToSlash(relativePath)})
+	require.NoError(t, err)
 
 	var mu sync.Mutex
 	requestCount := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	toolDenialObserved := false
+	fixtureContentObserved := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			http.Error(w, "failed to read request", http.StatusBadRequest)
+			return
+		}
+		_ = r.Body.Close()
+
 		mu.Lock()
 		requestCount++
 		n := requestCount
+		toolDenialObserved = toolDenialObserved || strings.Contains(string(body), "tool call denied by approval policy")
+		fixtureContentObserved = fixtureContentObserved || strings.Contains(string(body), fixtureContent)
 		mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		if n == 1 {
-			// First request: return a bash tool call.
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hello\"}"}}]}}]}`))
+			// First request: return a safe read tool call.
+			response, marshalErr := json.Marshal(map[string]any{
+				"choices": []any{map[string]any{
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": nil,
+						"tool_calls": []any{map[string]any{
+							"id":   "call_1",
+							"type": "function",
+							"function": map[string]any{
+								"name":      "read",
+								"arguments": string(toolArgs),
+							},
+						}},
+					},
+				}},
+			})
+			if marshalErr != nil {
+				http.Error(w, "failed to marshal response", http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write(response)
 			return
 		}
-		// Subsequent requests (tool result / extraction): return a final text response.
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Done: hello"}}]}`))
+		// Subsequent requests (tool result / extraction): return a final response.
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Done: interactive read fixture"}}]}`))
 	}))
 	defer srv.Close()
 
 	cfg := newE2ETestConfig(t, srv.URL)
+	cfg.Git.WorkDir = workspaceDir
 
 	var out bytes.Buffer
 	in := &delayedReader{
-		lines: []string{"run echo hello", "exit"},
+		lines: []string{"read the interactive fixture", "exit"},
 		delay: 200 * time.Millisecond,
 	}
 	cmd := newInteractiveCmd(in, &out)
@@ -72,10 +117,15 @@ func TestE2E_ToolExecutionViaInteractive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	err := cmd.Run(ctx, cfg, nil)
+	err = cmd.Run(ctx, cfg, nil)
 	require.NoError(t, err)
-	assert.Contains(t, out.String(), "hello")
+	assert.Contains(t, out.String(), "Done: interactive read fixture")
 	assert.Contains(t, out.String(), "Session ended")
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 2, requestCount, "the model should receive one denial followup before returning its final response")
+	assert.True(t, toolDenialObserved, "the non-TTY approval denial must be sent back to the model")
+	assert.False(t, fixtureContentObserved, "unapproved file contents must not be sent to the model")
 }
 
 // TestE2E_SlashCommandsViaInteractive verifies that slash commands are

@@ -342,8 +342,14 @@ func TestLoopToolDefCache_InvalidateOnRegister_MiddlewareRegistry(t *testing.T) 
 	require.NoError(t, reg.Register(context.Background(), &nameDescTool{name: "tool_a", description: "does a"}))
 
 	// Wrap with MiddlewareToolRegistry — the decorator whose Version() was
-	// previously missing, breaking cache invalidation.
+	// previously missing, breaking cache invalidation. Prepared proxies require
+	// an explicit policy and stage pipeline; configure a deny-by-default test
+	// policy so the cache behavior is exercised without opening execution.
 	wrapped := tools.NewMiddlewareToolRegistry(reg)
+	require.NoError(t, wrapped.SetPreparedToolStages(tools.PreparedToolStages{}))
+	require.NoError(t, wrapped.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		return tools.PreparedPolicyDecision{Generations: request.Generations}, nil
+	}))
 
 	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
 		"TC-MW", "mw-cache-invalidate",

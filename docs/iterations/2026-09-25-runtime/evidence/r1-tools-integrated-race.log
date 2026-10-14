@@ -1,0 +1,6 @@
+Snapshot: 5fee63b
+Command: GOMAXPROCS=2 go test -p 2 -race -count=1 ./internal/tools
+ok  	github.com/pengjunchen/go-cli/internal/tools	38.630s
+
+Exit: 0
+ElapsedSeconds: 71.59
