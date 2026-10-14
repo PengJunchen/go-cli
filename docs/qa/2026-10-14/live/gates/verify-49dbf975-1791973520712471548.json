@@ -1,0 +1,32 @@
+{
+  "target": "verify",
+  "command": "make verify",
+  "exitCode": 2,
+  "durationSeconds": 343.262,
+  "baselineCommit": "49dbf9755d860b877edd45ed9a73161ab5ebbb8f",
+  "startedCommit": "49dbf9755d860b877edd45ed9a73161ab5ebbb8f",
+  "sourceDiffBeforeSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "sourceDiffAfterSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "sourceUnchangedDuringRun": true,
+  "untrackedSourceBefore": [],
+  "untrackedSourceAfter": [],
+  "accepted": false,
+  "worktreeDiffSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "log": "verify-49dbf975-1791973520712471548.log",
+  "logSHA256": "4d148fcc6f32f93ca6b36864da9df47c152fec9a4e76f043bbf508790147d0cc",
+  "signals": [
+    "0 issues.",
+    "  ERROR: boom",
+    "  ERROR: boom",
+    "go test event failure: package github.com/pengjunchen/go-cli/tests/e2e_20260802 failed",
+    "go test event failure: test github.com/pengjunchen/go-cli/tests/e2e_20260802.TestCompaction_EdgeCases failed",
+    "go test event failure: test github.com/pengjunchen/go-cli/tests/e2e_20260802.TestCompaction_EdgeCases/all_system_messages failed",
+    "go test event failure: test github.com/pengjunchen/go-cli/tests/e2e_20260802.TestCompaction_EdgeCases/all_tool_results_no_user_content failed",
+    "go test observed 8840 test function(s): 8831 passed, 3 failed, 6 skipped across 28 package(s)",
+    "go test command failed with exit status 1 (go test -json -count=1 -race -count=1 ./...)",
+    "exit status 1",
+    "make: *** [test] Error 1"
+  ],
+  "originalLogName": "verify.log",
+  "archiveNote": "Only log path updated when preserving previous run; underlying log bytes and logSHA256 remain unchanged."
+}

@@ -1,0 +1,52 @@
+{
+  "runId": "20261014-174155-f895248a",
+  "classification": "real model-requested large-context read with successful durable tool receipt; follow-up inference not reached because automatic compaction failed",
+  "providerRequest": {
+    "sequence": 12,
+    "responseId": "chatcmpl-resp_0525e62855f1c86c016acf4f9680f0819aa67878c0c9151a3a",
+    "status": 200,
+    "provider": "codex",
+    "servedModel": "codex/gpt-6.1-sol",
+    "finishReason": [
+      "tool_calls"
+    ],
+    "toolCallId": "call_b67be8b97c554438a4c10ae3c2a9de5e",
+    "toolName": "read",
+    "pathBasename": "large-context.txt"
+  },
+  "durableAction": {
+    "intentEntryId": "runcommit_e01ed594bab8bb510f75f539d9e0868c2fcf7716a712496a06b20d2db0d2d3c1",
+    "intentSeq": 58,
+    "executionEntryId": "runcommit_563a19ffae21b2db4742fa11e00fbaaa7693cebdfb62d9b0a9b94c2a769883a1",
+    "executionSeq": 59,
+    "dispatchState": "dispatched",
+    "resourceState": "quiescent",
+    "completionProof": "inline_pipeline_joined",
+    "receiptEntryId": "runcommit_becc6de7d9c65eddcfc9b36df9c4e5647d51555e52047e509eacdf25b3d02d41",
+    "receiptSeq": 60,
+    "receiptOutcome": "success",
+    "receiptBytes": 273600,
+    "receiptSha256": "894bea3361234cb8e8b1c2b51c86a83d2b88d549c656ce147028553b3576ae59",
+    "workspaceFileBytes": 273600,
+    "workspaceFileSha256": "894bea3361234cb8e8b1c2b51c86a83d2b88d549c656ce147028553b3576ae59",
+    "durableReceiptMatchesWorkspaceFile": true,
+    "firstReceiptLineSha256": "68bf305673cca9c1fb53ce0ac0420f716c285de0bf58af6bcb0f2e5fa8370d6e",
+    "lastReceiptLineSha256": "68bf305673cca9c1fb53ce0ac0420f716c285de0bf58af6bcb0f2e5fa8370d6e",
+    "firstLastRowsAreSameRepeatedFixtureRow": true
+  },
+  "compaction": {
+    "strategy": "micro",
+    "currentTokens": 73272,
+    "maxTokens": 60000,
+    "summaryEntryCreated": false,
+    "laterSummarySourceBoundary": null,
+    "terminalErrorCheckpointId": "terminal-c3c3596587f5434d",
+    "providerFollowupContainingReadReceiptObserved": false
+  },
+  "evidenceFiles": {
+    "runReport": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/terminal/20261014-174155-f895248a/run-report.json",
+    "trace": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-174155-f895248a/traces/session-d61a9c4bc35adaece90086ba2db851b0.jsonl",
+    "sessionStore": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-174155-f895248a/session-store/sessions/s_c272454723218c4908e0c24b986c7a4d.jsonl",
+    "errorScreenshot": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/terminal/20261014-174155-f895248a/large-context-read-terminal-error.png"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "comparisonStart": "e0493e5fe92f98ee460a0e25740a97852272ddf2",
+  "productionCommit": "bdb76efb0b31152e4c554268b43d39ef6285115a",
+  "scope": [
+    "Makefile",
+    ".golangci.yml",
+    "go.mod",
+    "go.sum",
+    ".github/workflows",
+    "internal/verify/rules"
+  ],
+  "changedPaths": [],
+  "unchanged": true,
+  "qaModuleBoundarySHA256": "81fbe10e8c14c40d3b0b392634947b9dd51a61d31a126b0933851fc894c93ad7",
+  "preservedRemoteOnlyChanges": {
+    "commit": "595d0599ffb506e36141d6e5cee21b669cb69d75",
+    "path": "_typos.toml",
+    "note": "Preserved upstream QA片段白名单 unchanged; main build/lint/CI/scanner rule files remain unchanged."
+  }
+}

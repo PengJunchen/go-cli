@@ -1,0 +1,23 @@
+diff --git a/internal/cli/repl_session.go b/internal/cli/repl_session.go
+index fb2152d..719a720 100644
+--- a/internal/cli/repl_session.go
++++ b/internal/cli/repl_session.go
+@@ -44,6 +44,10 @@ type REPLSession struct {
+ 	// cmd is the owning interactiveCmd, kept for handleSlashCommand.
+ 	cmd *interactiveCmd
+ 
++	// extraAssembleOptions supplies focused dependency overrides to REPL tests.
++	// The interactive command itself does not expose these as user flags.
++	extraAssembleOptions []AssembleOption
++
+ 	// I/O
+ 	out io.Writer
+ 	in  io.Reader
+@@ -330,6 +334,7 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
+ 		WithAgentName("interactive"),
+ 		WithThinkingLevel(s.thinkingLevel),
+ 	}
++	assembleOpts = append(assembleOpts, s.extraAssembleOptions...)
+ 	if durableSession != nil {
+ 		assembleOpts = append(assembleOpts, withDurableCLISession(durableSession))
+ 	}

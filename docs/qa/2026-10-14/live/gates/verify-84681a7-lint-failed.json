@@ -1,0 +1,19 @@
+{
+  "target": "verify",
+  "command": "make verify",
+  "exitCode": 2,
+  "durationSeconds": 49.268,
+  "baselineCommit": "84681a71b08ffd62212a63ef9e0a911e18c20933",
+  "startedCommit": "84681a71b08ffd62212a63ef9e0a911e18c20933",
+  "sourceDiffBeforeSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "sourceDiffAfterSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "sourceUnchangedDuringRun": true,
+  "worktreeDiffSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "log": "verify-84681a7-lint-failed.log",
+  "logSHA256": "d87a53b93f2641043ceb9595ddc89572a6ca4e0115300be6bf77d2b2426c042e",
+  "signals": [
+    "make: *** [lint] Error 1"
+  ],
+  "originalLogName": "verify.log",
+  "archiveNote": "Only archived log reference corrected; raw log bytes and original logSHA256 unchanged."
+}

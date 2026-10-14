@@ -1,0 +1,130 @@
+{
+  "runId": "20261014-161209-82245643",
+  "startedAt": "2026-10-14T08:12:09Z",
+  "revision": "508c785dffa06ec25aa36414b51f3afd46d462a7",
+  "raceBuild": {
+    "binary": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-161209-82245643/bin/go-cli-race",
+    "sha256": "ea8aa638df65eb2772c3b838d1cdfbf2830e7379730e75743742024b08aec544",
+    "flags": "rtk proxy go build -race"
+  },
+  "failure": "Traceback (most recent call last):\n  File \"/Users/yinyuepeng/projects/go-cli/scripts/e2e_live/run.py\", line 1500, in run_live\n    session = LivePTY(binary, home, cwd, bridge, node, model, max_tokens)\n  File \"/Users/yinyuepeng/projects/go-cli/scripts/e2e_live/run.py\", line 553, in __init__\n    child_env = self.child_env()\n  File \"/Users/yinyuepeng/projects/go-cli/scripts/e2e_live/run.py\", line 588, in child_env\n    \"GO_CLI_PROVIDER_MODEL\": self.model,\n                             ^^^^^^^^^^\nAttributeError: 'LivePTY' object has no attribute 'model'\n",
+  "goSourceSnapshot": {
+    "capturedAt": "2026-10-14T08:12:09Z",
+    "unstaged": {
+      "captured": true,
+      "file": "go-source-diff-unstaged-at-build.patch",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "staged": {
+      "captured": true,
+      "file": "go-source-diff-staged-at-build.patch",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "gitStatusShort": [
+      "?? docs/qa/2026-10-14/live/",
+      "?? scripts/e2e_live/",
+      "?? scripts/e2e_live_review/",
+      "?? scripts/magpie/"
+    ]
+  },
+  "nonce": "a2a708962b5c",
+  "sessionId": "go-cli-live-20261014-a2a708962b5c",
+  "gateway": "http://127.0.0.1:3425",
+  "model": "codex/gpt-6.1-sol",
+  "maxTokens": 8000,
+  "modelTimeout": {
+    "total": "5m",
+    "streamIdle": "90s"
+  },
+  "scopedWorkspace": false,
+  "screenshots": [],
+  "turns": [],
+  "approvals": [],
+  "checks": [
+    {
+      "name": "live PTY produced actual Chat Completions inference requests",
+      "passed": false
+    }
+  ],
+  "workspace": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-161209-82245643/workspace",
+  "workspaceGitBoundary": {
+    "initialized": true,
+    "root": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-161209-82245643/workspace",
+    "purpose": "stop the parent live/workspaces/.gitignore from hiding fixture files from the real grep tool"
+  },
+  "expectedPptx": "live_review_A2A708962B5C.pptx",
+  "pptxFixture": {
+    "file": "presentation-fixture.json",
+    "sha256": "20a80c5de20b2346e662dde217f44c5f6030d40513ca3f58df5be84b5f597041",
+    "artifactName": "live_review_A2A708962B5C.pptx"
+  },
+  "isolatedConfig": {
+    "file": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-161209-82245643/home/.go-cli/config.yaml",
+    "sha256": "d2bf9f16503f5d058218601f3adb625616e90c98b899b8ff7718d6632ceaeed5",
+    "traceDirectory": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-161209-82245643/traces",
+    "sessionStore": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-161209-82245643/session-store",
+    "pythonModulesPath": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-161209-82245643/python-deps",
+    "hostEnvironmentAllowlist": true,
+    "modelTimeout": {
+      "total": "5m",
+      "streamIdle": "90s"
+    },
+    "scopeMode": "default without sandbox.allowed_paths",
+    "sandboxAllowedPaths": [],
+    "sandboxAllowedPathsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "gatewayHealth": {
+    "httpStatus": 200,
+    "modelListed": true,
+    "modelCount": 30,
+    "gateway": "http://127.0.0.1:3425"
+  },
+  "status": "failed",
+  "failedTurn": "setup",
+  "bridgeSettlement": {
+    "settled": true,
+    "inflightAtSnapshot": 0,
+    "waitSeconds": 0.0
+  },
+  "bridge": {
+    "sessionId": "go-cli-live-20261014-a2a708962b5c",
+    "requests": [],
+    "events": []
+  },
+  "toolRegistrationEvidence": [],
+  "magpieAudit": {
+    "session": "go-cli-live-20261014-a2a708962b5c",
+    "routeUrl": "http://127.0.0.1:3425/v1/magpie/route?session=<redacted-session>",
+    "routes": [],
+    "usage": [],
+    "usagePagination": {
+      "pageSize": 500,
+      "rowsFetched": 0,
+      "total": 0,
+      "complete": true
+    }
+  },
+  "providerEvidence": {
+    "joinPolicy": "exact gateway response ID or route ID when exposed; otherwise session-scoped chronological order, one bridge inference per gateway route/usage row",
+    "inference": []
+  },
+  "source": {
+    "evidenceClass": "true live LLM end-to-end; real CLI binary, PTY, local forwarding bridge and signed-in Magpie Codex inference",
+    "provider": "Codex through Magpie; verified using per-session route/usage audit and upstream headers",
+    "model": "codex/gpt-6.1-sol",
+    "scopeMode": "default without sandbox.allowed_paths",
+    "sandboxAllowedPaths": [],
+    "sandboxAllowedPathsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "isolatedConfigSha256": "d2bf9f16503f5d058218601f3adb625616e90c98b899b8ff7718d6632ceaeed5",
+    "cliCredential": "non-secret local sentinel; never logged",
+    "authorizationHeadersCaptured": false,
+    "requestBodiesCaptured": false,
+    "responseBodiesCaptured": false,
+    "screenshotSource": "headless Chromium screenshot of xterm.js fed from real PTY bytes, not native Terminal",
+    "isolatedHome": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-161209-82245643/home",
+    "isolatedWorkspace": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-161209-82245643/workspace"
+  },
+  "finishedAt": "2026-10-14T08:12:17Z"
+}

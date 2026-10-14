@@ -1,0 +1,13 @@
+{
+  "runId": "20261014-150122-7ef3b912",
+  "startedAt": "2026-10-14T07:01:22Z",
+  "revision": "e0493e5fe92f98ee460a0e25740a97852272ddf2",
+  "raceBuild": {
+    "binary": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-150122-7ef3b912/bin/go-cli-race",
+    "sha256": "ac6fbf5d546d1776ffb1acd7aab23278248a3cf718c88673c0968c5b3077b864",
+    "flags": "rtk proxy go build -race"
+  },
+  "failure": "Traceback (most recent call last):\n  File \"/Users/yinyuepeng/projects/go-cli/scripts/e2e_live/run.py\", line 1277, in main\n    case_report = run_live(args.gateway, args.model, run_dir, evidence, args.max_tokens, args.timeout, args.smoke_only)\n  File \"/Users/yinyuepeng/projects/go-cli/scripts/e2e_live/run.py\", line 1074, in run_live\n    report[\"turns\"].append(wait_turn(session, bridge, label, evidence, report[\"approvals\"], report[\"screenshots\"], timeout))\n                           ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/yinyuepeng/projects/go-cli/scripts/e2e_live/run.py\", line 785, in wait_turn\n    raise TimeoutError(f\"turn {label} did not become idle in {timeout}s; screen={session.screen()[-1200:]}\")\nTimeoutError: turn inspect-fixtures did not become idle in 300.0s; screen=so remember this early fact for a later question after context compaction: LIVE_MEMO [receipt: success] RY_247ABD3D8F47=cobalt. Do not repeat the memory fact yet and do not use tools. [tool call_dde453be4235494f9c0ae96287a2d1d6] [assistant] [source output not truncated] LIVE_TEXT_OK_247ABD3D8F47 [receipt: success] [assistant · live] I’ll list the workspace, search for both fact markers, and read the matching files u sing read-only tools. [assistant · live] core: tool completion did not prove local resource quiescence: core: tool completion did not prove local resource quiescence codex/gpt-6.1-sol | turn #2 | interact | chat Tokens: 27256/0 (0%) | Cost: unknown Session ended. error: interactive: operation failed: operation failed: interactive: owner publication did not match the joined durable run (quiescent=true outcome_known=false run_match es=true session_matches=true owner_generation_present=true) Hint: Try again. If the problem persists, run `go-cli doctor` to diagnose common issues or contact support.\n",
+  "status": "failed",
+  "finishedAt": "2026-10-14T07:02:04Z"
+}

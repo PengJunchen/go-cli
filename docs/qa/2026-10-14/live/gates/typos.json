@@ -1,0 +1,12 @@
+{
+  "command": "typos --format json",
+  "version": "typos-cli 1.32.0",
+  "workflowVersion": "crate-ci/typos@v1.32.0",
+  "source": "official crate-ci/typos release v1.32.0 arm64 Darwin archive; temporary tool, not installed globally",
+  "archiveSHA256": "9da6598cc38a800273bb5d3c7866ad19995d65d69bd399d8b49a97f770c5f0db",
+  "releaseAPIDigestAvailable": false,
+  "exitCode": 0,
+  "typos": 0,
+  "scope": "repository with existing spelling config; QA-local ignore lists only immutable captures and local runtime profiles/caches; readable docs/scripts checked",
+  "rawEvidenceHandling": "unchanged raw bytes, -text/-diff attrs and explicit index inclusion; raw source captures verified by hashes, not spelling"
+}

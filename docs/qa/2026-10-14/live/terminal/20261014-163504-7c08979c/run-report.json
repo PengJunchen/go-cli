@@ -1,0 +1,5026 @@
+{
+  "runId": "20261014-163504-7c08979c",
+  "startedAt": "2026-10-14T08:35:04Z",
+  "revision": "508c785dffa06ec25aa36414b51f3afd46d462a7",
+  "raceBuild": {
+    "binary": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/bin/go-cli-race",
+    "sha256": "881a21c76b72b111b6e76466e7f46ff4cc078fc61e65c31a83f5c3669ded1496",
+    "flags": "rtk proxy go build -race"
+  },
+  "failure": "Traceback (most recent call last):\n  File \"/Users/yinyuepeng/projects/go-cli/scripts/e2e_live/run.py\", line 1705, in run_live\n    report[\"screenshots\"].append(session.capture(evidence, \"07-followup-queued\", [followup_marker]))\n                                 ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/yinyuepeng/projects/go-cli/scripts/e2e_live/run.py\", line 722, in capture\n    raise AssertionError(f\"screenshot {name} missing visible assertions {missing}: {screen[-800:]}\")\nAssertionError: screenshot 07-followup-queued missing visible assertions ['FOLLOWUP_5eea0d10a457_QUEUE_ACK']: ing exactly ALLOWE 57.txt D_5eea0d10a457. Request the approval as usual. [receipt: success] [assistant] [tool call_e09d0a7aeeeb4116b035165a902810fb] I’ll request the write action with the exact filename and content you specified. bash [assistant] Created `approved_5eea0d10a457.txt` containing exactly `ALLOWED_5eea0d10a457`. [user] Use the edit tool to replace the exact text ALLOWED_5eea0d10a457 with EDITED_5eea0d1 0a457 in approved_5eea0d10a457.txt. Preserve the rest of the file and report the fin al contents. [assistant] I’ll replace the exact text using the edit tool and preserve the rest of the file. [assistant] EDITED_5eea0d10a457 [assistant · live] I’ll run the command and report completion after the finished file is created. > followup> █ codex/gpt-6.1-sol | turn #6 | interact | chat\n",
+  "goSourceSnapshot": {
+    "capturedAt": "2026-10-14T08:35:04Z",
+    "unstaged": {
+      "captured": true,
+      "file": "go-source-diff-unstaged-at-build.patch",
+      "bytes": 10803,
+      "sha256": "49ab3acbc697382d680ec3f645ad51ea0f6517f6865940633900d1e839acaac2"
+    },
+    "staged": {
+      "captured": true,
+      "file": "go-source-diff-staged-at-build.patch",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "gitStatusShort": [
+      " M internal/acp/stdio_process_owner.go",
+      " M internal/acp/stdio_process_owner_unix.go",
+      " M internal/acp/stdio_process_owner_unix_test.go",
+      " M internal/acp/stdio_process_owner_unsupported.go",
+      "?? docs/qa/2026-10-14/live/",
+      "?? scripts/e2e_live/",
+      "?? scripts/e2e_live_review/",
+      "?? scripts/magpie/"
+    ]
+  },
+  "pptxLibrary": "python-pptx==1.0.2",
+  "nonce": "5eea0d10a457",
+  "sessionId": "go-cli-live-20261014-5eea0d10a457",
+  "gateway": "http://127.0.0.1:3425",
+  "model": "codex/gpt-6.1-sol",
+  "maxTokens": 8000,
+  "modelTimeout": {
+    "total": "5m",
+    "streamIdle": "90s"
+  },
+  "scopedWorkspace": false,
+  "screenshots": [
+    {
+      "file": "01-connected.png",
+      "sha256": "d72ad7fd5c6906ba4450ad9244bbbd25b4ffe109edd843007f45f104e823e401",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "Interactive session started": true
+      },
+      "screenExcerpt": "Interactive session started. Type 'exit' to quit.",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 0
+      }
+    },
+    {
+      "file": "02-live-text-answer.png",
+      "sha256": "89d7d3b110b835ef07655634d41315a3b985dd7749c2215775dc8497035568b9",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {},
+      "screenExcerpt": "Interactive session started. Type 'exit' to quit. > This is a live provider text check. Reply with exactly LIVE_TEXT_OK_5EEA0D10A457. Also remember this early fact for a later question after context compaction: LIVE_MEM ORY_5EEA0D10A457=cobalt. Do not repeat the memory fact yet and do not use tools. Session: s_586b46c55f744840e946480eb25fc250 | Branch: main | Loaded rows: 2 | loaded projection only [user] This is a live provider text check. Reply with exactly LIVE_TEXT_OK_5EEA0D10A457. Also remember this early fact for a later question after context compaction: LIVE_MEMOR Y_5EEA0D10A457=cobalt. Do not repeat the memory fact yet and do not use tools. [assistant] LIVE_TEXT_OK_5EEA0D10A457 codex/gpt-6.1-sol | turn #1 | interact | chat Tokens: 9003/0 (0%) | Cost: unknown Sources: usage=reported/u0 cost=unknown/c1 price=unknown actual=openai/codex/gpt-6.1-sol >",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 0
+      }
+    },
+    {
+      "file": "inspect-fixtures-1-approval-allow-page-1.png",
+      "sha256": "595177b48033d5120bac021497096a6af74041445e563962d8298043d807cb4a",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "[approval]": true
+      },
+      "screenExcerpt": "LPHA_5EEA0D10A457=blue and LIVE_FACT_BETA_5EEA0D10A457=green. [approval] grep local interaction #1 scope: unknown; once only; reuse unavailable details 1-3/3 args: path: /Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace pattern: LIVE_FACT_ALPHA_5EEA0D10A457 [y] once [n] reject [Esc] cancel",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 14
+      }
+    },
+    {
+      "file": "02-live-tools-answer.png",
+      "sha256": "41006c586555146b6c15091a6e42061a04953393c3f655b31f27ed62dc203cdf",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {},
+      "screenExcerpt": "0-14/live/workspaces/20261014-163504 ls, (2) search with grep for the single literal pattern LIVE_FACT_ALPHA_5EEA0D10A45 -7c08979c/workspace/scan-a.txt:2:LIVE_FACT_ALPHA_5EEA0D10A457=blue 7 under '.', (3) read scan-a.txt, (4) read nested/scan-b.txt. Do not use Bash, combi [source output not truncated] ne patterns, or write files. After all four tool results, report exactly LIVE_FACT_A [receipt: success] LPHA_5EEA0D10A457=blue and LIVE_FACT_BETA_5EEA0D10A457=green. [tool: read] [assistant] review fixture I’ll run the four tool calls in the requested order, one at a time. LIVE_FACT_ALPHA_5EEA0D10A457=blue [assistant] [assistant] [receipt: success] [assistant] [tool: read] [assistant] review fixture LIVE_FACT_ALPHA_5EEA0D10A457=blue LIVE_FACT_BETA_5EEA0D10A457=green LIVE_FACT_BETA_5EEA0D10A457=green [receipt: success] codex/gpt-6.1-sol | turn #2 | interact | chat Tokens: 55665/0 (0%) | Cost: unknown Sources: usage=reported/u0 cost=unknown/c6 price=unknown actual=openai/codex/gpt-6.1-sol >",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 0
+      }
+    },
+    {
+      "file": "03-deny-approval-deny-page-1.png",
+      "sha256": "2dd6a0a8a5dec89c0d2143e814ec6e9910a6999fbde55eb6897a304461e485d4",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "[approval]": true
+      },
+      "screenExcerpt": "> Use the write tool to create blocked_5eea0d10a457.txt containing exactly BLOCKED_5eea0d10a457. This is a deliberate approval test; request the tool action normally. [approval] write local interaction #1 scope: unknown; once only; reuse unavailable details 1-6/6 args: content: BLOCKED_5eea0d10a457 path: /Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace/blocked_5eea0d10a457.txt diff: +BLOCKED_5eea0d10a457 [y] once [n] reject [Esc] cancel [d] diff",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 40
+      }
+    },
+    {
+      "file": "04-allow-approval-allow-page-1.png",
+      "sha256": "e3f760712ab4b9ae266513068b545cac253521d2d0793ae535571947d3fba7de",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "[approval]": true
+      },
+      "screenExcerpt": "> Now use the write tool to create approved_5eea0d10a457.txt containing exactly ALLOWED_5eea0d10a457. Request the approval as usual. [approval] write local interaction #1 scope: unknown; once only; reuse unavailable details 1-6/6 args: content: ALLOWED_5eea0d10a457 path: /Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace/approved_5eea0d10a457.txt diff: +ALLOWED_5eea0d10a457 [y] once [n] reject [Esc] cancel [d] diff",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 40
+      }
+    },
+    {
+      "file": "04-edit-approval-allow-page-1.png",
+      "sha256": "0a53da4e4351381e1261d160c92e613911b25bb56b1024a868203be5b335a935",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "[approval]": true
+      },
+      "screenExcerpt": "nal contents. [approval] edit local interaction #1 scope: unknown; once only; reuse unavailable details 1-10/10 args: file_path: /Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace/approved_5eea0d10a457.txt new_string: EDITED_5eea0d10a457 old_string: ALLOWED_5eea0d10a457 diff: --- a//Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace/approved_5eea0d10a457.txt +++ b//Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace/approved_5eea0d10a457.txt -ALLOWED_5eea0d10a457 +EDITED_5eea0d10a457 [y] once [n] reject [Esc] cancel [d] diff",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 341
+      }
+    },
+    {
+      "file": "05-long-bash-approval-allow-page-1.png",
+      "sha256": "f50ed7e251dc4c5f10bdacb5bde6d34c3de863681602a599118d82bf0d761a7d",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "[approval]": true
+      },
+      "screenExcerpt": "ished. Do not claim completion before the second file exists. [approval] bash local interaction #1 scope: unknown; once only; reuse unavailable details 1-2/2 args: command: printf 'started' > long_5eea0d10a457.started && sleep 30 && printf 'finished' > long_5eea0d10a457.finished [y] once [n] reject [Esc] cancel",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 14
+      }
+    },
+    {
+      "file": "06-long-bash-running.png",
+      "sha256": "83542adabce9afe8fd8b3d5436994f8c4c5bbb2d98702b25724cb27d7a29e1f2",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {},
+      "screenExcerpt": "ished. Do not claim completion before the second file exists. Session: s_586b46c55f744840e946480eb25fc250 | Branch: main | Loaded rows: 24 | loaded projection only [user] │[tool: ls] This is a live provider text check. Reply with exactly LIVE_TEXT_OK_5EEA0D10A457. Al large-context.txt so remember this early fact for a later question after context compaction: LIVE_MEMO nested/ RY_5EEA0D10A457=cobalt. Do not repeat the memory fact yet and do not use tools. scan-a.txt [assistant] [receipt: success] LIVE_TEXT_OK_5EEA0D10A457",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 0
+      }
+    },
+    {
+      "file": "06-followup-input-ready.png",
+      "sha256": "95a4c8b93ffa045a93b3a40dd3bdb132b79b8a5e27fbd79f30e81ac0203b0d97",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "followup>": true,
+        "█": true
+      },
+      "screenExcerpt": "n /Users/yinyuepeng/projects/go-cli/docs/ [user] qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace/approved_5eea0d10a4 Now use the write tool to create approved_5eea0d10a457.txt containing exactly ALLOWE 57.txt D_5eea0d10a457. Request the approval as usual. [receipt: success] [assistant] [tool call_e09d0a7aeeeb4116b035165a902810fb] I’ll request the write action with the exact filename and content you specified. bash [assistant] Created `approved_5eea0d10a457.txt` containing exactly `ALLOWED_5eea0d10a457`. [user] Use the edit tool to replace the exact text ALLOWED_5eea0d10a457 with EDITED_5eea0d1 0a457 in approved_5eea0d10a457.txt. Preserve the rest of the file and report the fin al contents. [assistant] I’ll replace the exact text using the edit tool and preserve the rest of the file. [assistant] EDITED_5eea0d10a457 [assistant · live] I’ll run the command and report completion after the finished file is created. > followup> █ codex/gpt-6.1-sol | turn #6 | interact | chat",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 0
+      }
+    }
+  ],
+  "turns": [
+    {
+      "turn": "plain-live-text",
+      "gatewayRequestsBefore": 0,
+      "gatewayRequestsAfter": 1,
+      "approvals": [],
+      "screenExcerpt": "a later question after context compaction: LIVE_MEM ORY_5EEA0D10A457=cobalt. Do not repeat the memory fact yet and do not use tools. Session: s_586b46c55f744840e946480eb25fc250 | Branch: main | Loaded rows: 2 | loaded projection only [user] This is a live provider text check. Reply with exactly LIVE_TEXT_OK_5EEA0D10A457. Also remember this early fact for a later question after context compaction: LIVE_MEMOR Y_5EEA0D10A457=cobalt. Do not repeat the memory fact yet and do not use tools. [assistant] LIVE_TEXT_OK_5EEA0D10A457 codex/gpt-6.1-sol | turn #1 | interact | chat Tokens: 9003/0 (0%) | Cost: unknown Sources: usage=reported/u0 cost=unknown/c1 price=unknown actual=openai/codex/gpt-6.1-sol >",
+      "elapsedSeconds": 8.73,
+      "providerRequestSequences": [
+        1
+      ],
+      "upstreamResponseIds": [
+        "chatcmpl-resp_058861a3de695ee6016acf3ecc992c819bbd9bb3769d4def8f"
+      ],
+      "toolCalls": [],
+      "toolReceipts": [],
+      "toolCallReceiptMatches": []
+    },
+    {
+      "turn": "inspect-fixtures",
+      "gatewayRequestsBefore": 1,
+      "gatewayRequestsAfter": 6,
+      "approvals": [
+        {
+          "decision": "allow",
+          "decidedAt": "2026-10-14T08:35:43Z",
+          "toolName": "grep",
+          "toolCallIds": [
+            "call_77400b91a5874e28b5395ce4abc29b5e"
+          ],
+          "reviewedPages": [
+            [
+              1,
+              3,
+              3
+            ]
+          ],
+          "pageScreenshots": [
+            "inspect-fixtures-1-approval-allow-page-1.png"
+          ],
+          "decisionFooter": "[y] once [n] reject [Esc] cancel",
+          "screen": "LPHA_5EEA0D10A457=blue and LIVE_FACT_BETA_5EEA0D10A457=green. [approval] grep local interaction #1 scope: unknown; once only; reuse unavailable details 1-3/3 args: path: /Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace pattern: LIVE_FACT_ALPHA_5EEA0D10A457 [y] once [n] reject [Esc] cancel"
+        }
+      ],
+      "screenExcerpt": "d] ne patterns, or write files. After all four tool results, report exactly LIVE_FACT_A [receipt: success] LPHA_5EEA0D10A457=blue and LIVE_FACT_BETA_5EEA0D10A457=green. [tool: read] [assistant] review fixture I’ll run the four tool calls in the requested order, one at a time. LIVE_FACT_ALPHA_5EEA0D10A457=blue [assistant] [assistant] [receipt: success] [assistant] [tool: read] [assistant] review fixture LIVE_FACT_ALPHA_5EEA0D10A457=blue LIVE_FACT_BETA_5EEA0D10A457=green LIVE_FACT_BETA_5EEA0D10A457=green [receipt: success] codex/gpt-6.1-sol | turn #2 | interact | chat Tokens: 55665/0 (0%) | Cost: unknown Sources: usage=reported/u0 cost=unknown/c6 price=unknown actual=openai/codex/gpt-6.1-sol >",
+      "elapsedSeconds": 30.06,
+      "providerRequestSequences": [
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "upstreamResponseIds": [
+        "chatcmpl-resp_0842c86c90d575f0016acf3ed74dbc8198b136e99e40f66fec",
+        "chatcmpl-resp_03a34038613ec8f3016acf3edc48c48198852aa43c3af86650",
+        "chatcmpl-resp_03dc01e9825099fb016acf3ee078588198ae9f78ab6cb23caf",
+        "chatcmpl-resp_0daa5e4aece2f4fd016acf3ee436a88199828e1104fe2176cf",
+        "chatcmpl-resp_07457d2ac4923ccd016acf3ee90fcc8198b16bf8b3d78d729b"
+      ],
+      "toolCalls": [
+        {
+          "id": "call_acc59e2f333d466ca2b30578c4cbce90",
+          "name": "ls",
+          "argumentsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "safeArguments": {
+            "expectedArtifactMentioned": false
+          }
+        },
+        {
+          "id": "call_77400b91a5874e28b5395ce4abc29b5e",
+          "name": "grep",
+          "argumentsSha256": "6c8e126ab6928d2fa00bf778799801d0cc4494a9d820128856335035ec86e45e",
+          "safeArguments": {
+            "pathBasename": "",
+            "relativePath": ".",
+            "fixtureMarkers": [
+              "LIVE_FACT_ALPHA_5EEA0D10A457"
+            ],
+            "expectedArtifactMentioned": false
+          }
+        },
+        {
+          "id": "call_c8f247c3d597477789432fb25d53c403",
+          "name": "read",
+          "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383",
+          "safeArguments": {
+            "pathBasename": "scan-a.txt",
+            "relativePath": "scan-a.txt",
+            "expectedArtifactMentioned": false
+          }
+        },
+        {
+          "id": "call_55e2a49fb011499f9e9241976a7e6039",
+          "name": "read",
+          "argumentsSha256": "b75ba111d750bfe190b83c25ca5e276935725b7d8e74afcaef94a1fa4612c118",
+          "safeArguments": {
+            "pathBasename": "scan-b.txt",
+            "relativePath": "nested/scan-b.txt",
+            "expectedArtifactMentioned": false
+          }
+        }
+      ],
+      "toolReceipts": [
+        {
+          "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+          "tool": "ls",
+          "bytes": 36,
+          "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+          "tool": "ls",
+          "bytes": 36,
+          "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+          "tool": "grep",
+          "bytes": 150,
+          "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+          "tool": "ls",
+          "bytes": 36,
+          "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+          "tool": "grep",
+          "bytes": 150,
+          "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+          "tool": "ls",
+          "bytes": 36,
+          "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+          "tool": "grep",
+          "bytes": 150,
+          "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+          "mentionsDenied": false,
+          "mentionsError": false
+        }
+      ],
+      "toolCallReceiptMatches": [
+        {
+          "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+          "matchedReceipt": true
+        },
+        {
+          "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+          "matchedReceipt": true
+        },
+        {
+          "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+          "matchedReceipt": true
+        },
+        {
+          "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+          "matchedReceipt": true
+        }
+      ],
+      "observedToolNames": [
+        "grep",
+        "ls",
+        "read"
+      ]
+    },
+    {
+      "turn": "deny-write",
+      "gatewayRequestsBefore": 7,
+      "gatewayRequestsAfter": 8,
+      "approvals": [],
+      "screenExcerpt": "IVE_FACT_BETA_5EEA0D10A457=green [tool: write] [user] Error: tool call denied by approval policy Use the write tool to create blocked_5eea0d10a457.txt containing exactly BLOCKED_5ee [receipt: error] a0d10a457. This is a deliberate approval test; request the tool action normally. [assistant] I’ll create the file with the exact content you specified. [assistant] The automatic approval review rejected the write action for `blocked_5eea0d10a457.tx t` because the approval policy denied the tool call. The file was not created. codex/gpt-6.1-sol | turn #3 | interact | chat Tokens: 74732/0 (0%) | Cost: unknown Sources: usage=reported/u0 cost=unknown/c8 price=unknown actual=openai/codex/gpt-6.1-sol >",
+      "elapsedSeconds": 6.83,
+      "providerRequestSequences": [
+        7,
+        8
+      ],
+      "upstreamResponseIds": [
+        "chatcmpl-resp_071722295335c936016acf3ef1fd548199beebc0d04493d542",
+        "chatcmpl-resp_0346bb7640776131016acf3ef8d8cc81988f0ac7e311f7d066"
+      ],
+      "toolCalls": [
+        {
+          "id": "call_4c647a37a456437ea1e3ff408e106596",
+          "name": "write",
+          "argumentsSha256": "3267b18ea9fd501d4e34629feb42bf0a7c7882b9d01626136415cbeb7c2b071e",
+          "safeArguments": {
+            "pathBasename": "blocked_5eea0d10a457.txt",
+            "relativePath": "blocked_5eea0d10a457.txt",
+            "expectedArtifactMentioned": false
+          }
+        }
+      ],
+      "toolReceipts": [
+        {
+          "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+          "tool": "ls",
+          "bytes": 36,
+          "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+          "tool": "grep",
+          "bytes": 150,
+          "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+          "tool": "ls",
+          "bytes": 36,
+          "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+          "tool": "grep",
+          "bytes": 150,
+          "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+          "tool": "write",
+          "bytes": 42,
+          "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+          "mentionsDenied": true,
+          "mentionsError": true
+        }
+      ],
+      "toolCallReceiptMatches": [
+        {
+          "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+          "matchedReceipt": true
+        }
+      ]
+    },
+    {
+      "turn": "allow-write",
+      "gatewayRequestsBefore": 10,
+      "gatewayRequestsAfter": 10,
+      "approvals": [],
+      "screenExcerpt": "457.txt [assistant] [receipt: success] The automatic approval review rejected the write action for `blocked_5eea0d10a457.tx t` because the approval policy denied the tool call. The file was not created. [user] Now use the write tool to create approved_5eea0d10a457.txt containing exactly ALLOWE D_5eea0d10a457. Request the approval as usual. [assistant] I’ll request the write action with the exact filename and content you specified. [assistant] Created `approved_5eea0d10a457.txt` containing exactly `ALLOWED_5eea0d10a457`. codex/gpt-6.1-sol | turn #4 | interact | chat Tokens: 94152/0 (0%) | Cost: unknown Sources: usage=reported/u0 cost=unknown/c10 price=unknown actual=openai/codex/gpt-6.1-sol >",
+      "elapsedSeconds": 6.48,
+      "requiredToolCompletionEvidence": {
+        "passed": true,
+        "byTool": {
+          "write": {
+            "passed": true,
+            "calls": [
+              {
+                "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+                "callSequence": 9,
+                "laterReceiptSequences": [
+                  10
+                ],
+                "durableReceiptOutcome": "success",
+                "durableResourceState": "quiescent",
+                "hasCompletionProof": true,
+                "passed": true
+              }
+            ]
+          }
+        }
+      },
+      "providerRequestSequences": [
+        9,
+        10
+      ],
+      "upstreamResponseIds": [
+        "chatcmpl-resp_0b2baf49bb31cb11016acf3f0013a481989e408489dd9e0701",
+        "chatcmpl-resp_09cfa2d02bda21fb016acf3f04cecc819a935bde2496c6cac6"
+      ],
+      "toolCalls": [
+        {
+          "id": "call_af77e72b8b2c4543aede2bbc29302779",
+          "name": "write",
+          "argumentsSha256": "e0291ee78af2eb31daef38896ab59f32df40297d0ca0650fbe15a6d598d9ef5e",
+          "safeArguments": {
+            "pathBasename": "approved_5eea0d10a457.txt",
+            "relativePath": "approved_5eea0d10a457.txt",
+            "expectedArtifactMentioned": false
+          }
+        }
+      ],
+      "toolReceipts": [
+        {
+          "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+          "tool": "ls",
+          "bytes": 36,
+          "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+          "tool": "grep",
+          "bytes": 150,
+          "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+          "tool": "write",
+          "bytes": 42,
+          "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+          "mentionsDenied": true,
+          "mentionsError": true
+        },
+        {
+          "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+          "tool": "ls",
+          "bytes": 36,
+          "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+          "tool": "grep",
+          "bytes": 150,
+          "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+          "tool": "write",
+          "bytes": 42,
+          "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+          "mentionsDenied": true,
+          "mentionsError": true
+        },
+        {
+          "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+          "tool": "write",
+          "bytes": 147,
+          "sha256": "247b00cc1b5e7f83320f8d5b7ae1f32dc45647bbf831ae93269da4d19a745d26",
+          "mentionsDenied": false,
+          "mentionsError": false
+        }
+      ],
+      "toolCallReceiptMatches": [
+        {
+          "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+          "matchedReceipt": true
+        }
+      ]
+    },
+    {
+      "turn": "edit-written-file",
+      "gatewayRequestsBefore": 11,
+      "gatewayRequestsAfter": 12,
+      "approvals": [],
+      "screenExcerpt": "ual. [receipt: success] [assistant] I’ll request the write action with the exact filename and content you specified. [assistant] Created `approved_5eea0d10a457.txt` containing exactly `ALLOWED_5eea0d10a457`. [user] Use the edit tool to replace the exact text ALLOWED_5eea0d10a457 with EDITED_5eea0d1 0a457 in approved_5eea0d10a457.txt. Preserve the rest of the file and report the fin al contents. [assistant] I’ll replace the exact text using the edit tool and preserve the rest of the file. [assistant] EDITED_5eea0d10a457 codex/gpt-6.1-sol | turn #5 | interact | chat Tokens: 114018/0 (0%) | Cost: unknown Sources: usage=reported/u0 cost=unknown/c12 price=unknown actual=openai/codex/gpt-6.1-sol >",
+      "elapsedSeconds": 9.62,
+      "requiredToolCompletionEvidence": {
+        "passed": true,
+        "byTool": {
+          "edit": {
+            "passed": true,
+            "calls": [
+              {
+                "toolCallId": "call_30f19228344c4f6fbbd266068d8aa166",
+                "callSequence": 11,
+                "laterReceiptSequences": [
+                  12
+                ],
+                "durableReceiptOutcome": "success",
+                "durableResourceState": "quiescent",
+                "hasCompletionProof": true,
+                "passed": true
+              }
+            ]
+          }
+        }
+      },
+      "providerRequestSequences": [
+        11,
+        12
+      ],
+      "upstreamResponseIds": [
+        "chatcmpl-resp_0ce911419ca976bc016acf3f0c08a88199ac73385f1c8a0570",
+        "chatcmpl-resp_05f9b7c1a438e8aa016acf3f169c8c8198932128ae8acd700e"
+      ],
+      "toolCalls": [
+        {
+          "id": "call_30f19228344c4f6fbbd266068d8aa166",
+          "name": "edit",
+          "argumentsSha256": "93b773f1766f14da445c94a03e97f9cc822797fb0963c9bed13c01edc948e034",
+          "safeArguments": {
+            "pathBasename": "approved_5eea0d10a457.txt",
+            "relativePath": "approved_5eea0d10a457.txt",
+            "expectedArtifactMentioned": false
+          }
+        }
+      ],
+      "toolReceipts": [
+        {
+          "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+          "tool": "ls",
+          "bytes": 36,
+          "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+          "tool": "grep",
+          "bytes": 150,
+          "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+          "tool": "write",
+          "bytes": 42,
+          "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+          "mentionsDenied": true,
+          "mentionsError": true
+        },
+        {
+          "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+          "tool": "write",
+          "bytes": 147,
+          "sha256": "247b00cc1b5e7f83320f8d5b7ae1f32dc45647bbf831ae93269da4d19a745d26",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+          "tool": "ls",
+          "bytes": 36,
+          "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+          "tool": "grep",
+          "bytes": 150,
+          "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+          "tool": "write",
+          "bytes": 42,
+          "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+          "mentionsDenied": true,
+          "mentionsError": true
+        },
+        {
+          "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+          "tool": "write",
+          "bytes": 147,
+          "sha256": "247b00cc1b5e7f83320f8d5b7ae1f32dc45647bbf831ae93269da4d19a745d26",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_30f19228344c4f6fbbd266068d8aa166",
+          "tool": "edit",
+          "bytes": 174,
+          "sha256": "d0a1e872724fa3b1a162f50d3fcdcc7afec6922855ca88dd37b7def34d0ab876",
+          "mentionsDenied": false,
+          "mentionsError": false
+        }
+      ],
+      "toolCallReceiptMatches": [
+        {
+          "toolCallId": "call_30f19228344c4f6fbbd266068d8aa166",
+          "matchedReceipt": true
+        }
+      ]
+    }
+  ],
+  "approvals": [
+    {
+      "turn": "inspect-fixtures",
+      "decision": "allow",
+      "decidedAt": "2026-10-14T08:35:43Z",
+      "toolName": "grep",
+      "toolCallIds": [
+        "call_77400b91a5874e28b5395ce4abc29b5e"
+      ],
+      "reviewedPages": [
+        [
+          1,
+          3,
+          3
+        ]
+      ],
+      "pageScreenshots": [
+        "inspect-fixtures-1-approval-allow-page-1.png"
+      ],
+      "decisionFooter": "[y] once [n] reject [Esc] cancel",
+      "screen": "LPHA_5EEA0D10A457=blue and LIVE_FACT_BETA_5EEA0D10A457=green. [approval] grep local interaction #1 scope: unknown; once only; reuse unavailable details 1-3/3 args: path: /Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace pattern: LIVE_FACT_ALPHA_5EEA0D10A457 [y] once [n] reject [Esc] cancel"
+    },
+    {
+      "turn": "deny-write",
+      "decision": "deny",
+      "decidedAt": "2026-10-14T08:36:08Z",
+      "toolName": "write",
+      "toolCallIds": [
+        "call_4c647a37a456437ea1e3ff408e106596"
+      ],
+      "reviewedPages": [
+        [
+          1,
+          6,
+          6
+        ]
+      ],
+      "pageScreenshots": [
+        "03-deny-approval-deny-page-1.png"
+      ],
+      "decisionFooter": "[y] once [n] reject [Esc] cancel [d] diff",
+      "screen": "> Use the write tool to create blocked_5eea0d10a457.txt containing exactly BLOCKED_5eea0d10a457. This is a deliberate approval test; request the tool action normally. [approval] write local interaction #1 scope: unknown; once only; reuse unavailable details 1-6/6 args: content: BLOCKED_5eea0d10a457 path: /Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace/blocked_5eea0d10a457.txt diff: +BLOCKED_5eea0d10a457 [y] once [n] reject [Esc] cancel [d] diff"
+    },
+    {
+      "turn": "allow-write",
+      "decision": "allow",
+      "decidedAt": "2026-10-14T08:36:20Z",
+      "toolName": "write",
+      "toolCallIds": [
+        "call_af77e72b8b2c4543aede2bbc29302779"
+      ],
+      "reviewedPages": [
+        [
+          1,
+          6,
+          6
+        ]
+      ],
+      "pageScreenshots": [
+        "04-allow-approval-allow-page-1.png"
+      ],
+      "decisionFooter": "[y] once [n] reject [Esc] cancel [d] diff",
+      "screen": "> Now use the write tool to create approved_5eea0d10a457.txt containing exactly ALLOWED_5eea0d10a457. Request the approval as usual. [approval] write local interaction #1 scope: unknown; once only; reuse unavailable details 1-6/6 args: content: ALLOWED_5eea0d10a457 path: /Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace/approved_5eea0d10a457.txt diff: +ALLOWED_5eea0d10a457 [y] once [n] reject [Esc] cancel [d] diff"
+    },
+    {
+      "turn": "edit-written-file",
+      "decision": "allow",
+      "decidedAt": "2026-10-14T08:36:36Z",
+      "toolName": "edit",
+      "toolCallIds": [
+        "call_30f19228344c4f6fbbd266068d8aa166"
+      ],
+      "reviewedPages": [
+        [
+          1,
+          10,
+          10
+        ]
+      ],
+      "pageScreenshots": [
+        "04-edit-approval-allow-page-1.png"
+      ],
+      "decisionFooter": "[y] once [n] reject [Esc] cancel [d] diff",
+      "screen": "nal contents. [approval] edit local interaction #1 scope: unknown; once only; reuse unavailable details 1-10/10 args: file_path: /Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace/approved_5eea0d10a457.txt new_string: EDITED_5eea0d10a457 old_string: ALLOWED_5eea0d10a457 diff: --- a//Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace/approved_5eea0d10a457.txt +++ b//Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace/approved_5eea0d10a457.txt -ALLOWED_5eea0d10a457 +EDITED_5eea0d10a457 [y] once [n] reject [Esc] cancel [d] diff"
+    },
+    {
+      "turn": "long-bash-followup",
+      "decision": "allow",
+      "decidedAt": "2026-10-14T08:36:53Z",
+      "toolName": "bash",
+      "toolCallIds": [
+        "call_e09d0a7aeeeb4116b035165a902810fb"
+      ],
+      "reviewedPages": [
+        [
+          1,
+          2,
+          2
+        ]
+      ],
+      "pageScreenshots": [
+        "05-long-bash-approval-allow-page-1.png"
+      ],
+      "decisionFooter": "[y] once [n] reject [Esc] cancel",
+      "screen": "ished. Do not claim completion before the second file exists. [approval] bash local interaction #1 scope: unknown; once only; reuse unavailable details 1-2/2 args: command: printf 'started' > long_5eea0d10a457.started && sleep 30 && printf 'finished' > long_5eea0d10a457.finished [y] once [n] reject [Esc] cancel"
+    }
+  ],
+  "checks": [
+    {
+      "name": "actual model response contains requested exact text marker",
+      "passed": true
+    },
+    {
+      "name": "actual upstream assistant response includes exact alpha fixture fact",
+      "passed": true
+    },
+    {
+      "name": "actual upstream assistant response includes exact beta fixture fact",
+      "passed": true
+    },
+    {
+      "name": "actual inference selected ls, literal grep, and read tools",
+      "passed": true
+    },
+    {
+      "name": "both real read tool results were delivered back to the model",
+      "passed": true
+    },
+    {
+      "name": "read calls target both nonce fixture files",
+      "passed": true
+    },
+    {
+      "name": "real tool receipts contain both exact fixture facts",
+      "passed": true
+    },
+    {
+      "name": "default unscoped grep retains zero scope and unknown effect while ls/read retain canonical workspace scope",
+      "passed": true
+    },
+    {
+      "name": "default unscoped grep approval screenshot precedes a successful exact-fact grep receipt and read receipts",
+      "passed": true
+    },
+    {
+      "name": "denied write target was absent before and remains absent after human denial",
+      "passed": true
+    },
+    {
+      "name": "upstream request after denial carries a denied tool receipt",
+      "passed": true
+    },
+    {
+      "name": "human-style write approval produced a file and its matching durable completion proof",
+      "passed": true
+    },
+    {
+      "name": "human-style edit approval applied the exact replacement",
+      "passed": true
+    },
+    {
+      "name": "the model's Edit call has a later receipt and durable quiescent completion proof",
+      "passed": true
+    },
+    {
+      "name": "actual upstream assistant response reports the edited content",
+      "passed": true
+    },
+    {
+      "name": "interactive CLI exited successfully",
+      "passed": false
+    },
+    {
+      "name": "Go race detector reported no DATA RACE in the real PTY session",
+      "passed": true
+    },
+    {
+      "name": "live PTY produced actual Chat Completions inference requests",
+      "passed": true
+    },
+    {
+      "name": "allow-write: every real inference completed HTTP 200 with its own response ID",
+      "passed": true
+    },
+    {
+      "name": "allow-write: complete response JSON metadata was parsed without changing provider bytes",
+      "passed": true
+    },
+    {
+      "name": "allow-write: every upstream response identifies signed-in Codex and the requested served model",
+      "passed": true
+    },
+    {
+      "name": "allow-write: each inference completed with a finish reason and streamed responses have a terminal marker",
+      "passed": true
+    },
+    {
+      "name": "allow-write: each request joins to this session's completed route and nonzero usage",
+      "passed": true
+    },
+    {
+      "name": "allow-write: per-request upstream and Magpie token usage reconciles or is explicitly undefined",
+      "passed": true
+    },
+    {
+      "name": "deny-write: every real inference completed HTTP 200 with its own response ID",
+      "passed": true
+    },
+    {
+      "name": "deny-write: complete response JSON metadata was parsed without changing provider bytes",
+      "passed": true
+    },
+    {
+      "name": "deny-write: every upstream response identifies signed-in Codex and the requested served model",
+      "passed": true
+    },
+    {
+      "name": "deny-write: each inference completed with a finish reason and streamed responses have a terminal marker",
+      "passed": true
+    },
+    {
+      "name": "deny-write: each request joins to this session's completed route and nonzero usage",
+      "passed": true
+    },
+    {
+      "name": "deny-write: per-request upstream and Magpie token usage reconciles or is explicitly undefined",
+      "passed": true
+    },
+    {
+      "name": "edit-written-file: every real inference completed HTTP 200 with its own response ID",
+      "passed": true
+    },
+    {
+      "name": "edit-written-file: complete response JSON metadata was parsed without changing provider bytes",
+      "passed": true
+    },
+    {
+      "name": "edit-written-file: every upstream response identifies signed-in Codex and the requested served model",
+      "passed": true
+    },
+    {
+      "name": "edit-written-file: each inference completed with a finish reason and streamed responses have a terminal marker",
+      "passed": true
+    },
+    {
+      "name": "edit-written-file: each request joins to this session's completed route and nonzero usage",
+      "passed": true
+    },
+    {
+      "name": "edit-written-file: per-request upstream and Magpie token usage reconciles or is explicitly undefined",
+      "passed": true
+    },
+    {
+      "name": "inspect-fixtures: every real inference completed HTTP 200 with its own response ID",
+      "passed": true
+    },
+    {
+      "name": "inspect-fixtures: complete response JSON metadata was parsed without changing provider bytes",
+      "passed": true
+    },
+    {
+      "name": "inspect-fixtures: every upstream response identifies signed-in Codex and the requested served model",
+      "passed": true
+    },
+    {
+      "name": "inspect-fixtures: each inference completed with a finish reason and streamed responses have a terminal marker",
+      "passed": true
+    },
+    {
+      "name": "inspect-fixtures: each request joins to this session's completed route and nonzero usage",
+      "passed": true
+    },
+    {
+      "name": "inspect-fixtures: per-request upstream and Magpie token usage reconciles or is explicitly undefined",
+      "passed": true
+    },
+    {
+      "name": "long-bash-followup: every real inference completed HTTP 200 with its own response ID",
+      "passed": true
+    },
+    {
+      "name": "long-bash-followup: complete response JSON metadata was parsed without changing provider bytes",
+      "passed": true
+    },
+    {
+      "name": "long-bash-followup: every upstream response identifies signed-in Codex and the requested served model",
+      "passed": true
+    },
+    {
+      "name": "long-bash-followup: each inference completed with a finish reason and streamed responses have a terminal marker",
+      "passed": true
+    },
+    {
+      "name": "long-bash-followup: each request joins to this session's completed route and nonzero usage",
+      "passed": true
+    },
+    {
+      "name": "long-bash-followup: per-request upstream and Magpie token usage reconciles or is explicitly undefined",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: every real inference completed HTTP 200 with its own response ID",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: complete response JSON metadata was parsed without changing provider bytes",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: every upstream response identifies signed-in Codex and the requested served model",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: each inference completed with a finish reason and streamed responses have a terminal marker",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: each request joins to this session's completed route and nonzero usage",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: per-request upstream and Magpie token usage reconciles or is explicitly undefined",
+      "passed": true
+    }
+  ],
+  "workspace": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace",
+  "workspaceGitBoundary": {
+    "initialized": true,
+    "root": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace",
+    "purpose": "stop the parent live/workspaces/.gitignore from hiding fixture files from the real grep tool"
+  },
+  "expectedPptx": "live_review_5EEA0D10A457.pptx",
+  "pptxFixture": {
+    "file": "presentation-fixture.json",
+    "sha256": "b06ddce51f4846e744dc3193c289b06a35cf11151a6248cd14d158beaf35cf82",
+    "artifactName": "live_review_5EEA0D10A457.pptx"
+  },
+  "isolatedConfig": {
+    "file": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/home/.go-cli/config.yaml",
+    "sha256": "b6da52c1382566e63f50f64479a13f6de00541d75c527689551b1a7bb8d918da",
+    "traceDirectory": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/traces",
+    "sessionStore": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/session-store",
+    "pythonModulesPath": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/python-deps",
+    "hostEnvironmentAllowlist": true,
+    "modelTimeout": {
+      "total": "5m",
+      "streamIdle": "90s"
+    },
+    "scopeMode": "default without sandbox.allowed_paths",
+    "sandboxAllowedPaths": [],
+    "sandboxAllowedPathsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "gatewayHealth": {
+    "httpStatus": 200,
+    "modelListed": true,
+    "modelCount": 30,
+    "gateway": "http://127.0.0.1:3425"
+  },
+  "startupExcerpt": "Interactive session started. Type 'exit' to quit.",
+  "toolRegistrationEvidence": [
+    {
+      "toolCallId": "call_30f19228344c4f6fbbd266068d8aa166",
+      "toolName": "edit",
+      "registrationSource": "builtin_tool",
+      "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+      "effectSet": [
+        "workspace_write"
+      ],
+      "dispatchState": "dispatched",
+      "resourceState": "quiescent",
+      "completionProof": "queued_job_joined",
+      "receiptOutcome": "success",
+      "receiptTimestamp": "2026-10-14T08:36:36.617999Z"
+    },
+    {
+      "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+      "receiptOutcome": "error",
+      "receiptTimestamp": "2026-10-14T08:36:08.195038Z"
+    },
+    {
+      "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+      "toolName": "read",
+      "registrationSource": "builtin_tool",
+      "scopeFingerprint": "376eb62cc2df37fd1903ee50bcddab9949a51eeaaed4eb13c79cb0471c9f21b6",
+      "effectSet": [
+        "workspace_read"
+      ],
+      "dispatchState": "dispatched",
+      "resourceState": "quiescent",
+      "completionProof": "inline_pipeline_joined",
+      "receiptOutcome": "success",
+      "receiptTimestamp": "2026-10-14T08:35:52.528467Z"
+    },
+    {
+      "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+      "toolName": "grep",
+      "registrationSource": "tool_registry",
+      "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+      "effectSet": [
+        "unknown"
+      ],
+      "dispatchState": "dispatched",
+      "resourceState": "quiescent",
+      "completionProof": "owned_process_group_joined",
+      "receiptOutcome": "success",
+      "receiptTimestamp": "2026-10-14T08:35:43.75031Z"
+    },
+    {
+      "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+      "toolName": "ls",
+      "registrationSource": "builtin_tool",
+      "scopeFingerprint": "376eb62cc2df37fd1903ee50bcddab9949a51eeaaed4eb13c79cb0471c9f21b6",
+      "effectSet": [
+        "workspace_read"
+      ],
+      "dispatchState": "dispatched",
+      "resourceState": "quiescent",
+      "completionProof": "inline_pipeline_joined",
+      "receiptOutcome": "success",
+      "receiptTimestamp": "2026-10-14T08:35:38.798813Z"
+    },
+    {
+      "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+      "toolName": "write",
+      "registrationSource": "builtin_tool",
+      "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+      "effectSet": [
+        "workspace_write"
+      ],
+      "dispatchState": "dispatched",
+      "resourceState": "quiescent",
+      "completionProof": "queued_job_joined",
+      "receiptOutcome": "success",
+      "receiptTimestamp": "2026-10-14T08:36:20.17912Z"
+    },
+    {
+      "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+      "toolName": "read",
+      "registrationSource": "builtin_tool",
+      "scopeFingerprint": "376eb62cc2df37fd1903ee50bcddab9949a51eeaaed4eb13c79cb0471c9f21b6",
+      "effectSet": [
+        "workspace_read"
+      ],
+      "dispatchState": "dispatched",
+      "resourceState": "quiescent",
+      "completionProof": "inline_pipeline_joined",
+      "receiptOutcome": "success",
+      "receiptTimestamp": "2026-10-14T08:35:47.028168Z"
+    },
+    {
+      "toolCallId": "call_e09d0a7aeeeb4116b035165a902810fb",
+      "toolName": "bash",
+      "registrationSource": "builtin_tool",
+      "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+      "effectSet": [
+        "unknown"
+      ],
+      "dispatchState": "dispatched",
+      "resourceState": "quiescent",
+      "completionProof": "owned_process_group_joined",
+      "receiptOutcome": "unknown",
+      "receiptTimestamp": "2026-10-14T08:37:09.767891Z"
+    }
+  ],
+  "longBashRunningObservation": {
+    "startedExists": true,
+    "finishedExistsBeforeFollowUp": false,
+    "startedAt": "2026-10-14T16:36:54.034250+08:00",
+    "activeFooterMarker": null,
+    "screenExcerpt": "ished. Do not claim completion before the second file exists. Session: s_586b46c55f744840e946480eb25fc250 | Branch: main | Loaded rows: 24 | loaded projection only [user] │[tool: ls] This is a live provider text check. Reply with exactly LIVE_TEXT_OK_5EEA0D10A457. Al large-context.txt so remember this early fact for a later question after context compaction: LIVE_MEMO nested/ RY_5EEA0D10A457=cobalt. Do not repeat the memory fact yet and do not use tools. scan-a.txt [assistant] [receipt: success] LIVE_TEXT_OK_5EEA0D10A457"
+  },
+  "status": "failed",
+  "failedTurn": "long-bash-followup",
+  "ptyTranscript": {
+    "path": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/terminal/20261014-163504-7c08979c/pty-session.ansi",
+    "bytes": 290470,
+    "sha256": "4cef4f087319bd21a3aafe387c62e94d250997bcfae6e4d064e2733b55ed8dc3",
+    "source": "real CLI PTY raw bytes before xterm rendering"
+  },
+  "raceDetectorClean": true,
+  "cliExitStatus": 1,
+  "bridgeSettlement": {
+    "settled": true,
+    "inflightAtSnapshot": 0,
+    "waitSeconds": 0.0
+  },
+  "bridge": {
+    "sessionId": "go-cli-live-20261014-5eea0d10a457",
+    "requests": [
+      {
+        "sequence": 1,
+        "turn": "plain-live-text",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T08:35:23Z",
+        "requestBytes": 24839,
+        "requestSha256": "097a6476012728e61a906c2b07e2c9d41ba74a0263b02e67d21f07f21a513e96",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [],
+        "userMarkers": [
+          "LIVE_TEXT_OK_5EEA0D10A457",
+          "LIVE_MEMORY_5EEA0D10A457"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [],
+        "priorToolCalls": [],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_058861a3de695ee6016acf3ecc992c819bbd9bb3769d4def8f",
+        "usage": {
+          "prompt_tokens": 8987,
+          "completion_tokens": 16,
+          "total_tokens": 9003
+        },
+        "finishReasons": [
+          "stop"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021237,
+          "time": "2026-10-14T16:35:23.030569+08:00",
+          "ms": 4923,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 4910
+            }
+          ],
+          "bridgeSequence": 1,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 465
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T08:35:28Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [
+          "LIVE_TEXT_OK_5EEA0D10A457"
+        ],
+        "responseMarkerMatches": {
+          "LIVE_TEXT_OK_5EEA0D10A457": true
+        },
+        "responseBytes": 3754,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "7b22de4a51d491a96ddb630b7091ad0319d44f3c1100718d9278463218f3e5b9"
+      },
+      {
+        "sequence": 2,
+        "turn": "inspect-fixtures",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T08:35:33Z",
+        "requestBytes": 25568,
+        "requestSha256": "6c6dcf5e7c43914286a4c50213b69703df55b85e2229c42c49624ee790af263b",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [],
+        "userMarkers": [
+          "LIVE_TEXT_OK_5EEA0D10A457",
+          "LIVE_MEMORY_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_BETA_5EEA0D10A457"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "index": 0,
+            "name": "ls",
+            "argumentsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "safeArguments": {
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "priorToolCalls": [],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_0842c86c90d575f0016acf3ed74dbc8198b136e99e40f66fec",
+        "usage": {
+          "prompt_tokens": 9167,
+          "completion_tokens": 38,
+          "total_tokens": 9205
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021238,
+          "time": "2026-10-14T16:35:33.493106+08:00",
+          "ms": 5188,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 5185
+            }
+          ],
+          "bridgeSequence": 2,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 470
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T08:35:38Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [
+          "LIVE_FACT_ALPHA_5EEA0D10A457=blue",
+          "LIVE_FACT_BETA_5EEA0D10A457=green"
+        ],
+        "responseMarkerMatches": {
+          "LIVE_FACT_ALPHA_5EEA0D10A457=blue": false,
+          "LIVE_FACT_BETA_5EEA0D10A457=green": false
+        },
+        "responseBytes": 5631,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "573c8a91b2d7cc53e486aa00ed46bb5fa30a917310473828776cb4171a826f50"
+      },
+      {
+        "sequence": 3,
+        "turn": "inspect-fixtures",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T08:35:38Z",
+        "requestBytes": 25927,
+        "requestSha256": "1e59cafa75c3e064f8d350ff89150115758c28b94f114ef13a3bc056195d3a49",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_5EEA0D10A457",
+          "LIVE_MEMORY_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_BETA_5EEA0D10A457"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "index": 0,
+            "name": "grep",
+            "argumentsSha256": "6c8e126ab6928d2fa00bf778799801d0cc4494a9d820128856335035ec86e45e",
+            "safeArguments": {
+              "pathBasename": "",
+              "relativePath": ".",
+              "fixtureMarkers": [
+                "LIVE_FACT_ALPHA_5EEA0D10A457"
+              ],
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "argumentsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_03a34038613ec8f3016acf3edc48c48198852aa43c3af86650",
+        "usage": {
+          "prompt_tokens": 9225,
+          "completion_tokens": 33,
+          "total_tokens": 9258
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021239,
+          "time": "2026-10-14T16:35:38.85187+08:00",
+          "ms": 4674,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 4667
+            }
+          ],
+          "bridgeSequence": 3,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 475
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T08:35:43Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [
+          "LIVE_FACT_ALPHA_5EEA0D10A457=blue",
+          "LIVE_FACT_BETA_5EEA0D10A457=green"
+        ],
+        "responseMarkerMatches": {
+          "LIVE_FACT_ALPHA_5EEA0D10A457=blue": false,
+          "LIVE_FACT_BETA_5EEA0D10A457=green": false
+        },
+        "responseBytes": 1568,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "6c9095cbc0c1b567af8a57695c109880ae06ef4351de1e3c70663586a3e112d3"
+      },
+      {
+        "sequence": 4,
+        "turn": "inspect-fixtures",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T08:35:43Z",
+        "requestBytes": 26392,
+        "requestSha256": "1a9b44e70d33dd05a0ba77f2f0abbf89f4a8f9c841799f42ae2275ed42cabaf7",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_5EEA0D10A457",
+          "LIVE_MEMORY_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_BETA_5EEA0D10A457"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_c8f247c3d597477789432fb25d53c403",
+            "index": 0,
+            "name": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383",
+            "safeArguments": {
+              "pathBasename": "scan-a.txt",
+              "relativePath": "scan-a.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "argumentsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "argumentsSha256": "3c5f2347b0a35e5dc787ff1c00c293791bb88baa1b5ea0cf120f875fabcb0c2f"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_03dc01e9825099fb016acf3ee078588198ae9f78ab6cb23caf",
+        "usage": {
+          "prompt_tokens": 9327,
+          "completion_tokens": 19,
+          "total_tokens": 9346
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021240,
+          "time": "2026-10-14T16:35:43.802651+08:00",
+          "ms": 3164,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 3152
+            }
+          ],
+          "bridgeSequence": 4,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 480
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T08:35:46Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [
+          "LIVE_FACT_ALPHA_5EEA0D10A457=blue",
+          "LIVE_FACT_BETA_5EEA0D10A457=green"
+        ],
+        "responseMarkerMatches": {
+          "LIVE_FACT_ALPHA_5EEA0D10A457=blue": false,
+          "LIVE_FACT_BETA_5EEA0D10A457=green": false
+        },
+        "responseBytes": 1532,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "8702fdbd0a1156af5db3711600c6964f29a7e2240a9462cb853c078b56f9e99f"
+      },
+      {
+        "sequence": 5,
+        "turn": "inspect-fixtures",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T08:35:47Z",
+        "requestBytes": 26722,
+        "requestSha256": "5e3765bcd89b9e52aff07173f4edcf1a53675363801e232327ebd51f90cc9c0e",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_5EEA0D10A457",
+          "LIVE_MEMORY_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_BETA_5EEA0D10A457"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_55e2a49fb011499f9e9241976a7e6039",
+            "index": 0,
+            "name": "read",
+            "argumentsSha256": "b75ba111d750bfe190b83c25ca5e276935725b7d8e74afcaef94a1fa4612c118",
+            "safeArguments": {
+              "pathBasename": "scan-b.txt",
+              "relativePath": "nested/scan-b.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "argumentsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "argumentsSha256": "3c5f2347b0a35e5dc787ff1c00c293791bb88baa1b5ea0cf120f875fabcb0c2f"
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_0daa5e4aece2f4fd016acf3ee436a88199828e1104fe2176cf",
+        "usage": {
+          "prompt_tokens": 9374,
+          "completion_tokens": 21,
+          "total_tokens": 9395
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021241,
+          "time": "2026-10-14T16:35:47.081613+08:00",
+          "ms": 5324,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 5311
+            }
+          ],
+          "bridgeSequence": 5,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 485
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T08:35:52Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [
+          "LIVE_FACT_ALPHA_5EEA0D10A457=blue",
+          "LIVE_FACT_BETA_5EEA0D10A457=green"
+        ],
+        "responseMarkerMatches": {
+          "LIVE_FACT_ALPHA_5EEA0D10A457=blue": false,
+          "LIVE_FACT_BETA_5EEA0D10A457=green": false
+        },
+        "responseBytes": 1539,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "2bf260872ec58e11ef5e331315f954ba706892ec1052ef324619599afbe49400"
+      },
+      {
+        "sequence": 6,
+        "turn": "inspect-fixtures",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T08:35:52Z",
+        "requestBytes": 27059,
+        "requestSha256": "5692583d3322aa8b8a0232f214665005d2c0318d4e25cede9283b552c1a3b0cb",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "beta"
+            ]
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_5EEA0D10A457",
+          "LIVE_MEMORY_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_BETA_5EEA0D10A457"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "argumentsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "argumentsSha256": "3c5f2347b0a35e5dc787ff1c00c293791bb88baa1b5ea0cf120f875fabcb0c2f"
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383"
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "argumentsSha256": "b75ba111d750bfe190b83c25ca5e276935725b7d8e74afcaef94a1fa4612c118"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_07457d2ac4923ccd016acf3ee90fcc8198b16bf8b3d78d729b",
+        "usage": {
+          "prompt_tokens": 9424,
+          "completion_tokens": 34,
+          "total_tokens": 9458
+        },
+        "finishReasons": [
+          "stop"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021242,
+          "time": "2026-10-14T16:35:52.581973+08:00",
+          "ms": 5439,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 5431
+            }
+          ],
+          "bridgeSequence": 6,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 490
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T08:35:58Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [
+          "LIVE_FACT_ALPHA_5EEA0D10A457=blue",
+          "LIVE_FACT_BETA_5EEA0D10A457=green"
+        ],
+        "responseMarkerMatches": {
+          "LIVE_FACT_ALPHA_5EEA0D10A457=blue": true,
+          "LIVE_FACT_BETA_5EEA0D10A457=green": true
+        },
+        "responseBytes": 8084,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "1cadbfd1e738cefe02b22cf20c804271c6639363d08c85d306ccd838ebe02b43"
+      },
+      {
+        "sequence": 7,
+        "turn": "deny-write",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T08:36:01Z",
+        "requestBytes": 26976,
+        "requestSha256": "7291bc5e5a830c803dbb0c675a063931663725df8cc4ac46ef6113104ed0b559",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "beta"
+            ]
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_5EEA0D10A457",
+          "LIVE_MEMORY_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_BETA_5EEA0D10A457"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_4c647a37a456437ea1e3ff408e106596",
+            "index": 0,
+            "name": "write",
+            "argumentsSha256": "3267b18ea9fd501d4e34629feb42bf0a7c7882b9d01626136415cbeb7c2b071e",
+            "safeArguments": {
+              "pathBasename": "blocked_5eea0d10a457.txt",
+              "relativePath": "blocked_5eea0d10a457.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "argumentsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "argumentsSha256": "3c5f2347b0a35e5dc787ff1c00c293791bb88baa1b5ea0cf120f875fabcb0c2f"
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383"
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "argumentsSha256": "b75ba111d750bfe190b83c25ca5e276935725b7d8e74afcaef94a1fa4612c118"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_071722295335c936016acf3ef1fd548199beebc0d04493d542",
+        "usage": {
+          "prompt_tokens": 9444,
+          "completion_tokens": 60,
+          "total_tokens": 9504
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021243,
+          "time": "2026-10-14T16:36:01.448073+08:00",
+          "ms": 6500,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 6489
+            }
+          ],
+          "bridgeSequence": 7,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 495
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T08:36:07Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [],
+        "responseMarkerMatches": {},
+        "responseBytes": 4509,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "b5e8aac8d6d14cd272756886a2501a9c26ecd7724201fcb5035750c6c9bb4074"
+      },
+      {
+        "sequence": 8,
+        "turn": "deny-write",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T08:36:08Z",
+        "requestBytes": 27410,
+        "requestSha256": "3e64e541dc9e04d2b0cd9f34a0faf2e0b4a6e6ff01dd283b477dbf391cad6738",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "beta"
+            ]
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "bytes": 42,
+            "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+            "mentionsDenied": true,
+            "mentionsError": true,
+            "fixtureFactsMatched": []
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_5EEA0D10A457",
+          "LIVE_MEMORY_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_BETA_5EEA0D10A457"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "argumentsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "argumentsSha256": "3c5f2347b0a35e5dc787ff1c00c293791bb88baa1b5ea0cf120f875fabcb0c2f"
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383"
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "argumentsSha256": "b75ba111d750bfe190b83c25ca5e276935725b7d8e74afcaef94a1fa4612c118"
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "argumentsSha256": "a43b71807bf8beceef4996e677dda2fa8156d9e88adfcb4b6cc6b9679ec5a9c1"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_0346bb7640776131016acf3ef8d8cc81988f0ac7e311f7d066",
+        "usage": {
+          "prompt_tokens": 9522,
+          "completion_tokens": 41,
+          "total_tokens": 9563
+        },
+        "finishReasons": [
+          "stop"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021244,
+          "time": "2026-10-14T16:36:08.237278+08:00",
+          "ms": 3969,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 3957
+            }
+          ],
+          "bridgeSequence": 8,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 500
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T08:36:12Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [],
+        "responseMarkerMatches": {},
+        "responseBytes": 9844,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "55a3a026c830b6b8c7b14c7061b6d9fd622d4d36900f3e70a16027875094b925"
+      },
+      {
+        "sequence": 9,
+        "turn": "allow-write",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T08:36:15Z",
+        "requestBytes": 27780,
+        "requestSha256": "7ddddacbba5b0b9dd44a25977d0051482dc69218728edc6c9f2f9bbda3aa4cbc",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "beta"
+            ]
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "bytes": 42,
+            "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+            "mentionsDenied": true,
+            "mentionsError": true,
+            "fixtureFactsMatched": []
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_5EEA0D10A457",
+          "LIVE_MEMORY_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_BETA_5EEA0D10A457"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_af77e72b8b2c4543aede2bbc29302779",
+            "index": 0,
+            "name": "write",
+            "argumentsSha256": "e0291ee78af2eb31daef38896ab59f32df40297d0ca0650fbe15a6d598d9ef5e",
+            "safeArguments": {
+              "pathBasename": "approved_5eea0d10a457.txt",
+              "relativePath": "approved_5eea0d10a457.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "argumentsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "argumentsSha256": "3c5f2347b0a35e5dc787ff1c00c293791bb88baa1b5ea0cf120f875fabcb0c2f"
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383"
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "argumentsSha256": "b75ba111d750bfe190b83c25ca5e276935725b7d8e74afcaef94a1fa4612c118"
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "argumentsSha256": "a43b71807bf8beceef4996e677dda2fa8156d9e88adfcb4b6cc6b9679ec5a9c1"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_0b2baf49bb31cb11016acf3f0013a481989e408489dd9e0701",
+        "usage": {
+          "prompt_tokens": 9598,
+          "completion_tokens": 63,
+          "total_tokens": 9661
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021245,
+          "time": "2026-10-14T16:36:15.406462+08:00",
+          "ms": 4492,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 4435
+            }
+          ],
+          "bridgeSequence": 9,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 505
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T08:36:19Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [],
+        "responseMarkerMatches": {},
+        "responseBytes": 5246,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "8457e8d1a5993b471e1bafee274c93934b3fd90e328de3ac8ae4bd2635263bb4"
+      },
+      {
+        "sequence": 10,
+        "turn": "allow-write",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T08:36:20Z",
+        "requestBytes": 28342,
+        "requestSha256": "ab4be060ae9aeec02d4d2c3f576392796fbd5b333448c331ad579af577dff62c",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "beta"
+            ]
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "bytes": 42,
+            "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+            "mentionsDenied": true,
+            "mentionsError": true,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+            "tool": "write",
+            "bytes": 147,
+            "sha256": "247b00cc1b5e7f83320f8d5b7ae1f32dc45647bbf831ae93269da4d19a745d26",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_5EEA0D10A457",
+          "LIVE_MEMORY_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_BETA_5EEA0D10A457"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "argumentsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "argumentsSha256": "3c5f2347b0a35e5dc787ff1c00c293791bb88baa1b5ea0cf120f875fabcb0c2f"
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383"
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "argumentsSha256": "b75ba111d750bfe190b83c25ca5e276935725b7d8e74afcaef94a1fa4612c118"
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "argumentsSha256": "a43b71807bf8beceef4996e677dda2fa8156d9e88adfcb4b6cc6b9679ec5a9c1"
+          },
+          {
+            "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+            "tool": "write",
+            "argumentsSha256": "e0291ee78af2eb31daef38896ab59f32df40297d0ca0650fbe15a6d598d9ef5e"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_09cfa2d02bda21fb016acf3f04cecc819a935bde2496c6cac6",
+        "usage": {
+          "prompt_tokens": 9726,
+          "completion_tokens": 33,
+          "total_tokens": 9759
+        },
+        "finishReasons": [
+          "stop"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021246,
+          "time": "2026-10-14T16:36:20.239821+08:00",
+          "ms": 3672,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 3660
+            }
+          ],
+          "bridgeSequence": 10,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 510
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T08:36:23Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [],
+        "responseMarkerMatches": {},
+        "responseBytes": 7856,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "82652cdcf171a9a24f49c554197e503c0011758cb8347b01de4f3ca99b5549ba"
+      },
+      {
+        "sequence": 11,
+        "turn": "edit-written-file",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T08:36:27Z",
+        "requestBytes": 28513,
+        "requestSha256": "4d6e4988444f839f83d6dbdefb5a07644fe0e5567c1a40602b6fa0915ddfa240",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "beta"
+            ]
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "bytes": 42,
+            "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+            "mentionsDenied": true,
+            "mentionsError": true,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+            "tool": "write",
+            "bytes": 147,
+            "sha256": "247b00cc1b5e7f83320f8d5b7ae1f32dc45647bbf831ae93269da4d19a745d26",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_5EEA0D10A457",
+          "LIVE_MEMORY_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_BETA_5EEA0D10A457"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_30f19228344c4f6fbbd266068d8aa166",
+            "index": 0,
+            "name": "edit",
+            "argumentsSha256": "93b773f1766f14da445c94a03e97f9cc822797fb0963c9bed13c01edc948e034",
+            "safeArguments": {
+              "pathBasename": "approved_5eea0d10a457.txt",
+              "relativePath": "approved_5eea0d10a457.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "argumentsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "argumentsSha256": "3c5f2347b0a35e5dc787ff1c00c293791bb88baa1b5ea0cf120f875fabcb0c2f"
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383"
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "argumentsSha256": "b75ba111d750bfe190b83c25ca5e276935725b7d8e74afcaef94a1fa4612c118"
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "argumentsSha256": "a43b71807bf8beceef4996e677dda2fa8156d9e88adfcb4b6cc6b9679ec5a9c1"
+          },
+          {
+            "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+            "tool": "write",
+            "argumentsSha256": "e0291ee78af2eb31daef38896ab59f32df40297d0ca0650fbe15a6d598d9ef5e"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_0ce911419ca976bc016acf3f0c08a88199ac73385f1c8a0570",
+        "usage": {
+          "prompt_tokens": 9807,
+          "completion_tokens": 83,
+          "total_tokens": 9890
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021247,
+          "time": "2026-10-14T16:36:27.363984+08:00",
+          "ms": 8950,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 8894
+            }
+          ],
+          "bridgeSequence": 11,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 515
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T08:36:36Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [
+          "EDITED_5eea0d10a457"
+        ],
+        "responseMarkerMatches": {
+          "EDITED_5eea0d10a457": false
+        },
+        "responseBytes": 6020,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "5ed96f4788fa8bec953fb58ac2a747ea24fed49d82d49e0d72926aae77280a80"
+      },
+      {
+        "sequence": 12,
+        "turn": "edit-written-file",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T08:36:36Z",
+        "requestBytes": 29149,
+        "requestSha256": "2394d44852bcdc5cb4424579f2ae346fb261ef3145af8d5acac1a6adc89a459a",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "beta"
+            ]
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "bytes": 42,
+            "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+            "mentionsDenied": true,
+            "mentionsError": true,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+            "tool": "write",
+            "bytes": 147,
+            "sha256": "247b00cc1b5e7f83320f8d5b7ae1f32dc45647bbf831ae93269da4d19a745d26",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_30f19228344c4f6fbbd266068d8aa166",
+            "tool": "edit",
+            "bytes": 174,
+            "sha256": "d0a1e872724fa3b1a162f50d3fcdcc7afec6922855ca88dd37b7def34d0ab876",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_5EEA0D10A457",
+          "LIVE_MEMORY_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_BETA_5EEA0D10A457"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "argumentsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "argumentsSha256": "3c5f2347b0a35e5dc787ff1c00c293791bb88baa1b5ea0cf120f875fabcb0c2f"
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383"
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "argumentsSha256": "b75ba111d750bfe190b83c25ca5e276935725b7d8e74afcaef94a1fa4612c118"
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "argumentsSha256": "a43b71807bf8beceef4996e677dda2fa8156d9e88adfcb4b6cc6b9679ec5a9c1"
+          },
+          {
+            "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+            "tool": "write",
+            "argumentsSha256": "e0291ee78af2eb31daef38896ab59f32df40297d0ca0650fbe15a6d598d9ef5e"
+          },
+          {
+            "toolCallId": "call_30f19228344c4f6fbbd266068d8aa166",
+            "tool": "edit",
+            "argumentsSha256": "86e067cc9017a6a191dd93d168df867cdd31732d4fa77fe99b454301d3874520"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_05f9b7c1a438e8aa016acf3f169c8c8198932128ae8acd700e",
+        "usage": {
+          "prompt_tokens": 9961,
+          "completion_tokens": 15,
+          "total_tokens": 9976
+        },
+        "finishReasons": [
+          "stop"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021248,
+          "time": "2026-10-14T16:36:36.679809+08:00",
+          "ms": 6631,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 6620
+            }
+          ],
+          "bridgeSequence": 12,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 520
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T08:36:43Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [
+          "EDITED_5eea0d10a457"
+        ],
+        "responseMarkerMatches": {
+          "EDITED_5eea0d10a457": true
+        },
+        "responseBytes": 3513,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "4bc87addd87e42ac1f779b6330d7e1018820c5ad27c5e19c2ae04a2f6f48588b"
+      },
+      {
+        "sequence": 13,
+        "turn": "long-bash-followup",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T08:36:47Z",
+        "requestBytes": 29738,
+        "requestSha256": "7c3769a703b3e057b2688635497227a325dcc10386515dbb30975a02d057a60b",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "alpha"
+            ]
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": [
+              "beta"
+            ]
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "bytes": 42,
+            "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+            "mentionsDenied": true,
+            "mentionsError": true,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+            "tool": "write",
+            "bytes": 147,
+            "sha256": "247b00cc1b5e7f83320f8d5b7ae1f32dc45647bbf831ae93269da4d19a745d26",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          },
+          {
+            "toolCallId": "call_30f19228344c4f6fbbd266068d8aa166",
+            "tool": "edit",
+            "bytes": 174,
+            "sha256": "d0a1e872724fa3b1a162f50d3fcdcc7afec6922855ca88dd37b7def34d0ab876",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_5EEA0D10A457",
+          "LIVE_MEMORY_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_ALPHA_5EEA0D10A457",
+          "LIVE_FACT_BETA_5EEA0D10A457"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_e09d0a7aeeeb4116b035165a902810fb",
+            "index": 0,
+            "name": "bash",
+            "argumentsSha256": "e6a4ff831e4d2e1db19a16ad0a21f411e773191847bfcbe91fc49fc31b3ec687",
+            "safeArguments": {
+              "expectedArtifactMentioned": false,
+              "commandSha256": "e6a4ff831e4d2e1db19a16ad0a21f411e773191847bfcbe91fc49fc31b3ec687"
+            }
+          }
+        ],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "argumentsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "argumentsSha256": "3c5f2347b0a35e5dc787ff1c00c293791bb88baa1b5ea0cf120f875fabcb0c2f"
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383"
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "argumentsSha256": "b75ba111d750bfe190b83c25ca5e276935725b7d8e74afcaef94a1fa4612c118"
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "argumentsSha256": "a43b71807bf8beceef4996e677dda2fa8156d9e88adfcb4b6cc6b9679ec5a9c1"
+          },
+          {
+            "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+            "tool": "write",
+            "argumentsSha256": "e0291ee78af2eb31daef38896ab59f32df40297d0ca0650fbe15a6d598d9ef5e"
+          },
+          {
+            "toolCallId": "call_30f19228344c4f6fbbd266068d8aa166",
+            "tool": "edit",
+            "argumentsSha256": "86e067cc9017a6a191dd93d168df867cdd31732d4fa77fe99b454301d3874520"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_0a1172ace9a6c153016acf3f1fa664819aa3d3522f582cd151",
+        "usage": {
+          "prompt_tokens": 10086,
+          "completion_tokens": 76,
+          "total_tokens": 10162
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021249,
+          "time": "2026-10-14T16:36:47.165245+08:00",
+          "ms": 6526,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 6512
+            }
+          ],
+          "bridgeSequence": 13,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 525
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T08:36:53Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [],
+        "responseMarkerMatches": {},
+        "responseBytes": 5334,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "fe507c3a37755bff39660d3b3494b8561bc219b8ef1b2532682ec5aa1784b918"
+      }
+    ],
+    "events": [
+      {
+        "sequence": 1,
+        "turn": "plain-live-text",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 2,
+        "turn": "inspect-fixtures",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 3,
+        "turn": "inspect-fixtures",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 4,
+        "turn": "inspect-fixtures",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 5,
+        "turn": "inspect-fixtures",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 6,
+        "turn": "inspect-fixtures",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 7,
+        "turn": "deny-write",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 8,
+        "turn": "deny-write",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 9,
+        "turn": "allow-write",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 10,
+        "turn": "allow-write",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 11,
+        "turn": "edit-written-file",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 12,
+        "turn": "edit-written-file",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 13,
+        "turn": "long-bash-followup",
+        "kind": "upstream_complete",
+        "status": 200
+      }
+    ]
+  },
+  "magpieAudit": {
+    "session": "go-cli-live-20261014-5eea0d10a457",
+    "routeUrl": "http://127.0.0.1:3425/v1/magpie/route?session=<redacted-session>",
+    "routes": [
+      {
+        "id": 1791960021249,
+        "time": "2026-10-14T16:36:47.165245+08:00",
+        "ms": 6526,
+        "asked": "codex/gpt-6.1-sol",
+        "model": "codex/gpt-6.1-sol",
+        "served": "gpt-6.1-sol",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6.1-sol",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 6512
+          }
+        ],
+        "seq": 525,
+        "session": "go-cli-live-20261014-5eea0d10a457"
+      }
+    ],
+    "usage": [
+      {
+        "t": "2026-10-14T16:36:47.165245+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_0a1172ace9a6c153016acf3f1fa664819aa3d3522f582cd151",
+        "route_id": 1791960021249,
+        "in": 10086,
+        "out": 76,
+        "cache_read": 0,
+        "cache_write": 0,
+        "ms": 6526,
+        "session": "go-cli-live-20261014-5eea0d10a457"
+      },
+      {
+        "t": "2026-10-14T16:36:36.679809+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_05f9b7c1a438e8aa016acf3f169c8c8198932128ae8acd700e",
+        "route_id": 1791960021248,
+        "in": 233,
+        "out": 15,
+        "cache_read": 9728,
+        "cache_write": 0,
+        "ms": 6631,
+        "session": "go-cli-live-20261014-5eea0d10a457"
+      },
+      {
+        "t": "2026-10-14T16:36:27.363984+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_0ce911419ca976bc016acf3f0c08a88199ac73385f1c8a0570",
+        "route_id": 1791960021247,
+        "in": 9807,
+        "out": 83,
+        "cache_read": 0,
+        "cache_write": 0,
+        "ms": 8950,
+        "session": "go-cli-live-20261014-5eea0d10a457"
+      },
+      {
+        "t": "2026-10-14T16:36:20.239821+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_09cfa2d02bda21fb016acf3f04cecc819a935bde2496c6cac6",
+        "route_id": 1791960021246,
+        "in": 254,
+        "out": 33,
+        "cache_read": 9472,
+        "cache_write": 0,
+        "ms": 3672,
+        "session": "go-cli-live-20261014-5eea0d10a457"
+      },
+      {
+        "t": "2026-10-14T16:36:15.406462+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_0b2baf49bb31cb11016acf3f0013a481989e408489dd9e0701",
+        "route_id": 1791960021245,
+        "in": 9598,
+        "out": 63,
+        "cache_read": 0,
+        "cache_write": 0,
+        "ms": 4492,
+        "session": "go-cli-live-20261014-5eea0d10a457"
+      },
+      {
+        "t": "2026-10-14T16:36:08.237278+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_0346bb7640776131016acf3ef8d8cc81988f0ac7e311f7d066",
+        "route_id": 1791960021244,
+        "in": 178,
+        "out": 41,
+        "cache_read": 9344,
+        "cache_write": 0,
+        "ms": 3969,
+        "session": "go-cli-live-20261014-5eea0d10a457"
+      },
+      {
+        "t": "2026-10-14T16:36:01.448073+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_071722295335c936016acf3ef1fd548199beebc0d04493d542",
+        "route_id": 1791960021243,
+        "in": 9444,
+        "out": 60,
+        "cache_read": 0,
+        "cache_write": 0,
+        "ms": 6500,
+        "session": "go-cli-live-20261014-5eea0d10a457"
+      },
+      {
+        "t": "2026-10-14T16:35:52.581973+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_07457d2ac4923ccd016acf3ee90fcc8198b16bf8b3d78d729b",
+        "route_id": 1791960021242,
+        "in": 208,
+        "out": 34,
+        "cache_read": 9216,
+        "cache_write": 0,
+        "ms": 5439,
+        "session": "go-cli-live-20261014-5eea0d10a457"
+      },
+      {
+        "t": "2026-10-14T16:35:47.081613+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_0daa5e4aece2f4fd016acf3ee436a88199828e1104fe2176cf",
+        "route_id": 1791960021241,
+        "in": 158,
+        "out": 21,
+        "cache_read": 9216,
+        "cache_write": 0,
+        "ms": 5324,
+        "session": "go-cli-live-20261014-5eea0d10a457"
+      },
+      {
+        "t": "2026-10-14T16:35:43.802651+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_03dc01e9825099fb016acf3ee078588198ae9f78ab6cb23caf",
+        "route_id": 1791960021240,
+        "in": 239,
+        "out": 19,
+        "cache_read": 9088,
+        "cache_write": 0,
+        "ms": 3164,
+        "session": "go-cli-live-20261014-5eea0d10a457"
+      },
+      {
+        "t": "2026-10-14T16:35:38.85187+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_03a34038613ec8f3016acf3edc48c48198852aa43c3af86650",
+        "route_id": 1791960021239,
+        "in": 137,
+        "out": 33,
+        "cache_read": 9088,
+        "cache_write": 0,
+        "ms": 4674,
+        "session": "go-cli-live-20261014-5eea0d10a457"
+      },
+      {
+        "t": "2026-10-14T16:35:33.493106+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_0842c86c90d575f0016acf3ed74dbc8198b136e99e40f66fec",
+        "route_id": 1791960021238,
+        "in": 9167,
+        "out": 38,
+        "cache_read": 0,
+        "cache_write": 0,
+        "ms": 5188,
+        "session": "go-cli-live-20261014-5eea0d10a457"
+      },
+      {
+        "t": "2026-10-14T16:35:23.030569+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_058861a3de695ee6016acf3ecc992c819bbd9bb3769d4def8f",
+        "route_id": 1791960021237,
+        "in": 8987,
+        "out": 16,
+        "cache_read": 0,
+        "cache_write": 0,
+        "ms": 4923,
+        "session": "go-cli-live-20261014-5eea0d10a457"
+      }
+    ],
+    "usagePagination": {
+      "pageSize": 500,
+      "rowsFetched": 13,
+      "total": 13,
+      "complete": true
+    },
+    "lastRouteSettlement": {
+      "route": {
+        "id": 1791960021249,
+        "time": "2026-10-14T16:36:47.165245+08:00",
+        "ms": 6526,
+        "asked": "codex/gpt-6.1-sol",
+        "model": "codex/gpt-6.1-sol",
+        "served": "gpt-6.1-sol",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6.1-sol",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 6512
+          }
+        ],
+        "bridgeSequence": 0,
+        "session": "go-cli-live-20261014-5eea0d10a457",
+        "routeStateSequence": 525
+      },
+      "settled": true,
+      "waitSeconds": 0.002
+    }
+  },
+  "providerEvidence": {
+    "joinPolicy": "exact gateway response ID or route ID when exposed; otherwise session-scoped chronological order, one bridge inference per gateway route/usage row",
+    "inference": [
+      {
+        "sequence": 1,
+        "turn": "plain-live-text",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_058861a3de695ee6016acf3ecc992c819bbd9bb3769d4def8f",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 3754,
+        "responseSha256": "7b22de4a51d491a96ddb630b7091ad0319d44f3c1100718d9278463218f3e5b9",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 8987,
+          "completion_tokens": 16,
+          "total_tokens": 9003
+        },
+        "stream": true,
+        "finishReasons": [
+          "stop"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [],
+        "toolReceipts": [],
+        "route": {
+          "id": 1791960021237,
+          "time": "2026-10-14T16:35:23.030569+08:00",
+          "ms": 4923,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 4910
+            }
+          ],
+          "bridgeSequence": 1,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 465
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T16:35:23.030569+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_058861a3de695ee6016acf3ecc992c819bbd9bb3769d4def8f",
+          "route_id": 1791960021237,
+          "in": 8987,
+          "out": 16,
+          "cache_read": 0,
+          "cache_write": 0,
+          "ms": 4923,
+          "session": "go-cli-live-20261014-5eea0d10a457"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 8987,
+          "magpieUncachedInputTokens": 8987,
+          "magpieCachedInputTokens": 0,
+          "upstreamOutputTokens": 16,
+          "magpieOutputTokens": 16,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 2,
+        "turn": "inspect-fixtures",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_0842c86c90d575f0016acf3ed74dbc8198b136e99e40f66fec",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 5631,
+        "responseSha256": "573c8a91b2d7cc53e486aa00ed46bb5fa30a917310473828776cb4171a826f50",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 9167,
+          "completion_tokens": 38,
+          "total_tokens": 9205
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "name": "ls",
+            "argumentsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "safeArguments": {
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "toolReceipts": [],
+        "route": {
+          "id": 1791960021238,
+          "time": "2026-10-14T16:35:33.493106+08:00",
+          "ms": 5188,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 5185
+            }
+          ],
+          "bridgeSequence": 2,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 470
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T16:35:33.493106+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_0842c86c90d575f0016acf3ed74dbc8198b136e99e40f66fec",
+          "route_id": 1791960021238,
+          "in": 9167,
+          "out": 38,
+          "cache_read": 0,
+          "cache_write": 0,
+          "ms": 5188,
+          "session": "go-cli-live-20261014-5eea0d10a457"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 9167,
+          "magpieUncachedInputTokens": 9167,
+          "magpieCachedInputTokens": 0,
+          "upstreamOutputTokens": 38,
+          "magpieOutputTokens": 38,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 3,
+        "turn": "inspect-fixtures",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_03a34038613ec8f3016acf3edc48c48198852aa43c3af86650",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 1568,
+        "responseSha256": "6c9095cbc0c1b567af8a57695c109880ae06ef4351de1e3c70663586a3e112d3",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 9225,
+          "completion_tokens": 33,
+          "total_tokens": 9258
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "name": "grep",
+            "argumentsSha256": "6c8e126ab6928d2fa00bf778799801d0cc4494a9d820128856335035ec86e45e",
+            "safeArguments": {
+              "pathBasename": "",
+              "relativePath": ".",
+              "fixtureMarkers": [
+                "LIVE_FACT_ALPHA_5EEA0D10A457"
+              ],
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "route": {
+          "id": 1791960021239,
+          "time": "2026-10-14T16:35:38.85187+08:00",
+          "ms": 4674,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 4667
+            }
+          ],
+          "bridgeSequence": 3,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 475
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T16:35:38.85187+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_03a34038613ec8f3016acf3edc48c48198852aa43c3af86650",
+          "route_id": 1791960021239,
+          "in": 137,
+          "out": 33,
+          "cache_read": 9088,
+          "cache_write": 0,
+          "ms": 4674,
+          "session": "go-cli-live-20261014-5eea0d10a457"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 9225,
+          "magpieUncachedInputTokens": 137,
+          "magpieCachedInputTokens": 9088,
+          "upstreamOutputTokens": 33,
+          "magpieOutputTokens": 33,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 4,
+        "turn": "inspect-fixtures",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_03dc01e9825099fb016acf3ee078588198ae9f78ab6cb23caf",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 1532,
+        "responseSha256": "8702fdbd0a1156af5db3711600c6964f29a7e2240a9462cb853c078b56f9e99f",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 9327,
+          "completion_tokens": 19,
+          "total_tokens": 9346
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_c8f247c3d597477789432fb25d53c403",
+            "name": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383",
+            "safeArguments": {
+              "pathBasename": "scan-a.txt",
+              "relativePath": "scan-a.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "route": {
+          "id": 1791960021240,
+          "time": "2026-10-14T16:35:43.802651+08:00",
+          "ms": 3164,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 3152
+            }
+          ],
+          "bridgeSequence": 4,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 480
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T16:35:43.802651+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_03dc01e9825099fb016acf3ee078588198ae9f78ab6cb23caf",
+          "route_id": 1791960021240,
+          "in": 239,
+          "out": 19,
+          "cache_read": 9088,
+          "cache_write": 0,
+          "ms": 3164,
+          "session": "go-cli-live-20261014-5eea0d10a457"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 9327,
+          "magpieUncachedInputTokens": 239,
+          "magpieCachedInputTokens": 9088,
+          "upstreamOutputTokens": 19,
+          "magpieOutputTokens": 19,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 5,
+        "turn": "inspect-fixtures",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_0daa5e4aece2f4fd016acf3ee436a88199828e1104fe2176cf",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 1539,
+        "responseSha256": "2bf260872ec58e11ef5e331315f954ba706892ec1052ef324619599afbe49400",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 9374,
+          "completion_tokens": 21,
+          "total_tokens": 9395
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_55e2a49fb011499f9e9241976a7e6039",
+            "name": "read",
+            "argumentsSha256": "b75ba111d750bfe190b83c25ca5e276935725b7d8e74afcaef94a1fa4612c118",
+            "safeArguments": {
+              "pathBasename": "scan-b.txt",
+              "relativePath": "nested/scan-b.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "route": {
+          "id": 1791960021241,
+          "time": "2026-10-14T16:35:47.081613+08:00",
+          "ms": 5324,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 5311
+            }
+          ],
+          "bridgeSequence": 5,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 485
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T16:35:47.081613+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_0daa5e4aece2f4fd016acf3ee436a88199828e1104fe2176cf",
+          "route_id": 1791960021241,
+          "in": 158,
+          "out": 21,
+          "cache_read": 9216,
+          "cache_write": 0,
+          "ms": 5324,
+          "session": "go-cli-live-20261014-5eea0d10a457"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 9374,
+          "magpieUncachedInputTokens": 158,
+          "magpieCachedInputTokens": 9216,
+          "upstreamOutputTokens": 21,
+          "magpieOutputTokens": 21,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 6,
+        "turn": "inspect-fixtures",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_07457d2ac4923ccd016acf3ee90fcc8198b16bf8b3d78d729b",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 8084,
+        "responseSha256": "1cadbfd1e738cefe02b22cf20c804271c6639363d08c85d306ccd838ebe02b43",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 9424,
+          "completion_tokens": 34,
+          "total_tokens": 9458
+        },
+        "stream": true,
+        "finishReasons": [
+          "stop"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "route": {
+          "id": 1791960021242,
+          "time": "2026-10-14T16:35:52.581973+08:00",
+          "ms": 5439,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 5431
+            }
+          ],
+          "bridgeSequence": 6,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 490
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T16:35:52.581973+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_07457d2ac4923ccd016acf3ee90fcc8198b16bf8b3d78d729b",
+          "route_id": 1791960021242,
+          "in": 208,
+          "out": 34,
+          "cache_read": 9216,
+          "cache_write": 0,
+          "ms": 5439,
+          "session": "go-cli-live-20261014-5eea0d10a457"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 9424,
+          "magpieUncachedInputTokens": 208,
+          "magpieCachedInputTokens": 9216,
+          "upstreamOutputTokens": 34,
+          "magpieOutputTokens": 34,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 7,
+        "turn": "deny-write",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_071722295335c936016acf3ef1fd548199beebc0d04493d542",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 4509,
+        "responseSha256": "b5e8aac8d6d14cd272756886a2501a9c26ecd7724201fcb5035750c6c9bb4074",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 9444,
+          "completion_tokens": 60,
+          "total_tokens": 9504
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_4c647a37a456437ea1e3ff408e106596",
+            "name": "write",
+            "argumentsSha256": "3267b18ea9fd501d4e34629feb42bf0a7c7882b9d01626136415cbeb7c2b071e",
+            "safeArguments": {
+              "pathBasename": "blocked_5eea0d10a457.txt",
+              "relativePath": "blocked_5eea0d10a457.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "route": {
+          "id": 1791960021243,
+          "time": "2026-10-14T16:36:01.448073+08:00",
+          "ms": 6500,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 6489
+            }
+          ],
+          "bridgeSequence": 7,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 495
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T16:36:01.448073+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_071722295335c936016acf3ef1fd548199beebc0d04493d542",
+          "route_id": 1791960021243,
+          "in": 9444,
+          "out": 60,
+          "cache_read": 0,
+          "cache_write": 0,
+          "ms": 6500,
+          "session": "go-cli-live-20261014-5eea0d10a457"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 9444,
+          "magpieUncachedInputTokens": 9444,
+          "magpieCachedInputTokens": 0,
+          "upstreamOutputTokens": 60,
+          "magpieOutputTokens": 60,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 8,
+        "turn": "deny-write",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_0346bb7640776131016acf3ef8d8cc81988f0ac7e311f7d066",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 9844,
+        "responseSha256": "55a3a026c830b6b8c7b14c7061b6d9fd622d4d36900f3e70a16027875094b925",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 9522,
+          "completion_tokens": 41,
+          "total_tokens": 9563
+        },
+        "stream": true,
+        "finishReasons": [
+          "stop"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "bytes": 42,
+            "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+            "mentionsDenied": true,
+            "mentionsError": true
+          }
+        ],
+        "route": {
+          "id": 1791960021244,
+          "time": "2026-10-14T16:36:08.237278+08:00",
+          "ms": 3969,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 3957
+            }
+          ],
+          "bridgeSequence": 8,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 500
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T16:36:08.237278+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_0346bb7640776131016acf3ef8d8cc81988f0ac7e311f7d066",
+          "route_id": 1791960021244,
+          "in": 178,
+          "out": 41,
+          "cache_read": 9344,
+          "cache_write": 0,
+          "ms": 3969,
+          "session": "go-cli-live-20261014-5eea0d10a457"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 9522,
+          "magpieUncachedInputTokens": 178,
+          "magpieCachedInputTokens": 9344,
+          "upstreamOutputTokens": 41,
+          "magpieOutputTokens": 41,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 9,
+        "turn": "allow-write",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_0b2baf49bb31cb11016acf3f0013a481989e408489dd9e0701",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 5246,
+        "responseSha256": "8457e8d1a5993b471e1bafee274c93934b3fd90e328de3ac8ae4bd2635263bb4",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 9598,
+          "completion_tokens": 63,
+          "total_tokens": 9661
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_af77e72b8b2c4543aede2bbc29302779",
+            "name": "write",
+            "argumentsSha256": "e0291ee78af2eb31daef38896ab59f32df40297d0ca0650fbe15a6d598d9ef5e",
+            "safeArguments": {
+              "pathBasename": "approved_5eea0d10a457.txt",
+              "relativePath": "approved_5eea0d10a457.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "bytes": 42,
+            "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+            "mentionsDenied": true,
+            "mentionsError": true
+          }
+        ],
+        "route": {
+          "id": 1791960021245,
+          "time": "2026-10-14T16:36:15.406462+08:00",
+          "ms": 4492,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 4435
+            }
+          ],
+          "bridgeSequence": 9,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 505
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T16:36:15.406462+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_0b2baf49bb31cb11016acf3f0013a481989e408489dd9e0701",
+          "route_id": 1791960021245,
+          "in": 9598,
+          "out": 63,
+          "cache_read": 0,
+          "cache_write": 0,
+          "ms": 4492,
+          "session": "go-cli-live-20261014-5eea0d10a457"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 9598,
+          "magpieUncachedInputTokens": 9598,
+          "magpieCachedInputTokens": 0,
+          "upstreamOutputTokens": 63,
+          "magpieOutputTokens": 63,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 10,
+        "turn": "allow-write",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_09cfa2d02bda21fb016acf3f04cecc819a935bde2496c6cac6",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 7856,
+        "responseSha256": "82652cdcf171a9a24f49c554197e503c0011758cb8347b01de4f3ca99b5549ba",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 9726,
+          "completion_tokens": 33,
+          "total_tokens": 9759
+        },
+        "stream": true,
+        "finishReasons": [
+          "stop"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "bytes": 42,
+            "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+            "mentionsDenied": true,
+            "mentionsError": true
+          },
+          {
+            "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+            "tool": "write",
+            "bytes": 147,
+            "sha256": "247b00cc1b5e7f83320f8d5b7ae1f32dc45647bbf831ae93269da4d19a745d26",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "route": {
+          "id": 1791960021246,
+          "time": "2026-10-14T16:36:20.239821+08:00",
+          "ms": 3672,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 3660
+            }
+          ],
+          "bridgeSequence": 10,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 510
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T16:36:20.239821+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_09cfa2d02bda21fb016acf3f04cecc819a935bde2496c6cac6",
+          "route_id": 1791960021246,
+          "in": 254,
+          "out": 33,
+          "cache_read": 9472,
+          "cache_write": 0,
+          "ms": 3672,
+          "session": "go-cli-live-20261014-5eea0d10a457"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 9726,
+          "magpieUncachedInputTokens": 254,
+          "magpieCachedInputTokens": 9472,
+          "upstreamOutputTokens": 33,
+          "magpieOutputTokens": 33,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 11,
+        "turn": "edit-written-file",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_0ce911419ca976bc016acf3f0c08a88199ac73385f1c8a0570",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 6020,
+        "responseSha256": "5ed96f4788fa8bec953fb58ac2a747ea24fed49d82d49e0d72926aae77280a80",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 9807,
+          "completion_tokens": 83,
+          "total_tokens": 9890
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_30f19228344c4f6fbbd266068d8aa166",
+            "name": "edit",
+            "argumentsSha256": "93b773f1766f14da445c94a03e97f9cc822797fb0963c9bed13c01edc948e034",
+            "safeArguments": {
+              "pathBasename": "approved_5eea0d10a457.txt",
+              "relativePath": "approved_5eea0d10a457.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "bytes": 42,
+            "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+            "mentionsDenied": true,
+            "mentionsError": true
+          },
+          {
+            "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+            "tool": "write",
+            "bytes": 147,
+            "sha256": "247b00cc1b5e7f83320f8d5b7ae1f32dc45647bbf831ae93269da4d19a745d26",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "route": {
+          "id": 1791960021247,
+          "time": "2026-10-14T16:36:27.363984+08:00",
+          "ms": 8950,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 8894
+            }
+          ],
+          "bridgeSequence": 11,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 515
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T16:36:27.363984+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_0ce911419ca976bc016acf3f0c08a88199ac73385f1c8a0570",
+          "route_id": 1791960021247,
+          "in": 9807,
+          "out": 83,
+          "cache_read": 0,
+          "cache_write": 0,
+          "ms": 8950,
+          "session": "go-cli-live-20261014-5eea0d10a457"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 9807,
+          "magpieUncachedInputTokens": 9807,
+          "magpieCachedInputTokens": 0,
+          "upstreamOutputTokens": 83,
+          "magpieOutputTokens": 83,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 12,
+        "turn": "edit-written-file",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_05f9b7c1a438e8aa016acf3f169c8c8198932128ae8acd700e",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 3513,
+        "responseSha256": "4bc87addd87e42ac1f779b6330d7e1018820c5ad27c5e19c2ae04a2f6f48588b",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 9961,
+          "completion_tokens": 15,
+          "total_tokens": 9976
+        },
+        "stream": true,
+        "finishReasons": [
+          "stop"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "bytes": 42,
+            "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+            "mentionsDenied": true,
+            "mentionsError": true
+          },
+          {
+            "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+            "tool": "write",
+            "bytes": 147,
+            "sha256": "247b00cc1b5e7f83320f8d5b7ae1f32dc45647bbf831ae93269da4d19a745d26",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_30f19228344c4f6fbbd266068d8aa166",
+            "tool": "edit",
+            "bytes": 174,
+            "sha256": "d0a1e872724fa3b1a162f50d3fcdcc7afec6922855ca88dd37b7def34d0ab876",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "route": {
+          "id": 1791960021248,
+          "time": "2026-10-14T16:36:36.679809+08:00",
+          "ms": 6631,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 6620
+            }
+          ],
+          "bridgeSequence": 12,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 520
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T16:36:36.679809+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_05f9b7c1a438e8aa016acf3f169c8c8198932128ae8acd700e",
+          "route_id": 1791960021248,
+          "in": 233,
+          "out": 15,
+          "cache_read": 9728,
+          "cache_write": 0,
+          "ms": 6631,
+          "session": "go-cli-live-20261014-5eea0d10a457"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 9961,
+          "magpieUncachedInputTokens": 233,
+          "magpieCachedInputTokens": 9728,
+          "upstreamOutputTokens": 15,
+          "magpieOutputTokens": 15,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 13,
+        "turn": "long-bash-followup",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_0a1172ace9a6c153016acf3f1fa664819aa3d3522f582cd151",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 5334,
+        "responseSha256": "fe507c3a37755bff39660d3b3494b8561bc219b8ef1b2532682ec5aa1784b918",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 10086,
+          "completion_tokens": 76,
+          "total_tokens": 10162
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_e09d0a7aeeeb4116b035165a902810fb",
+            "name": "bash",
+            "argumentsSha256": "e6a4ff831e4d2e1db19a16ad0a21f411e773191847bfcbe91fc49fc31b3ec687",
+            "safeArguments": {
+              "expectedArtifactMentioned": false,
+              "commandSha256": "e6a4ff831e4d2e1db19a16ad0a21f411e773191847bfcbe91fc49fc31b3ec687"
+            }
+          }
+        ],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_acc59e2f333d466ca2b30578c4cbce90",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_77400b91a5874e28b5395ce4abc29b5e",
+            "tool": "grep",
+            "bytes": 150,
+            "sha256": "4d3906198caae5b067b9c7bf105d0932b7b2ccca994c22cf51cad729ab47ffa5",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_c8f247c3d597477789432fb25d53c403",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "ec4a01178f11a904d62aee88f472e35eb3aa0a897cada8d18629c16c83f1dc79",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_55e2a49fb011499f9e9241976a7e6039",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "1f7e54a1b3e246f28f329bfe81d73f980b77fd30e99ccce91b846f1d0614aaf6",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_4c647a37a456437ea1e3ff408e106596",
+            "tool": "write",
+            "bytes": 42,
+            "sha256": "51b6468271bc9ab868038e22c654772da2f7aaf83146fecd7a59c5d496d1edab",
+            "mentionsDenied": true,
+            "mentionsError": true
+          },
+          {
+            "toolCallId": "call_af77e72b8b2c4543aede2bbc29302779",
+            "tool": "write",
+            "bytes": 147,
+            "sha256": "247b00cc1b5e7f83320f8d5b7ae1f32dc45647bbf831ae93269da4d19a745d26",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_30f19228344c4f6fbbd266068d8aa166",
+            "tool": "edit",
+            "bytes": 174,
+            "sha256": "d0a1e872724fa3b1a162f50d3fcdcc7afec6922855ca88dd37b7def34d0ab876",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "route": {
+          "id": 1791960021249,
+          "time": "2026-10-14T16:36:47.165245+08:00",
+          "ms": 6526,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 6512
+            }
+          ],
+          "bridgeSequence": 13,
+          "session": "go-cli-live-20261014-5eea0d10a457",
+          "routeStateSequence": 525
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T16:36:47.165245+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_0a1172ace9a6c153016acf3f1fa664819aa3d3522f582cd151",
+          "route_id": 1791960021249,
+          "in": 10086,
+          "out": 76,
+          "cache_read": 0,
+          "cache_write": 0,
+          "ms": 6526,
+          "session": "go-cli-live-20261014-5eea0d10a457"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 10086,
+          "magpieUncachedInputTokens": 10086,
+          "magpieCachedInputTokens": 0,
+          "upstreamOutputTokens": 76,
+          "magpieOutputTokens": 76,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      }
+    ]
+  },
+  "source": {
+    "evidenceClass": "true live LLM end-to-end; real CLI binary, PTY, local forwarding bridge and signed-in Magpie Codex inference",
+    "provider": "Codex through Magpie; verified using per-session route/usage audit and upstream headers",
+    "model": "codex/gpt-6.1-sol",
+    "scopeMode": "default without sandbox.allowed_paths",
+    "sandboxAllowedPaths": [],
+    "sandboxAllowedPathsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "isolatedConfigSha256": "b6da52c1382566e63f50f64479a13f6de00541d75c527689551b1a7bb8d918da",
+    "cliCredential": "non-secret local sentinel; never logged",
+    "authorizationHeadersCaptured": false,
+    "requestBodiesCaptured": false,
+    "responseBodiesCaptured": false,
+    "screenshotSource": "headless Chromium screenshot of xterm.js fed from real PTY bytes, not native Terminal",
+    "isolatedHome": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/home",
+    "isolatedWorkspace": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-163504-7c08979c/workspace"
+  },
+  "finishedAt": "2026-10-14T08:37:11Z"
+}

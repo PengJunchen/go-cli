@@ -1,0 +1,7 @@
+{
+  "file": "terminal-error-replayed.png",
+  "sha256": "e34811c37c447629920e79b01d56cae0d55642b28a21012f2c316d2a48fc696d",
+  "bytes": 272600,
+  "source": "replay of the saved raw PTY bytes from this run through the same pinned xterm.js + Chromium renderer; not a contemporaneous capture",
+  "screenExcerpt": "                                                            \n                                                                                                                                                                         \n                                                                                                                                                                         \n                                                                                                                                                                         \n                                                                                                                                                                         \ncore: durable compaction is unsupported: the winning strategy did not produce a typed summary projection: core: durable compaction projection is invalid\ncodex/gpt-6.1-sol | turn #2 | interact | chat\nTokens: 21098/0 (0%) | Cost: unknown\nSources: usage=reported/u0 cost=unknown/c2 price=unknown actual=openai/codex/gpt-6.1-sol\nError: operation failed\nHint: Try again. If the problem persists, run `go-cli doctor` to diagnose common issues or contact support.\n> "
+}

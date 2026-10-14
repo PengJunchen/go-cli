@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "fixture_kind": "synthetic-live-presentation-acceptance",
+  "nonce": "96AEB82FCB5E",
+  "artifact_basename": "live_review_96AEB82FCB5E.pptx",
+  "expected_slide_count": 4,
+  "title": "LIVE_REVIEW_96AEB82FCB5E",
+  "slide_titles": [
+    "LIVE_REVIEW_96AEB82FCB5E",
+    "What Was Checked",
+    "Tool Cycle and Retained Facts",
+    "Release Status"
+  ],
+  "facts": [
+    {
+      "label": "Synthetic checks completed",
+      "value": "57 of 100",
+      "exact_text": "Synthetic checks completed: 57 of 100"
+    },
+    {
+      "label": "Synthetic median tool cycle",
+      "value": "4.1 seconds",
+      "exact_text": "Synthetic median tool cycle: 4.1 seconds"
+    },
+    {
+      "label": "Synthetic review facts retained",
+      "value": "7 of 10",
+      "exact_text": "Synthetic review facts retained: 7 of 10"
+    }
+  ],
+  "scope_disclosure": "Synthetic QA inputs only - not product measurements",
+  "initial_status": "Release status: INITIAL",
+  "revised_status": "Release status: REVISED",
+  "first_turn_prompt": "Create an editable four-slide PowerPoint at `live_review_96AEB82FCB5E.pptx` in the current workspace. Use the actual tools available in this CLI to create the file, then inspect the saved file and report its path and slide count.\n\nUse only the supplied fixture facts below. Label the figures synthetic on the slides; do not present them as measured product performance or add outside factual claims.\n\nRequired content:\n- Use these exact, distinct editable slide titles in order: [\"LIVE_REVIEW_96AEB82FCB5E\", \"What Was Checked\", \"Tool Cycle and Retained Facts\", \"Release Status\"].\n- A concise four-slide briefing with distinct titles and editable text shapes (not slide-sized screenshots).\n- Include each exact metric line verbatim on a slide: `Synthetic checks completed: 57 of 100`; `Synthetic median tool cycle: 4.1 seconds`; `Synthetic review facts retained: 7 of 10`.\n- Include the exact disclosure `Synthetic QA inputs only - not product measurements`.\n- Include the exact marker `Release status: INITIAL` on slide 4.\n- Keep the writing plain and the visual hierarchy clear. Do not add unsupported numbers, citations, or claims.\n\nThis is turn 1 of a live tool-use acceptance run. The file must be created through model-requested CLI tool calls; do not claim success before the file exists and has been inspected.\n",
+  "second_turn_prompt": "Edit the existing `live_review_96AEB82FCB5E.pptx` in place using the available CLI tools. This is a separate follow-up user turn. Change only the slide-4 status marker `Release status: INITIAL` to `Release status: REVISED`. Preserve the four-slide structure, exact title, all three exact metric lines, and disclosure. Save the edited PPTX, inspect it, and report the changed text and path. Do not create a replacement from scratch or claim success before verifying the existing file changed.\n"
+}

@@ -1,0 +1,206 @@
+diff --git a/internal/tui/app.go b/internal/tui/app.go
+index 756d0dc..8bb9fb0 100644
+--- a/internal/tui/app.go
++++ b/internal/tui/app.go
+@@ -842,6 +842,10 @@ type teaModel struct {
+ 	liveToolReceipts       map[liveToolOccurrence]string
+ 	canonicalAssistantKeys map[AssistantOccurrenceKey]struct{}
+ 	canonicalToolEntryKeys map[liveToolOccurrence]string
++	canonicalToolProgress  map[liveToolOccurrence]canonicalToolProgressState
++	// One Bubbletea app is built per REPL turn; keep quiescent run IDs only for
++	// this presentation lifetime so stale events from a finished run stay closed.
++	quiescentToolRuns      map[string]struct{}
+ 	liveRowOrder           []string
+ 	liveRowSequence        uint64
+ 	transcriptSearchMode   bool
+@@ -921,6 +925,8 @@ func newTeaModel(a *BubbleteaApp) *teaModel {
+ 		liveToolReceipts:                make(map[liveToolOccurrence]string),
+ 		canonicalAssistantKeys:          make(map[AssistantOccurrenceKey]struct{}),
+ 		canonicalToolEntryKeys:          make(map[liveToolOccurrence]string),
++		canonicalToolProgress:           make(map[liveToolOccurrence]canonicalToolProgressState),
++		quiescentToolRuns:               make(map[string]struct{}),
+ 		accordion:                       NewAccordionModel(),
+ 		onUpdate:                        a.onUpdate,
+ 		steerCallback:                   a.steerCallback,
+@@ -959,6 +965,14 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+ 		if msg.request == nil || !msg.request.apply(m) {
+ 			return m, nil
+ 		}
++		m.mu.Lock()
++		progressChanged := m.reconcileCanonicalToolProgressLocked(m.runObservation)
++		view := ""
++		if progressChanged && m.shouldNotify() {
++			view = m.renderViewLocked()
++		}
++		m.mu.Unlock()
++		m.notify(view)
+ 		request := msg.request
+ 		return m, func() tea.Msg { return transcriptRefreshViewQueuedMsg{request: request} }
+ 	case transcriptRefreshViewQueuedMsg:
+@@ -2884,6 +2898,11 @@ func (m *teaModel) hasRunningToolLocked() bool {
+ 			return true
+ 		}
+ 	}
++	for _, state := range m.canonicalToolProgress {
++		if state == canonicalToolProgressRunning {
++			return true
++		}
++	}
+ 	return false
+ }
+ 
+diff --git a/internal/tui/app_transcript.go b/internal/tui/app_transcript.go
+index 73ea848..4f0f64c 100644
+--- a/internal/tui/app_transcript.go
++++ b/internal/tui/app_transcript.go
+@@ -9,20 +9,32 @@ import (
+ 
+ 	tea "github.com/charmbracelet/bubbletea"
+ 	"github.com/charmbracelet/lipgloss"
++	"github.com/pengjunchen/go-cli/internal/core"
+ )
+ 
+ const maxCanonicalTranscriptPreviewBytes = maxStreamingRenderBytes
+ 
++type canonicalToolProgressState uint8
++
++const (
++	canonicalToolProgressRunning canonicalToolProgressState = iota + 1
++	canonicalToolProgressCompleted
++)
++
+ type liveToolOccurrence struct {
+ 	Key                      ToolOccurrenceKey
+ 	CanonicalTranscriptIndex uint64
+ }
+ 
+ func (m *teaModel) installTranscriptSnapshotLocked(snapshot CanonicalTranscriptSnapshot) error {
++	m.ensureCanonicalToolProgressLocked()
+ 	rows := canonicalTranscriptViewportRows(snapshot)
+ 	assistantKeys, toolEntryKeys := canonicalTranscriptOccurrenceIndexes(snapshot)
+ 	m.canonicalAssistantKeys = assistantKeys
+ 	m.canonicalToolEntryKeys = toolEntryKeys
++	for occurrence := range toolEntryKeys {
++		m.canonicalToolProgress[occurrence] = canonicalToolProgressCompleted
++	}
+ 	matchedLive := make([]AssistantOccurrenceKey, 0)
+ 	matchedKeys := make(map[string]struct{})
+ 	for occurrence, key := range m.liveAssistantRows {
+@@ -88,9 +100,109 @@ func (m *teaModel) installTranscriptSnapshotLocked(snapshot CanonicalTranscriptS
+ 	m.transcriptSplitActive = m.width >= splitWidthThreshold
+ 	m.transcriptSnapshot = snapshot.Clone()
+ 	m.hasTranscriptSnapshot = true
++	m.spinnerActive = m.hasRunningToolLocked()
+ 	return nil
+ }
+ 
++func (m *teaModel) ensureCanonicalToolProgressLocked() {
++	if m.canonicalToolProgress == nil {
++		m.canonicalToolProgress = make(map[liveToolOccurrence]canonicalToolProgressState)
++	}
++	if m.quiescentToolRuns == nil {
++		m.quiescentToolRuns = make(map[string]struct{})
++	}
++}
++
++// reconcileCanonicalToolProgressLocked closes only the presentation state for
++// one quiescent run. It does not establish or modify resource completion proof.
++func (m *teaModel) reconcileCanonicalToolProgressLocked(observation RunObservation) bool {
++	if observation.RunID == "" || observation.ExecutionState != core.RunExecutionQuiescent {
++		return false
++	}
++	m.ensureCanonicalToolProgressLocked()
++	_, alreadyQuiescent := m.quiescentToolRuns[observation.RunID]
++	m.quiescentToolRuns[observation.RunID] = struct{}{}
++	changed := !alreadyQuiescent
++	for occurrence := range m.canonicalToolProgress {
++		if occurrence.Key.RunID == observation.RunID {
++			delete(m.canonicalToolProgress, occurrence)
++			changed = true
++		}
++	}
++	m.pruneQuiescentToolRunsLocked()
++	wasActive := m.spinnerActive
++	m.spinnerActive = m.hasRunningToolLocked()
++	return changed || wasActive != m.spinnerActive
++}
++
++func (m *teaModel) pruneQuiescentToolRunsLocked() {
++	if m.expectedRunID == "" {
++		return
++	}
++	for runID := range m.quiescentToolRuns {
++		if runID != m.expectedRunID {
++			delete(m.quiescentToolRuns, runID)
++		}
++	}
++}
++
++func (m *teaModel) recordCanonicalToolProgressLocked(event AgentEvent, occurrence liveToolOccurrence) {
++	m.ensureCanonicalToolProgressLocked()
++	m.pruneQuiescentToolRunsLocked()
++	key := occurrence.Key
++	if m.expectedRunID != "" && key.RunID != m.expectedRunID {
++		return
++	}
++	if !m.canonicalToolOccurrenceFitsSnapshotLocked(occurrence) {
++		return
++	}
++	if m.runObservation.RunID == key.RunID && m.runObservation.ExecutionState == core.RunExecutionQuiescent {
++		m.quiescentToolRuns[key.RunID] = struct{}{}
++	}
++	if _, quiescent := m.quiescentToolRuns[key.RunID]; quiescent {
++		return
++	}
++
++	switch event.ContentType {
++	case ContentTypeToolCall:
++		if event.Type != "" && event.Type != "tool_call" {
++			return
++		}
++		if m.canonicalToolProgress[occurrence] == canonicalToolProgressCompleted {
++			return
++		}
++		m.canonicalToolProgress[occurrence] = canonicalToolProgressRunning
++	case ContentTypeToolResult:
++		if event.Type != "" && event.Type != "tool_result" {
++			return
++		}
++		m.canonicalToolProgress[occurrence] = canonicalToolProgressCompleted
++	default:
++		return
++	}
++	m.spinnerActive = m.hasRunningToolLocked()
++}
++
++func (m *teaModel) canonicalToolOccurrenceFitsSnapshotLocked(occurrence liveToolOccurrence) bool {
++	found := false
++	for _, row := range m.transcriptSnapshot.Rows {
++		if row.Kind != TranscriptRowAssistant {
++			continue
++		}
++		for _, call := range row.Calls {
++			if call.Key != occurrence.Key {
++				continue
++			}
++			if found || row.AssistantOccurrence == nil || row.AssistantOccurrence.RunID != occurrence.Key.RunID ||
++				row.AssistantOccurrence.CanonicalTranscriptIndex != occurrence.CanonicalTranscriptIndex {
++				return false
++			}
++			found = true
++		}
++	}
++	return true
++}
++
+ func canonicalTranscriptOccurrenceIndexes(snapshot CanonicalTranscriptSnapshot) (
+ 	map[AssistantOccurrenceKey]struct{},
+ 	map[liveToolOccurrence]string,
+@@ -616,6 +728,7 @@ func (m *teaModel) handleCanonicalToolEvent(event AgentEvent) tea.Cmd {
+ 	notify := m.shouldNotify()
+ 	var view string
+ 	m.mu.Lock()
++	m.recordCanonicalToolProgressLocked(event, occurrence)
+ 	entryKey, canonicalMatch := m.canonicalToolEntryKeys[occurrence]
+ 	if event.SourceTruncated != nil {
+ 		value := *event.SourceTruncated

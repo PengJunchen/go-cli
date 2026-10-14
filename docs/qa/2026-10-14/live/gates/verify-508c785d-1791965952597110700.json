@@ -1,0 +1,27 @@
+{
+  "target": "verify",
+  "command": "make verify",
+  "exitCode": 2,
+  "durationSeconds": 418.394,
+  "baselineCommit": "508c785dffa06ec25aa36414b51f3afd46d462a7",
+  "startedCommit": "508c785dffa06ec25aa36414b51f3afd46d462a7",
+  "sourceDiffBeforeSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "sourceDiffAfterSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "sourceUnchangedDuringRun": true,
+  "worktreeDiffSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "log": "verify-508c785d-1791965952597110700.log",
+  "logSHA256": "209e2a1272f3436262179d43cd22914cdf98386c4fa389811e02a01498a19560",
+  "signals": [
+    "0 issues.",
+    "  ERROR: boom",
+    "  ERROR: boom",
+    "go test event failure: package github.com/pengjunchen/go-cli/internal/acp failed",
+    "go test event failure: test github.com/pengjunchen/go-cli/internal/acp.TestStdioProcessOwnerEarlyExitIsWaitedAndReaped failed",
+    "go test observed 8775 test function(s): 8768 passed, 1 failed, 6 skipped across 28 package(s)",
+    "go test command failed with exit status 1 (go test -json -count=1 -race -count=1 ./...)",
+    "exit status 1",
+    "make: *** [test] Error 1"
+  ],
+  "originalLogName": "verify.log",
+  "archiveNote": "Only log path updated when preserving previous run; underlying log bytes and logSHA256 remain unchanged."
+}

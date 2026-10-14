@@ -1,0 +1,1232 @@
+{
+  "runId": "20261014-172353-ae18536c",
+  "startedAt": "2026-10-14T09:23:53Z",
+  "revision": "3a20cc237ee3fa7c0e8ca3c4765f66cd98762526",
+  "raceBuild": {
+    "binary": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-172353-ae18536c/bin/go-cli-race",
+    "sha256": "02f3bca301fecfa6cba81e1d35fa9347583f8707ea1bb2afe553b89f30b46a59",
+    "flags": "rtk proxy go build -race"
+  },
+  "failure": "Traceback (most recent call last):\n  File \"/Users/yinyuepeng/projects/go-cli/scripts/e2e_live/run.py\", line 1917, in run_live\n    report[\"turns\"].append(wait_turn(session, bridge, label, evidence, report[\"approvals\"], report[\"screenshots\"], timeout, capture_progress=\"13-pptx-generation-working\"))\n                           ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/yinyuepeng/projects/go-cli/scripts/e2e_live/run.py\", line 1064, in wait_turn\n    raise RuntimeError(f\"interactive process exited during {label} with status {process_status}; screen={screen[-1200:]}\")\nRuntimeError: interactive process exited during pptx-create with status 1; screen=so remember this early fact for a later question after context compaction: LIVE_MEMO [tool call_71cecf4fffdf452eb2d1fd1729c9ab69] RY_9599A58520D6=cobalt. Do not repeat the memory fact yet and do not use tools. [receipt: error] [assistant] LIVE_TEXT_OK_9599A58520D6 [assistant · live] I’ll write and run the Python script, then reopen the saved deck to verify its four slides, editable text, and exact required content. [assistant · live] core: tool completion did not prove local resource quiescence: core: tool completion did not prove local resource quiescence codex/gpt-6.1-sol | turn #2 | interact | chat Tokens: 29486/0 (0%) | Cost: unknown Session ended. error: interactive: operation failed: operation failed: interactive: owner publication did not match the joined durable run (quiescent=true outcome_known=false run_match es=true session_matches=true owner_generation_present=true) Hint: Try again. If the problem persists, run `go-cli doctor` to diagnose common issues or contact support.\n",
+  "goSourceSnapshot": {
+    "capturedAt": "2026-10-14T09:23:53Z",
+    "unstaged": {
+      "captured": true,
+      "file": "go-source-diff-unstaged-at-build.patch",
+      "bytes": 879,
+      "sha256": "ea2e3fb840998e3308cfc679ba51bdbc3f87520235742b40052d7dfb505e29e2"
+    },
+    "staged": {
+      "captured": true,
+      "file": "go-source-diff-staged-at-build.patch",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "gitStatusShort": [
+      " M internal/cli/repl_session.go",
+      "?? docs/qa/2026-10-14/live/",
+      "?? internal/cli/repl_unknown_cancel_recovery_test.go",
+      "?? scripts/e2e_live/",
+      "?? scripts/e2e_live_review/",
+      "?? scripts/magpie/"
+    ]
+  },
+  "goSourceSnapshotAfterBuild": {
+    "capturedAt": "2026-10-14T09:23:59Z",
+    "unstaged": {
+      "captured": true,
+      "file": "go-source-diff-unstaged-after-build.patch",
+      "bytes": 879,
+      "sha256": "ea2e3fb840998e3308cfc679ba51bdbc3f87520235742b40052d7dfb505e29e2"
+    },
+    "staged": {
+      "captured": true,
+      "file": "go-source-diff-staged-after-build.patch",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "gitStatusShort": [
+      " M internal/cli/repl_session.go",
+      "?? docs/qa/2026-10-14/live/",
+      "?? internal/cli/repl_unknown_cancel_recovery_test.go",
+      "?? scripts/e2e_live/",
+      "?? scripts/e2e_live_review/",
+      "?? scripts/magpie/"
+    ]
+  },
+  "goSourceUnchangedDuringBuild": true,
+  "pptxLibrary": "python-pptx==1.0.2",
+  "nonce": "9599a58520d6",
+  "sessionId": "go-cli-live-20261014-9599a58520d6",
+  "gateway": "http://127.0.0.1:3425",
+  "model": "codex/gpt-6.1-sol",
+  "runMode": "live-artifact-focus",
+  "selectedScenes": [
+    "real provider memory seed",
+    "model-generated PPTX create and separate-turn edit",
+    "rendered OOXML review",
+    "production context compaction and recall"
+  ],
+  "skippedScenes": [
+    "smoke and approvals",
+    "long Bash with queued follow-up",
+    "Escape cancellation and recovery"
+  ],
+  "maxTokens": 8000,
+  "modelTimeout": {
+    "total": "5m",
+    "streamIdle": "90s"
+  },
+  "scopedWorkspace": false,
+  "screenshots": [
+    {
+      "file": "01-connected.png",
+      "sha256": "d72ad7fd5c6906ba4450ad9244bbbd25b4ffe109edd843007f45f104e823e401",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "Interactive session started": true
+      },
+      "screenExcerpt": "Interactive session started. Type 'exit' to quit.",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 0
+      }
+    },
+    {
+      "file": "02-live-memory-seed.png",
+      "sha256": "e180812689e7890a532429ffd7da8474a92198b8b7bc4238801419a1a25e8f9d",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {},
+      "screenExcerpt": "Interactive session started. Type 'exit' to quit. > This is a live provider text check. Reply with exactly LIVE_TEXT_OK_9599A58520D6. Also remember this early fact for a later question after context compaction: LIVE_MEM ORY_9599A58520D6=cobalt. Do not repeat the memory fact yet and do not use tools. Session: s_73e17f5143cebda1d54d8893728d8d09 | Branch: main | Loaded rows: 2 | loaded projection only [user] This is a live provider text check. Reply with exactly LIVE_TEXT_OK_9599A58520D6. Also remember this early fact for a later question after context compaction: LIVE_MEMOR Y_9599A58520D6=cobalt. Do not repeat the memory fact yet and do not use tools. [assistant] LIVE_TEXT_OK_9599A58520D6 codex/gpt-6.1-sol | turn #1 | interact | chat Tokens: 8999/0 (0%) | Cost: unknown Sources: usage=reported/u0 cost=unknown/c1 price=unknown actual=openai/codex/gpt-6.1-sol >",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 0
+      }
+    },
+    {
+      "file": "13-pptx-generation-working.png",
+      "sha256": "56a7209d4cfee5cc03d8cc27ce6bb37f34b76b38f357cec5d1f7780824dd1a62",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "working...": true
+      },
+      "screenExcerpt": "pptx and report its slide count and exact required content. [approval] write local interaction #1 scope: unknown; once only; reuse unavailable view truncated · details 1-20/127 · ↑/↓ PgUp/PgDn args: content: from pathlib import Path from pptx import Presentation from pptx.util import Inches, Pt from pptx.dml.color import RGB, then reopen the saved deck to verify its four slides, editable text, and exact required content. ⠋ working... codex/gpt-6.1-sol | turn #2 | interact | chat",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 15
+      }
+    },
+    {
+      "file": "pptx-create-1-approval-allow-page-1.png",
+      "sha256": "b0d2f66b624e0ea6ca448b9469f8c8b1b83e0c4b8de17452877b8b02be6a885d",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "[approval]": true
+      },
+      "screenExcerpt": "pptx and report its slide count and exact required content. [approval] write local interaction #1 scope: unknown; once only; reuse unavailable view truncated · details 1-20/127 · ↑/↓ PgUp/PgDn args: content: from pathlib import Path from pptx import Presentation from pptx.util import Inches, Pt from pptx.dml.color import RGBColor OUTPUT = Path.cwd() / 'live_review_9599A58520D6.pptx' TITLES = [ 'LIVE_REVIEW_9599A58520D6', 'What Was Checked', 'Tool Cycle and Retained Facts', 'Release Status', ] DISCLOSURE = 'Synthetic QA inputs only - not product measurements' BODIES = [ ['Synthetic QA briefing'], ['Synthetic checks completed: 67 of 100'], ['Synthetic median tool cycle: 4.3 seconds', 'Synthetic review facts retained: 7 of 10'], ['Release status: INITIAL'], [y] review details [n] reject [d] diff",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 15
+      }
+    },
+    {
+      "file": "pptx-create-1-approval-allow-page-2.png",
+      "sha256": "e5e5a6a556b30d91eca7eedc5a2f5320aed539b49243c695ba4a32bc80520015",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "[approval]": true
+      },
+      "screenExcerpt": "pptx and report its slide count and exact required content. [approval] write local interaction #1 scope: unknown; once only; reuse unavailable view truncated · details 20-39/127 · ↑/↓ PgUp/PgDn ['Release status: INITIAL'], ] def text_box(slide, text, x, y, width, height, size, color, bold=False): shape = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(width), Inches(height)) frame = shape.text_frame frame.word_wrap = True paragraph = frame.paragraphs[0] paragraph.text = text paragraph.font.name = 'Arial' paragraph.font.size = Pt(size) paragraph.font.bold = bold paragraph.font.color.rgb = RGBColor(*color) return shape prs = Presentation() prs.slide_width = Inches(13.333) prs.slide_height = Inches(7.5) [y] review details [n] reject [d] diff",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 15
+      }
+    },
+    {
+      "file": "pptx-create-1-approval-allow-page-3.png",
+      "sha256": "391445112f7274838aa776f6ab2b5dbfac4c8c615a4b6310c5bf635dec32f31c",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "[approval]": true
+      },
+      "screenExcerpt": "nteraction #1 scope: unknown; once only; reuse unavailable view truncated · details 39-58/127 · ↑/↓ PgUp/PgDn prs.slide_height = Inches(7.5) for title, body in zip(TITLES, BODIES): slide = prs.slides.add_slide(prs.slide_layouts[6]) slide.background.fill.solid() slide.background.fill.fore_color.rgb = RGBColor(245, 247, 250) text_box(slide, title, 0.75, 0.65, 11.85, 1.2, 32, (22, 43, 65), True) for index, line in enumerate(body): text_box(slide, line, 0.75, 2.5 + index * 1.0, 11.85, 0.8, 26, (22, 43, 65)) text_box(slide, DISCLOSURE, 0.75, 6.55, 11.85, 0.5, 16, (75, 85, 95)) prs.save(OUTPUT) # Inspect the saved artifact, including its editable text shapes. saved = Presentation(OUTPUT) assert len(saved.slides) == 4 for index, (slide, title, body) in enumerate(zip(saved.slides, TITLES, BODIES), start=1): texts = [shape.text for shape in slide.shapes if shape.has_text_f prs = Presentation() prs.slide_width = Inches(13.333) prs.slide_height = Inches(7.5) [y] review details [n] reject [d] diff",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 15
+      }
+    },
+    {
+      "file": "pptx-create-1-approval-allow-page-4.png",
+      "sha256": "d9932cffeb0010ac72995b85da718e39af5767e1e11dabed3ab0ee3dc80656b6",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "[approval]": true
+      },
+      "screenExcerpt": "pptx and report its slide count and exact required content. [approval] write local interaction #1 scope: unknown; once only; reuse unavailable view truncated · details 58-77/127 · ↑/↓ PgUp/PgDn for text in texts: print(f' {text}') print(f'Path: {OUTPUT.resolve()}') print(f'Slide count: {len(saved.slides)}') print('Inspection passed: all required content is present in editable text shapes.') path: /Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-172353-ae18536c/workspace/create_live_deck.py diff: +from pathlib import Path +from pptx import Presentation +from pptx.util import Inches, Pt +from pptx.dml.color import RGBColor + +OUTPUT = Path.cwd() / 'live_review_9599A58520D6.pptx' +TITLES = [ + 'LIVE_REVIEW_9599A58520D6', + 'What Was Checked', + 'Tosert all(shape.has_text_frame for shape in slide.shapes) print(f'Slide {index}:') for text in texts: [y] review details [n] reject [d] diff",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 309
+      }
+    },
+    {
+      "file": "pptx-create-1-approval-allow-page-5.png",
+      "sha256": "8b5c554ce573a2f63ff096db1c2fd41fd2aff22d142d2487d5e5e6024cd22457",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "[approval]": true
+      },
+      "screenExcerpt": "pptx and report its slide count and exact required content. [approval] write local interaction #1 scope: unknown; once only; reuse unavailable view truncated · details 77-96/127 · ↑/↓ PgUp/PgDn +] +DISCLOSURE = 'Synthetic QA inputs only - not product measurements' +BODIES = [ + ['Synthetic QA briefing'], + ['Synthetic checks completed: 67 of 100'], + ['Synthetic median tool cycle: 4.3 seconds', + 'Synthetic review facts retained: 7 of 10'], + ['Release status: INITIAL'], +] + + +def text_box(slide, text, x, y, width, height, size, color, bold=False): + shape = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(width), Inches(height)) + frame = shape.text_frame + frame.word_wrap = True + 'LIVE_REVIEW_9599A58520D6', + 'What Was Checked', + 'Tool Cycle and Retained Facts', + 'Release Status', +] [y] review details [n] reject [d] diff",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 725
+      }
+    },
+    {
+      "file": "pptx-create-1-approval-allow-page-6.png",
+      "sha256": "cdb39c98401809cf9eb1516547758113e139043e1dd6c86cb9a598e8b69e723c",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "[approval]": true
+      },
+      "screenExcerpt": "pptx and report its slide count and exact required content. [approval] write local interaction #1 scope: unknown; once only; reuse unavailable view truncated · details 96-115/127 · ↑/↓ PgUp/PgDn + paragraph.font.bold = bold + paragraph.font.color.rgb = RGBColor(*color) + return shape + + +prs = Presentation() +prs.slide_width = Inches(13.333) +prs.slide_height = Inches(7.5) +for title, body in zip(TITLES, BODIES): + slide = prs.slides.add_slide(prs.slide_layouts[6]) + slide.background.fill.solid() + slide.background.fill.fore_color.rgb = RGBColor(245, 247, 250) + text_box(slide, title, 0.75, 0.65, 11.85, 1.2, 32, (22, 43, 65), True) + for index, line in enumerate(body): + text_box(slide, line, 0 + paragraph = frame.paragraphs[0] + paragraph.text = text + paragraph.font.name = 'Arial' + paragraph.font.size = Pt(size) + paragraph.font.bold = bold [y] review details [n] reject [d] diff",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 783
+      }
+    },
+    {
+      "file": "pptx-create-1-approval-allow-page-7.png",
+      "sha256": "4e7b9b5dfae9dc6d4153a21f87a42a1edcb9df4e001dce57e36baf2efe993fa0",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "[approval]": true
+      },
+      "screenExcerpt": ", 43, 65), True) + for index, line in enumerate(body): + text_box(slide, line, 0.75, 2.5 + index * 1.0, 11.85, 0.8, 26, (22, 43, 65)) + text_box(slide, DISCLOSURE, 0.75, 6.55, 11.85, 0.5, 16, (75, 85, 95)) +prs.save(OUTPUT) + +# Inspect the saved artifact, including its editable text shapes. +saved = Presentation(OUTPUT) +assert len(saved.slides) == 4 +for index, (slide, title, body) in enumerate(zip(saved.slides, TITLES, BODIES), start=1): + texts = [shape.text for shape in slide.shapes if shape.has_text_frame] + assert texts == [title, *e_color.rgb = RGBColor(245, 247, 250) + text_box(slide, title, 0.75, 0.65, 11.85, 1.2, 32, (22, 43, 65), True) + for index, line in enumerate(body): + text_box(slide, line, 0.75, 2.5 + index * 1.0, 11.85, 0.8, 26, (22, 43, 65)) + text_box(slide, DISCLOSURE, 0.75, 6.55, 11.85, 0.5, 16, (75, 85, 95)) +prs.save(OUTPUT) + +# Inspect the saved artifact, including its editable text shapes. +saved = Presentation(OUTPUT) [y] review details [n] reject [d] diff",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 1131
+      }
+    },
+    {
+      "file": "pptx-create-2-approval-allow-page-1.png",
+      "sha256": "b1ac9d771be61329a765d209e36c43cca15cc523c823de2c8cdc1489edffbead",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "[approval]": true
+      },
+      "screenExcerpt": "pptx and report its slide count and exact required content. [approval] bash local interaction #2 scope: unknown; once only; reuse unavailable details 1-2/2 args: command: python create_live_deck.py [y] once [n] reject [Esc] cancel",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 14
+      }
+    },
+    {
+      "file": "pptx-create-cli-exit.png",
+      "sha256": "3d8021b74b194804e4fc8a9a4a675ef458f0d00f42507d15243c166dda9334bc",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {},
+      "screenExcerpt": "so remember this early fact for a later question after context compaction: LIVE_MEMO [tool call_71cecf4fffdf452eb2d1fd1729c9ab69] RY_9599A58520D6=cobalt. Do not repeat the memory fact yet and do not use tools. [receipt: error] [assistant] LIVE_TEXT_OK_9599A58520D6 [assistant · live] I’ll write and run the Python script, then reopen the saved deck to verify its four slides, editable text, and exact required content. [assistant · live] core: tool completion did not prove local resource quiescence: core: tool completion did not prove local resource quiescence codex/gpt-6.1-sol | turn #2 | interact | chat Tokens: 29486/0 (0%) | Cost: unknown Session ended. error: interactive: operation failed: operation failed: interactive: owner publication did not match the joined durable run (quiescent=true outcome_known=false run_match es=true session_matches=true owner_generation_present=true) Hint: Try again. If the problem persists, run `go-cli doctor` to diagnose common issues or contact support.",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 124
+      }
+    }
+  ],
+  "turns": [
+    {
+      "turn": "plain-live-text",
+      "gatewayRequestsBefore": 0,
+      "gatewayRequestsAfter": 1,
+      "approvals": [],
+      "screenExcerpt": "a later question after context compaction: LIVE_MEM ORY_9599A58520D6=cobalt. Do not repeat the memory fact yet and do not use tools. Session: s_73e17f5143cebda1d54d8893728d8d09 | Branch: main | Loaded rows: 2 | loaded projection only [user] This is a live provider text check. Reply with exactly LIVE_TEXT_OK_9599A58520D6. Also remember this early fact for a later question after context compaction: LIVE_MEMOR Y_9599A58520D6=cobalt. Do not repeat the memory fact yet and do not use tools. [assistant] LIVE_TEXT_OK_9599A58520D6 codex/gpt-6.1-sol | turn #1 | interact | chat Tokens: 8999/0 (0%) | Cost: unknown Sources: usage=reported/u0 cost=unknown/c1 price=unknown actual=openai/codex/gpt-6.1-sol >",
+      "elapsedSeconds": 7.64,
+      "providerRequestSequences": [
+        1
+      ],
+      "upstreamResponseIds": [
+        "chatcmpl-resp_0a3e4f39eb65f465016acf4a3e0e088199ae64753bb6a19dfd"
+      ],
+      "toolCalls": [],
+      "toolReceipts": [],
+      "toolCallReceiptMatches": []
+    }
+  ],
+  "approvals": [
+    {
+      "turn": "pptx-create",
+      "decision": "allow",
+      "decidedAt": "2026-10-14T09:25:32Z",
+      "toolName": "write",
+      "toolCallIds": [
+        "call_c05950f45c6043b3b06fe57d487613ed"
+      ],
+      "reviewedPages": [
+        [
+          1,
+          20,
+          127
+        ],
+        [
+          20,
+          39,
+          127
+        ],
+        [
+          39,
+          58,
+          127
+        ],
+        [
+          58,
+          77,
+          127
+        ],
+        [
+          77,
+          96,
+          127
+        ],
+        [
+          96,
+          115,
+          127
+        ],
+        [
+          108,
+          127,
+          127
+        ]
+      ],
+      "reviewedRows": 127,
+      "detailRows": 127,
+      "detailRowsFullyCovered": true,
+      "decisionBasis": "complete-captured-detail-coverage",
+      "pageScreenshots": [
+        "pptx-create-1-approval-allow-page-1.png",
+        "pptx-create-1-approval-allow-page-2.png",
+        "pptx-create-1-approval-allow-page-3.png",
+        "pptx-create-1-approval-allow-page-4.png",
+        "pptx-create-1-approval-allow-page-5.png",
+        "pptx-create-1-approval-allow-page-6.png",
+        "pptx-create-1-approval-allow-page-7.png"
+      ],
+      "decisionFooter": "[y] review details [n] reject [d] diff",
+      "screen": "= Presentation(OUTPUT) +assert len(saved.slides) == 4 +for index, (slide, title, body) in enumerate(zip(saved.slides, TITLES, BODIES), start=1): + texts = [shape.text for shape in slide.shapes if shape.has_text_frame] + assert texts == [title, *e_color.rgb = RGBColor(245, 247, 250) + text_box(slide, title, 0.75, 0.65, 11.85, 1.2, 32, (22, 43, 65), True) + for index, line in enumerate(body): + text_box(slide, line, 0.75, 2.5 + index * 1.0, 11.85, 0.8, 26, (22, 43, 65)) + text_box(slide, DISCLOSURE, 0.75, 6.55, 11.85, 0.5, 16, (75, 85, 95)) +prs.save(OUTPUT) + +# Inspect the saved artifact, including its editable text shapes. +saved = Presentation(OUTPUT) [y] review details [n] reject [d] diff",
+      "screenAfterDecision": "(OUTPUT) + +# Inspect the saved artifact, including its editable text shapes. +saved = Presentation(OUTPUT) +assert len(saved.slides) == 4 +for index, (slide, title, body) in enumerate(zip(saved.slides, TITLES, BODIES), start=1): + texts = [shape.text for shape in slide.shapes if shape.has_text_frame] + assert texts == [title, *body, DISCLOSURE], (index, texts) + assert all(shape.has_text_frame for shape in slide.shapes) + print(f'Slide {index}:') + for text in texts: + print(f' {text}') +print(f'Path: {OUTPUT.resolve()}') +print(f'Slide count: {len(saved.slides)}') +print('Inspection passed: all required content is present in editable text shapes.') [y] once [n] reject [Esc] cancel [d] diff"
+    },
+    {
+      "turn": "pptx-create",
+      "decision": "allow",
+      "decidedAt": "2026-10-14T09:25:35Z",
+      "toolName": "bash",
+      "toolCallIds": [
+        "call_71cecf4fffdf452eb2d1fd1729c9ab69"
+      ],
+      "reviewedPages": [
+        [
+          1,
+          2,
+          2
+        ]
+      ],
+      "reviewedRows": 2,
+      "detailRows": 2,
+      "detailRowsFullyCovered": true,
+      "decisionBasis": "unlocked-footer",
+      "pageScreenshots": [
+        "pptx-create-2-approval-allow-page-1.png"
+      ],
+      "decisionFooter": "[y] once [n] reject [Esc] cancel",
+      "screen": "pptx and report its slide count and exact required content. [approval] bash local interaction #2 scope: unknown; once only; reuse unavailable details 1-2/2 args: command: python create_live_deck.py [y] once [n] reject [Esc] cancel",
+      "screenAfterDecision": "pptx and report its slide count and exact required content. Session: s_73e17f5143cebda1d54d8893728d8d09 | Branch: main | Loaded rows: 2 | loaded projection only [user] │[tool call_c05950f45c6043b3b06fe57d487613ed] This is a live provider text check. Reply with exactly LIVE_TEXT_OK_9599A58520D6. Al [receipt: success] so remember this early fact for a later question after context compaction: LIVE_MEMO [tool call_71cecf4fffdf452eb2d1fd1729c9ab69] RY_9599A58520D6=cobalt. Do not repeat the memory fact yet and do not use tools. bash [assistant] LIVE_TEXT_OK_9599A58520D6"
+    }
+  ],
+  "checks": [
+    {
+      "name": "actual model response contains requested exact text marker",
+      "passed": true
+    },
+    {
+      "name": "nonce-bound external PPTX fixture exists and target artifact is absent before turn 1",
+      "passed": true
+    },
+    {
+      "name": "interactive CLI exited successfully",
+      "passed": false
+    },
+    {
+      "name": "Go race detector reported no DATA RACE in the real PTY session",
+      "passed": true
+    },
+    {
+      "name": "live PTY produced actual Chat Completions inference requests",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: every real inference completed HTTP 200 with its own response ID",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: complete response JSON metadata was parsed without changing provider bytes",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: every upstream response identifies signed-in Codex and the requested served model",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: each inference completed with a finish reason and streamed responses have a terminal marker",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: each request joins to this session's completed route and nonzero usage",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: per-request upstream and Magpie token usage reconciles or is explicitly undefined",
+      "passed": true
+    },
+    {
+      "name": "pptx-create: every real inference completed HTTP 200 with its own response ID",
+      "passed": true
+    },
+    {
+      "name": "pptx-create: complete response JSON metadata was parsed without changing provider bytes",
+      "passed": true
+    },
+    {
+      "name": "pptx-create: every upstream response identifies signed-in Codex and the requested served model",
+      "passed": true
+    },
+    {
+      "name": "pptx-create: each inference completed with a finish reason and streamed responses have a terminal marker",
+      "passed": true
+    },
+    {
+      "name": "pptx-create: each request joins to this session's completed route and nonzero usage",
+      "passed": true
+    },
+    {
+      "name": "pptx-create: per-request upstream and Magpie token usage reconciles or is explicitly undefined",
+      "passed": true
+    }
+  ],
+  "workspace": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-172353-ae18536c/workspace",
+  "workspaceGitBoundary": {
+    "initialized": true,
+    "root": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-172353-ae18536c/workspace",
+    "purpose": "stop the parent live/workspaces/.gitignore from hiding fixture files from the real grep tool"
+  },
+  "expectedPptx": "live_review_9599A58520D6.pptx",
+  "pptxFixture": {
+    "file": "presentation-fixture.json",
+    "sha256": "2888e9d16f8d185640499e012492e376b7b80a508fe83cd7058ac03b55123678",
+    "artifactName": "live_review_9599A58520D6.pptx"
+  },
+  "isolatedConfig": {
+    "file": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-172353-ae18536c/home/.go-cli/config.yaml",
+    "sha256": "847b0362a5bd309063b975b6758263e92064c85f80b3d7c777af4e31f7f66e17",
+    "traceDirectory": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-172353-ae18536c/traces",
+    "sessionStore": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-172353-ae18536c/session-store",
+    "pythonModulesPath": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-172353-ae18536c/python-deps",
+    "hostEnvironmentAllowlist": true,
+    "modelTimeout": {
+      "total": "5m",
+      "streamIdle": "90s"
+    },
+    "scopeMode": "default without sandbox.allowed_paths",
+    "sandboxAllowedPaths": [],
+    "sandboxAllowedPathsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "gatewayHealth": {
+    "httpStatus": 200,
+    "modelListed": true,
+    "modelCount": 30,
+    "gateway": "http://127.0.0.1:3425"
+  },
+  "startupExcerpt": "Interactive session started. Type 'exit' to quit.",
+  "pythonDependencies": "python-pptx==1.0.2 installed into isolated run workspace; actual PPTX creation is requested through go-cli tools",
+  "workspaceInventoryBeforePptx": [
+    {
+      "path": ".go-cli/logs/go-cli.log",
+      "bytes": 14134,
+      "sha256": "5f92a3176262f19e73d608b718bb71a59261630b730fc164c86983ca1ea5d5fe"
+    },
+    {
+      "path": "large-context.txt",
+      "bytes": 273600,
+      "sha256": "9c9e4943f35137924169114acb127fe600b867981ec6ca85d7814ffa91b6853e"
+    },
+    {
+      "path": "nested/scan-b.txt",
+      "bytes": 49,
+      "sha256": "bb43f61a8b5905bae6a2a80dea3fe352ca5b4a457ccdc89165d3d44238590c76"
+    },
+    {
+      "path": "scan-a.txt",
+      "bytes": 49,
+      "sha256": "39fef48106888bed35648157d28cb51f7b599d617a569adb824015b26c2e962a"
+    }
+  ],
+  "status": "failed",
+  "failedTurn": "pptx-create",
+  "ptyTranscript": {
+    "path": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/terminal/20261014-172353-ae18536c/pty-session.ansi",
+    "bytes": 1611624,
+    "sha256": "efb3d6698a422e223b5d0dcb1873499eefe8c9ab1c89dc6af2d698500625b26f",
+    "source": "real CLI PTY raw bytes before xterm rendering"
+  },
+  "raceDetectorClean": true,
+  "cliExitStatus": 1,
+  "bridgeSettlement": {
+    "settled": true,
+    "inflightAtSnapshot": 0,
+    "waitSeconds": 0.0
+  },
+  "bridge": {
+    "sessionId": "go-cli-live-20261014-9599a58520d6",
+    "requests": [
+      {
+        "sequence": 1,
+        "turn": "plain-live-text",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T09:24:12Z",
+        "requestBytes": 24839,
+        "requestSha256": "ae9bf7cd44bbc07eaf59ce07a5dc81bd5b15174dd07acf2a830ce771882d7d8d",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [],
+        "userMarkers": [
+          "LIVE_TEXT_OK_9599A58520D6",
+          "LIVE_MEMORY_9599A58520D6"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [],
+        "priorToolCalls": [],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_0a3e4f39eb65f465016acf4a3e0e088199ae64753bb6a19dfd",
+        "usage": {
+          "prompt_tokens": 8984,
+          "completion_tokens": 15,
+          "total_tokens": 8999
+        },
+        "finishReasons": [
+          "stop"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021324,
+          "time": "2026-10-14T17:24:12.711027+08:00",
+          "ms": 3639,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 3624
+            }
+          ],
+          "bridgeSequence": 1,
+          "session": "go-cli-live-20261014-9599a58520d6",
+          "routeStateSequence": 902
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T09:24:16Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [
+          "LIVE_TEXT_OK_9599A58520D6"
+        ],
+        "responseMarkerMatches": {
+          "LIVE_TEXT_OK_9599A58520D6": true
+        },
+        "responseBytes": 3516,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "84374d1a4bc78ea1fd940b7c008e279dcb0fac0a2be7a16c7ba13e0cbc03087b"
+      },
+      {
+        "sequence": 2,
+        "turn": "pptx-create",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T09:25:09Z",
+        "requestBytes": 26786,
+        "requestSha256": "501b5bfb891b2b0d0f240f84e3bb782db944f1d3b5a3250184832cf4c79473d5",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [],
+        "userMarkers": [
+          "LIVE_TEXT_OK_9599A58520D6",
+          "LIVE_MEMORY_9599A58520D6",
+          "LIVE_REVIEW_9599A58520D6"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_c05950f45c6043b3b06fe57d487613ed",
+            "index": 0,
+            "name": "write",
+            "argumentsSha256": "55c3c8939060b94f87352c93312984d0b04d1ba675836c5d2a1f65609a4d2562",
+            "safeArguments": {
+              "pathBasename": "create_live_deck.py",
+              "relativePath": "create_live_deck.py",
+              "expectedArtifactMentioned": true
+            }
+          }
+        ],
+        "priorToolCalls": [],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_00d91c7c8cb9c0c8016acf4a766610819b80bd00c04f0a80c2",
+        "usage": {
+          "prompt_tokens": 9401,
+          "completion_tokens": 802,
+          "total_tokens": 10203
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021325,
+          "time": "2026-10-14T17:25:09.815291+08:00",
+          "ms": 20714,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 20700
+            }
+          ],
+          "bridgeSequence": 2,
+          "session": "go-cli-live-20261014-9599a58520d6",
+          "routeStateSequence": 907
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T09:25:30Z",
+        "expectedArtifactReferenced": true,
+        "expectedResponseMarkers": [
+          "LIVE_REVIEW_9599A58520D6",
+          "Release status: INITIAL"
+        ],
+        "responseMarkerMatches": {
+          "Release status: INITIAL": false,
+          "LIVE_REVIEW_9599A58520D6": false
+        },
+        "responseBytes": 10950,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "90216d7b6638fed79fa55120dc0f556ca88d91c6d120d13a2dc77a0786a19a37"
+      },
+      {
+        "sequence": 3,
+        "turn": "pptx-create",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T09:25:32Z",
+        "requestBytes": 29772,
+        "requestSha256": "dde0accd2ca7e2d81e4ce9be972bbbbb11884243a86626481967618134402741",
+        "askedModel": "codex/gpt-6.1-sol",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_c05950f45c6043b3b06fe57d487613ed",
+            "tool": "write",
+            "bytes": 143,
+            "sha256": "63bf00373f83ea733e5aee92ecdf73f49cec24efe1abe180b271277b2ef80ba6",
+            "mentionsDenied": false,
+            "mentionsError": false,
+            "fixtureFactsMatched": []
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_9599A58520D6",
+          "LIVE_MEMORY_9599A58520D6",
+          "LIVE_REVIEW_9599A58520D6"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_71cecf4fffdf452eb2d1fd1729c9ab69",
+            "index": 0,
+            "name": "bash",
+            "argumentsSha256": "3f646690dfa1c24ccbe13e7536a3ca7c85f05191b170e01868fa4b6ba3982130",
+            "safeArguments": {
+              "expectedArtifactMentioned": false,
+              "commandSha256": "3f646690dfa1c24ccbe13e7536a3ca7c85f05191b170e01868fa4b6ba3982130"
+            }
+          }
+        ],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_c05950f45c6043b3b06fe57d487613ed",
+            "tool": "write",
+            "argumentsSha256": "eeb99a3057ce8edf11cb3400820b051de7291f45bbc1756d3eaf727295ccf109"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_0d324657bb778193016acf4a8cf5dc8199b7b192a8c5f32427",
+        "usage": {
+          "prompt_tokens": 10261,
+          "completion_tokens": 23,
+          "total_tokens": 10284
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021326,
+          "time": "2026-10-14T17:25:32.263165+08:00",
+          "ms": 3220,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 3206
+            }
+          ],
+          "bridgeSequence": 3,
+          "session": "go-cli-live-20261014-9599a58520d6",
+          "routeStateSequence": 912
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T09:25:35Z",
+        "expectedArtifactReferenced": true,
+        "expectedResponseMarkers": [
+          "LIVE_REVIEW_9599A58520D6",
+          "Release status: INITIAL"
+        ],
+        "responseMarkerMatches": {
+          "Release status: INITIAL": false,
+          "LIVE_REVIEW_9599A58520D6": false
+        },
+        "responseBytes": 1553,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "6da260be5e4792e1c54a35a55fb0f1911a820051b05fd4e2a217dfc54baf8632"
+      }
+    ],
+    "events": [
+      {
+        "sequence": 1,
+        "turn": "plain-live-text",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 2,
+        "turn": "pptx-create",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 3,
+        "turn": "pptx-create",
+        "kind": "upstream_complete",
+        "status": 200
+      }
+    ]
+  },
+  "toolRegistrationEvidence": [
+    {
+      "toolCallId": "call_71cecf4fffdf452eb2d1fd1729c9ab69",
+      "toolName": "bash",
+      "registrationSource": "builtin_tool",
+      "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+      "effectSet": [
+        "unknown"
+      ],
+      "dispatchState": "dispatched",
+      "resourceState": "cleanup_pending",
+      "completionProof": null,
+      "receiptOutcome": "error",
+      "receiptTimestamp": "2026-10-14T09:25:35.756686Z"
+    },
+    {
+      "toolCallId": "call_c05950f45c6043b3b06fe57d487613ed",
+      "toolName": "write",
+      "registrationSource": "builtin_tool",
+      "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+      "effectSet": [
+        "workspace_write"
+      ],
+      "dispatchState": "dispatched",
+      "resourceState": "quiescent",
+      "completionProof": "queued_job_joined",
+      "receiptOutcome": "success",
+      "receiptTimestamp": "2026-10-14T09:25:32.185233Z"
+    }
+  ],
+  "magpieAudit": {
+    "session": "go-cli-live-20261014-9599a58520d6",
+    "routeUrl": "http://127.0.0.1:3425/v1/magpie/route?session=<redacted-session>",
+    "routes": [
+      {
+        "id": 1791960021326,
+        "time": "2026-10-14T17:25:32.263165+08:00",
+        "ms": 3220,
+        "asked": "codex/gpt-6.1-sol",
+        "model": "codex/gpt-6.1-sol",
+        "served": "gpt-6.1-sol",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6.1-sol",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 3206
+          }
+        ],
+        "seq": 912,
+        "session": "go-cli-live-20261014-9599a58520d6"
+      }
+    ],
+    "usage": [
+      {
+        "t": "2026-10-14T17:25:32.263165+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_0d324657bb778193016acf4a8cf5dc8199b7b192a8c5f32427",
+        "route_id": 1791960021326,
+        "in": 1045,
+        "out": 23,
+        "cache_read": 9216,
+        "cache_write": 0,
+        "ms": 3220,
+        "session": "go-cli-live-20261014-9599a58520d6"
+      },
+      {
+        "t": "2026-10-14T17:25:09.815291+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_00d91c7c8cb9c0c8016acf4a766610819b80bd00c04f0a80c2",
+        "route_id": 1791960021325,
+        "in": 9401,
+        "out": 802,
+        "cache_read": 0,
+        "cache_write": 0,
+        "ms": 20714,
+        "session": "go-cli-live-20261014-9599a58520d6"
+      },
+      {
+        "t": "2026-10-14T17:24:12.711027+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_0a3e4f39eb65f465016acf4a3e0e088199ae64753bb6a19dfd",
+        "route_id": 1791960021324,
+        "in": 8984,
+        "out": 15,
+        "cache_read": 0,
+        "cache_write": 0,
+        "ms": 3639,
+        "session": "go-cli-live-20261014-9599a58520d6"
+      }
+    ],
+    "usagePagination": {
+      "pageSize": 500,
+      "rowsFetched": 3,
+      "total": 3,
+      "complete": true
+    },
+    "lastRouteSettlement": {
+      "route": {
+        "id": 1791960021326,
+        "time": "2026-10-14T17:25:32.263165+08:00",
+        "ms": 3220,
+        "asked": "codex/gpt-6.1-sol",
+        "model": "codex/gpt-6.1-sol",
+        "served": "gpt-6.1-sol",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6.1-sol",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 3206
+          }
+        ],
+        "bridgeSequence": 0,
+        "session": "go-cli-live-20261014-9599a58520d6",
+        "routeStateSequence": 912
+      },
+      "settled": true,
+      "waitSeconds": 0.001
+    }
+  },
+  "providerEvidence": {
+    "joinPolicy": "exact gateway response ID or route ID when exposed; otherwise session-scoped chronological order, one bridge inference per gateway route/usage row",
+    "inference": [
+      {
+        "sequence": 1,
+        "turn": "plain-live-text",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_0a3e4f39eb65f465016acf4a3e0e088199ae64753bb6a19dfd",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 3516,
+        "responseSha256": "84374d1a4bc78ea1fd940b7c008e279dcb0fac0a2be7a16c7ba13e0cbc03087b",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 8984,
+          "completion_tokens": 15,
+          "total_tokens": 8999
+        },
+        "stream": true,
+        "finishReasons": [
+          "stop"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [],
+        "toolReceipts": [],
+        "route": {
+          "id": 1791960021324,
+          "time": "2026-10-14T17:24:12.711027+08:00",
+          "ms": 3639,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 3624
+            }
+          ],
+          "bridgeSequence": 1,
+          "session": "go-cli-live-20261014-9599a58520d6",
+          "routeStateSequence": 902
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T17:24:12.711027+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_0a3e4f39eb65f465016acf4a3e0e088199ae64753bb6a19dfd",
+          "route_id": 1791960021324,
+          "in": 8984,
+          "out": 15,
+          "cache_read": 0,
+          "cache_write": 0,
+          "ms": 3639,
+          "session": "go-cli-live-20261014-9599a58520d6"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 8984,
+          "magpieUncachedInputTokens": 8984,
+          "magpieCachedInputTokens": 0,
+          "upstreamOutputTokens": 15,
+          "magpieOutputTokens": 15,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 2,
+        "turn": "pptx-create",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_00d91c7c8cb9c0c8016acf4a766610819b80bd00c04f0a80c2",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 10950,
+        "responseSha256": "90216d7b6638fed79fa55120dc0f556ca88d91c6d120d13a2dc77a0786a19a37",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 9401,
+          "completion_tokens": 802,
+          "total_tokens": 10203
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_c05950f45c6043b3b06fe57d487613ed",
+            "name": "write",
+            "argumentsSha256": "55c3c8939060b94f87352c93312984d0b04d1ba675836c5d2a1f65609a4d2562",
+            "safeArguments": {
+              "pathBasename": "create_live_deck.py",
+              "relativePath": "create_live_deck.py",
+              "expectedArtifactMentioned": true
+            }
+          }
+        ],
+        "toolReceipts": [],
+        "route": {
+          "id": 1791960021325,
+          "time": "2026-10-14T17:25:09.815291+08:00",
+          "ms": 20714,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 20700
+            }
+          ],
+          "bridgeSequence": 2,
+          "session": "go-cli-live-20261014-9599a58520d6",
+          "routeStateSequence": 907
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T17:25:09.815291+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_00d91c7c8cb9c0c8016acf4a766610819b80bd00c04f0a80c2",
+          "route_id": 1791960021325,
+          "in": 9401,
+          "out": 802,
+          "cache_read": 0,
+          "cache_write": 0,
+          "ms": 20714,
+          "session": "go-cli-live-20261014-9599a58520d6"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 9401,
+          "magpieUncachedInputTokens": 9401,
+          "magpieCachedInputTokens": 0,
+          "upstreamOutputTokens": 802,
+          "magpieOutputTokens": 802,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 3,
+        "turn": "pptx-create",
+        "askedModel": "codex/gpt-6.1-sol",
+        "responseId": "chatcmpl-resp_0d324657bb778193016acf4a8cf5dc8199b7b192a8c5f32427",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 1553,
+        "responseSha256": "6da260be5e4792e1c54a35a55fb0f1911a820051b05fd4e2a217dfc54baf8632",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6.1-sol",
+        "usage": {
+          "prompt_tokens": 10261,
+          "completion_tokens": 23,
+          "total_tokens": 10284
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_71cecf4fffdf452eb2d1fd1729c9ab69",
+            "name": "bash",
+            "argumentsSha256": "3f646690dfa1c24ccbe13e7536a3ca7c85f05191b170e01868fa4b6ba3982130",
+            "safeArguments": {
+              "expectedArtifactMentioned": false,
+              "commandSha256": "3f646690dfa1c24ccbe13e7536a3ca7c85f05191b170e01868fa4b6ba3982130"
+            }
+          }
+        ],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_c05950f45c6043b3b06fe57d487613ed",
+            "tool": "write",
+            "bytes": 143,
+            "sha256": "63bf00373f83ea733e5aee92ecdf73f49cec24efe1abe180b271277b2ef80ba6",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "route": {
+          "id": 1791960021326,
+          "time": "2026-10-14T17:25:32.263165+08:00",
+          "ms": 3220,
+          "asked": "codex/gpt-6.1-sol",
+          "model": "codex/gpt-6.1-sol",
+          "served": "gpt-6.1-sol",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6.1-sol",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 3206
+            }
+          ],
+          "bridgeSequence": 3,
+          "session": "go-cli-live-20261014-9599a58520d6",
+          "routeStateSequence": 912
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T17:25:32.263165+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6.1-sol",
+          "status": 200,
+          "req": "codex/gpt-6.1-sol",
+          "response_id": "chatcmpl-resp_0d324657bb778193016acf4a8cf5dc8199b7b192a8c5f32427",
+          "route_id": 1791960021326,
+          "in": 1045,
+          "out": 23,
+          "cache_read": 9216,
+          "cache_write": 0,
+          "ms": 3220,
+          "session": "go-cli-live-20261014-9599a58520d6"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 10261,
+          "magpieUncachedInputTokens": 1045,
+          "magpieCachedInputTokens": 9216,
+          "upstreamOutputTokens": 23,
+          "magpieOutputTokens": 23,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      }
+    ]
+  },
+  "source": {
+    "evidenceClass": "true live LLM end-to-end; real CLI binary, PTY, local forwarding bridge and signed-in Magpie Codex inference",
+    "provider": "Codex through Magpie; verified using per-session route/usage audit and upstream headers",
+    "model": "codex/gpt-6.1-sol",
+    "scopeMode": "default without sandbox.allowed_paths",
+    "sandboxAllowedPaths": [],
+    "sandboxAllowedPathsSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "isolatedConfigSha256": "847b0362a5bd309063b975b6758263e92064c85f80b3d7c777af4e31f7f66e17",
+    "cliCredential": "non-secret local sentinel; never logged",
+    "authorizationHeadersCaptured": false,
+    "requestBodiesCaptured": false,
+    "responseBodiesCaptured": false,
+    "screenshotSource": "headless Chromium screenshot of xterm.js fed from real PTY bytes, not native Terminal",
+    "isolatedHome": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-172353-ae18536c/home",
+    "isolatedWorkspace": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-172353-ae18536c/workspace"
+  },
+  "finishedAt": "2026-10-14T09:25:36Z"
+}

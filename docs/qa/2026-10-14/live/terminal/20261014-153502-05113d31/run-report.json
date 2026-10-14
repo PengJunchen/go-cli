@@ -1,0 +1,1848 @@
+{
+  "runId": "20261014-153502-05113d31",
+  "startedAt": "2026-10-14T07:35:02Z",
+  "revision": "f827a91e3782cf1d787b65b5da4b9ba6fc86d74d",
+  "raceBuild": {
+    "binary": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-153502-05113d31/bin/go-cli-race",
+    "sha256": "09f52c4e67e69eba81389c8c8b841a2b2b8cd92157672d71eab943f474b66dcb",
+    "flags": "rtk proxy go build -race"
+  },
+  "failure": "Traceback (most recent call last):\n  File \"/Users/yinyuepeng/projects/go-cli/scripts/e2e_live/run.py\", line 1337, in run_live\n    denial = drive_approval(session, evidence, \"03-deny\", \"deny\", report[\"screenshots\"], timeout)\n  File \"/Users/yinyuepeng/projects/go-cli/scripts/e2e_live/run.py\", line 791, in drive_approval\n    screen = session.wait_for(\"[approval]\", timeout)\n  File \"/Users/yinyuepeng/projects/go-cli/scripts/e2e_live/run.py\", line 642, in wait_for\n    raise TimeoutError(f\"timed out waiting for {needle!r}; last screen: {last[-1000:]}\")\nTimeoutError: timed out waiting for '[approval]'; last screen:  search with grep for the single literal pattern LIVE_FACT_ALPHA_DE91948F10D review fixture 6 under '.', (3) read scan-a.txt, (4) read nested/scan-b.txt. Do not use Bash, combi LIVE_FACT_ALPHA_DE91948F10D6=blue ne patterns, or write files. After all four tool results, report exactly LIVE_FACT_A LPHA_DE91948F10D6=blue and LIVE_FACT_BETA_DE91948F10D6=green. [receipt: success] [assistant] I’ll run the four requested workspace operations in order. [assistant] [assistant] [user] Use the write tool to create blocked_de91948f10d6.txt containing exactly BLOCKED_de9 1948f10d6. This is a deliberate approval test; request the tool action normally. loopdetection: detected repeated response (count=4) codex/gpt-6-luna | turn #3 | interact | chat Tokens: 51265/0 (0%) | Cost: unknown Sources: usage=reported/u0 cost=unknown/c6 price=unknown actual=openai/codex/gpt-6-luna Error: operation failed Hint: Try again. If the problem persists, run `go-cli doctor` to diagnose common issues or contact support. >\n",
+  "goSourceSnapshot": {
+    "capturedAt": "2026-10-14T07:35:02Z",
+    "unstaged": {
+      "captured": true,
+      "file": "go-source-diff-unstaged-at-build.patch",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "staged": {
+      "captured": true,
+      "file": "go-source-diff-staged-at-build.patch",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "gitStatusShort": [
+      "?? docs/qa/2026-10-14/live/",
+      "?? scripts/e2e_live/",
+      "?? scripts/e2e_live_review/"
+    ]
+  },
+  "nonce": "de91948f10d6",
+  "sessionId": "go-cli-live-20261014-de91948f10d6",
+  "gateway": "http://127.0.0.1:3425",
+  "model": "codex/gpt-6-luna",
+  "maxTokens": 8000,
+  "screenshots": [
+    {
+      "file": "01-connected.png",
+      "sha256": "d72ad7fd5c6906ba4450ad9244bbbd25b4ffe109edd843007f45f104e823e401",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {
+        "Interactive session started": true
+      },
+      "screenExcerpt": "Interactive session started. Type 'exit' to quit.",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 0
+      }
+    },
+    {
+      "file": "02-live-text-answer.png",
+      "sha256": "a063281495fac0fe40936b3f325c18a9a6eb8cc22c98b5b1672783fe36f4bfaf",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {},
+      "screenExcerpt": "Interactive session started. Type 'exit' to quit. > This is a live provider text check. Reply with exactly LIVE_TEXT_OK_DE91948F10D6. Also remember this early fact for a later question after context compaction: LIVE_MEM ORY_DE91948F10D6=cobalt. Do not repeat the memory fact yet and do not use tools. Session: s_0dc680cc8fbaa7de3606272abd7ade9f | Branch: main | Loaded rows: 2 | loaded projection only [user] This is a live provider text check. Reply with exactly LIVE_TEXT_OK_DE91948F10D6. Also remember this early fact for a later question after context compaction: LIVE_MEMOR Y_DE91948F10D6=cobalt. Do not repeat the memory fact yet and do not use tools. [assistant] LIVE_TEXT_OK_DE91948F10D6 codex/gpt-6-luna | turn #1 | interact | chat Tokens: 8304/0 (0%) | Cost: unknown Sources: usage=reported/u0 cost=unknown/c1 price=unknown actual=openai/codex/gpt-6-luna >",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 0
+      }
+    },
+    {
+      "file": "02-live-tools-answer.png",
+      "sha256": "5e9f22123e1f8e1c49dcac3aceacbac7aa91607f65e1f4680e2fe1ecae3f1019",
+      "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
+      "assertions": {},
+      "screenExcerpt": "user] [tool: grep] Use one tool call at a time in this exact order: (1) list the current workspace with [source output not truncated] ls, (2) search with grep for the single literal pattern LIVE_FACT_ALPHA_DE91948F10D [receipt: success] 6 under '.', (3) read scan-a.txt, (4) read nested/scan-b.txt. Do not use Bash, combi [tool: read] ne patterns, or write files. After all four tool results, report exactly LIVE_FACT_A review fixture LPHA_DE91948F10D6=blue and LIVE_FACT_BETA_DE91948F10D6=green. LIVE_FACT_ALPHA_DE91948F10D6=blue [assistant] I’ll run the four requested workspace operations in order. [receipt: success] [assistant] [assistant] loopdetection: detected repeated response (count=3) codex/gpt-6-luna | turn #2 | interact | chat Tokens: 42597/0 (0%) | Cost: unknown Sources: usage=reported/u0 cost=unknown/c5 price=unknown actual=openai/codex/gpt-6-luna Error: operation failed Hint: Try again. If the problem persists, run `go-cli doctor` to diagnose common issues or contact support. >",
+      "terminal": {
+        "widthPx": 1440,
+        "heightPx": 900,
+        "cols": 169,
+        "rows": 50,
+        "coloredCells": 51
+      }
+    }
+  ],
+  "turns": [
+    {
+      "turn": "plain-live-text",
+      "gatewayRequestsBefore": 0,
+      "gatewayRequestsAfter": 1,
+      "approvals": [],
+      "screenExcerpt": "r a later question after context compaction: LIVE_MEM ORY_DE91948F10D6=cobalt. Do not repeat the memory fact yet and do not use tools. Session: s_0dc680cc8fbaa7de3606272abd7ade9f | Branch: main | Loaded rows: 2 | loaded projection only [user] This is a live provider text check. Reply with exactly LIVE_TEXT_OK_DE91948F10D6. Also remember this early fact for a later question after context compaction: LIVE_MEMOR Y_DE91948F10D6=cobalt. Do not repeat the memory fact yet and do not use tools. [assistant] LIVE_TEXT_OK_DE91948F10D6 codex/gpt-6-luna | turn #1 | interact | chat Tokens: 8304/0 (0%) | Cost: unknown Sources: usage=reported/u0 cost=unknown/c1 price=unknown actual=openai/codex/gpt-6-luna >",
+      "elapsedSeconds": 8.58,
+      "providerRequestSequences": [
+        1
+      ],
+      "upstreamResponseIds": [
+        "chatcmpl-resp_013297fcb5c1ca4f016acf30b62dd8819aba0992a846f20e63"
+      ],
+      "toolCalls": [],
+      "toolReceipts": [],
+      "toolCallReceiptMatches": []
+    },
+    {
+      "turn": "inspect-fixtures",
+      "gatewayRequestsBefore": 1,
+      "gatewayRequestsAfter": 5,
+      "approvals": [],
+      "screenExcerpt": "o not use Bash, combi [tool: read] ne patterns, or write files. After all four tool results, report exactly LIVE_FACT_A review fixture LPHA_DE91948F10D6=blue and LIVE_FACT_BETA_DE91948F10D6=green. LIVE_FACT_ALPHA_DE91948F10D6=blue [assistant] I’ll run the four requested workspace operations in order. [receipt: success] [assistant] [assistant] loopdetection: detected repeated response (count=3) codex/gpt-6-luna | turn #2 | interact | chat Tokens: 42597/0 (0%) | Cost: unknown Sources: usage=reported/u0 cost=unknown/c5 price=unknown actual=openai/codex/gpt-6-luna Error: operation failed Hint: Try again. If the problem persists, run `go-cli doctor` to diagnose common issues or contact support. >",
+      "elapsedSeconds": 14.28,
+      "providerRequestSequences": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "upstreamResponseIds": [
+        "chatcmpl-resp_05b0ebe18011532a016acf30bf0f0c81989c49396ace9ae6c6",
+        "chatcmpl-resp_0c919d4c1d6a7268016acf30c19d30819886c01a138319e1d3",
+        "chatcmpl-resp_0e534843425f70ee016acf30c3ee44819882425fa1023f02a1",
+        "chatcmpl-resp_00ceb94e946e9a5d016acf30c64ee881998faa0cced3ffec56"
+      ],
+      "toolCalls": [
+        {
+          "id": "call_e1fdc9493362465db15d1f3460c1af79",
+          "name": "ls",
+          "argumentsSha256": "4ae486c3a48f8dc732af672b138b438a1d96960304cc334d46bbc2687d169cbb",
+          "safeArguments": {
+            "pathBasename": "",
+            "relativePath": ".",
+            "expectedArtifactMentioned": false
+          }
+        },
+        {
+          "id": "call_00a5fbe294a64939a3e35c36d031c74a",
+          "name": "grep",
+          "argumentsSha256": "7589d883a50a3aece3a6d2ec2ee4f1b70fb1cd363ac06e61bba96d8462117206",
+          "safeArguments": {
+            "pathBasename": "",
+            "relativePath": ".",
+            "fixtureMarkers": [
+              "LIVE_FACT_ALPHA_DE91948F10D6"
+            ],
+            "expectedArtifactMentioned": false
+          }
+        },
+        {
+          "id": "call_b753f40fc0e147ed9133f5a9384efdf0",
+          "name": "read",
+          "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383",
+          "safeArguments": {
+            "pathBasename": "scan-a.txt",
+            "relativePath": "scan-a.txt",
+            "expectedArtifactMentioned": false
+          }
+        },
+        {
+          "id": "call_70e5c45b84b84a7683fe8912ae521cd2",
+          "name": "read",
+          "argumentsSha256": "b75ba111d750bfe190b83c25ca5e276935725b7d8e74afcaef94a1fa4612c118",
+          "safeArguments": {
+            "pathBasename": "scan-b.txt",
+            "relativePath": "nested/scan-b.txt",
+            "expectedArtifactMentioned": false
+          }
+        }
+      ],
+      "toolReceipts": [
+        {
+          "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+          "tool": "ls",
+          "bytes": 36,
+          "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+          "tool": "ls",
+          "bytes": 36,
+          "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_00a5fbe294a64939a3e35c36d031c74a",
+          "tool": "grep",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+          "tool": "ls",
+          "bytes": 36,
+          "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_00a5fbe294a64939a3e35c36d031c74a",
+          "tool": "grep",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "mentionsDenied": false,
+          "mentionsError": false
+        },
+        {
+          "toolCallId": "call_b753f40fc0e147ed9133f5a9384efdf0",
+          "tool": "read",
+          "bytes": 49,
+          "sha256": "183c5e3c885323fb8cb03c44ed3e91103425eea9c9ef65bf1cb0e689d02c6b68",
+          "mentionsDenied": false,
+          "mentionsError": false
+        }
+      ],
+      "toolCallReceiptMatches": [
+        {
+          "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+          "matchedReceipt": true
+        },
+        {
+          "toolCallId": "call_00a5fbe294a64939a3e35c36d031c74a",
+          "matchedReceipt": true
+        },
+        {
+          "toolCallId": "call_b753f40fc0e147ed9133f5a9384efdf0",
+          "matchedReceipt": true
+        },
+        {
+          "toolCallId": "call_70e5c45b84b84a7683fe8912ae521cd2",
+          "matchedReceipt": false
+        }
+      ],
+      "observedToolNames": [
+        "grep",
+        "ls",
+        "read"
+      ]
+    }
+  ],
+  "approvals": [],
+  "checks": [
+    {
+      "name": "actual model response contains requested exact text marker",
+      "passed": true
+    },
+    {
+      "name": "actual upstream assistant response includes exact alpha fixture fact",
+      "passed": false
+    },
+    {
+      "name": "actual upstream assistant response includes exact beta fixture fact",
+      "passed": false
+    },
+    {
+      "name": "actual inference selected ls, literal grep, and read tools",
+      "passed": true
+    },
+    {
+      "name": "both real read tool results were delivered back to the model",
+      "passed": false
+    },
+    {
+      "name": "read calls target both nonce fixture files",
+      "passed": true
+    },
+    {
+      "name": "interactive CLI exited successfully",
+      "passed": true
+    },
+    {
+      "name": "Go race detector reported no DATA RACE in the real PTY session",
+      "passed": true
+    },
+    {
+      "name": "live PTY produced actual Chat Completions inference requests",
+      "passed": true
+    },
+    {
+      "name": "deny-write: every real inference completed HTTP 200 with its own response ID",
+      "passed": true
+    },
+    {
+      "name": "deny-write: complete response JSON metadata was parsed without changing provider bytes",
+      "passed": true
+    },
+    {
+      "name": "deny-write: every upstream response identifies signed-in Codex and the requested served model",
+      "passed": true
+    },
+    {
+      "name": "deny-write: each inference completed with a finish reason and streamed responses have a terminal marker",
+      "passed": true
+    },
+    {
+      "name": "deny-write: each request joins to this session's completed route and nonzero usage",
+      "passed": true
+    },
+    {
+      "name": "deny-write: per-request upstream and Magpie token usage reconciles or is explicitly undefined",
+      "passed": true
+    },
+    {
+      "name": "inspect-fixtures: every real inference completed HTTP 200 with its own response ID",
+      "passed": true
+    },
+    {
+      "name": "inspect-fixtures: complete response JSON metadata was parsed without changing provider bytes",
+      "passed": true
+    },
+    {
+      "name": "inspect-fixtures: every upstream response identifies signed-in Codex and the requested served model",
+      "passed": true
+    },
+    {
+      "name": "inspect-fixtures: each inference completed with a finish reason and streamed responses have a terminal marker",
+      "passed": true
+    },
+    {
+      "name": "inspect-fixtures: each request joins to this session's completed route and nonzero usage",
+      "passed": true
+    },
+    {
+      "name": "inspect-fixtures: per-request upstream and Magpie token usage reconciles or is explicitly undefined",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: every real inference completed HTTP 200 with its own response ID",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: complete response JSON metadata was parsed without changing provider bytes",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: every upstream response identifies signed-in Codex and the requested served model",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: each inference completed with a finish reason and streamed responses have a terminal marker",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: each request joins to this session's completed route and nonzero usage",
+      "passed": true
+    },
+    {
+      "name": "plain-live-text: per-request upstream and Magpie token usage reconciles or is explicitly undefined",
+      "passed": true
+    }
+  ],
+  "workspace": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-153502-05113d31/workspace",
+  "expectedPptx": "live_review_DE91948F10D6.pptx",
+  "pptxFixture": {
+    "file": "presentation-fixture.json",
+    "sha256": "78c4f586687365b4ee51dbb23f058e6f6d5fc9654e0280b64ed2786e14e14bd1",
+    "artifactName": "live_review_DE91948F10D6.pptx"
+  },
+  "isolatedConfig": {
+    "file": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-153502-05113d31/home/.go-cli/config.yaml",
+    "traceDirectory": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-153502-05113d31/traces",
+    "sessionStore": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-153502-05113d31/session-store",
+    "pythonModulesPath": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-153502-05113d31/python-deps",
+    "hostEnvironmentAllowlist": true,
+    "sandboxAllowedPaths": [
+      "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-153502-05113d31/workspace"
+    ]
+  },
+  "gatewayHealth": {
+    "httpStatus": 200,
+    "modelListed": true,
+    "modelCount": 30,
+    "gateway": "http://127.0.0.1:3425"
+  },
+  "startupExcerpt": "Interactive session started. Type 'exit' to quit.",
+  "status": "failed",
+  "failedTurn": "deny-write",
+  "ptyTranscript": {
+    "path": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/terminal/20261014-153502-05113d31/pty-session.ansi",
+    "bytes": 155444,
+    "sha256": "4df662115fb774a0dbbe061803fedaff962b065e60fbc5cf5e432c3b0d93fbdb",
+    "source": "real CLI PTY raw bytes before xterm rendering"
+  },
+  "raceDetectorClean": true,
+  "cliExitStatus": 0,
+  "bridgeSettlement": {
+    "settled": true,
+    "inflightAtSnapshot": 0,
+    "waitSeconds": 0.0
+  },
+  "bridge": {
+    "sessionId": "go-cli-live-20261014-de91948f10d6",
+    "requests": [
+      {
+        "sequence": 1,
+        "turn": "plain-live-text",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T07:35:16Z",
+        "requestBytes": 24838,
+        "requestSha256": "b99b4472f76db8c546a7ebf325ee930c1ba4bb344355929c7d7440ea0a6fd758",
+        "askedModel": "codex/gpt-6-luna",
+        "stream": true,
+        "toolReceipts": [],
+        "userMarkers": [
+          "LIVE_TEXT_OK_DE91948F10D6",
+          "LIVE_MEMORY_DE91948F10D6"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [],
+        "priorToolCalls": [],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6-luna",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_013297fcb5c1ca4f016acf30b62dd8819aba0992a846f20e63",
+        "usage": {
+          "prompt_tokens": 8290,
+          "completion_tokens": 14,
+          "total_tokens": 8304
+        },
+        "finishReasons": [
+          "stop"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021162,
+          "time": "2026-10-14T15:35:16.065139+08:00",
+          "ms": 4761,
+          "asked": "codex/gpt-6-luna",
+          "model": "codex/gpt-6-luna",
+          "served": "gpt-6-luna",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6-luna",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 4739
+            }
+          ],
+          "bridgeSequence": 1,
+          "session": "go-cli-live-20261014-de91948f10d6",
+          "routeStateSequence": 90
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T07:35:20Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [
+          "LIVE_TEXT_OK_DE91948F10D6"
+        ],
+        "responseMarkerMatches": {
+          "LIVE_TEXT_OK_DE91948F10D6": true
+        },
+        "responseBytes": 3253,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "7aed24b59bc9ba7e00e0bcedf4cabc335909283357353c8fc6f2bd44597c4fe2"
+      },
+      {
+        "sequence": 2,
+        "turn": "inspect-fixtures",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T07:35:26Z",
+        "requestBytes": 25567,
+        "requestSha256": "3ba428c4f12d2ab6a47339d07a2ed37132242955ce158c9602ace614458a56b6",
+        "askedModel": "codex/gpt-6-luna",
+        "stream": true,
+        "toolReceipts": [],
+        "userMarkers": [
+          "LIVE_TEXT_OK_DE91948F10D6",
+          "LIVE_MEMORY_DE91948F10D6",
+          "LIVE_FACT_ALPHA_DE91948F10D6",
+          "LIVE_FACT_ALPHA_DE91948F10D6",
+          "LIVE_FACT_BETA_DE91948F10D6"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_e1fdc9493362465db15d1f3460c1af79",
+            "index": 0,
+            "name": "ls",
+            "argumentsSha256": "4ae486c3a48f8dc732af672b138b438a1d96960304cc334d46bbc2687d169cbb",
+            "safeArguments": {
+              "pathBasename": "",
+              "relativePath": ".",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "priorToolCalls": [],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6-luna",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_05b0ebe18011532a016acf30bf0f0c81989c49396ace9ae6c6",
+        "usage": {
+          "prompt_tokens": 8462,
+          "completion_tokens": 77,
+          "total_tokens": 8539
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021163,
+          "time": "2026-10-14T15:35:26.416913+08:00",
+          "ms": 2307,
+          "asked": "codex/gpt-6-luna",
+          "model": "codex/gpt-6-luna",
+          "served": "gpt-6-luna",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6-luna",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 2294
+            }
+          ],
+          "bridgeSequence": 2,
+          "session": "go-cli-live-20261014-de91948f10d6",
+          "routeStateSequence": 95
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T07:35:28Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [
+          "LIVE_FACT_ALPHA_DE91948F10D6=blue",
+          "LIVE_FACT_BETA_DE91948F10D6=green"
+        ],
+        "responseMarkerMatches": {
+          "LIVE_FACT_BETA_DE91948F10D6=green": false,
+          "LIVE_FACT_ALPHA_DE91948F10D6=blue": false
+        },
+        "responseBytes": 4181,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "5d37a96d337c165915f2070ded0a02f493e7c7204fa887703916b063b98729a4"
+      },
+      {
+        "sequence": 3,
+        "turn": "inspect-fixtures",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T07:35:28Z",
+        "requestBytes": 25931,
+        "requestSha256": "6fc18132fa1bc17176686944c5717a6a90f07e599a3bdee60a7303999ebd0b21",
+        "askedModel": "codex/gpt-6-luna",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_DE91948F10D6",
+          "LIVE_MEMORY_DE91948F10D6",
+          "LIVE_FACT_ALPHA_DE91948F10D6",
+          "LIVE_FACT_ALPHA_DE91948F10D6",
+          "LIVE_FACT_BETA_DE91948F10D6"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_00a5fbe294a64939a3e35c36d031c74a",
+            "index": 0,
+            "name": "grep",
+            "argumentsSha256": "7589d883a50a3aece3a6d2ec2ee4f1b70fb1cd363ac06e61bba96d8462117206",
+            "safeArguments": {
+              "pathBasename": "",
+              "relativePath": ".",
+              "fixtureMarkers": [
+                "LIVE_FACT_ALPHA_DE91948F10D6"
+              ],
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+            "tool": "ls",
+            "argumentsSha256": "4ae486c3a48f8dc732af672b138b438a1d96960304cc334d46bbc2687d169cbb"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6-luna",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_0c919d4c1d6a7268016acf30c19d30819886c01a138319e1d3",
+        "usage": {
+          "prompt_tokens": 8518,
+          "completion_tokens": 31,
+          "total_tokens": 8549
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021164,
+          "time": "2026-10-14T15:35:28.878158+08:00",
+          "ms": 1743,
+          "asked": "codex/gpt-6-luna",
+          "model": "codex/gpt-6-luna",
+          "served": "gpt-6-luna",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6-luna",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 1729
+            }
+          ],
+          "bridgeSequence": 3,
+          "session": "go-cli-live-20261014-de91948f10d6",
+          "routeStateSequence": 100
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T07:35:30Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [
+          "LIVE_FACT_ALPHA_DE91948F10D6=blue",
+          "LIVE_FACT_BETA_DE91948F10D6=green"
+        ],
+        "responseMarkerMatches": {
+          "LIVE_FACT_BETA_DE91948F10D6=green": false,
+          "LIVE_FACT_ALPHA_DE91948F10D6=blue": false
+        },
+        "responseBytes": 1563,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "0e001d10036d1911227f26cb46d649ecb5d9f9d224088d8fbc717473868609f1"
+      },
+      {
+        "sequence": 4,
+        "turn": "inspect-fixtures",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T07:35:30Z",
+        "requestBytes": 26246,
+        "requestSha256": "a5e45fa5a015d5277c5105c3d434c758593849ec7725332049d840437068c6d0",
+        "askedModel": "codex/gpt-6-luna",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_00a5fbe294a64939a3e35c36d031c74a",
+            "tool": "grep",
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_DE91948F10D6",
+          "LIVE_MEMORY_DE91948F10D6",
+          "LIVE_FACT_ALPHA_DE91948F10D6",
+          "LIVE_FACT_ALPHA_DE91948F10D6",
+          "LIVE_FACT_BETA_DE91948F10D6"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_b753f40fc0e147ed9133f5a9384efdf0",
+            "index": 0,
+            "name": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383",
+            "safeArguments": {
+              "pathBasename": "scan-a.txt",
+              "relativePath": "scan-a.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+            "tool": "ls",
+            "argumentsSha256": "4ae486c3a48f8dc732af672b138b438a1d96960304cc334d46bbc2687d169cbb"
+          },
+          {
+            "toolCallId": "call_00a5fbe294a64939a3e35c36d031c74a",
+            "tool": "grep",
+            "argumentsSha256": "7589d883a50a3aece3a6d2ec2ee4f1b70fb1cd363ac06e61bba96d8462117206"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6-luna",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_0e534843425f70ee016acf30c3ee44819882425fa1023f02a1",
+        "usage": {
+          "prompt_tokens": 8560,
+          "completion_tokens": 19,
+          "total_tokens": 8579
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021165,
+          "time": "2026-10-14T15:35:30.812349+08:00",
+          "ms": 2688,
+          "asked": "codex/gpt-6-luna",
+          "model": "codex/gpt-6-luna",
+          "served": "gpt-6-luna",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6-luna",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 2675
+            }
+          ],
+          "bridgeSequence": 4,
+          "session": "go-cli-live-20261014-de91948f10d6",
+          "routeStateSequence": 105
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T07:35:33Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [
+          "LIVE_FACT_ALPHA_DE91948F10D6=blue",
+          "LIVE_FACT_BETA_DE91948F10D6=green"
+        ],
+        "responseMarkerMatches": {
+          "LIVE_FACT_BETA_DE91948F10D6=green": false,
+          "LIVE_FACT_ALPHA_DE91948F10D6=blue": false
+        },
+        "responseBytes": 1527,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "a4c0b149097ee9d86e257969747ad9e4c7edd2b8c697aa06069190973d70d59f"
+      },
+      {
+        "sequence": 5,
+        "turn": "inspect-fixtures",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T07:35:33Z",
+        "requestBytes": 26576,
+        "requestSha256": "8910095d9773af1fba0356f884fdee9d88850e77554c904274125870e15c8520",
+        "askedModel": "codex/gpt-6-luna",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_00a5fbe294a64939a3e35c36d031c74a",
+            "tool": "grep",
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_b753f40fc0e147ed9133f5a9384efdf0",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "183c5e3c885323fb8cb03c44ed3e91103425eea9c9ef65bf1cb0e689d02c6b68",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_DE91948F10D6",
+          "LIVE_MEMORY_DE91948F10D6",
+          "LIVE_FACT_ALPHA_DE91948F10D6",
+          "LIVE_FACT_ALPHA_DE91948F10D6",
+          "LIVE_FACT_BETA_DE91948F10D6"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_70e5c45b84b84a7683fe8912ae521cd2",
+            "index": 0,
+            "name": "read",
+            "argumentsSha256": "b75ba111d750bfe190b83c25ca5e276935725b7d8e74afcaef94a1fa4612c118",
+            "safeArguments": {
+              "pathBasename": "scan-b.txt",
+              "relativePath": "nested/scan-b.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+            "tool": "ls",
+            "argumentsSha256": "4ae486c3a48f8dc732af672b138b438a1d96960304cc334d46bbc2687d169cbb"
+          },
+          {
+            "toolCallId": "call_00a5fbe294a64939a3e35c36d031c74a",
+            "tool": "grep",
+            "argumentsSha256": "7589d883a50a3aece3a6d2ec2ee4f1b70fb1cd363ac06e61bba96d8462117206"
+          },
+          {
+            "toolCallId": "call_b753f40fc0e147ed9133f5a9384efdf0",
+            "tool": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6-luna",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_00ceb94e946e9a5d016acf30c64ee881998faa0cced3ffec56",
+        "usage": {
+          "prompt_tokens": 8605,
+          "completion_tokens": 21,
+          "total_tokens": 8626
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021166,
+          "time": "2026-10-14T15:35:33.69168+08:00",
+          "ms": 1613,
+          "asked": "codex/gpt-6-luna",
+          "model": "codex/gpt-6-luna",
+          "served": "gpt-6-luna",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6-luna",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 1599
+            }
+          ],
+          "bridgeSequence": 5,
+          "session": "go-cli-live-20261014-de91948f10d6",
+          "routeStateSequence": 110
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T07:35:35Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [
+          "LIVE_FACT_ALPHA_DE91948F10D6=blue",
+          "LIVE_FACT_BETA_DE91948F10D6=green"
+        ],
+        "responseMarkerMatches": {
+          "LIVE_FACT_BETA_DE91948F10D6=green": false,
+          "LIVE_FACT_ALPHA_DE91948F10D6=blue": false
+        },
+        "responseBytes": 1534,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "a73db3bc1f52052a88772e52964deac79318db9e94dacc317a9c9ed52720215f"
+      },
+      {
+        "sequence": 6,
+        "turn": "deny-write",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "startedAt": "2026-10-14T07:35:38Z",
+        "requestBytes": 26391,
+        "requestSha256": "a6178c847ab68c1b3d1a8047e2b78e4e13b25cc28c27a699d7b069f182982164",
+        "askedModel": "codex/gpt-6-luna",
+        "stream": true,
+        "toolReceipts": [
+          {
+            "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_00a5fbe294a64939a3e35c36d031c74a",
+            "tool": "grep",
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_b753f40fc0e147ed9133f5a9384efdf0",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "183c5e3c885323fb8cb03c44ed3e91103425eea9c9ef65bf1cb0e689d02c6b68",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "userMarkers": [
+          "LIVE_TEXT_OK_DE91948F10D6",
+          "LIVE_MEMORY_DE91948F10D6",
+          "LIVE_FACT_ALPHA_DE91948F10D6",
+          "LIVE_FACT_ALPHA_DE91948F10D6",
+          "LIVE_FACT_BETA_DE91948F10D6"
+        ],
+        "memoryCanaryPresent": true,
+        "memoryCanaryMessageRoles": [
+          "user"
+        ],
+        "toolCalls": [
+          {
+            "id": "call_a3893fe927d44aef83446767d2e98260",
+            "index": 0,
+            "name": "write",
+            "argumentsSha256": "93c37e7dfa9cd45fb48154dd1e9dcd0e92576f71f5c72a9c68dfa0b26c34ebd8",
+            "safeArguments": {
+              "pathBasename": "blocked_de91948f10d6.txt",
+              "relativePath": "blocked_de91948f10d6.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "priorToolCalls": [
+          {
+            "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+            "tool": "ls",
+            "argumentsSha256": "4ae486c3a48f8dc732af672b138b438a1d96960304cc334d46bbc2687d169cbb"
+          },
+          {
+            "toolCallId": "call_00a5fbe294a64939a3e35c36d031c74a",
+            "tool": "grep",
+            "argumentsSha256": "7589d883a50a3aece3a6d2ec2ee4f1b70fb1cd363ac06e61bba96d8462117206"
+          },
+          {
+            "toolCallId": "call_b753f40fc0e147ed9133f5a9384efdf0",
+            "tool": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383"
+          }
+        ],
+        "provider": "codex",
+        "servedModel": "codex/gpt-6-luna",
+        "requestId": null,
+        "responseId": "chatcmpl-resp_0d64c2601e32675d016acf30cb4490819991c21f6bd25ff71e",
+        "usage": {
+          "prompt_tokens": 8585,
+          "completion_tokens": 83,
+          "total_tokens": 8668
+        },
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "routeSnapshot": {
+          "id": 1791960021167,
+          "time": "2026-10-14T15:35:38.603237+08:00",
+          "ms": 2930,
+          "asked": "codex/gpt-6-luna",
+          "model": "codex/gpt-6-luna",
+          "served": "gpt-6-luna",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6-luna",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 2917
+            }
+          ],
+          "bridgeSequence": 6,
+          "session": "go-cli-live-20261014-de91948f10d6",
+          "routeStateSequence": 115
+        },
+        "status": 200,
+        "completedAt": "2026-10-14T07:35:41Z",
+        "expectedArtifactReferenced": false,
+        "expectedResponseMarkers": [],
+        "responseMarkerMatches": {},
+        "responseBytes": 1577,
+        "_nonstreamBodyComplete": true,
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "responseSha256": "df954fbdbe44c4aef079b98c79c5c1c001e26e41ed2808f4bb57375722d52bc9"
+      }
+    ],
+    "events": [
+      {
+        "sequence": 1,
+        "turn": "plain-live-text",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 2,
+        "turn": "inspect-fixtures",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 3,
+        "turn": "inspect-fixtures",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 4,
+        "turn": "inspect-fixtures",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 5,
+        "turn": "inspect-fixtures",
+        "kind": "upstream_complete",
+        "status": 200
+      },
+      {
+        "sequence": 6,
+        "turn": "deny-write",
+        "kind": "upstream_complete",
+        "status": 200
+      }
+    ]
+  },
+  "magpieAudit": {
+    "session": "go-cli-live-20261014-de91948f10d6",
+    "routeUrl": "http://127.0.0.1:3425/v1/magpie/route?session=<redacted-session>",
+    "routes": [
+      {
+        "id": 1791960021167,
+        "time": "2026-10-14T15:35:38.603237+08:00",
+        "ms": 2930,
+        "asked": "codex/gpt-6-luna",
+        "model": "codex/gpt-6-luna",
+        "served": "gpt-6-luna",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6-luna",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 2917
+          }
+        ],
+        "seq": 115,
+        "session": "go-cli-live-20261014-de91948f10d6"
+      }
+    ],
+    "usage": [
+      {
+        "t": "2026-10-14T15:35:38.603237+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6-luna",
+        "status": 200,
+        "req": "codex/gpt-6-luna",
+        "response_id": "chatcmpl-resp_0d64c2601e32675d016acf30cb4490819991c21f6bd25ff71e",
+        "route_id": 1791960021167,
+        "in": 8585,
+        "out": 83,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 44,
+        "ms": 2930,
+        "session": "go-cli-live-20261014-de91948f10d6"
+      },
+      {
+        "t": "2026-10-14T15:35:33.69168+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6-luna",
+        "status": 200,
+        "req": "codex/gpt-6-luna",
+        "response_id": "chatcmpl-resp_00ceb94e946e9a5d016acf30c64ee881998faa0cced3ffec56",
+        "route_id": 1791960021166,
+        "in": 925,
+        "out": 21,
+        "cache_read": 7680,
+        "cache_write": 0,
+        "ms": 1613,
+        "session": "go-cli-live-20261014-de91948f10d6"
+      },
+      {
+        "t": "2026-10-14T15:35:30.812349+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6-luna",
+        "status": 200,
+        "req": "codex/gpt-6-luna",
+        "response_id": "chatcmpl-resp_0e534843425f70ee016acf30c3ee44819882425fa1023f02a1",
+        "route_id": 1791960021165,
+        "in": 880,
+        "out": 19,
+        "cache_read": 7680,
+        "cache_write": 0,
+        "ms": 2688,
+        "session": "go-cli-live-20261014-de91948f10d6"
+      },
+      {
+        "t": "2026-10-14T15:35:28.878158+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6-luna",
+        "status": 200,
+        "req": "codex/gpt-6-luna",
+        "response_id": "chatcmpl-resp_0c919d4c1d6a7268016acf30c19d30819886c01a138319e1d3",
+        "route_id": 1791960021164,
+        "in": 838,
+        "out": 31,
+        "cache_read": 7680,
+        "cache_write": 0,
+        "ms": 1743,
+        "session": "go-cli-live-20261014-de91948f10d6"
+      },
+      {
+        "t": "2026-10-14T15:35:26.416913+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6-luna",
+        "status": 200,
+        "req": "codex/gpt-6-luna",
+        "response_id": "chatcmpl-resp_05b0ebe18011532a016acf30bf0f0c81989c49396ace9ae6c6",
+        "route_id": 1791960021163,
+        "in": 8462,
+        "out": 77,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 39,
+        "ms": 2307,
+        "session": "go-cli-live-20261014-de91948f10d6"
+      },
+      {
+        "t": "2026-10-14T15:35:16.065139+08:00",
+        "agent": "Python-urllib",
+        "provider": "codex",
+        "model": "gpt-6-luna",
+        "status": 200,
+        "req": "codex/gpt-6-luna",
+        "response_id": "chatcmpl-resp_013297fcb5c1ca4f016acf30b62dd8819aba0992a846f20e63",
+        "route_id": 1791960021162,
+        "in": 8290,
+        "out": 14,
+        "cache_read": 0,
+        "cache_write": 0,
+        "ms": 4761,
+        "session": "go-cli-live-20261014-de91948f10d6"
+      }
+    ],
+    "usagePagination": {
+      "pageSize": 500,
+      "rowsFetched": 6,
+      "total": 6,
+      "complete": true
+    },
+    "lastRouteSettlement": {
+      "route": {
+        "id": 1791960021167,
+        "time": "2026-10-14T15:35:38.603237+08:00",
+        "ms": 2930,
+        "asked": "codex/gpt-6-luna",
+        "model": "codex/gpt-6-luna",
+        "served": "gpt-6-luna",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6-luna",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 2917
+          }
+        ],
+        "bridgeSequence": 0,
+        "session": "go-cli-live-20261014-de91948f10d6",
+        "routeStateSequence": 115
+      },
+      "settled": true,
+      "waitSeconds": 0.001
+    }
+  },
+  "providerEvidence": {
+    "joinPolicy": "exact gateway response ID or route ID when exposed; otherwise session-scoped chronological order, one bridge inference per gateway route/usage row",
+    "inference": [
+      {
+        "sequence": 1,
+        "turn": "plain-live-text",
+        "askedModel": "codex/gpt-6-luna",
+        "responseId": "chatcmpl-resp_013297fcb5c1ca4f016acf30b62dd8819aba0992a846f20e63",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 3253,
+        "responseSha256": "7aed24b59bc9ba7e00e0bcedf4cabc335909283357353c8fc6f2bd44597c4fe2",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6-luna",
+        "usage": {
+          "prompt_tokens": 8290,
+          "completion_tokens": 14,
+          "total_tokens": 8304
+        },
+        "stream": true,
+        "finishReasons": [
+          "stop"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [],
+        "toolReceipts": [],
+        "route": {
+          "id": 1791960021162,
+          "time": "2026-10-14T15:35:16.065139+08:00",
+          "ms": 4761,
+          "asked": "codex/gpt-6-luna",
+          "model": "codex/gpt-6-luna",
+          "served": "gpt-6-luna",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6-luna",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 4739
+            }
+          ],
+          "bridgeSequence": 1,
+          "session": "go-cli-live-20261014-de91948f10d6",
+          "routeStateSequence": 90
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T15:35:16.065139+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6-luna",
+          "status": 200,
+          "req": "codex/gpt-6-luna",
+          "response_id": "chatcmpl-resp_013297fcb5c1ca4f016acf30b62dd8819aba0992a846f20e63",
+          "route_id": 1791960021162,
+          "in": 8290,
+          "out": 14,
+          "cache_read": 0,
+          "cache_write": 0,
+          "ms": 4761,
+          "session": "go-cli-live-20261014-de91948f10d6"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 8290,
+          "magpieUncachedInputTokens": 8290,
+          "magpieCachedInputTokens": 0,
+          "upstreamOutputTokens": 14,
+          "magpieOutputTokens": 14,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 2,
+        "turn": "inspect-fixtures",
+        "askedModel": "codex/gpt-6-luna",
+        "responseId": "chatcmpl-resp_05b0ebe18011532a016acf30bf0f0c81989c49396ace9ae6c6",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 4181,
+        "responseSha256": "5d37a96d337c165915f2070ded0a02f493e7c7204fa887703916b063b98729a4",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6-luna",
+        "usage": {
+          "prompt_tokens": 8462,
+          "completion_tokens": 77,
+          "total_tokens": 8539
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_e1fdc9493362465db15d1f3460c1af79",
+            "name": "ls",
+            "argumentsSha256": "4ae486c3a48f8dc732af672b138b438a1d96960304cc334d46bbc2687d169cbb",
+            "safeArguments": {
+              "pathBasename": "",
+              "relativePath": ".",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "toolReceipts": [],
+        "route": {
+          "id": 1791960021163,
+          "time": "2026-10-14T15:35:26.416913+08:00",
+          "ms": 2307,
+          "asked": "codex/gpt-6-luna",
+          "model": "codex/gpt-6-luna",
+          "served": "gpt-6-luna",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6-luna",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 2294
+            }
+          ],
+          "bridgeSequence": 2,
+          "session": "go-cli-live-20261014-de91948f10d6",
+          "routeStateSequence": 95
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T15:35:26.416913+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6-luna",
+          "status": 200,
+          "req": "codex/gpt-6-luna",
+          "response_id": "chatcmpl-resp_05b0ebe18011532a016acf30bf0f0c81989c49396ace9ae6c6",
+          "route_id": 1791960021163,
+          "in": 8462,
+          "out": 77,
+          "cache_read": 0,
+          "cache_write": 0,
+          "reasoning": 39,
+          "ms": 2307,
+          "session": "go-cli-live-20261014-de91948f10d6"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 8462,
+          "magpieUncachedInputTokens": 8462,
+          "magpieCachedInputTokens": 0,
+          "upstreamOutputTokens": 77,
+          "magpieOutputTokens": 77,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 3,
+        "turn": "inspect-fixtures",
+        "askedModel": "codex/gpt-6-luna",
+        "responseId": "chatcmpl-resp_0c919d4c1d6a7268016acf30c19d30819886c01a138319e1d3",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 1563,
+        "responseSha256": "0e001d10036d1911227f26cb46d649ecb5d9f9d224088d8fbc717473868609f1",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6-luna",
+        "usage": {
+          "prompt_tokens": 8518,
+          "completion_tokens": 31,
+          "total_tokens": 8549
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_00a5fbe294a64939a3e35c36d031c74a",
+            "name": "grep",
+            "argumentsSha256": "7589d883a50a3aece3a6d2ec2ee4f1b70fb1cd363ac06e61bba96d8462117206",
+            "safeArguments": {
+              "pathBasename": "",
+              "relativePath": ".",
+              "fixtureMarkers": [
+                "LIVE_FACT_ALPHA_DE91948F10D6"
+              ],
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "route": {
+          "id": 1791960021164,
+          "time": "2026-10-14T15:35:28.878158+08:00",
+          "ms": 1743,
+          "asked": "codex/gpt-6-luna",
+          "model": "codex/gpt-6-luna",
+          "served": "gpt-6-luna",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6-luna",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 1729
+            }
+          ],
+          "bridgeSequence": 3,
+          "session": "go-cli-live-20261014-de91948f10d6",
+          "routeStateSequence": 100
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T15:35:28.878158+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6-luna",
+          "status": 200,
+          "req": "codex/gpt-6-luna",
+          "response_id": "chatcmpl-resp_0c919d4c1d6a7268016acf30c19d30819886c01a138319e1d3",
+          "route_id": 1791960021164,
+          "in": 838,
+          "out": 31,
+          "cache_read": 7680,
+          "cache_write": 0,
+          "ms": 1743,
+          "session": "go-cli-live-20261014-de91948f10d6"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 8518,
+          "magpieUncachedInputTokens": 838,
+          "magpieCachedInputTokens": 7680,
+          "upstreamOutputTokens": 31,
+          "magpieOutputTokens": 31,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 4,
+        "turn": "inspect-fixtures",
+        "askedModel": "codex/gpt-6-luna",
+        "responseId": "chatcmpl-resp_0e534843425f70ee016acf30c3ee44819882425fa1023f02a1",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 1527,
+        "responseSha256": "a4c0b149097ee9d86e257969747ad9e4c7edd2b8c697aa06069190973d70d59f",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6-luna",
+        "usage": {
+          "prompt_tokens": 8560,
+          "completion_tokens": 19,
+          "total_tokens": 8579
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_b753f40fc0e147ed9133f5a9384efdf0",
+            "name": "read",
+            "argumentsSha256": "548c04169c68c826e72832657b8ac7ba10b8ef973abf041c69ec8329014de383",
+            "safeArguments": {
+              "pathBasename": "scan-a.txt",
+              "relativePath": "scan-a.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_00a5fbe294a64939a3e35c36d031c74a",
+            "tool": "grep",
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "route": {
+          "id": 1791960021165,
+          "time": "2026-10-14T15:35:30.812349+08:00",
+          "ms": 2688,
+          "asked": "codex/gpt-6-luna",
+          "model": "codex/gpt-6-luna",
+          "served": "gpt-6-luna",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6-luna",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 2675
+            }
+          ],
+          "bridgeSequence": 4,
+          "session": "go-cli-live-20261014-de91948f10d6",
+          "routeStateSequence": 105
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T15:35:30.812349+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6-luna",
+          "status": 200,
+          "req": "codex/gpt-6-luna",
+          "response_id": "chatcmpl-resp_0e534843425f70ee016acf30c3ee44819882425fa1023f02a1",
+          "route_id": 1791960021165,
+          "in": 880,
+          "out": 19,
+          "cache_read": 7680,
+          "cache_write": 0,
+          "ms": 2688,
+          "session": "go-cli-live-20261014-de91948f10d6"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 8560,
+          "magpieUncachedInputTokens": 880,
+          "magpieCachedInputTokens": 7680,
+          "upstreamOutputTokens": 19,
+          "magpieOutputTokens": 19,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 5,
+        "turn": "inspect-fixtures",
+        "askedModel": "codex/gpt-6-luna",
+        "responseId": "chatcmpl-resp_00ceb94e946e9a5d016acf30c64ee881998faa0cced3ffec56",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 1534,
+        "responseSha256": "a73db3bc1f52052a88772e52964deac79318db9e94dacc317a9c9ed52720215f",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6-luna",
+        "usage": {
+          "prompt_tokens": 8605,
+          "completion_tokens": 21,
+          "total_tokens": 8626
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_70e5c45b84b84a7683fe8912ae521cd2",
+            "name": "read",
+            "argumentsSha256": "b75ba111d750bfe190b83c25ca5e276935725b7d8e74afcaef94a1fa4612c118",
+            "safeArguments": {
+              "pathBasename": "scan-b.txt",
+              "relativePath": "nested/scan-b.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_00a5fbe294a64939a3e35c36d031c74a",
+            "tool": "grep",
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_b753f40fc0e147ed9133f5a9384efdf0",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "183c5e3c885323fb8cb03c44ed3e91103425eea9c9ef65bf1cb0e689d02c6b68",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "route": {
+          "id": 1791960021166,
+          "time": "2026-10-14T15:35:33.69168+08:00",
+          "ms": 1613,
+          "asked": "codex/gpt-6-luna",
+          "model": "codex/gpt-6-luna",
+          "served": "gpt-6-luna",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6-luna",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 1599
+            }
+          ],
+          "bridgeSequence": 5,
+          "session": "go-cli-live-20261014-de91948f10d6",
+          "routeStateSequence": 110
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T15:35:33.69168+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6-luna",
+          "status": 200,
+          "req": "codex/gpt-6-luna",
+          "response_id": "chatcmpl-resp_00ceb94e946e9a5d016acf30c64ee881998faa0cced3ffec56",
+          "route_id": 1791960021166,
+          "in": 925,
+          "out": 21,
+          "cache_read": 7680,
+          "cache_write": 0,
+          "ms": 1613,
+          "session": "go-cli-live-20261014-de91948f10d6"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 8605,
+          "magpieUncachedInputTokens": 925,
+          "magpieCachedInputTokens": 7680,
+          "upstreamOutputTokens": 21,
+          "magpieOutputTokens": 21,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      },
+      {
+        "sequence": 6,
+        "turn": "deny-write",
+        "askedModel": "codex/gpt-6-luna",
+        "responseId": "chatcmpl-resp_0d64c2601e32675d016acf30cb4490819991c21f6bd25ff71e",
+        "requestId": null,
+        "status": 200,
+        "responseBytes": 1577,
+        "responseSha256": "df954fbdbe44c4aef079b98c79c5c1c001e26e41ed2808f4bb57375722d52bc9",
+        "responseJsonParsed": true,
+        "responseMetadataError": null,
+        "provider": "codex",
+        "servedModel": "codex/gpt-6-luna",
+        "usage": {
+          "prompt_tokens": 8585,
+          "completion_tokens": 83,
+          "total_tokens": 8668
+        },
+        "stream": true,
+        "finishReasons": [
+          "tool_calls"
+        ],
+        "terminalStreamMarker": true,
+        "toolCalls": [
+          {
+            "id": "call_a3893fe927d44aef83446767d2e98260",
+            "name": "write",
+            "argumentsSha256": "93c37e7dfa9cd45fb48154dd1e9dcd0e92576f71f5c72a9c68dfa0b26c34ebd8",
+            "safeArguments": {
+              "pathBasename": "blocked_de91948f10d6.txt",
+              "relativePath": "blocked_de91948f10d6.txt",
+              "expectedArtifactMentioned": false
+            }
+          }
+        ],
+        "toolReceipts": [
+          {
+            "toolCallId": "call_e1fdc9493362465db15d1f3460c1af79",
+            "tool": "ls",
+            "bytes": 36,
+            "sha256": "35adedb12c0b545c31b3776a2af481ee98c6b46899584e1acec49cad695139aa",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_00a5fbe294a64939a3e35c36d031c74a",
+            "tool": "grep",
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "mentionsDenied": false,
+            "mentionsError": false
+          },
+          {
+            "toolCallId": "call_b753f40fc0e147ed9133f5a9384efdf0",
+            "tool": "read",
+            "bytes": 49,
+            "sha256": "183c5e3c885323fb8cb03c44ed3e91103425eea9c9ef65bf1cb0e689d02c6b68",
+            "mentionsDenied": false,
+            "mentionsError": false
+          }
+        ],
+        "route": {
+          "id": 1791960021167,
+          "time": "2026-10-14T15:35:38.603237+08:00",
+          "ms": 2930,
+          "asked": "codex/gpt-6-luna",
+          "model": "codex/gpt-6-luna",
+          "served": "gpt-6-luna",
+          "tier_served": "default",
+          "status": 200,
+          "done": true,
+          "tries": [
+            {
+              "model": "codex/gpt-6-luna",
+              "tier_served": "default",
+              "done": true,
+              "status": 200,
+              "ms": 2917
+            }
+          ],
+          "bridgeSequence": 6,
+          "session": "go-cli-live-20261014-de91948f10d6",
+          "routeStateSequence": 115
+        },
+        "routeJoin": "post-response-session-snapshot",
+        "gatewayUsage": {
+          "t": "2026-10-14T15:35:38.603237+08:00",
+          "agent": "Python-urllib",
+          "provider": "codex",
+          "model": "gpt-6-luna",
+          "status": 200,
+          "req": "codex/gpt-6-luna",
+          "response_id": "chatcmpl-resp_0d64c2601e32675d016acf30cb4490819991c21f6bd25ff71e",
+          "route_id": 1791960021167,
+          "in": 8585,
+          "out": 83,
+          "cache_read": 0,
+          "cache_write": 0,
+          "reasoning": 44,
+          "ms": 2930,
+          "session": "go-cli-live-20261014-de91948f10d6"
+        },
+        "usageJoin": "id",
+        "usageReconciliation": {
+          "status": "matched",
+          "upstreamInputTokens": 8585,
+          "magpieUncachedInputTokens": 8585,
+          "magpieCachedInputTokens": 0,
+          "upstreamOutputTokens": 83,
+          "magpieOutputTokens": 83,
+          "inputMatches": true,
+          "outputMatches": true
+        }
+      }
+    ]
+  },
+  "source": {
+    "evidenceClass": "true live LLM end-to-end; real CLI binary, PTY, local forwarding bridge and signed-in Magpie Codex inference",
+    "provider": "Codex through Magpie; verified using per-session route/usage audit and upstream headers",
+    "model": "codex/gpt-6-luna",
+    "cliCredential": "non-secret local sentinel; never logged",
+    "authorizationHeadersCaptured": false,
+    "requestBodiesCaptured": false,
+    "responseBodiesCaptured": false,
+    "screenshotSource": "headless Chromium screenshot of xterm.js fed from real PTY bytes, not native Terminal",
+    "isolatedHome": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-153502-05113d31/home",
+    "isolatedWorkspace": "/Users/yinyuepeng/projects/go-cli/docs/qa/2026-10-14/live/workspaces/20261014-153502-05113d31/workspace"
+  },
+  "finishedAt": "2026-10-14T07:39:40Z"
+}

@@ -1,0 +1,559 @@
+{
+  "startingCommit": "e0493e5fe92f98ee460a0e25740a97852272ddf2",
+  "issues": [
+    {
+      "id": "LIVE-HARNESS-001",
+      "category": "test-harness",
+      "finding": "Aggregate any-proof across a session cannot prove every claimed inference turn used the real Codex provider and completed successfully.",
+      "owner": "live_harness",
+      "acceptance": "Per completed HTTP inference retain ID, status, finish reason, provider/model and correlated route/usage; failed requests stay separate.",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "finalSmokeEvidence": "terminal/20261014-162026-42a11637/run-report.json",
+      "priorStatus": "fixed-and-default-6.1-smoke-independently-verified",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-002",
+      "category": "test-harness",
+      "finding": "Copying the host environment into a tool-capable test child can inherit unrelated credential variables and CODEX_HOME despite isolated HOME.",
+      "owner": "live_harness",
+      "acceptance": "Use a minimal environment allowlist plus explicit test settings and dummy local gateway key; omit global Codex/credential variables without reading their values.",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "finalSmokeEvidence": "terminal/20261014-162026-42a11637/run-report.json",
+      "priorStatus": "fixed-and-default-6.1-smoke-independently-verified",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-003",
+      "category": "test-harness",
+      "finding": "An audit query limited to 20 records can omit inference rows from a multi-turn tool run.",
+      "owner": "live_harness",
+      "acceptance": "Retrieve complete audit coverage or use a unique request/session correlation for every inference; no missing rows claimed as passed.",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "finalSmokeEvidence": "terminal/20261014-162026-42a11637/run-report.json",
+      "priorStatus": "fixed-and-default-6.1-smoke-independently-verified",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-004",
+      "category": "test-harness",
+      "finding": "An exception discarded partial per-turn provider evidence; exit-status retrieval after reaping could incorrectly display 0, and early CLI exit was labelled as a timeout.",
+      "owner": "live_harness",
+      "acceptance": "Preserve failed run state and screenshot, cache actual waitpid status and report early CLI exit immediately; failures never count as passed.",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": "terminal/20261014-150427-60ef4e9b/run-report.json",
+      "finalSmokeEvidence": "terminal/20261014-162026-42a11637/run-report.json",
+      "priorStatus": "fixed-and-default-6.1-smoke-independently-verified",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-005",
+      "category": "test-harness",
+      "finding": "Provider identity validation hardcoded gpt-6.1-sol even for a declared diagnostic gpt-6-luna request.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "acceptance": "Compare actual served model to each request askedModel; do not substitute diagnostic model evidence for default model acceptance.",
+      "finalSmokeEvidence": "terminal/20261014-162026-42a11637/run-report.json",
+      "priorStatus": "fixed-and-default-6.1-smoke-independently-verified",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-006",
+      "category": "test-harness",
+      "finding": "Default-registration assertions incorrectly required Read/Ls to have unknown/zero scope although their existing canonical cwd registration is reviewed and scoped; Grep/Find default completion metadata is different.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "acceptance": "Compare each concrete tool actual registration contract; unknown scope still requires approval and proof; preserve marker/result assertions.",
+      "finalSmokeEvidence": "terminal/20261014-162026-42a11637/run-report.json",
+      "priorStatus": "fixed-and-default-6.1-smoke-independently-verified",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-007",
+      "category": "test-harness",
+      "finding": "The fixture workspace is below an ignored live/workspaces ancestor, so actual rg respects Git ignore and returns no marker match despite the marker file existing.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-155103-a11d7e7c/run-report.json"
+      ],
+      "acceptance": "Use an independent nonignored fixture workspace without changing production ignore semantics; actual Grep receipt contains the literal fixture marker.",
+      "finalSmokeEvidence": "terminal/20261014-162026-42a11637/run-report.json",
+      "priorStatus": "fixed-and-default-6.1-smoke-independently-verified",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-008",
+      "category": "test-harness",
+      "finding": "wait_turn interpreted residual approval text in the viewport as a current modal and then waited for a nonexistent approval. Actual edit/read/terminal completion had already happened. Further full-run checks still waited for legacy working... rather than the actual assistant progress footer.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-155705-a891a2fe/run-report.json",
+        "terminal/20261014-162310-59f1ebd1/run-report.json"
+      ],
+      "acceptance": "Detect the current modal by live header/footer in one snapshot; no stale approval keys; completed turn admits following user turn, then real full rerun.",
+      "finalSmokeEvidence": "terminal/20261014-162026-42a11637/run-report.json",
+      "priorStatus": "smoke-fixed; full-long-busy-marker-corrected-awaiting-rerun",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-009",
+      "category": "test-harness",
+      "finding": "A fresh run failed before process exec because child_env referenced an unassigned LivePTY.model attribute. No provider inference or UI evidence was produced.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-161209-82245643/run-report.json"
+      ],
+      "acceptance": "Constructor model identity is initialized before child environment creation; fresh actual PTY and provider dispatch succeeds.",
+      "finalSmokeEvidence": "terminal/20261014-162026-42a11637/run-report.json",
+      "priorStatus": "fixed-and-default-6.1-smoke-independently-verified",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-010",
+      "category": "test-harness",
+      "finding": "Follow-up canary used lowercase nonce while the metadata pattern accepted uppercase; actual later user message/receipt existed but the label predicate failed.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-165617-51d002f0/run-report.json"
+      ],
+      "acceptance": "Exact typed token is recognized in actual following provider request and paired Bash receipt; distinguish queue input screenshot from later transcript publication.",
+      "priorStatus": "uppercase-canary-fixed-awaiting-fresh-live-join",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-011",
+      "category": "test-harness",
+      "finding": "The test extended Bash sleep to the default 30s operation limit, causing a genuine tool timeout before its finish sentinel.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-165617-51d002f0/run-report.json"
+      ],
+      "acceptance": "Keep scripted successful-task duration inside configured tool deadline; record actual start/finish interval and timeout boundary.",
+      "priorStatus": "20s-test-window-fixed-and-completed-live",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-012",
+      "category": "test-harness",
+      "finding": "A stale running variable raised NameError after follow-up was actually submitted; Python compilation did not detect the undefined name.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-164632-5efefab2/run-report.json",
+        "terminal/20261014-165617-51d002f0/run-report.json"
+      ],
+      "acceptance": "Static undefined-name checks plus actual task completion; preserve the failed round.",
+      "priorStatus": "fixed-static-pyflakes-and-later-live-task-completion",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-013",
+      "category": "test-harness",
+      "finding": "A 1751-character prompt blocked in one PTY write before the old 2048-character pacing threshold; no PPT request reached the model.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-170449-4818728d/run-report.json",
+        "terminal/20261014-171811-82c75abe/run-report.json"
+      ],
+      "acceptance": "Nonblocking partial writes with pumping, EAGAIN handling and bounded deadline; verify actual provider prompt delivery.",
+      "priorStatus": "fixed-nonblocking-partial-writes-and-real-tool-proposal-observed",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-014",
+      "category": "test-harness",
+      "finding": "The long Write approval remained visually labelled review details after all visible detail ranges had been captured. The driver stopped before attempting the actual guarded decision.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-171811-82c75abe/run-report.json",
+        "terminal/20261014-172353-ae18536c/run-report.json"
+      ],
+      "acceptance": "Capture every 1..N detail interval; submit a real decision key and require real modal closure and matching tool receipt, never bypass TUI guards.",
+      "diagnosis": "172353 raw PTY emits final details108-127/127 then [y] once 1553 bytes later before allow key. capture happened mid-redraw without draining; screenshot footer is inconclusive, not a confirmed TUI defect. Production guard accepted only after its full coverage check.",
+      "latestEvidence": "terminal/20261014-184011-290bc55c/run-report.json",
+      "priorStatus": "fixed-and-real-184011-prefix-verified; final-full-run-pending",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-015",
+      "category": "test-harness",
+      "finding": "The PPT prompt instructed use of Python although both python and python3 are blocked by the existing Bash command policy.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-172353-ae18536c/run-report.json"
+      ],
+      "acceptance": "Genuine model/tool generation with allowed commands; preserve policy rejection as a failed round and separately repair its lifecycle handling.",
+      "priorStatus": "Go-stdlib-generator-prompt-retry-in-progress",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-016",
+      "category": "test-harness",
+      "finding": "The driver treated a normal idle prompt after a known durable terminal Error as success, then discovered the missing PPT only during wait_file.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-173000-9c8ba10a/run-report.json",
+        "terminal/20261014-174155-f895248a/run-report.json"
+      ],
+      "acceptance": "Inspect fresh run_terminal outcome tied to the current user turn; capture known error immediately and retain provider/receipt evidence.",
+      "priorStatus": "fixed-exact-durable-error-detection-and-fresh-live-failure-captured",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-017",
+      "category": "test-harness",
+      "finding": "Full-run follow-up assertions interpolated lowercase nonce although actual input/provider markers are uppercase; real queued prompt and matching receipts were present.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-181548-4087fce4/run-report.json",
+        "terminal/20261014-182412-40ef8373/run-report.json"
+      ],
+      "acceptance": "Compare exact submitted uppercase marker in later real request plus matching Bash receipt, rerun corrected driver.",
+      "latestEvidence": "terminal/20261014-184011-290bc55c/run-report.json",
+      "priorStatus": "fixed-and-real-184011-prefix-verified; final-full-run-pending",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-018",
+      "category": "test-harness",
+      "finding": "Policy explanation phrase matcher missed the real answer that python3 is blacklisted and did not write the marker.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-181548-4087fce4/run-report.json",
+        "terminal/20261014-182412-40ef8373/run-report.json"
+      ],
+      "acceptance": "Recognize actual rejection explanation with known error/quiescence receipt and no side effect, not just an echoed nonce.",
+      "priorStatus": "confirmed-real-explanation; final-driver-correction-pending",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-019",
+      "category": "test-harness",
+      "finding": "A 30000-byte character-by-character pressure prompt timed out after 3356 bytes due terminal redraw/backpressure, before a pressure model request.",
+      "owner": "live_harness",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-182412-40ef8373/run-report.json"
+      ],
+      "acceptance": "Use existing LineEditor bracketed paste with bounded write, prove all input bytes reached actual provider and later pressure response.",
+      "latestEvidence": "terminal/20261014-184011-290bc55c/run-report.json",
+      "priorStatus": "fixed-and-real-184011-prefix-verified; final-full-run-pending",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-020",
+      "category": "artifact-verifier",
+      "finding": "OOXML checker did not assert the main presentation MIME content type, so it reported structural pass on a deck LibreOffice cannot load.",
+      "owner": "live_artifacts_review",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "review/182412-pptx-independent-review.md"
+      ],
+      "acceptance": "Canonical MIME and relationship checks followed by actual file rendering and full-size visual review.",
+      "priorStatus": "fixed-canonical-content-types; bad-deck-fail-working-control-pass",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-021",
+      "category": "test-harness",
+      "owner": "live_harness",
+      "finding": "Frozen184011 report labels internal nonstream summary as context-pressure-4 inference; same-request policy-error receipt explanation incorrectly required a strictly later request.",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-184011-290bc55c/run-report.json",
+        "review/184011-independent-review.md"
+      ],
+      "acceptance": "Distinct interactive nonce-bearing streams versus internal summary rows; every row retains real complete provider proof. A missing main pressure turn must fail; exact refusal receipt can be consumed in same provider request.",
+      "priorStatus": "request-kind-and-same-row-receipt-proof-fixed-static-and-independent-replay; fresh-run-pending",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-022",
+      "category": "test-harness",
+      "owner": "live_harness",
+      "finding": "Provider evidence join allowed chronological fallback when exposed response/route IDs disagreed. Actual184011 independently matched30/30 IDs, but future wrong joins could pass.",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "acceptance": "Exact upstream response_id to usage.response_id and route.id to usage.route_id, session consistency, uniqueness; ordered fallback only absent join keys. Local capture sequence is labelled local, not upstream-returned evidence.",
+      "priorStatus": "fail-closed-id-joins-fixed-and-independent-review; fresh-run-pending",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-HARNESS-023",
+      "category": "test-harness",
+      "owner": "live_harness",
+      "finding": "190417 /session new acknowledged distinct physical ID and created empty named JSONL; physical_session_ids scanned row fields only and falsely omitted new session before first turn, stopping before actual fresh provider response.",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-190417-930a46d9/run-report.json",
+        "terminal/20261014-190417-930a46d9/13-session-new-recovery.png"
+      ],
+      "acceptance": "Validate distinct announced ID and named file availability; then actual fresh no-tool inference and durable user/terminal bound to that exact file; final persisted ID and unchanged old unknown outcome. No empty-file test bypass of fresh inference.",
+      "priorStatus": "fix-under-review; failed-run-preserved",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    }
+  ],
+  "productDefects": [
+    {
+      "id": "LIVE-PRODUCT-001",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "finding": "Approved builtin grep in a durable interactive run returns a successful tool receipt but lacks completion attestation; run becomes unknown and the CLI exits with quiescence/publication errors. The first scoped fix did not cover empty-whitelist default registration; a clean committed real run reproduced the failure.",
+      "sourceCommit": "e0493e5fe92f98ee460a0e25740a97852272ddf2",
+      "evidence": [
+        "terminal/20261014-150122-7ef3b912/run-report.json",
+        "terminal/20261014-150427-60ef4e9b/run-report.json",
+        "terminal/20261014-153101-ef080409/run-report.json",
+        "terminal/20261014-155705-a891a2fe/run-report.json"
+      ],
+      "owner": "magpie_install",
+      "candidateProducerFiles": [
+        "internal/tools/trusted_registry.go",
+        "internal/tools/grep.go",
+        "internal/tools/find.go"
+      ],
+      "acceptance": "Real completion proof for managed external helpers and pure-Go fallbacks; pending or unknown executions remain fenced; deterministic regressions plus fresh real provider rerun.",
+      "candidateFixCommit": "f827a91e3782cf1d787b65b5da4b9ba6fc86d74d",
+      "defaultFixCommit": "e6c5ce5",
+      "finalSmokeEvidence": "terminal/20261014-162026-42a11637/run-report.json",
+      "priorStatus": "fixed-and-independent-default-6.1-smoke-pass",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-PRODUCT-002",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "finding": "A real codex/gpt-6.1-sol stream was canceled by the production 10s idle timeout; error handling then failed canonical transcript refresh identity validation. The canceled request is not completed inference evidence.",
+      "sourceCommit": "e0493e5fe92f98ee460a0e25740a97852272ddf2 with first-fix working changes; exact dirty source snapshot unavailable",
+      "evidence": [
+        "terminal/20261014-152358-63990f30/run-report.json"
+      ],
+      "owner": "magpie_install",
+      "acceptance": "Bounded configurable or appropriate production response budgets, correct durable TUI provider-error refresh, deterministic regressions and fresh actual default 6.1 runs.",
+      "fixCommits": [
+        "c1d4de8",
+        "84681a7"
+      ],
+      "deterministicEvidence": "internal/cli/repl_local_timeout_test.go; internal/core/run_commit_consumer_test.go; internal/cli/assembly_model_timeout_test.go",
+      "finalSmokeEvidence": "terminal/20261014-162026-42a11637/run-report.json",
+      "priorStatus": "fixed-deterministic-REPL-recovery-and-configured-6.1-smoke-pass",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-PRODUCT-003",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "finding": "A scoped real sequence with successful ls, grep and read receipts was stopped by repeated response count=3. Loop middleware compares only assistant content; tool-only responses can share empty text while requesting different operations.",
+      "sourceCommit": "f827a91e3782cf1d787b65b5da4b9ba6fc86d74d",
+      "evidence": [
+        "terminal/20261014-153502-05113d31/02-live-tools-answer.png",
+        "terminal/20261014-155705-a891a2fe/run-report.json"
+      ],
+      "owner": "live_harness",
+      "acceptance": "Compare complete semantic response including tool names/arguments independent of random call IDs; retain genuine repeated-text and repeated-tool protection, bounded streams and cancellation; deterministic regressions then actual multi-tool rerun.",
+      "fixCommit": "6f2762e",
+      "finalSmokeEvidence": "terminal/20261014-162026-42a11637/run-report.json",
+      "priorStatus": "fixed-and-independent-default-6.1-smoke-pass",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-PRODUCT-004",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "finding": "Real durable-mode long Bash tasks have no busy spinner/working footer; canonical tool event handling never updates legacy spinner state. Filesystem timing and real follow-up input demonstrate the task actually ran.",
+      "owner": "live_artifacts_review",
+      "evidence": [
+        "terminal/20261014-162904-ce3be8d0/run-report.json",
+        "terminal/20261014-163504-7c08979c/06-long-bash-running.png",
+        "terminal/20261014-165617-51d002f0/06-long-bash-running.png"
+      ],
+      "acceptance": "Show progress from exact canonical observed tool-start occurrences, preserve concurrent-tool progress until all matching results, reject stale/duplicate/terminal-run resurrection, clear on authoritative quiescent refresh/cancel; deterministic and actual long-task screenshot.",
+      "fixCommit": "3a20cc237ee3fa7c0e8ca3c4765f66cd98762526",
+      "latestEvidence": "terminal/20261014-184011-290bc55c/run-report.json",
+      "priorStatus": "fixed-and-real-184011-prefix-verified; final-full-run-pending",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-PRODUCT-005",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "finding": "Esc during a non-idempotent Bash run joins its owned process group and records local-resource resolution, but operation receipt/terminal outcome remain honestly unknown. Current CLI treats the fenced unknown publication as fatal and exits before a fresh user prompt.",
+      "owner": "magpie_install",
+      "evidence": [
+        "terminal/20261014-165617-51d002f0/run-report.json"
+      ],
+      "acceptance": "Preserve unknown receipt/run and actual resource proofs; no automatic replay/continuation. For confirmed joined resources provide explicit safe new-session recovery, keeping pending/unproven resources fenced; genuine Esc/new session/fresh prompt regression.",
+      "fixCommit": "7d5dfd0",
+      "deterministicEvidence": "internal/cli/repl_unknown_cancel_recovery_test.go: actual prepared helper cancellation, preserved unknown receipt/terminal, fresh physical session and separate unresolved workspace marker quarantine; negative evidence and stale identity cases",
+      "registryFixCommit": "1897678",
+      "priorStatus": "reviewed-and-committed; deterministic-race-pass; genuine-final-Esc-new-session-rerun-pending",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-PRODUCT-006",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "finding": "A Bash command rejected by policy before process launch has no local completion proof; durable ownership reports unknown and the interactive CLI terminates with publication mismatch.",
+      "owner": "live_artifacts_review",
+      "evidence": [
+        "terminal/20261014-172353-ae18536c/run-report.json"
+      ],
+      "acceptance": "Trustworthy no-process completion on actual pre-launch refusal, known error terminal, no side effects and a following real turn; never infer quiescence for unknown or launched processes.",
+      "fixCommit": "0c1242e",
+      "deterministicEvidence": "internal/tools/prepared_bash_no_process_test.go; internal/cli/repl_policy_rejection_test.go",
+      "latestEvidence": "terminal/20261014-184011-290bc55c/run-report.json",
+      "priorStatus": "fixed-and-real-184011-prefix-verified; final-full-run-pending",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-PRODUCT-007",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "finding": "Automatic compaction after a real Write selected micro; durable core requires a typed summary projection and refused the result before the next HTTP inference. No Bash or PPTX followed.",
+      "owner": "magpie_install",
+      "evidence": [
+        "terminal/20261014-173000-9c8ba10a/run-report.json",
+        "terminal/20261014-174155-f895248a/run-report.json"
+      ],
+      "acceptance": "Correct durable strategy selection with real typed summary projection and unchanged integrity guard; real compaction trigger, retained early fact/latest prompt and following real inference.",
+      "diagnosis": "Admission estimates include role/name/call IDs and serialized tool arguments; compaction estimates omit them and can double-count shadow Content alongside text blocks. The real Write arguments were 8392 bytes (~3044 estimated tokens). Unified incorrectly accepted micro without typed durable projection. The screen 21098 is cumulative usage, not the next request context estimate.",
+      "fixCommit": "49dbf9755d860b877edd45ed9a73161ab5ebbb8f",
+      "latestEvidence": "terminal/20261014-190417-930a46d9/run-report.json",
+      "priorStatus": "real-production-summary-committed-and-exact-recall-190417-verified; final-full-run-pending",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    },
+    {
+      "id": "LIVE-PRODUCT-008",
+      "category": "product-compaction",
+      "owner": "magpie_install",
+      "finding": "Real production summary completed, but placeholder-based cut left insufficient room for actual summary body: tokens_after102760 exceeded102400. Guard correctly refused projection publication; no pressure-4 main inference or recall followed.",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-184011-290bc55c/run-report.json",
+        "review/184011-independent-review.md"
+      ],
+      "acceptance": "Reserve bounded durable summary body plus provider user role and untrusted framing; preserve final exact budget/current input/source integrity checks. Real committed summary, subsequent user inference and exact recall must pass.",
+      "fixCommit": "ec267df999405a03a09ed5485256aee6cc133aae",
+      "latestEvidence": "terminal/20261014-190417-930a46d9/run-report.json",
+      "priorStatus": "real-production-summary-committed-and-exact-recall-190417-verified; final-full-run-pending",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    }
+  ],
+  "note": "Final selected full live193912 and clean bdb76ef gates both pass; earlierfailed/diagnostic reports and passing ec267191314 remain unchanged. Final independent review and push linked separately.",
+  "gateFindings": [
+    {
+      "id": "LIVE-GATE-001",
+      "finding": "goimports test import grouping failure",
+      "status": "fixed; final-clean-bdb76ef-verify-and-tagged-e2e-accepted",
+      "evidence": "gates/verify-84681a7-lint-failed.json",
+      "finalVerifyEvidence": "gates/verify.json",
+      "finalVerifySource": "bdb76efb0b31152e4c554268b43d39ef6285115a",
+      "finalVerifyAccepted": true,
+      "finalTaggedE2EEvidence": "gates/test-e2e.json"
+    },
+    {
+      "id": "LIVE-GATE-002",
+      "finding": "Darwin ACP early-exit Close returned process-group EPERM during full concurrent race suite; isolated 1x and 10x passed.",
+      "status": "fixed; final-clean-bdb76ef-verify-and-tagged-e2e-accepted",
+      "owner": "magpie_install",
+      "evidence": "gates/verify-508c785-race-failed.json",
+      "acceptance": "Diagnose ownership/lifecycle race; do not hide permission failures or infer group absence from leader exit. Final full gate must pass.",
+      "fixCommit": "2c58f995333df9259320d928ab3c295bc776913f",
+      "diagnosis": "The original Close error contained only EPERM: its later bounded group probe had already confirmed absence; stale signal error remained. OS transition or PGID reuse cause is not established.",
+      "finalVerifyEvidence": "gates/verify.json",
+      "finalVerifySource": "bdb76efb0b31152e4c554268b43d39ef6285115a",
+      "finalVerifyAccepted": true,
+      "finalTaggedE2EEvidence": "gates/test-e2e.json"
+    },
+    {
+      "id": "LIVE-GATE-003",
+      "finding": "Go tooling ./... includes gitignored QA workspaces; two real LLM-authored transient Go generators were linted as project packages, causing nine issues before test execution.",
+      "category": "test-workspace-isolation",
+      "status": "fixed; final-clean-bdb76ef-verify-and-tagged-e2e-accepted",
+      "evidence": "gates/verify-49dbf975-1791973018266400447.json",
+      "logSHA256": "05169cc25c18c810653681d129976d33057e36da1e8203c729db6114e78e017c",
+      "acceptance": "A nested Go module isolates generated test programs without changing root go.mod, Makefile, CI or lint rules; project ./... retains the original 28 package roots.",
+      "finalVerifyEvidence": "gates/verify.json",
+      "finalVerifySource": "bdb76efb0b31152e4c554268b43d39ef6285115a",
+      "finalVerifyAccepted": true,
+      "finalTaggedE2EEvidence": "gates/test-e2e.json"
+    },
+    {
+      "id": "LIVE-GATE-004",
+      "finding": "Final full race gate found two legacy E2E fixtures omitted provider-visible roles/tool metadata in tiny budgets; 8831pass3fail6skip (parent+2subtests).",
+      "status": "fixed; final-clean-bdb76ef-verify-and-tagged-e2e-accepted",
+      "evidence": "gates/verify-49dbf975-1791973520712471548.json",
+      "logSHA256": "4d148fcc6f32f93ca6b36864da9df47c152fec9a4e76f043bbf508790147d0cc",
+      "acceptance": "Exact9-token system fit and8-token typed rejection, exact63-token complete Micro groups; no system dropping or source-guard weakening.",
+      "finalVerifyEvidence": "gates/verify.json",
+      "finalVerifySource": "bdb76efb0b31152e4c554268b43d39ef6285115a",
+      "finalVerifyAccepted": true,
+      "finalTaggedE2EEvidence": "gates/test-e2e.json"
+    },
+    {
+      "id": "LIVE-GATE-005",
+      "finding": "All8840 full race functions succeeded or expected skipped, lint0, but AST SCAN-010 rejects hardcoded help command routing in unknown-cancel allowlist.",
+      "status": "fixed; final-clean-bdb76ef-verify-and-tagged-e2e-accepted",
+      "owner": "magpie_install",
+      "evidence": "gates/verify.json",
+      "logSHA256": "fd29c16cec3e8d83bbf9cf9fb4e95b713875d27e353fc3f489d9f98613227b77",
+      "scannerEvidence": "gates/scanner-78a7f48.json",
+      "acceptance": "Use existing registry-owned handler type/identity and retain strict command fence; scanner0errors plus focused/genuine recovery regressions.",
+      "finalVerifyEvidence": "gates/verify.json",
+      "finalVerifySource": "bdb76efb0b31152e4c554268b43d39ef6285115a",
+      "finalVerifyAccepted": true,
+      "finalTaggedE2EEvidence": "gates/test-e2e.json"
+    }
+  ],
+  "artifactFindings": [
+    {
+      "id": "LIVE-ARTIFACT-001",
+      "finding": "Real LLM-authored PPTX declares presentation+xml instead of presentation.main+xml for its main part. Both real versions cannot load in LibreOffice; actual separate-turn slide status edit occurred but no visual acceptance.",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "review/182412-pptx-independent-review.md"
+      ],
+      "acceptance": "Actual Dot model/tool generation or repair produces canonical package; v1/v2 preservation and four-page native-file rendering pass; no parent-authored replacement.",
+      "latestEvidence": "terminal/20261014-184011-290bc55c/pptx-review.json",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    }
+  ],
+  "providerFailures": [
+    {
+      "id": "LIVE-PROVIDER-001",
+      "finding": "One real 6.1 PPT-generation request exceeded configured90s stream-idle; HTTP headers200 but no finish/DONE, Magpie499 canceled after122002ms.",
+      "status": "resolved-and-final-bdb76ef-full-live-verified; historical-failures-preserved",
+      "evidence": [
+        "terminal/20261014-181548-4087fce4/run-report.json"
+      ],
+      "acceptance": "Bounded budget recorded explicitly; genuinely completed inference only counts as success.",
+      "finalEvidence": "terminal/20261014-193912-aafaafae/run-report.json"
+    }
+  ],
+  "integrationFindings": [
+    {
+      "id": "LIVE-INTEGRATION-001",
+      "finding": "HTTPS push rejected non-fast-forward; fetched remote595d059 adds metadata reservation and spinner command capture. Automatic text merge succeeds, but old content-only reservation double-counts local49 provider-visible compaction metadata.",
+      "status": "merged-preserving-remote; final-bdb76ef-full-live194checks-and-both-gates-pass",
+      "remoteCommit": "595d0599ffb506e36141d6e5cee21b669cb69d75",
+      "previousValidatedLocalCommit": "ec267df999405a03a09ed5485256aee6cc133aae",
+      "acceptance": "Preserve remote change intent and tests; metadata counted exactly once, invalid estimators and final envelope guard still fail closed; merged source gates and fresh full live proof before final push.",
+      "mergeCommit": "bdb76efb0b31152e4c554268b43d39ef6285115a",
+      "focusedTUIPackageRace": "interrupted-without-result; changed-spinner-race-pass; root-full-gate-pending",
+      "fullTUIPackageRace": "PASS in root makeverify fullrace"
+    }
+  ],
+  "processFindings": [
+    {
+      "id": "LIVE-PROCESS-001",
+      "finding": "One unfiltered Magpie audit read emitted an account email only in tool output; no value was saved in evidence files. No credential token was exposed.",
+      "status": "further-audits-filtered-before-output; final-saved-probe-metadata-allowlist-reviewed",
+      "owner": "magpie_install",
+      "acceptance": "Further audits filter time/provider/model/status and allowlisted correlation fields before any output; saved evidence contains no email/account/token fields."
+    }
+  ],
+  "finalAcceptance": "acceptance.json"
+}

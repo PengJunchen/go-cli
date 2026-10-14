@@ -1,0 +1,98 @@
+package main
+
+import (
+ "archive/zip"
+ "bytes"
+ "encoding/xml"
+ "fmt"
+ "io"
+ "os"
+ "path/filepath"
+ "strings"
+)
+
+const oldStatus = "Release status: INITIAL"
+const releaseStatus = "Release status: INITIAL"
+const deck = "live_review_EC18EBDC48CC.pptx"
+const disclosure = "Synthetic QA inputs only - not product measurements"
+var titles = []string{"LIVE_REVIEW_EC18EBDC48CC", "What Was Checked", "Tool Cycle and Retained Facts", "Release Status"}
+var facts = []string{"Synthetic checks completed: 72 of 100", "Synthetic median tool cycle: 5.0 seconds", "Synthetic review facts retained: 9 of 10"}
+const header = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`
+
+func esc(s string) string { var b bytes.Buffer; if err := xml.EscapeText(&b, []byte(s)); err != nil { panic(err) }; return b.String() }
+func shape(id int, text string, y, size int) string {
+ return fmt.Sprintf(`<p:sp><p:nvSpPr><p:cNvPr id="%d" name="Text %d"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="640000" y="%d"/><a:ext cx="10900000" cy="850000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap="square"/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" sz="%d"><a:solidFill><a:srgbClr val="18334D"/></a:solidFill><a:latin typeface="Arial"/></a:rPr><a:t>%s</a:t></a:r><a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp>`, id, id, y, size, esc(text))
+}
+func slide(title string, lines []string) string {
+ s := header + `<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="F5F8FC"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>`
+ s += shape(2, title, 550000, 3200)
+ for i, line := range lines { s += shape(i+3, line, 1850000+i*950000, 2400) }
+ s += shape(len(lines)+3, disclosure, 5750000, 1500)
+ return s + `</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>`
+}
+func create() error {
+ entries := map[string]string{}
+ ct := header + `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>`
+ pres := header + `<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldIdLst>`
+ rel := header + `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`
+ lines := [][]string{{"Synthetic QA review", facts[0]}, {facts[0]}, {facts[1], facts[2]}, {releaseStatus}}
+ for i, title := range titles {
+  n := i+1
+  ct += fmt.Sprintf(`<Override PartName="/ppt/slides/slide%d.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`, n)
+  pres += fmt.Sprintf(`<p:sldId id="%d" r:id="rId%d"/>`, 255+n, n)
+  rel += fmt.Sprintf(`<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide%d.xml"/>`, n, n)
+  entries[fmt.Sprintf("ppt/slides/slide%d.xml", n)] = slide(title, lines[i])
+ }
+ entries["[Content_Types].xml"] = ct + `</Types>`
+ entries["ppt/presentation.xml"] = pres + `</p:sldIdLst><p:sldSz cx="12192000" cy="6858000" type="screen16x9"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>`
+ entries["ppt/_rels/presentation.xml.rels"] = rel + `</Relationships>`
+ entries["_rels/.rels"] = header + `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>`
+ f, err := os.Create(deck); if err != nil { return err }; z := zip.NewWriter(f)
+ for name, content := range entries { w, e := z.Create(name); if e != nil { return e }; if _, e = io.WriteString(w, content); e != nil { return e } }
+ if err = z.Close(); err != nil { f.Close(); return err }; return f.Close()
+}
+func update() error {
+ r, err := zip.OpenReader(deck); if err != nil { return err }; defer r.Close()
+ tmp, err := os.CreateTemp(".", "live-deck-*.pptx"); if err != nil { return err }; defer os.Remove(tmp.Name())
+ z := zip.NewWriter(tmp); found := false
+ for _, f := range r.File {
+  if f.Name != "ppt/slides/slide4.xml" { if err := z.Copy(f); err != nil { return err }; continue }
+  found = true
+  reader, err := f.Open(); if err != nil { return err }; b, err := io.ReadAll(reader); reader.Close(); if err != nil { return err }
+  if !bytes.Contains(b, []byte(esc(oldStatus))) { return fmt.Errorf("slide 4 old status missing") }
+  b = bytes.Replace(b, []byte(esc(oldStatus)), []byte(esc(releaseStatus)), 1)
+  if oldStatus == releaseStatus { if err := z.Copy(f); err != nil { return err }; continue }
+  h := f.FileHeader; w, err := z.CreateHeader(&h); if err != nil { return err }; if _, err = w.Write(b); err != nil { return err }
+ }
+ if !found { return fmt.Errorf("slide 4 missing") }
+ if err := z.Close(); err != nil { return err }; if err := tmp.Close(); err != nil { return err }; return os.Rename(tmp.Name(), deck)
+}
+func verify() error {
+ r, err := zip.OpenReader(deck); if err != nil { return err }; defer r.Close()
+ texts := map[string][]string{}; slideCount := 0; declared := 0
+ for _, f := range r.File {
+  rd, err := f.Open(); if err != nil { return err }; b, err := io.ReadAll(rd); rd.Close(); if err != nil { return err }
+  if !strings.HasSuffix(f.Name, ".xml") && !strings.HasSuffix(f.Name, ".rels") { continue }
+  d := xml.NewDecoder(bytes.NewReader(b)); shapes := 0
+  for { tok, err := d.Token(); if err == io.EOF { break }; if err != nil { return fmt.Errorf("%s: %w", f.Name, err) }; if start, ok := tok.(xml.StartElement); ok {
+   if start.Name.Local == "sp" { shapes++ }
+   if f.Name == "ppt/presentation.xml" && start.Name.Local == "sldId" { declared++ }
+   if start.Name.Local == "t" { var s string; if err := d.DecodeElement(&s, &start); err != nil { return err }; texts[f.Name] = append(texts[f.Name], s) }
+  } }
+  if strings.HasPrefix(f.Name, "ppt/slides/slide") && strings.HasSuffix(f.Name, ".xml") { slideCount++; if shapes < 3 { return fmt.Errorf("editable text shapes missing in %s", f.Name) } }
+ }
+ if slideCount != 4 || declared != 4 { return fmt.Errorf("slide count: package=%d presentation=%d", slideCount, declared) }
+ all := ""
+ for i, title := range titles { name := fmt.Sprintf("ppt/slides/slide%d.xml", i+1); t := texts[name]; if len(t)==0 || t[0]!=title { return fmt.Errorf("title mismatch: %s", name) }; joined := strings.Join(t, "\n"); if !strings.Contains(joined, disclosure) { return fmt.Errorf("disclosure missing: %s", name) }; all += joined+"\n" }
+ for _, fact := range facts { if !strings.Contains(all, fact) { return fmt.Errorf("missing fact: %s", fact) } }
+ if !strings.Contains(strings.Join(texts["ppt/slides/slide4.xml"], "\n"), releaseStatus) { return fmt.Errorf("release status missing") }
+ path, err := filepath.Abs(deck); if err != nil { return err }
+ fmt.Printf("Verified ZIP and XML: %s\nSlide count: %d\nEditable text shapes and all required titles, synthetic facts, disclosure, and slide-4 status verified.\n", path, slideCount)
+ return nil
+}
+func main() {
+ var err error
+ if _, err = os.Stat(deck); os.IsNotExist(err) { err = create() } else if err == nil { err = update() }
+ if err == nil { err = verify() }
+ if err != nil { fmt.Fprintln(os.Stderr, err); os.Exit(1) }
+}

@@ -1,0 +1,22 @@
+{
+  "target": "verify",
+  "command": "make verify",
+  "exitCode": 2,
+  "durationSeconds": 48.832,
+  "baselineCommit": "49dbf9755d860b877edd45ed9a73161ab5ebbb8f",
+  "startedCommit": "49dbf9755d860b877edd45ed9a73161ab5ebbb8f",
+  "sourceDiffBeforeSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "sourceDiffAfterSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "sourceUnchangedDuringRun": true,
+  "untrackedSourceBefore": [],
+  "untrackedSourceAfter": [],
+  "accepted": false,
+  "worktreeDiffSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "log": "verify-49dbf975-1791973018266400447.log",
+  "logSHA256": "05169cc25c18c810653681d129976d33057e36da1e8203c729db6114e78e017c",
+  "signals": [
+    "make: *** [lint] Error 1"
+  ],
+  "originalLogName": "verify.log",
+  "archiveNote": "Only log path updated when preserving previous run; underlying log bytes and logSHA256 remain unchanged."
+}
