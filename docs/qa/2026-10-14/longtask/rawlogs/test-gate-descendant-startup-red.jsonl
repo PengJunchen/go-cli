@@ -1,0 +1,10 @@
+{"Time":"2026-10-14T12:18:39.671648+08:00","Action":"start","Package":"github.com/pengjunchen/go-cli/internal/verify/cmd/test-gate"}
+{"Time":"2026-10-14T12:18:39.921884+08:00","Action":"run","Package":"github.com/pengjunchen/go-cli/internal/verify/cmd/test-gate","Test":"TestRunTimeoutReturnsWhenDescendantHoldsPipes"}
+{"Time":"2026-10-14T12:18:39.922046+08:00","Action":"output","Package":"github.com/pengjunchen/go-cli/internal/verify/cmd/test-gate","Test":"TestRunTimeoutReturnsWhenDescendantHoldsPipes","Output":"=== RUN   TestRunTimeoutReturnsWhenDescendantHoldsPipes\n"}
+{"Time":"2026-10-14T12:18:40.41345+08:00","Action":"output","Package":"github.com/pengjunchen/go-cli/internal/verify/cmd/test-gate","Test":"TestRunTimeoutReturnsWhenDescendantHoldsPipes","Output":"    main_test.go:353: read descendant pid: open /var/folders/_l/f743070s7yj3qk47q2krwqt00000gn/T/TestRunTimeoutReturnsWhenDescendantHoldsPipes1046598401/002/holder.pid: no such file or directory\n"}
+{"Time":"2026-10-14T12:18:40.414656+08:00","Action":"output","Package":"github.com/pengjunchen/go-cli/internal/verify/cmd/test-gate","Test":"TestRunTimeoutReturnsWhenDescendantHoldsPipes","Output":"--- FAIL: TestRunTimeoutReturnsWhenDescendantHoldsPipes (0.49s)\n"}
+{"Time":"2026-10-14T12:18:40.414697+08:00","Action":"fail","Package":"github.com/pengjunchen/go-cli/internal/verify/cmd/test-gate","Test":"TestRunTimeoutReturnsWhenDescendantHoldsPipes","Elapsed":0.49}
+{"Time":"2026-10-14T12:18:40.414726+08:00","Action":"output","Package":"github.com/pengjunchen/go-cli/internal/verify/cmd/test-gate","Output":"FAIL\n"}
+{"Time":"2026-10-14T12:18:40.415685+08:00","Action":"output","Package":"github.com/pengjunchen/go-cli/internal/verify/cmd/test-gate","Output":"FAIL\tgithub.com/pengjunchen/go-cli/internal/verify/cmd/test-gate\t0.744s\n"}
+{"Time":"2026-10-14T12:18:40.41574+08:00","Action":"fail","Package":"github.com/pengjunchen/go-cli/internal/verify/cmd/test-gate","Elapsed":0.744}
+

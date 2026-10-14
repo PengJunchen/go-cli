@@ -1,0 +1,12 @@
+]11;?\[6nInteractive session started. Type 'exit' to quit.
+[?2004h> 
+⚠ IME (input method editor) detected. CJK input may not work correctly in raw mode.
+Press Ctrl+\ to switch to cooked mode for better IME support.
+[J> 请[J> 请用[J> 请用本[J> 请用本地[J> 请用本地中[J> 请用本地中文[J> 请用本地中文流[J> 请用本地中文流式[J> 请用本地中文流式回[J> 请用本地中文流式回答[J> 请用本地中文流式回答保[J> 请用本地中文流式回答保持[J> 请用本地中文流式回答保持原[J> 请用本地中文流式回答保持原样[J> 请用本地中文流式回答保持原样。
+[?2004l[?25l[?2004h[K
+[Assistant response is being generated and checked][K
+[1mfixture-model | turn #1 | interact | chat[0m[K[2A▼ [1mAI: [0m[38;2;125;86;243m这是本地模拟模型逐段返回的中文答案。[0m[K
+[1mfixture-model | turn #1 | interact | chat[0m[K
+Tokens: unknown | Cost: unknown[K
+usage=unknown (unknown:1) cost=unknown (unknown:1) /cost[K[2K[?2004l[?25h[?1002l[?1003l[?1006l[?2004h> [J> e[J> ex[J> exi[J> exit
+[?2004lSession ended.

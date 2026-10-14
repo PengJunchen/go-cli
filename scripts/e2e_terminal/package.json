@@ -1,0 +1,12 @@
+{
+  "name": "go-cli-terminal-e2e",
+  "private": true,
+  "description": "Headless xterm.js renderer for real go-cli PTY end-to-end evidence",
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

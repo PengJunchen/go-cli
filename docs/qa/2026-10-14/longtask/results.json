@@ -1,0 +1,119 @@
+{
+  "baseline": {
+    "branch": "develop",
+    "commit": "e77e8058c51e5370a2ecc3eacb5fce0419829bcf"
+  },
+  "run": {
+    "startedAt": "2026-10-14T12:29:02+08:00",
+    "hostOS": "darwin",
+    "command": "rtk proxy go test -race -tags=e2e ./tests -run '^TestE2EBinaryLongTask$' -count=1 -json",
+    "status": "passed-in-isolated-run-but-superseded",
+    "durationSeconds": 19.239,
+    "rawLog": "rawlogs/e2e-binary-longtask-darwin.jsonl"
+  },
+  "latestFocusedRun": {
+    "startedAt": "2026-10-14T12:46:03+08:00",
+    "hostOS": "darwin",
+    "command": "rtk proxy go test -race -tags=e2e ./tests -run '^TestE2EBinaryLongTask$' -count=1 -json",
+    "status": "passed",
+    "durationSeconds": 18.139,
+    "rawLog": "rawlogs/e2e-binary-longtask-darwin-queue-ack.jsonl"
+  },
+  "currentAcceptanceStatus": "focused-longtask-e2e-passed-awaiting-full-tagged-suite",
+  "latestFullTaggedSuite": {
+    "status": "failed",
+    "failedCase": "TestE2EBinaryLongTask/PTY_follow-up_preserves_Bash_side_effect",
+    "diagnosis": "The test released the Bash fixture after the PTY view showed follow-up text, before the production callback confirmed channel enqueue."
+  },
+  "checks": [
+    {
+      "name": "real race-instrumented CLI, streamed HTTP, 120 turns, and compaction",
+      "status": "passed-in-isolated-run",
+      "httpRequests": 120,
+      "lastRequestMessageCount": 29,
+      "oldestTurnOmittedFromLastRequest": true,
+      "productionCompactionLogPresent": true
+    },
+    {
+      "name": "Darwin PTY follow-up while Bash waits on a controlled release file",
+      "status": "passed-focused-run-awaiting-full-tagged-suite",
+      "followUp": "FOLLOW-UP-CANARY include the shell result in your completion",
+      "actualSecondRequestContainsFollowUp": true,
+      "actualSecondRequestContainsToolOutput": true,
+      "bashStartedMarkerConfirmed": true,
+      "releaseControlledUntilProductionQueueAcknowledgment": true,
+      "queueAcknowledgmentLog": "core.turn.runner.followup.sent",
+      "sideEffectFileVerified": true
+    },
+    {
+      "name": "Darwin PTY Escape cancels delayed Bash side effect",
+      "status": "passed",
+      "escapeToPromptMilliseconds": 16,
+      "delayedSideEffectAbsentAfterSeconds": 5,
+      "providerRequests": 1
+    }
+  ],
+  "relatedChecks": {
+    "tuiFollowUpAndSteerSpaceRegression": {
+      "status": "passed",
+      "command": "rtk proxy go test -race -count=1 ./internal/tui -run '^(TestFollowUpUpdateAndViewPreserveSpace|TestSteerUpdateAndViewPreserveSpace)$' -json",
+      "rawLog": "rawlogs/tui-space-green.jsonl",
+      "redLog": "rawlogs/tui-space-red.jsonl"
+    },
+    "grepEscapedPipeDeadlineFixture": {
+      "status": "passed",
+      "command": "rtk proxy go test -race -count=1 ./internal/tools -run '^TestGrepTimeoutWithEscapedPipeWriterPreservesCancellationCause$' -json",
+      "rawLog": "rawlogs/grep-escaped-pipe-green.jsonl",
+      "redLog": "rawlogs/grep-escaped-pipe-startup-red.jsonl"
+    },
+    "testGateDescendantPipeFixture": {
+      "status": "focused-race-pass-awaiting-full-suite",
+      "timeoutMilliseconds": 500,
+      "waitDelayMilliseconds": 750,
+      "elapsedUpperBoundSeconds": 2,
+      "focusedElapsedSeconds": 1.18,
+      "descendantPIDMarkerConfirmed": true,
+      "exitCode": 124,
+      "descendantStopped": true,
+      "residualProcessGroupDiagnosticObserved": true,
+      "redLogs": [
+        "rawlogs/test-gate-descendant-startup-red.jsonl",
+        "rawlogs/test-gate-descendant-waitdelay-red.jsonl"
+      ],
+      "latestConcurrentRunLog": "rawlogs/test-gate-descendant-concurrent-red.jsonl",
+      "greenLog": "rawlogs/test-gate-descendant-green.jsonl",
+      "note": "The focused race run returned the expected bounded timeout 124 with the descendant PID marker present and PID stopped. The residual-descendant diagnostic is expected because the synthetic parent intentionally exits while its child holds the pipes; this test verifies the gate rejects the timed-out command and cleanup stops the child."
+    },
+    "sshpassAmbiguousExitFixture": {
+      "status": "focused-race-pass-awaiting-full-suite",
+      "exitCodes": [1, 2, 3, 4, 5, 6, 7],
+      "allOutcomesUnknownAndQuiescent": true,
+      "redLog": "rawlogs/sshpass-local-exit-codes-red.jsonl",
+      "isolatedRetryLog": "rawlogs/sshpass-exit-5-isolation.jsonl",
+      "greenLog": "rawlogs/sshpass-local-exit-codes-green.jsonl",
+      "note": "A one-second fixture timeout expired for fake sshpass exit 5 during loaded race verification; an isolated retry completed in 161ms. The test-specific timeout is now 5s, and the full seven-code focused race run passed."
+    },
+    "longTaskQueueAcknowledgedE2E": {
+      "status": "focused-race-pass-awaiting-full-tagged-suite",
+      "command": "rtk proxy go test -race -tags=e2e ./tests -run '^TestE2EBinaryLongTask$' -count=1 -json",
+      "rawLog": "rawlogs/e2e-binary-longtask-darwin-queue-ack.jsonl",
+      "productionQueueAcknowledgmentBeforeRelease": true,
+      "actualFollowUpRequestContainsFullCanary": true,
+      "actualFollowUpRequestContainsBashToolResult": true,
+      "cancelDelayedEffectAbsentAfterSeconds": 5,
+      "cancelProviderRequests": 1
+    }
+  },
+  "linux": {
+    "e2eTestPackageCrossCompile": "passed",
+    "ptyRuntime": "not-run-on-linux",
+    "crossCompileLog": "rawlogs/linux-e2e-test-cross-compile.txt"
+  },
+  "evidenceCategories": [
+    "real-binary-and-local-http-sse",
+    "real-darwin-pty-e2e",
+    "unit-regression",
+    "linux-cross-compile"
+  ],
+  "scope": "A real local CLI binary and terminal workflow were exercised against a deterministic local OpenAI-compatible mock. The two PTY child invocations use --no-sandbox: the run verifies TUI approval, Bash side effects and cancellation, plus actual HTTP request content, but does not validate OS sandbox isolation or enforcement. This is not a real-provider or production-model acceptance run."
+}

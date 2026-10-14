@@ -1,0 +1,109 @@
+]11;?\[6nInteractive session started. Type 'exit' to quit.
+[?2004h> 
+⚠ IME (input method editor) detected. CJK input may not work correctly in raw mode.
+Press Ctrl+\ to switch to cooked mode for better IME support.
+[J> 执[J> 执行[J> 执行本[J> 执行本地[J> 执行本地模[J> 执行本地模拟[J> 执行本地模拟器[J> 执行本地模拟器提[J> 执行本地模拟器提交[J> 执行本地模拟器提交的[J> 执行本地模拟器提交的多[J> 执行本地模拟器提交的多阶[J> 执行本地模拟器提交的多阶段[J> 执行本地模拟器提交的多阶段 [J> 执行本地模拟器提交的多阶段 s[J> 执行本地模拟器提交的多阶段 sh[J> 执行本地模拟器提交的多阶段 she[J> 执行本地模拟器提交的多阶段 shel[J> 执行本地模拟器提交的多阶段 shell[J> 执行本地模拟器提交的多阶段 shell [J> 执行本地模拟器提交的多阶段 shell 命[J> 执行本地模拟器提交的多阶段 shell 命令[J> 执行本地模拟器提交的多阶段 shell 命令。
+[?2004l[?25l[?2004h[1;38;2;255;192;0m[approval][0m [38;2;0;217;255mbash[0m[K
+  local interaction #1[K
+  scope: unknown; once only; reuse unavailable[K
+  view truncated · details 1-20/42 · ↑/↓ PgUp/PgDn[K
+  args:[K
+    command: set -e[K
+      printf 'E2E_STAGE_ONE\\n' | tee stage-one.done[K
+      sleep 6[K
+      printf 'E2E_STAGE_TWO\\n' | tee stage-two.done[K
+      sleep 2.5[K
+      printf 'E2E_STAGE_THREE\\n' | tee stage-three.done[K
+      # approval detail row 01 keeps this command longer than the visible review window[K
+      # approval detail row 02 keeps this command longer than the visible review window[K
+      # approval detail row 03 keeps this command longer than the visible review window[K
+      # approval detail row 04 keeps this command longer than the visible review window[K
+      # approval detail row 05 keeps this command longer than the visible review window[K
+      # approval detail row 06 keeps this command longer than the visible review window[K
+      # approval detail row 07 keeps this command longer than the visible review window[K
+      # approval detail row 08 keeps this command longer than the visible review window[K
+      # approval detail row 09 keeps this command longer than the visible review window[K
+      # approval detail row 10 keeps this command longer than the visible review window[K
+      # approval detail row 11 keeps this command longer than the visible review window[K
+      # approval detail row 12 keeps this command longer than the visible review window[K
+      # approval detail row 13 keeps this command longer than the visible review window[K
+  [y] review details [n] reject[K[24A
+
+
+  view truncated · details 20-39/42 · ↑/↓ PgUp/PgDn[K
+      # approval detail row 13 keeps this command longer than the visible review window[K
+      # approval detail row 14 keeps this command longer than the visible review window[K
+      # approval detail row 15 keeps this command longer than the visible review window[K
+      # approval detail row 16 keeps this command longer than the visible review window[K
+      # approval detail row 17 keeps this command longer than the visible review window[K
+      # approval detail row 18 keeps this command longer than the visible review window[K
+      # approval detail row 19 keeps this command longer than the visible review window[K
+      # approval detail row 20 keeps this command longer than the visible review window[K
+      # approval detail row 21 keeps this command longer than the visible review window[K
+      # approval detail row 22 keeps this command longer than the visible review window[K
+      # approval detail row 23 keeps this command longer than the visible review window[K
+      # approval detail row 24 keeps this command longer than the visible review window[K
+      # approval detail row 25 keeps this command longer than the visible review window[K
+      # approval detail row 26 keeps this command longer than the visible review window[K
+      # approval detail row 27 keeps this command longer than the visible review window[K
+      # approval detail row 28 keeps this command longer than the visible review window[K
+      # approval detail row 29 keeps this command longer than the visible review window[K
+      # approval detail row 30 keeps this command longer than the visible review window[K
+      # approval detail row 31 keeps this command longer than the visible review window[K
+      # approval detail row 32 keeps this command longer than the visible review window[K
+[24A
+
+
+  view truncated · details 23-42/42 · ↑/↓ PgUp/PgDn[K
+      # approval detail row 16 keeps this command longer than the visible review window[K
+      # approval detail row 17 keeps this command longer than the visible review window[K
+      # approval detail row 18 keeps this command longer than the visible review window[K
+      # approval detail row 19 keeps this command longer than the visible review window[K
+      # approval detail row 20 keeps this command longer than the visible review window[K
+      # approval detail row 21 keeps this command longer than the visible review window[K
+      # approval detail row 22 keeps this command longer than the visible review window[K
+      # approval detail row 23 keeps this command longer than the visible review window[K
+      # approval detail row 24 keeps this command longer than the visible review window[K
+      # approval detail row 25 keeps this command longer than the visible review window[K
+      # approval detail row 26 keeps this command longer than the visible review window[K
+      # approval detail row 27 keeps this command longer than the visible review window[K
+      # approval detail row 28 keeps this command longer than the visible review window[K
+      # approval detail row 29 keeps this command longer than the visible review window[K
+      # approval detail row 30 keeps this command longer than the visible review window[K
+      # approval detail row 31 keeps this command longer than the visible review window[K
+      # approval detail row 32 keeps this command longer than the visible review window[K
+      # approval detail row 33 keeps this command longer than the visible review window[K
+      # approval detail row 34 keeps this command longer than the visible review window[K
+      # approval detail row 35 keeps this command longer than the visible review window[K
+  [y] once [n] reject [Esc] cancel[K[24A▼ [38;2;108;112;134m[0m                                                                                  │  ⠧ [tool] bash(command=set -e                                                      
+⠧ working...[K
+[1mfixture-model | turn #1 | interact | chat[0m[K[J[2A▼ [38;2;108;112;134m[0m                                                                                  │  ⠇ [tool] bash(command=set -e                                                      
+⠇ working...[K
+[2A
+
+> followup> █[K
+[1mfixture-model | turn #1 | interact | chat[0m[K[3A▼ [38;2;108;112;134m[0m                                                                                  │  ⠏ [tool] bash(command=set -e                                                      
+⠏ working...[K
+
+[3A
+
+> followup> During the active run, keep xterm colors stable and inspect 日志窗口。█[K
+[3A▼ [38;2;108;112;134m[0m                                                                                  │  ⠋ [tool] bash(command=set -e                                                      
+⠋ working...[K
+
+[3A▼ [38;2;108;112;134m[0m                                                                                  │  ⠙ [tool] bash(command=set -e                                                      
+⠙ working...[K
+[1mfixture-model | turn #1 | interact | chat[0m[K[J[2A▼ [38;2;108;112;134m[0m                                                                                  │  ⠹ [tool] bash(command=set -e                                                      
+⠹ working...[K
+[2A▼ [38;2;108;112;134m[0m                                                                                  │  ⠸ [tool] bash(command=set -e                                                      
+⠸ working...[K
+[2A▼ [38;2;108;112;134m[0m                                                                                  │  ⠼ [tool] bash(command=set -e                                                      
+⠼ working...[K
+[2A▼ [38;2;108;112;134m[0m                                                                                  │  ✓ [tool] bash(command=set -e                                                      
+[Assistant response is being generated and checked][K
+[2A  [38;2;108;112;134m[0m                                                                                  │  ✓ [tool] bash(command=set -e                                                      
+▼ [1mAI: [0m[38;2;125;86;243m本地模拟器确认三阶段 shell 命令全部完成，并收到 follow-up 指令。[0m                                                                                                   
+
+Tokens: unknown | Cost: unknown[K
+Sources: usage=unknown/u2 cost=unknown/c2 price=unknown actual=openai/fixture-model[K[2K[?2004l[?25h[?1002l[?1003l[?1006l[?2004h> [J> e[J> ex[J> exi[J> exit
+[?2004lSession ended.

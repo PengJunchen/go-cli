@@ -53,19 +53,17 @@ func TestTrustedProjectACPCommandUsesCapturedExecutableAndRejectsChangedPath(t *
 	require.NoError(t, err)
 	require.Equal(t, config.ProjectSourceTrustVerified, loaded.ProjectSourceTrustStatus)
 	require.NotEmpty(t, loaded.VerifiedProjectSources())
+	require.Equal(t, "stdio", loaded.ACP.Transport, "trusted project ACP transport must reach the effective config")
+	require.Equal(t, "./bin/acp-agent", loaded.ACP.Command, "trusted project executable must reach the effective config")
 	assembly, err := AssembleAgent(ctx, loaded, "openai", "acp-project-trust", io.Discard)
 	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		_, statErr := os.Stat(expectedMarker)
-		return statErr == nil
-	}, time.Second, 10*time.Millisecond, "the captured executable must consume ACP's connect handshake")
-	closeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	require.NoError(t, assembly.Close(closeCtx))
-	cancel()
 	t.Cleanup(assembly.Cleanup)
-	contents, err := os.ReadFile(expectedMarker)
-	require.NoError(t, err)
-	require.Contains(t, string(contents), `"type":"connect"`)
+	markerContents := requireACPConnectHandshake(t, expectedMarker)
+	closeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	closeErr := assembly.Close(closeCtx)
+	cancel()
+	require.NoError(t, closeErr)
+	require.Contains(t, markerContents, `"type":"connect"`)
 
 	changedMarker := filepath.Join(root, "attacker-started")
 	changedCommand := "#!/bin/sh\nprintf 'attacker\\n' > " + shellQuote(changedMarker) + "\n"
@@ -148,12 +146,37 @@ func newACPProjectCommandTrustFixture(t *testing.T) (context.Context, string, st
 	require.NoError(t, os.WriteFile(filepath.Join(home, ".go-cli", "config.yaml"), []byte(globalConfig), 0o600))
 	marker := filepath.Join(root, "trusted-command-started")
 	commandPath := filepath.Join(root, "bin", "acp-agent")
-	command := "#!/bin/sh\nIFS= read -r frame || exit 31\nprintf '%s\\n' \"$frame\" > " + shellQuote(marker) + "\nwhile IFS= read -r line; do :; done\n"
+	command := "#!/bin/sh\nprintf 'started\\n' > " + shellQuote(marker) + "\nIFS= read -r frame || exit 31\nprintf '%s\\n' \"$frame\" >> " + shellQuote(marker) + "\nwhile IFS= read -r line; do :; done\n"
 	require.NoError(t, os.WriteFile(commandPath, []byte(command), 0o700))
 	projectConfig := fmt.Sprintf("acp:\n  transport: stdio\n  command: ./bin/acp-agent\n")
 	require.NoError(t, os.WriteFile(filepath.Join(root, ".go-cli.yaml"), []byte(projectConfig), 0o600))
 	manager := approval.NewDefaultTrustManager(approval.NewInMemoryTrustStore())
 	return ctx, root, home, marker, commandPath, manager
+}
+
+func requireACPConnectHandshake(t *testing.T, markerPath string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var lastContents string
+	started := false
+	for time.Now().Before(deadline) {
+		contents, err := os.ReadFile(markerPath)
+		if err == nil {
+			lastContents = string(contents)
+			started = strings.HasPrefix(lastContents, "started\n")
+			if strings.Contains(lastContents, `"type":"connect"`) {
+				return lastContents
+			}
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("read ACP fixture marker: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !started {
+		t.Fatalf("configured ACP executable did not start within 10s; last marker=%q", lastContents)
+	}
+	t.Fatalf("configured ACP executable started but did not consume the connect handshake within 10s; last marker=%q", lastContents)
+	return ""
 }
 
 func shellQuote(value string) string {

@@ -2774,6 +2774,9 @@ func (m *teaModel) handleSteerKeyLocked(msg tea.KeyMsg) tea.Cmd {
 		// Ctrl+U clears the steer input line.
 		m.steerInput = ""
 		m.steerCursor = 0
+	case tea.KeySpace:
+		m.steerInput = m.steerInput[:m.steerCursor] + " " + m.steerInput[m.steerCursor:]
+		m.steerCursor++
 	case tea.KeyRunes:
 		for _, r := range msg.Runes {
 			m.steerInput = m.steerInput[:m.steerCursor] + string(r) + m.steerInput[m.steerCursor:]
@@ -2825,6 +2828,9 @@ func (m *teaModel) handleFollowUpKeyLocked(msg tea.KeyMsg) tea.Cmd {
 		// Ctrl+U clears the follow-up input line.
 		m.followUpInput = ""
 		m.followUpCursor = 0
+	case tea.KeySpace:
+		m.followUpInput = m.followUpInput[:m.followUpCursor] + " " + m.followUpInput[m.followUpCursor:]
+		m.followUpCursor++
 	case tea.KeyRunes:
 		for _, r := range msg.Runes {
 			m.followUpInput = m.followUpInput[:m.followUpCursor] + string(r) + m.followUpInput[m.followUpCursor:]
