@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"net/http"
@@ -276,4 +277,69 @@ func TestFiniteMultimodalReserveIsBoundedInPreparedLoopPlan(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body.Messages[1].Content, &imageBlocks))
 	require.Len(t, imageBlocks, 2, "the prepared plan and actual request should include both image parts")
 	require.Greater(t, len(requestBody), 0)
+}
+
+func TestCompactPreparedMessagesReservesProviderMessageMetadata(t *testing.T) {
+	messages := []llm.Message{{Role: llm.RoleSystem, Content: "rules"}}
+	for index := 0; index < 100; index++ {
+		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: "short user input"})
+	}
+	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: "current request"})
+	estimator := compaction.NewHeuristicTokenEstimator()
+	const budget = 400
+	compacted, current, err := compactPreparedMessages(context.Background(), messages, nil, nil,
+		compaction.NewTruncatingCompactor(), estimator, budget, 0, len(messages)-1)
+	require.NoError(t, err)
+	require.Equal(t, messages[len(messages)-1], compacted[current], "current user input must survive unchanged")
+	tokens, _, err := estimateProviderMessages(compacted, estimator, 0)
+	require.NoError(t, err)
+	require.LessOrEqual(t, tokens, budget, "compaction must leave room for per-message provider metadata")
+}
+
+func TestPreparedCompactionTextBudgetAccountsMetadataWithoutMutatingMessages(t *testing.T) {
+	messages := []llm.Message{{
+		Role: llm.RoleAssistant, Name: "named sender", ToolCallID: "receipt-id",
+		Content:       "body must not count as metadata",
+		ContentBlocks: []llm.ContentBlock{{Type: "image_url", ImageURL: &llm.ImageURL{URL: "https://example.invalid/image"}}},
+		ToolCalls:     []llm.ToolCall{{ID: "call-id", Name: "tool-name", Args: map[string]any{"argument": "value"}}},
+	}}
+	before := cloneLLMMessage(messages[0])
+	estimator := oneTokenPerNonEmptyText{}
+	// Role, sender name, receipt ID, call ID, tool name, encoded arguments.
+	budget, err := preparedCompactionTextBudget(messages, estimator, 30, 7)
+	require.NoError(t, err)
+	require.Equal(t, 17, budget)
+	require.Equal(t, before, messages[0])
+	_, err = preparedCompactionTextBudget(messages, estimator, 12, 7)
+	require.ErrorIs(t, err, ErrRequestEnvelopeRejected)
+}
+
+type requestMetadataEstimator struct {
+	tokens int
+	err    error
+}
+
+func (estimator requestMetadataEstimator) Estimate(string) (int, error) {
+	return estimator.tokens, estimator.err
+}
+
+func TestPreparedCompactionTextBudgetFailsClosedOnInvalidEstimates(t *testing.T) {
+	failure := errors.New("estimator failed")
+	for _, test := range []struct {
+		name      string
+		estimator compaction.TokenEstimator
+	}{
+		{"missing", nil},
+		{"negative", requestMetadataEstimator{tokens: -1}},
+		{"overflow", requestMetadataEstimator{tokens: math.MaxInt}},
+		{"failed", requestMetadataEstimator{err: failure}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := preparedCompactionTextBudget([]llm.Message{{Role: llm.RoleUser, Name: "sender"}}, test.estimator, 100, 0)
+			require.ErrorIs(t, err, ErrRequestEnvelopeRejected)
+			if test.name == "failed" {
+				require.ErrorIs(t, err, failure)
+			}
+		})
+	}
 }

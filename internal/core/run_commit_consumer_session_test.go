@@ -1134,6 +1134,14 @@ func TestRunCommitLoopPersistsLateProofDuringReceiptBeforeResolution(t *testing.
 			default:
 			}
 			cancelOnce.Do(cancel)
+			// This test needs completion to become visible during receipt sync,
+			// not before the first execution row is sampled. Cancellation alone
+			// does not prevent a fast queued write from finishing immediately.
+			select {
+			case <-receiptAppend:
+			case <-time.After(3 * time.Second):
+				return nil, errors.New("test: receipt append did not release the queued write")
+			}
 			return next(context.WithoutCancel(toolCtx), call)
 		}
 	})
