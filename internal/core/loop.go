@@ -525,7 +525,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				return
 			}
 			runErr = normalizeLoopDetectedCause(spanCtx, runErr)
-			terminalErr := consumer.commitTerminal(runResult.Transcript, consumer.projections, terminalOutcome(runErr))
+			terminalErr := consumer.commitTerminal(runResult.Transcript, consumer.projections, terminalOutcome(spanCtx, runErr))
 			if terminalErr != nil {
 				markRunOutcomeUnknown(spanCtx)
 				runErr = errors.Join(runErr, terminalErr)

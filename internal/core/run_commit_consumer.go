@@ -1013,7 +1013,7 @@ func persistenceError(operation string, err error) error {
 	return runCommitPersistenceError{operation: operation, cause: err}
 }
 
-func terminalOutcome(err error) RunOutcome {
+func terminalOutcome(runCtx context.Context, err error) RunOutcome {
 	if err == nil {
 		return RunOutcomeSuccess
 	}
@@ -1023,8 +1023,10 @@ func terminalOutcome(err error) RunOutcome {
 	if errors.Is(err, ErrLoopDetected) {
 		return RunOutcomeError
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return RunOutcomeCancelled
+	if runCtx != nil {
+		if runContextErr := runCtx.Err(); runContextErr != nil && errors.Is(err, runContextErr) {
+			return RunOutcomeCancelled
+		}
 	}
 	return RunOutcomeError
 }
