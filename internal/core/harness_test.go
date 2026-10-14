@@ -21,7 +21,7 @@ func drainEvents(stream EventStream) []AgentEvent {
 	return evs
 }
 
-func testHarness(t *testing.T) *HarnessImpl {
+func testHarness(t *testing.T, opts ...HarnessOption) *HarnessImpl {
 	t.Helper()
 	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
 		"H-01", "harness",
@@ -29,13 +29,15 @@ func testHarness(t *testing.T) *HarnessImpl {
 	))
 	loop := NewLoopAgent(WithLLM(model))
 	agent := NewAgentImpl("h", loop)
-	return NewHarnessImpl(agent)
+	return NewHarnessImpl(agent, opts...)
 }
 
 func TestHarnessSubmitStreamsToDone(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	h := testHarness(t)
+	// Terminal projection is non-blocking. Reserve room for this single turn
+	// so delivery does not depend on the consumer already waiting to receive.
+	h := testHarness(t, WithEventBuffer(16))
 	stream, err := h.Submit(context.Background(), "hello harness")
 	require.NoError(t, err)
 	require.NotNil(t, stream)
@@ -117,4 +119,25 @@ func TestHarnessNilAgentPanics(t *testing.T) {
 	assert.Panics(t, func() {
 		NewHarnessImpl(nil)
 	})
+}
+
+// With an unbuffered stream and no reader, terminal projection must not hold
+// run cleanup hostage; the authoritative result and gap remain observable.
+func TestHarnessUnbufferedTerminalWithoutConsumer(t *testing.T) {
+	h := NewHarnessImpl(nonEventSourceAgent{})
+	stream, err := h.Submit(context.Background(), "hi")
+	require.NoError(t, err)
+	concrete, ok := stream.(*EventStreamImpl)
+	require.True(t, ok)
+	select {
+	case <-concrete.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminal projection blocked harness cleanup without a consumer")
+	}
+	require.Empty(t, drainEvents(stream))
+	require.EqualValues(t, 1, concrete.GapCount())
+	result, err := stream.Result()
+	require.NoError(t, err)
+	require.Equal(t, "from-run", result.Content)
+	require.NoError(t, stream.Err())
 }

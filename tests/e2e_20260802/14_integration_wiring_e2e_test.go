@@ -776,29 +776,31 @@ func TestWT_Middleware_ModelMiddlewareWraps(t *testing.T) {
 // Feature:   DefaultSubAgent lifecycle states
 func TestWT_SubAgent_LifecycleStates(t *testing.T) {
 	conf := core.SubAgentConfig{Name: "lifecycle-worker", MaxTurns: 3}
-	sub := core.NewDefaultSubAgent(conf)
-	sa := sub.(*core.DefaultSubAgent) //nolint:errcheck
+	fixture := newHeldSubAgentFixture(t, conf)
+	sub := fixture.sub
 
 	// Verify initial state is Idle.
-	assert.Equal(t, core.SubAgentIdle, sa.State())
+	assert.Equal(t, core.SubAgentIdle, sub.State())
 
 	// Run: state transitions to Running.
-	ch, err := sub.Run(context.Background(), "do something")
+	ch, err := sub.Run(fixture.ctx, "do something")
 	require.NoError(t, err)
 	require.NotNil(t, ch)
-	assert.Equal(t, core.SubAgentRunning, sa.State())
+	waitForSubAgentRunner(t, fixture.started)
+	assert.Equal(t, core.SubAgentRunning, sub.State())
 
+	fixture.release()
 	// Drain events.
 	for range ch {
 	}
 
 	// Wait for final result.
-	msg, werr := sub.Wait(context.Background())
+	msg, werr := sub.Wait(fixture.ctx)
 	require.NoError(t, werr)
 	assert.Equal(t, "assistant", string(msg.Role))
 
 	// Verify final state is Completed.
-	assert.Equal(t, core.SubAgentCompleted, sa.State())
+	assert.Equal(t, core.SubAgentCompleted, sub.State())
 }
 
 // Test ID:   WT-SUBAGENT-002

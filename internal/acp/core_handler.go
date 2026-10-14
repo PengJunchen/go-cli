@@ -205,8 +205,8 @@ func (s *Session) Events() <-chan core.AgentEvent {
 	return s.events
 }
 
-// PublishEvent records one monotonically numbered entry and performs non-blocking
-// delivery to legacy and replay/live consumers. A full legacy channel drops
+// PublishEvent records one entry with a monotonically increasing ID and performs
+// non-blocking delivery to legacy and replay/live consumers. A full legacy channel drops
 // only that legacy delivery; a full replay/live subscriber is terminated with
 // explicit gap evidence while the ring retains the event for reconnection.
 func (s *Session) PublishEvent(event core.AgentEvent) {
