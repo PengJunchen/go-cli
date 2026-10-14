@@ -1248,3 +1248,79 @@ func TestPreparedScopedSearchReportsObservedHelperCompletion(t *testing.T) {
 		})
 	}
 }
+
+func TestPreparedDefaultUnscopedSearchReportsConcreteCompletion(t *testing.T) {
+	for _, testCase := range []struct {
+		toolName   string
+		helperMode bool
+	}{
+		{toolName: "grep"},
+		{toolName: "grep", helperMode: true},
+		{toolName: "find"},
+		{toolName: "find", helperMode: true},
+	} {
+		name := testCase.toolName + "/pure-Go-fallback"
+		if testCase.helperMode {
+			name = testCase.toolName + "/managed-helper"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			var args map[string]any
+			if testCase.toolName == "grep" {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "match.txt"), []byte("needle\n"), 0o600))
+				args = map[string]any{"pattern": "needle", "path": root}
+			} else {
+				require.NoError(t, os.WriteFile(filepath.Join(root, "target.go"), []byte("package main\n"), 0o600))
+				args = map[string]any{"pattern": "target.go", "type": "f", "path": root}
+			}
+
+			path := t.TempDir()
+			if testCase.helperMode {
+				if runtime.GOOS == "windows" {
+					t.Skip("managed process-group helper completion is Unix-only")
+				}
+				helperName, helperScript := "rg", `#!/bin/sh
+printf '%s\n' '{"type":"match","data":{"path":{"text":"match.txt"},"lines":{"text":"needle\n"},"line_number":1}}'
+`
+				if testCase.toolName == "find" {
+					helperName, helperScript = "fd", `#!/bin/sh
+printf 'target.go\000'
+`
+				}
+				path = t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(path, helperName), []byte(helperScript), 0o700))
+			}
+			t.Setenv("PATH", path)
+
+			base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+			require.NoError(t, RegisterDefaults(ctx, base, WithRegisteredBuiltinWhitelist([]string{testCase.toolName})))
+			snapshot, err := base.toolRegistrationSnapshot(ctx, testCase.toolName)
+			require.NoError(t, err)
+			assert.Equal(t, []TrustedToolEffect{EffectUnknown}, snapshot.effects.Values(), "completion authority must not grant workspace-read effect")
+			assert.Equal(t, [32]byte{}, snapshot.identity.Scope().Fingerprint(), "default registration must remain unscoped")
+			assert.Equal(t, completionScopedSearchJoined, snapshot.completionProof)
+
+			registry := NewMiddlewareToolRegistry(base)
+			configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+			invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: testCase.toolName, Args: args})
+			require.NoError(t, err)
+			result, err := invocation.Dispatch(ctx)
+			require.NoError(t, err)
+			require.NotEmpty(t, result.Output)
+
+			signal := invocation.CompletionSignal()
+			require.NotNil(t, signal.Done(), "the default unscoped reader must expose concrete execution completion")
+			select {
+			case <-signal.Done():
+			default:
+				t.Fatal("completion signal must close after the default reader returns")
+			}
+			wantProof := CompletionInlinePipelineJoined
+			if testCase.helperMode {
+				wantProof = CompletionOwnedProcessGroupJoined
+			}
+			assert.Equal(t, wantProof, signal.Proof())
+		})
+	}
+}

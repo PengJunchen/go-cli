@@ -375,6 +375,7 @@ func (r *DefaultToolRegistry) registerTrustedScopedWorkspaceRead(ctx context.Con
 	completionProof := PreparedCompletionProof("")
 	canonicalRoot := ""
 	proofEligibleReader := false
+	completionOnlySearchReader := false
 	switch tool := def.(type) {
 	case *ReadTool:
 		if tool == nil {
@@ -397,24 +398,28 @@ func (r *DefaultToolRegistry) registerTrustedScopedWorkspaceRead(ctx context.Con
 			return errors.New("tools: scoped workspace-read registration requires a non-nil grep tool")
 		}
 		whitelist = tool.whitelist
+		completionProof = completionScopedSearchJoined
+		completionOnlySearchReader = true
 	case *FindTool:
 		if tool == nil {
 			return errors.New("tools: scoped workspace-read registration requires a non-nil find tool")
 		}
 		whitelist = tool.whitelist
+		completionProof = completionScopedSearchJoined
+		completionOnlySearchReader = true
 	default:
 		return errors.New("tools: scoped workspace-read registration requires a reviewed concrete reader")
 	}
 
 	if whitelist.invalid || len(whitelist.paths) == 0 {
 		if completionProof != "" {
-			return r.registerDefinitionWithScopeAndCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), TrustedToolScope{}, completionProof)
+			source := RegistrationSourceBuiltin
+			if completionOnlySearchReader {
+				source = RegistrationSourceToolRegistry
+			}
+			return r.registerDefinitionWithScopeAndCompletion(def, source, newTrustedEffectSet(), TrustedToolScope{}, completionProof)
 		}
 		return r.Register(ctx, def)
-	}
-	switch def.(type) {
-	case *GrepTool, *FindTool:
-		completionProof = completionScopedSearchJoined
 	}
 
 	scope := trustedWorkspaceReadScope(whitelist.paths)
