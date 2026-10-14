@@ -20,3 +20,7 @@ ERRORs = "ERRORs"
 # Short variable names in Go code that trigger false positives
 typ = "typ"
 ue = "ue"
+
+[default.extend-words]
+# Valid variant used in provider documentation.
+unparseable = "unparseable"

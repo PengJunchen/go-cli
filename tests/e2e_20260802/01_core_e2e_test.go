@@ -248,6 +248,37 @@ func (b *blockingLoop) Run(ctx context.Context, _ core.Submission, _ ...core.Eve
 // Test 7: SubAgent delegation (Send, Interrupt, Wait)
 // ---------------------------------------------------------------------------
 func TestSubAgentDelegation(t *testing.T) {
+	conf := core.SubAgentConfig{Name: "worker", MaxTurns: 3}
+	fixture := newHeldSubAgentFixture(t, conf)
+	sub := fixture.sub
+
+	ch, err := sub.Run(fixture.ctx, "do the work")
+	require.NoError(t, err)
+	require.NotNil(t, ch)
+	waitForSubAgentRunner(t, fixture.started)
+
+	// send a follow-up
+	serr := sub.Send(context.Background(), "more info")
+	require.NoError(t, serr)
+	assert.Equal(t, []string{"more info"}, sub.Received())
+
+	fixture.release()
+	// consume events
+	var msgs []string
+	for ev := range ch {
+		if ev.Kind == "message" {
+			msgs = append(msgs, ev.Content)
+		}
+	}
+	assert.NotEmpty(t, msgs)
+
+	msg, werr := sub.Wait(fixture.ctx)
+	require.NoError(t, werr)
+	assert.Equal(t, "assistant", string(msg.Role))
+	assert.Equal(t, core.SubAgentCompleted, sub.State())
+}
+
+func TestSimulatedSubAgentDeliversFollowUp(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	conf := core.SubAgentConfig{Name: "worker", MaxTurns: 1024}
