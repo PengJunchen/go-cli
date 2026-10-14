@@ -81,9 +81,11 @@ type PreToolCallEvent struct {
 	ToolName string
 	// ToolCallID is the unique ID of the tool call.
 	ToolCallID string
-	// Args holds the arguments passed to the tool.
+	// Args is an independent snapshot of the arguments passed to the tool.
 	Args map[string]any
 	ctx  context.Context
+	// owner shares only cancellation/interception authority with observer copies.
+	owner *PreToolCallEvent
 	// interceptors contains the LoopAgent-scoped interceptors for this event.
 	interceptors []ToolInterceptor
 	// contextInterceptors contains the LoopAgent-scoped context-aware interceptors.
@@ -102,6 +104,10 @@ type PreToolCallEvent struct {
 // Cancel marks the tool call as canceled. It is safe to call from a different
 // goroutine than the one that emitted the event.
 func (e *PreToolCallEvent) Cancel() {
+	if e.owner != nil {
+		e.owner.Cancel()
+		return
+	}
 	e.mu.Lock()
 	e.canceled = true
 	e.mu.Unlock()
@@ -111,6 +117,9 @@ func (e *PreToolCallEvent) Cancel() {
 // event, if any. It is available to controlled callers that can render a safe
 // diagnostic; callers must not expose arbitrary interceptor error strings.
 func (e *PreToolCallEvent) CancellationError() error {
+	if e.owner != nil {
+		return e.owner.CancellationError()
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.cancellationErr
@@ -126,6 +135,9 @@ func (e *PreToolCallEvent) CancellationError() error {
 // This is the synchronous interception point: loop.go calls IsCancelled
 // before executeTool, so interceptors effectively gate tool execution.
 func (e *PreToolCallEvent) IsCancelled() bool {
+	if e.owner != nil {
+		return e.owner.IsCancelled()
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -142,7 +154,7 @@ func (e *PreToolCallEvent) IsCancelled() bool {
 	// Loop-scoped interceptors are snapshotted when the event is created, so
 	// changing a LoopAgent's configuration cannot affect an event in progress.
 	for _, f := range e.interceptors {
-		if err := f(e.ToolName, e.ToolCallID, e.Args); err != nil {
+		if err := f(e.ToolName, e.ToolCallID, cloneStringAnyMap(e.Args)); err != nil {
 			e.canceled = true
 			e.cancellationErr = err
 			break
@@ -155,7 +167,7 @@ func (e *PreToolCallEvent) IsCancelled() bool {
 		e.ctx = context.Background()
 	}
 	for _, f := range e.contextInterceptors {
-		if err := f(e.ctx, e.ToolName, e.ToolCallID, e.Args); err != nil {
+		if err := f(e.ctx, e.ToolName, e.ToolCallID, cloneStringAnyMap(e.Args)); err != nil {
 			e.canceled = true
 			e.cancellationErr = err
 			break
@@ -173,7 +185,7 @@ func (e *PreToolCallEvent) IsCancelled() bool {
 	globalInterceptorsMu.RUnlock()
 
 	for _, f := range interceptors {
-		if err := f(e.ToolName, e.ToolCallID, e.Args); err != nil {
+		if err := f(e.ToolName, e.ToolCallID, cloneStringAnyMap(e.Args)); err != nil {
 			e.canceled = true
 			e.cancellationErr = err
 			break
@@ -181,4 +193,22 @@ func (e *PreToolCallEvent) IsCancelled() bool {
 	}
 
 	return e.canceled
+}
+
+// clonePreToolCallEvent isolates observer-visible data while preserving the
+// original synchronous interception gate and shared cancellation signal.
+func clonePreToolCallEvent(event *PreToolCallEvent) *PreToolCallEvent {
+	if event == nil {
+		return nil
+	}
+	owner := event
+	if event.owner != nil {
+		owner = event.owner
+	}
+	return &PreToolCallEvent{
+		ToolName:   event.ToolName,
+		ToolCallID: event.ToolCallID,
+		Args:       cloneStringAnyMap(event.Args),
+		owner:      owner,
+	}
 }

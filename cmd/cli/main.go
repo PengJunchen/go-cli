@@ -82,7 +82,10 @@ func runWithContextLoader(
 	producerWaitBudget time.Duration,
 ) int {
 	previousLogger := slog.Default()
-	logHandler := previousLogger.Handler()
+	// The default slog handler forwards to the standard log package. Wrapping
+	// it and then calling SetDefault redirects standard log back into the
+	// wrapper, deadlocking when a log file cannot be opened.
+	logHandler := slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
 	var logFile *os.File
 	var invocationLogger *slog.Logger
 	ownershipTransferred := false
@@ -145,8 +148,15 @@ func runWithContextLoader(
 
 	tracer, exporter, err := newTracing(cfg, stdout)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: tracing: %v\n", err) //nolint:errcheck // CLI error output is best-effort
-		return 1
+		var pathErr *os.PathError
+		if (cfg.Tracing.Exporter == "" || cfg.Tracing.Exporter == "jsonl") && errors.As(err, &pathErr) {
+			// An unavailable optional file sink must not disable commands in an
+			// unwritable working directory. Do not redirect traces to stdout.
+			_, _ = fmt.Fprintln(stderr, "warning: tracing file unavailable; continuing without tracing") //nolint:errcheck // CLI warning output is best-effort
+		} else {
+			_, _ = fmt.Fprintf(stderr, "error: tracing: %v\n", err) //nolint:errcheck // CLI error output is best-effort
+			return 1
+		}
 	}
 	var root tracing.TraceSpan
 	tctx := ctx

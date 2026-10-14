@@ -5,20 +5,32 @@ package tools
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"syscall"
 )
 
 func trustedSystemBashPath() (string, error) {
-	const path = "/usr/bin/bash"
-	canonical, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return "", err
+	return resolveTrustedLinuxBashPath(filepath.EvalSymlinks)
+}
+
+func resolveTrustedLinuxBashPath(resolve func(string) (string, error)) (string, error) {
+	for _, path := range []string{"/usr/bin/bash", "/bin/bash"} {
+		canonical, err := resolve(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		switch filepath.Clean(canonical) {
+		case "/usr/bin/bash", "/bin/bash":
+			return filepath.Clean(canonical), nil
+		default:
+			return "", errors.New("tools: Linux system Bash resolves outside the trusted system paths")
+		}
 	}
-	if filepath.Clean(canonical) != path {
-		return "", errors.New("Linux system Bash does not resolve to /usr/bin/bash")
-	}
-	return path, nil
+	return "", fmt.Errorf("locate trusted Linux system Bash: %w", os.ErrNotExist)
 }
 
 func verifyTrustedSystemPathSecurity(path string, directory bool) error {

@@ -463,10 +463,13 @@ func TestOwnedStdioResponseBudgetRejectsOversizedFramesAndJoinsChild(t *testing.
 			require.NotNil(t, proc)
 			require.NotNil(t, owner)
 
-			callCtx, cancelCall := context.WithTimeout(context.Background(), time.Second)
+			// These fixtures encode and consume more than 10 MiB under race
+			// instrumentation. Match the exact-boundary test watchdog so
+			// scheduler load does not turn a byte-budget test into cancellation.
+			callCtx, cancelCall := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancelCall()
 			_, callErr := adapter.CallTool(callCtx, "oversized", nil)
-			require.Error(t, callErr)
+			require.ErrorIs(t, callErr, errStdioResponseTooLarge, "the reader must actually exhaust its byte budget")
 			var protocolErr interface{ isStdioProtocolError() }
 			require.ErrorAs(t, callErr, &protocolErr, "oversize must be reported as a typed stdio protocol failure")
 			var unknown interface{ OutcomeUnknown() bool }

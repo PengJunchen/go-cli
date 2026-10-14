@@ -17,7 +17,7 @@ func currentHostGeneration() (string, error) {
 	}
 	bootID := strings.TrimSpace(string(data))
 	if bootID == "" {
-		return "", errors.New("Linux boot generation is empty")
+		return "", errors.New("tools: Linux boot generation is empty")
 	}
 	return "linux:" + bootID, nil
 }

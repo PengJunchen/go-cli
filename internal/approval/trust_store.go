@@ -292,7 +292,7 @@ func readPrivateTrustFile(path string) ([]byte, error) {
 		if statErr != nil {
 			return nil, fmt.Errorf("approval: stat opened trust store: %w", statErr)
 		}
-		return nil, fmt.Errorf("approval: restat trust store: %w", pathErr)
+		return nil, fmt.Errorf("approval: re-stat trust store: %w", pathErr)
 	}
 	if !openedInfo.Mode().IsRegular() || !os.SameFile(pathInfo, openedInfo) || !os.SameFile(openedInfo, currentInfo) {
 		_ = file.Close()

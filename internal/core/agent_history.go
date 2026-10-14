@@ -62,20 +62,30 @@ func cloneProtocolJSONValue(value any) any {
 	if value == nil {
 		return nil
 	}
-	cloned := cloneJSONValue(reflect.ValueOf(value))
+	cloned := cloneJSONValue(reflect.ValueOf(value), make(map[jsonCloneIdentity]reflect.Value))
 	if !cloned.IsValid() {
 		return nil
 	}
 	return cloned.Interface()
 }
 
-func cloneJSONValue(value reflect.Value) reflect.Value {
+// jsonCloneIdentity distinguishes map objects and slice views. A memo keeps
+// malformed cycles cyclic (so protocol validation still rejects them) without
+// retaining map or slice references into the caller's JSON graph.
+type jsonCloneIdentity struct {
+	typ      reflect.Type
+	pointer  uintptr
+	length   int
+	capacity int
+}
+
+func cloneJSONValue(value reflect.Value, memo map[jsonCloneIdentity]reflect.Value) reflect.Value {
 	switch value.Kind() {
 	case reflect.Interface:
 		if value.IsNil() {
 			return reflect.Zero(value.Type())
 		}
-		clonedElement := cloneJSONValue(value.Elem())
+		clonedElement := cloneJSONValue(value.Elem(), memo)
 		cloned := reflect.New(value.Type()).Elem()
 		if clonedElement.IsValid() && clonedElement.Type().AssignableTo(value.Type()) {
 			cloned.Set(clonedElement)
@@ -87,25 +97,35 @@ func cloneJSONValue(value reflect.Value) reflect.Value {
 		if value.IsNil() || value.Type().Key().Kind() != reflect.String {
 			return value
 		}
+		identity := jsonCloneIdentity{typ: value.Type(), pointer: uintptr(value.UnsafePointer())}
+		if cloned, ok := memo[identity]; ok {
+			return cloned
+		}
 		cloned := reflect.MakeMapWithSize(value.Type(), value.Len())
+		memo[identity] = cloned
 		iterator := value.MapRange()
 		for iterator.Next() {
-			cloned.SetMapIndex(iterator.Key(), cloneJSONValue(iterator.Value()))
+			cloned.SetMapIndex(iterator.Key(), cloneJSONValue(iterator.Value(), memo))
 		}
 		return cloned
 	case reflect.Slice:
 		if value.IsNil() {
 			return reflect.Zero(value.Type())
 		}
+		identity := jsonCloneIdentity{typ: value.Type(), pointer: uintptr(value.UnsafePointer()), length: value.Len(), capacity: value.Cap()}
+		if cloned, ok := memo[identity]; ok {
+			return cloned
+		}
 		cloned := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		memo[identity] = cloned
 		for i := 0; i < value.Len(); i++ {
-			cloned.Index(i).Set(cloneJSONValue(value.Index(i)))
+			cloned.Index(i).Set(cloneJSONValue(value.Index(i), memo))
 		}
 		return cloned
 	case reflect.Array:
 		cloned := reflect.New(value.Type()).Elem()
 		for i := 0; i < value.Len(); i++ {
-			cloned.Index(i).Set(cloneJSONValue(value.Index(i)))
+			cloned.Index(i).Set(cloneJSONValue(value.Index(i), memo))
 		}
 		return cloned
 	default:

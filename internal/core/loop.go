@@ -339,7 +339,7 @@ func (l *LoopAgent) newPreToolCallEvent(ctx context.Context, toolName, toolCallI
 	return &PreToolCallEvent{
 		ToolName:            toolName,
 		ToolCallID:          toolCallID,
-		Args:                args,
+		Args:                cloneStringAnyMap(args),
 		ctx:                 ctx,
 		interceptors:        interceptors,
 		contextInterceptors: contextInterceptors,
@@ -609,9 +609,9 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 	// streaming) to the EventStream in real time.
 	sendEvent := func(ev AgentEvent) {
 		ev = stampAgentEvent(eventCoordinates, ev)
-		events = append(events, ev)
+		events = append(events, cloneAgentEvent(ev))
 		if es != nil {
-			_ = es.Send(ev) //nolint:errcheck
+			_ = es.Send(cloneAgentEvent(ev)) //nolint:errcheck
 		}
 	}
 	sendToolResultEvent := func(content string, isError bool, toolCallID, outcome string, sourceTruncated *bool) {
@@ -2558,7 +2558,7 @@ func (l *LoopAgent) executeTool(ctx context.Context, call tools.ToolCall, es Eve
 func toToolsCall(tc llm.ToolCall) tools.ToolCall {
 	call := tools.ToolCall{ID: tc.ID, Name: tc.Name}
 	if m, ok := tc.Args.(map[string]any); ok {
-		call.Args = m
+		call.Args = cloneStringAnyMap(m)
 	}
 	return call
 }

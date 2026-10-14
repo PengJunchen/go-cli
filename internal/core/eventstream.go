@@ -111,6 +111,8 @@ func NewEventStream(capacity int, opts ...EventStreamOption) *EventStreamImpl {
 //   - DiscardOldest: evict the oldest buffered event to make room (non-blocking).
 //   - BlockUntilConsumed (default): block the sender until a consumer reads.
 func (s *EventStreamImpl) Send(event AgentEvent) error {
+	// Keep this snapshot private for bus publication. Each channel send below
+	// transfers a separate copy: its consumer may mutate it before Publish runs.
 	event = cloneAgentEvent(event)
 	if s.closed.Load() {
 		s.gapCount.Add(1)
@@ -130,7 +132,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 		case <-s.done:
 			s.gapCount.Add(1)
 			return nil
-		case s.events <- event:
+		case s.events <- cloneAgentEvent(event):
 			s.sentCount.Add(1)
 			s.publishToBus(event)
 			slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "discard_newest")
@@ -147,7 +149,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 		case <-s.done:
 			s.gapCount.Add(1)
 			return nil
-		case s.events <- event:
+		case s.events <- cloneAgentEvent(event):
 			s.sentCount.Add(1)
 			s.publishToBus(event)
 			slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "discard_oldest")
@@ -164,7 +166,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 			case <-s.done:
 				s.gapCount.Add(1)
 				return nil
-			case s.events <- event:
+			case s.events <- cloneAgentEvent(event):
 				s.sentCount.Add(1)
 				s.publishToBus(event)
 				slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "discard_oldest")
@@ -181,7 +183,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 		case <-s.done:
 			s.gapCount.Add(1)
 			return nil
-		case s.events <- event:
+		case s.events <- cloneAgentEvent(event):
 			s.sentCount.Add(1)
 			s.publishToBus(event)
 			return nil
@@ -194,7 +196,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 			case <-s.done:
 				s.gapCount.Add(1)
 				return nil
-			case s.events <- event:
+			case s.events <- cloneAgentEvent(event):
 				s.sentCount.Add(1)
 				s.publishToBus(event)
 				slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "block")
@@ -208,7 +210,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 		case <-s.done:
 			s.gapCount.Add(1)
 			return nil
-		case s.events <- event:
+		case s.events <- cloneAgentEvent(event):
 			s.sentCount.Add(1)
 			s.publishToBus(event)
 			slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "block")
@@ -251,7 +253,7 @@ func (s *EventStreamImpl) sendTerminal(event AgentEvent) {
 	select {
 	case <-s.done:
 		s.gapCount.Add(1)
-	case s.events <- event:
+	case s.events <- cloneAgentEvent(event):
 		s.sentCount.Add(1)
 		s.publishToBus(event)
 	default:

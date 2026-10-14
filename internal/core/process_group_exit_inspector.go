@@ -1,11 +1,6 @@
 package core
 
-import (
-	"errors"
-	"time"
-)
-
-var errPIDNamespaceTokenUnsupported = errors.New("PID namespace tokens are supported only on Linux")
+import "time"
 
 // ProcessGroupExitStatus is the result of a read-only check of a persisted
 // process-group identity. Unknown is the only safe result when the inspector

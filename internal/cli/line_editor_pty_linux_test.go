@@ -27,7 +27,7 @@ func openPTYWithMaster(t *testing.T) (*os.File, *os.File, func()) {
 	require.NoError(t, err)
 
 	// Unlock the slave PTY.
-	require.NoError(t, unix.IoctlSetInt(int(master.Fd()), unix.TIOCSPTLCK, 0))
+	require.NoError(t, unix.IoctlSetPointerInt(int(master.Fd()), unix.TIOCSPTLCK, 0))
 
 	// Get the slave device number and construct its path.
 	n, err := unix.IoctlGetInt(int(master.Fd()), unix.TIOCGPTN)

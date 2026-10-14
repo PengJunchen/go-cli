@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -84,4 +85,18 @@ func TestSSRFSafeHTTPClient(t *testing.T) {
 		t.Fatal("expected error when connecting to private IP, got nil")
 	}
 	assert.ErrorIs(t, err, ErrPrivateIP)
+}
+
+func TestValidateURL_DNSFailurePreservesBlockedHostAndCause(t *testing.T) {
+	cause := &net.DNSError{Err: "resolver unavailable", Name: "example.test", IsTimeout: true}
+	err := validateURLWithLookup("https://example.test/", func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		require.Equal(t, "example.test", host)
+		_, bounded := ctx.Deadline()
+		require.True(t, bounded, "DNS lookup must retain its timeout")
+		return nil, cause
+	})
+	require.ErrorIs(t, err, ErrBlockedHost, "resolution failure must still deny the host")
+	var dnsErr *net.DNSError
+	require.ErrorAs(t, err, &dnsErr)
+	require.Same(t, cause, dnsErr)
 }

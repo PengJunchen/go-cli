@@ -958,6 +958,54 @@ func TestNewTracingFileFailureDoesNotFallbackToStdout(t *testing.T) {
 	assert.Empty(t, stdout.String())
 }
 
+func TestRunTraceFileFailureWarnsAndPreservesCommand(t *testing.T) {
+	for _, exporter := range []string{"", "jsonl"} {
+		t.Run(exporter, func(t *testing.T) {
+			workDir := t.TempDir()
+			t.Chdir(workDir)
+			// A file in place of the trace directory's parent fails even under
+			// root, reproducing an unavailable sink without chmod assumptions.
+			require.NoError(t, os.WriteFile(".go-cli", []byte("blocker"), 0o600))
+			cfg := &config.Config{Tracing: config.TracingConfig{Exporter: exporter}}
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"version"}, &stdout, &stderr, func() (*config.Config, error) {
+				slog.Info("fallback.canaries", "prompt", "FALLBACK-PROMPT-CANARY", "tool_args", map[string]any{"input": "FALLBACK-TOOL-CANARY"})
+				return cfg, nil
+			})
+			assert.Equal(t, 0, code)
+			assert.Contains(t, stdout.String(), cli.Version)
+			assert.NotContains(t, stdout.String(), "[TRACE]")
+			assert.Contains(t, stderr.String(), "warning: tracing file unavailable; continuing without tracing")
+			assert.Contains(t, stderr.String(), "fallback.canaries")
+			assert.Contains(t, stderr.String(), "bytes=")
+			assert.NotContains(t, stderr.String(), "FALLBACK-PROMPT-CANARY")
+			assert.NotContains(t, stderr.String(), "FALLBACK-TOOL-CANARY")
+		})
+	}
+}
+
+func TestHelpWithUnavailableLogDirectoryExits(t *testing.T) {
+	const childEnv = "GOCLI_TEST_HELP_UNAVAILABLE_LOG"
+	if os.Getenv(childEnv) == "1" {
+		os.Exit(run([]string{"--help"}, os.Stdout, os.Stderr, func() (*config.Config, error) {
+			return disabledCfg(), nil
+		}))
+	}
+	workDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, ".go-cli"), []byte("blocker"), 0o600))
+	binary, err := os.Executable()
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, binary, "-test.run=^TestHelpWithUnavailableLogDirectoryExits$")
+	command.Dir = workDir
+	command.Env = append(os.Environ(), childEnv+"=1")
+	output, err := command.CombinedOutput()
+	require.NoError(t, ctx.Err(), "help deadlocked with an unavailable log directory: %s", output)
+	require.NoError(t, err, "%s", output)
+	assert.Contains(t, string(output), "Usage:")
+}
+
 // TestDefaultTraceContainsNoPrompt drives a prompt and tool call through the
 // production CLI, Assembly, Harness, trace exporters, and slog handler. Prompt
 // and tool-argument canaries must not be retained by default trace/log output.

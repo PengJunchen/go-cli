@@ -119,6 +119,16 @@ type AgentEvent struct {
 }
 
 func cloneAgentEvent(event AgentEvent) AgentEvent {
+	event.Usage = cloneUsage(event.Usage)
+	if event.ToolCalls != nil {
+		calls := make([]llm.ToolCall, len(event.ToolCalls))
+		copy(calls, event.ToolCalls)
+		for i := range calls {
+			calls[i].Args = cloneProtocolJSONValue(calls[i].Args)
+		}
+		event.ToolCalls = calls
+	}
+	event.PreToolCall = clonePreToolCallEvent(event.PreToolCall)
 	if event.CanonicalTranscriptIndex != nil {
 		index := *event.CanonicalTranscriptIndex
 		event.CanonicalTranscriptIndex = &index
