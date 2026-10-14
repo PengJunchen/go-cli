@@ -305,6 +305,12 @@ func (q *DefaultFileMutationQueue) startWorker(input chan queuedMutation) {
 				Error:      err,
 				ToolResult: tr,
 			}
+			// A returned executor with no pending resource is already joined.
+			// Publish that fact before its result can trigger terminal observers.
+			if nestedExecutionDone == nil && qm.done != nil {
+				close(qm.done)
+				qm.done = nil
+			}
 			qm.result <- res
 			close(qm.result)
 			if nestedExecutionDone != nil {

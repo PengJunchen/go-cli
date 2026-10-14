@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -344,4 +345,83 @@ func TestPreparedTerminalOutcomeBoundsAndSanitizesUntrustedIdentity(t *testing.T
 func terminalFingerprint(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+// An unbuffered result channel makes the queue's publication boundary explicit:
+// ordinary completion must precede publication, while a pending resource must
+// still publish its result before that resource joins.
+func TestPreparedQueueCompletionPublicationOrder(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		name := "joined executor"
+		if pending {
+			name = "pending resource"
+		}
+		t.Run(name, func(t *testing.T) {
+			queue, ok := NewDefaultFileMutationQueue().(*DefaultFileMutationQueue)
+			require.True(t, ok)
+			input := make(chan queuedMutation)
+			results := make(chan FileMutationResult)
+			done := make(chan struct{})
+			resourceDone := make(chan struct{})
+			var release sync.Once
+			queue.startWorker(input)
+			defer func() {
+				release.Do(func() { close(resourceDone) })
+				// Also releases a worker blocked publishing after a failed assertion.
+				for range results {
+				}
+				close(input)
+				require.NoError(t, queue.Close())
+			}()
+			fence := NewDispatchFence()
+			invocation := newPreparedInvocation(preparedInvocationConfig{
+				fence: fence, generations: fence.Snapshot(),
+				call:            mustFreezeToolCall(t, ToolCall{ID: "queued-order", Name: "capture"}),
+				completionProof: CompletionQueuedJobJoined,
+				execute: func(context.Context, ToolCall) (*ToolResult, error) {
+					result := &ToolResult{Output: "executed"}
+					if pending {
+						return result, pendingProcessErrorWithDone(errors.New("still running"), true, resourceDone)
+					}
+					return result, nil
+				},
+			})
+			require.True(t, invocation.completion.attach(CompletionQueuedJobJoined, done))
+			input <- queuedMutation{ctx: context.Background(), prepared: invocation, result: results, done: done}
+			if !pending {
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Fatal("joined executor completion waited for result consumption")
+				}
+				require.Equal(t, CompletionQueuedJobJoined, invocation.CompletionSignal().Proof())
+			}
+			var result FileMutationResult
+			select {
+			case result = <-results:
+			case <-time.After(time.Second):
+				t.Fatal("pending resource prevented caller-visible result publication")
+			}
+			require.NotNil(t, result.ToolResult)
+			require.Equal(t, "executed", result.ToolResult.Output)
+			if pending {
+				require.Error(t, result.Error)
+				select {
+				case <-done:
+					t.Fatal("pending resource was reported joined before it completed")
+				default:
+				}
+				require.Empty(t, invocation.CompletionSignal().Proof())
+				release.Do(func() { close(resourceDone) })
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Fatal("resource join did not complete its queued job")
+				}
+				require.Equal(t, CompletionQueuedJobJoined, invocation.CompletionSignal().Proof())
+			} else {
+				require.NoError(t, result.Error)
+			}
+		})
+	}
 }
