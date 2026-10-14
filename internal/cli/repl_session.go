@@ -1308,6 +1308,24 @@ func (s *REPLSession) waitForTurnCompletion() error {
 		eventSourceDone = s.app.EventSourceDone()
 		appDone = s.app.Done()
 	}
+	if s.waitForTUICompletion(turnDone, bridgeDone, eventSourceDone, appDone, durableApp) {
+		return errors.New("interactive: TUI exited before its event source and durable refresh completed")
+	}
+	if durableApp && s.app != nil {
+		select {
+		case <-s.app.Done():
+			return errors.New("interactive: TUI exited before its durable refresh completed")
+		default:
+		}
+	}
+	return nil
+}
+
+// waitForTUICompletion joins the turn and bridge, and waits for the model event
+// source while the TUI can still acknowledge it. After the app exits, it drops
+// that UI-owned acknowledgment barrier, but still joins the core turn and
+// bridge. It returns true for an unexpected early exit.
+func (s *REPLSession) waitForTUICompletion(turnDone, bridgeDone, eventSourceDone, appDone <-chan struct{}, durableApp bool) bool {
 	turnCtxDone := s.turnCtx.Done()
 	var steerMessages <-chan string
 	if s.interrupter != nil {
@@ -1340,7 +1358,15 @@ func (s *REPLSession) waitForTurnCompletion() error {
 				// durable path it still forbids a refresh because no live model is
 				// available to acknowledge it.
 				parentCanceledUI := s.uiCtx != nil && s.uiCtx.Err() != nil
-				appExitedEarly = !parentCanceledUI || durableApp
+				cancelRequested := s.turnCtx.Err() != nil
+				// Escape cancels the turn and closes the legacy TUI. Its app-done
+				// notification may arrive before the owned bridge and RunTurn have
+				// observed cancellation. That is an expected UI exit, but the loop
+				// below must still join those owners before executeTurn continues.
+				// A durable app remains an error here because its transcript refresh
+				// has not been acknowledged.
+				legacyCancelExit := !durableApp && cancelRequested
+				appExitedEarly = (!parentCanceledUI || durableApp) && !legacyCancelExit
 				eventSourceDone = nil
 				if s.cancelTurn != nil {
 					s.cancelTurn()
@@ -1356,17 +1382,7 @@ func (s *REPLSession) waitForTurnCompletion() error {
 			}
 		}
 	}
-	if appExitedEarly {
-		return errors.New("interactive: TUI exited before its event source and durable refresh completed")
-	}
-	if durableApp && s.app != nil {
-		select {
-		case <-s.app.Done():
-			return errors.New("interactive: TUI exited before its durable refresh completed")
-		default:
-		}
-	}
-	return nil
+	return appExitedEarly
 }
 
 // handleSteer forwards a steer message to the TurnRunner or the shared
