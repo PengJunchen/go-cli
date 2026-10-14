@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -118,7 +119,9 @@ func testLongTaskPTYFollowUp(t *testing.T, binary string) {
 	const startedFile = "followup-started.txt"
 	const releaseFile = "followup-release.txt"
 	const effectFile = "followup-proof.txt"
-	commandText := "printf '" + longTaskStartMarker + "\\n'; printf started > " + startedFile + "; while [ ! -f " + releaseFile + " ]; do sleep 0.02; done; printf 'FOLLOWUP_SIDE_EFFECT' > " + effectFile + "; cat " + effectFile
+	const shellPIDFile = "followup-shell.pid"
+	shellToken := fmt.Sprintf("GO_CLI_LONGTASK_%x", time.Now().UnixNano())
+	commandText := ": '" + shellToken + "'; printf '%s\\n' \"$$\" > " + shellPIDFile + "; printf '" + longTaskStartMarker + "\\n'; printf started > " + startedFile + "; while [ ! -f " + releaseFile + " ]; do sleep 0.02; done; printf 'FOLLOWUP_SIDE_EFFECT' > " + effectFile + "; cat " + effectFile
 	peer := newLongTaskHTTPPeer(func(index int, _ []byte) longTaskReply {
 		if index == 0 {
 			return longTaskReply{toolCallID: "call-longtask-followup", toolName: "bash", toolArgs: map[string]string{"command": commandText}}
@@ -129,15 +132,19 @@ func testLongTaskPTYFollowUp(t *testing.T, binary string) {
 	defer fixture.server.Close()
 
 	pty := startLongTaskPTYChild(t, binary, fixture, "--max-tokens=4096")
+	t.Cleanup(func() { cleanupLongTaskBashGroup(t, fixture.workDir, shellPIDFile, shellToken) })
 	pty.capture.waitContains(t, "> ", 15*time.Second)
 	pty.write(t, "please run the long task and report the result\r")
 	pty.capture.waitContains(t, "[approval]", 20*time.Second)
 	pty.write(t, "y")
-	pty.capture.waitContains(t, longTaskStartMarker, 20*time.Second)
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(filepath.Join(fixture.workDir, startedFile))
-		return err == nil
-	}, 20*time.Second, 10*time.Millisecond, "the approved Bash command must create its start marker")
+		_, pidErr := os.Stat(filepath.Join(fixture.workDir, shellPIDFile))
+		_, startedErr := os.Stat(filepath.Join(fixture.workDir, startedFile))
+		return pidErr == nil && startedErr == nil
+	}, 20*time.Second, 10*time.Millisecond, "the approved Bash command must create its PID and start markers")
+	// The command text is visible in the approval view. The PID and start files
+	// prove Bash actually began, without treating a rendered command preview as
+	// streamed tool output.
 	require.NoFileExists(t, filepath.Join(fixture.workDir, releaseFile), "Bash must remain blocked until the test releases it")
 	require.NoFileExists(t, filepath.Join(fixture.workDir, effectFile), "Bash must not finish before the follow-up is queued")
 	// Submit follow-up through Bubble Tea while the approved Bash subprocess is
@@ -173,15 +180,17 @@ func testLongTaskPTYFollowUp(t *testing.T, binary string) {
 	pty.waitSuccess(t, 20*time.Second)
 	require.NotContains(t, pty.capture.output(), "DATA RACE")
 
-	t.Logf("evidence: real TTY captured Bash output %q; production follow-up queue acknowledgment observed before release; actual HTTP request 2 matched user follow-up=%q and role=tool result=%q; side_effect=%s:%q; final streamed answer visible; race-enabled child clean",
-		longTaskStartMarker, followUp, "FOLLOWUP_SIDE_EFFECT", effectFile, string(proof))
+	t.Logf("evidence: PTY drove follow-up while test-owned Bash PID/start markers proved execution; production queue acknowledgment preceded release; actual HTTP request 2 contained user follow-up=%q and role=tool stdout=%q; side_effect=%s:%q; final streamed answer visible; race-enabled child clean",
+		followUp, "FOLLOWUP_SIDE_EFFECT", effectFile, string(proof))
 }
 
 func testLongTaskPTYCancel(t *testing.T, binary string) {
 	t.Helper()
 	const startedFile = "cancel-started.txt"
 	const effectFile = "cancelled-proof.txt"
-	commandText := "printf 'CANCEL_LONGTASK_STARTED\\n'; printf started > " + startedFile + "; sleep 5; printf 'SHOULD_NOT_RUN' > " + effectFile
+	const shellPIDFile = "cancel-shell.pid"
+	shellToken := fmt.Sprintf("GO_CLI_LONGTASK_%x", time.Now().UnixNano())
+	commandText := ": '" + shellToken + "'; printf '%s\\n' \"$$\" > " + shellPIDFile + "; printf 'CANCEL_LONGTASK_STARTED\\n'; printf started > " + startedFile + "; sleep 5; printf 'SHOULD_NOT_RUN' > " + effectFile
 	peer := newLongTaskHTTPPeer(func(index int, _ []byte) longTaskReply {
 		if index == 0 {
 			return longTaskReply{toolCallID: "call-longtask-cancel", toolName: "bash", toolArgs: map[string]string{"command": commandText}}
@@ -192,15 +201,16 @@ func testLongTaskPTYCancel(t *testing.T, binary string) {
 	defer fixture.server.Close()
 
 	pty := startLongTaskPTYChild(t, binary, fixture, "--max-tokens=4096")
+	t.Cleanup(func() { cleanupLongTaskBashGroup(t, fixture.workDir, shellPIDFile, shellToken) })
 	pty.capture.waitContains(t, "> ", 15*time.Second)
 	pty.write(t, "run the long task and wait for it\r")
 	pty.capture.waitContains(t, "[approval]", 20*time.Second)
 	pty.write(t, "y")
-	pty.capture.waitContains(t, "CANCEL_LONGTASK_STARTED", 20*time.Second)
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(filepath.Join(fixture.workDir, startedFile))
-		return err == nil
-	}, 20*time.Second, 10*time.Millisecond, "the approved Bash command must create its start marker")
+		_, pidErr := os.Stat(filepath.Join(fixture.workDir, shellPIDFile))
+		_, startedErr := os.Stat(filepath.Join(fixture.workDir, startedFile))
+		return pidErr == nil && startedErr == nil
+	}, 20*time.Second, 10*time.Millisecond, "the approved Bash command must create its PID and start markers")
 	cancelAt := time.Now()
 	pty.writeBytes(t, []byte{0x1b})
 	pty.capture.waitContains(t, "[interrupted]", 3*time.Second)
@@ -228,6 +238,88 @@ func testLongTaskPTYCancel(t *testing.T, binary string) {
 
 	t.Logf("evidence: Escape returned [interrupted] in %s; delayed side-effect file remained absent after 5s; no automatic follow-up request was sent; a later explicit prompt completed as a fresh turn; race-enabled child clean",
 		cancelLatency.Round(time.Millisecond))
+}
+
+func TestCleanupLongTaskBashGroupVerifiesFixtureIdentity(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		wrongToken bool
+	}{
+		{name: "matching token kills test-owned group"},
+		{name: "wrong token leaves group running", wrongToken: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			const pidFile = "owned-bash.pid"
+			token := fmt.Sprintf("GO_CLI_LONGTASK_CLEANUP_%x", time.Now().UnixNano())
+			commandText := ": '" + token + "'; printf '%s\\n' \"$$\" > " + pidFile + "; while :; do sleep 1; done"
+			command := exec.Command("bash", "-lc", commandText)
+			command.Dir = workDir
+			command.Stdout = io.Discard
+			command.Stderr = io.Discard
+			command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			require.NoError(t, command.Start())
+			pid := command.Process.Pid
+			waitDone := make(chan struct{})
+			go func() {
+				_ = command.Wait()
+				close(waitDone)
+			}()
+			t.Cleanup(func() {
+				select {
+				case <-waitDone:
+					return
+				default:
+				}
+				if groupID, err := syscall.Getpgid(pid); err == nil && groupID == pid {
+					_ = syscall.Kill(-pid, syscall.SIGKILL)
+				}
+				select {
+				case <-waitDone:
+				case <-time.After(2 * time.Second):
+					t.Errorf("test Bash child %d did not exit during cleanup", pid)
+				}
+			})
+			require.Eventually(t, func() bool {
+				data, err := os.ReadFile(filepath.Join(workDir, pidFile))
+				if err != nil {
+					return false
+				}
+				markedPID, err := strconv.Atoi(strings.TrimSpace(string(data)))
+				return err == nil && markedPID == pid
+			}, 3*time.Second, 10*time.Millisecond, "fixture Bash must publish its own PID")
+			require.Equal(t, pid, func() int {
+				groupID, err := syscall.Getpgid(pid)
+				require.NoError(t, err)
+				return groupID
+			}(), "fixture Bash must remain its own process-group leader")
+
+			cleanupToken := token
+			if testCase.wrongToken {
+				cleanupToken += "_mismatch"
+			}
+			cleanupLongTaskBashGroup(t, workDir, pidFile, cleanupToken)
+			if testCase.wrongToken {
+				select {
+				case <-waitDone:
+					t.Fatal("Bash fixture exited after a mismatched cleanup token")
+				case <-time.After(100 * time.Millisecond):
+				}
+				groupID, err := syscall.Getpgid(pid)
+				require.NoError(t, err, "wrong fixture token must not signal the process group")
+				require.Equal(t, pid, groupID)
+				cleanupLongTaskBashGroup(t, workDir, pidFile, token)
+			}
+			require.Eventually(t, func() bool {
+				return syscall.Kill(-pid, 0) != nil
+			}, 2*time.Second, 10*time.Millisecond, "the matching fixture token must stop its owned process group")
+			select {
+			case <-waitDone:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("test Bash child %d did not exit after process-group cleanup", pid)
+			}
+		})
+	}
 }
 
 type longTaskFixture struct {
@@ -538,6 +630,38 @@ func (child *longTaskPTYChild) waitSuccess(t *testing.T, timeout time.Duration) 
 		_ = child.command.Process.Kill()
 		t.Fatalf("real CLI did not exit within %s; output=%q", timeout, child.capture.output())
 	}
+}
+
+func cleanupLongTaskBashGroup(t *testing.T, workDir, pidFile, token string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(workDir, pidFile))
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 1 {
+		return
+	}
+	groupID, err := syscall.Getpgid(pid)
+	if err != nil || groupID != pid {
+		return
+	}
+	command, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil || !strings.Contains(string(command), token) {
+		return
+	}
+	// Recheck both identity and group ownership immediately before signaling so
+	// a stale fixture PID cannot target a reused process group.
+	groupID, err = syscall.Getpgid(pid)
+	if err != nil || groupID != pid {
+		return
+	}
+	command, err = exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	if err != nil || !strings.Contains(string(command), token) {
+		return
+	}
+	t.Logf("cleaning up still-running test-owned Bash process group %d", pid)
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
 }
 
 type longTaskPTYCapture struct {
