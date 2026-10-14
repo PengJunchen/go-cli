@@ -316,8 +316,9 @@ func TestCompaction_TokenEstimation(t *testing.T) {
 			{Role: compaction.RoleTool, ToolCallID: "read-1", ToolName: "read", ToolResult: "tool result content"},
 		}
 		tokens := tokenSum(items, est)
-		// system prompt here (5) + user question (4) + tool result content (5) = 14
-		assert.Equal(t, 14, tokens)
+		// Provider-visible estimation includes role, tool-call ID/name, and the
+		// JSON-encoded null arguments in addition to message content.
+		assert.Equal(t, 27, tokens)
 	})
 }
 
@@ -512,21 +513,27 @@ func TestCompaction_EdgeCases(t *testing.T) {
 			{Role: compaction.RoleSystem, Content: "sys3"},
 		}
 
-		// Truncating keeps all system messages even over budget.
+		// Each provider-visible system message costs three tokens: two for the
+		// role and one for its four-character content. All three therefore fit
+		// exactly in nine tokens.
+		const systemBudget = 9
 		trunc := compaction.NewTruncatingCompactor()
-		out, err := compactItemsForTest(ctx, trunc, items, 5, est)
+		out, err := compactItemsForTest(ctx, trunc, items, systemBudget, est)
 		require.NoError(t, err)
-		// System messages are always preserved.
+		assert.Equal(t, systemBudget, tokenSum(out, est))
 		assert.Len(t, out, 3)
 		for _, it := range out {
 			assert.Equal(t, compaction.RoleSystem, it.Role)
 		}
+
+		tooSmall, err := compactItemsForTest(ctx, trunc, items, systemBudget-1, est)
+		require.ErrorIs(t, err, compaction.ErrMandatorySystemPromptOverBudget)
+		assert.Equal(t, items, tooSmall, "an impossible budget must not drop mandatory system messages")
 	})
 
 	t.Run("all tool results no user content", func(t *testing.T) {
-		// Micro replaces tool results with placeholders. Each placeholder
-		// "[compacted tool result]" is ~7 tokens, so 3 tool results need ~21 tokens.
-		// Use a budget of 30 with 3 complete call groups to stay under the threshold.
+		// After replacement, all three complete call groups and placeholders cost
+		// 63 provider-visible tokens, including roles, call IDs/names, and JSON args.
 		items := make([]compaction.TurnItem, 0, 6)
 		for i := 0; i < 3; i++ {
 			callID := fmt.Sprintf("micro-read-%d", i)
@@ -542,9 +549,10 @@ func TestCompaction_EdgeCases(t *testing.T) {
 		}
 
 		micro := compaction.NewMicroCompactor()
-		out, err := compactItemsForTest(ctx, micro, items, 30, est)
+		const microBudget = 63
+		out, err := compactItemsForTest(ctx, micro, items, microBudget, est)
 		require.NoError(t, err)
-		assert.LessOrEqual(t, tokenSum(out, est), 30)
+		assert.Equal(t, microBudget, tokenSum(out, est))
 		require.Len(t, out, 6)
 		for i := 0; i < len(out); i += 2 {
 			assert.Equal(t, compaction.RoleAssistant, out[i].Role)
@@ -593,22 +601,9 @@ func TestCompaction_EdgeCases(t *testing.T) {
 // Helpers
 // =============================================================================
 
-// tokenSum computes the total estimated tokens for a slice of TurnItems.
+// tokenSum computes the provider-visible token estimate for a slice of TurnItems.
 func tokenSum(items []compaction.TurnItem, est compaction.TokenEstimator) int {
-	total := 0
-	for _, it := range items {
-		if it.Content != "" {
-			if n, err := est.Estimate(it.Content); err == nil {
-				total += n
-			}
-		}
-		if it.ToolResult != "" {
-			if n, err := est.Estimate(it.ToolResult); err == nil {
-				total += n
-			}
-		}
-	}
-	return total
+	return compaction.EstimateTokens(items, est)
 }
 
 // contentSlice extracts the Content field from a TurnItem slice.
