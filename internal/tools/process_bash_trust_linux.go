@@ -16,7 +16,7 @@ func trustedSystemBashPath() (string, error) {
 		return "", err
 	}
 	if filepath.Clean(canonical) != path {
-		return "", errors.New("Linux system Bash does not resolve to /usr/bin/bash")
+		return "", errors.New("system Bash on Linux does not resolve to /usr/bin/bash")
 	}
 	return path, nil
 }
