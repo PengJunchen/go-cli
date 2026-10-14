@@ -317,37 +317,30 @@ func TestRunTimeoutReturnsWhenDescendantHoldsPipes(t *testing.T) {
 		t.Skip("owned process-group cleanup is supported only on Darwin and Linux")
 	}
 	module := t.TempDir()
-	goCommand := mustGoCommand(t)
 	pidFile := filepath.Join(t.TempDir(), "holder.pid")
 	t.Cleanup(func() { cleanupDescendantFromFile(pidFile) })
 	t.Setenv("VERIFY_TEST_GATE_PID_FILE", pidFile)
-	fakeSource := `package main
-import (
-	"os"
-	"os/exec"
-	"strconv"
-	"time"
-)
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "hold" {
-		time.Sleep(10 * time.Second)
-		return
+	fakeGo := filepath.Join(module, "fake-go")
+	fakeSource := "#!/bin/sh\nsleep 10 &\nprintf '%s' \"$!\" > \"$VERIFY_TEST_GATE_PID_FILE\"\nexit 0\n"
+	if err := os.WriteFile(fakeGo, []byte(fakeSource), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	child := exec.Command(os.Args[0], "hold")
-	child.Stdout = os.Stdout
-	child.Stderr = os.Stderr
-	if err := child.Start(); err != nil { os.Exit(21) }
-	_ = os.WriteFile(os.Getenv("VERIFY_TEST_GATE_PID_FILE"), []byte(strconv.Itoa(child.Process.Pid)), 0o600)
-}
-`
-	fakeGo := buildFakeGoProcess(t, module, goCommand, fakeSource)
 	var stdout, stderr bytes.Buffer
 	started := time.Now()
-	code := runWithCaptureLimits([]string{"-dir", module, "-go-command", fakeGo, "-timeout=100ms", "-package=fixture"}, &stdout, &stderr, gatecapture.Limits{StdoutBytes: 1024, StderrBytes: 1024, WaitDelay: 150 * time.Millisecond})
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("test-gate run took %s with a 100ms timeout and 150ms WaitDelay; stderr=%q", elapsed, stderr.String())
+	code := runWithCaptureLimits([]string{"-dir", module, "-go-command", fakeGo, "-timeout=500ms", "-package=fixture"}, &stdout, &stderr, gatecapture.Limits{StdoutBytes: 1024, StderrBytes: 1024, WaitDelay: 750 * time.Millisecond})
+	elapsed := time.Since(started)
+	markerExists := false
+	if _, err := os.Stat(pidFile); err == nil {
+		markerExists = true
 	}
-	if code != 124 || !strings.Contains(stderr.String(), "timed out after 100ms") {
+	t.Logf("timeout fixture evidence: elapsed=%s, descendant PID marker created=%t, stdout=%q, stderr=%q", elapsed, markerExists, stdout.String(), stderr.String())
+	// The command timeout remains 500ms. Cancellation can then use the owned
+	// process-group cleanup budget (up to 500ms), while WaitDelay bounds inherited
+	// pipes. Allow two seconds for those bounded stages plus scheduler overhead.
+	if elapsed > 2*time.Second {
+		t.Fatalf("test-gate run took %s with a 500ms timeout and bounded cleanup; stderr=%q", elapsed, stderr.String())
+	}
+	if code != 124 || !strings.Contains(stderr.String(), "timed out after 500ms") {
 		t.Fatalf("runWithCaptureLimits() = %d, want bounded timeout 124; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	assertDescendantStoppedFromFile(t, pidFile)

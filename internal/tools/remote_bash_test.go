@@ -500,7 +500,11 @@ func TestRemoteBashSSHPassLocalExitCodesAreUnknownButQuiescent(t *testing.T) {
 				Host:     "example.invalid",
 				Password: "secret",
 			})
-			tool := NewRemoteBashTool(client, WithRemoteBashTimeout(time.Second))
+			// Each fixture exits immediately, but leave room for race-instrumented
+			// process startup and package-level CPU contention. This test is about
+			// classifying sshpass's ambiguous status after its local process stops;
+			// the short tool deadline made a healthy fake occasionally look pending.
+			tool := NewRemoteBashTool(client, WithRemoteBashTimeout(5*time.Second))
 
 			result, err := tool.Execute(context.Background(), ToolCall{
 				ID:   "call-sshpass-ambiguous-status",

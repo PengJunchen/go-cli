@@ -82,24 +82,73 @@ wait "$child"
 	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "rg"), []byte(script), 0o700))
 	t.Setenv("PATH", helperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("SEARCH_HELPER_ESCAPED_PIPE_PID", pidPath)
+	deadline := newControlledDeadlineContext()
+	t.Cleanup(func() { deadline.expire() })
 	t.Cleanup(func() { killProcessFromFile(t, pidPath) })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
 	reported := make(chan searchCompletionReport, 1)
-	ctx = withPreparedCompletionReporter(ctx, func(proof PreparedCompletionProof, done <-chan struct{}) {
+	ctx := withPreparedCompletionReporter(deadline, func(proof PreparedCompletionProof, done <-chan struct{}) {
 		reported <- searchCompletionReport{proof: proof, done: done}
 	})
-	result, err := NewGrepTool(WithGrepWorkdir(workdir)).Execute(ctx, ToolCall{Args: map[string]any{"pattern": "needle"}})
+	type response struct {
+		result *ToolResult
+		err    error
+	}
+	done := make(chan response, 1)
+	go func() {
+		result, err := NewGrepTool(WithGrepWorkdir(workdir)).Execute(ctx, ToolCall{Args: map[string]any{"pattern": "needle"}})
+		done <- response{result: result, err: err}
+	}()
 	pid := waitForChildPIDFile(t, pidPath)
-	require.Error(t, err)
-	require.Empty(t, result.Output, "unknown helper effects must not fall back to Go search")
-	assertUnknownWithoutPendingResource(t, err)
 	require.NoError(t, syscall.Kill(pid, 0), "escaped writer remains alive when Grep returns")
+	deadline.expire()
+	var got response
+	select {
+	case got = <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Grep did not return after the controlled deadline while its helper writer was escaped")
+	}
+	require.Error(t, got.err)
+	require.Empty(t, got.result.Output, "unknown helper effects must not fall back to Go search")
+	assertUnknownWithoutPendingResource(t, got.err)
 	assertNoProcessCompletionReport(t, reported)
 	killProcessFromFile(t, pidPath)
 	assertProcessFromFileStopped(t, pidPath)
-	require.ErrorIs(t, err, context.DeadlineExceeded, "unknown outcome must retain the caller's cancellation cause")
+	require.ErrorIs(t, got.err, context.DeadlineExceeded, "unknown outcome must retain the caller's cancellation cause")
+}
+
+type controlledDeadlineContext struct {
+	context.Context
+	done chan struct{}
+}
+
+func newControlledDeadlineContext() *controlledDeadlineContext {
+	return &controlledDeadlineContext{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (ctx *controlledDeadlineContext) Deadline() (time.Time, bool) {
+	return time.Time{}, false
+}
+
+func (ctx *controlledDeadlineContext) Done() <-chan struct{} {
+	return ctx.done
+}
+
+func (ctx *controlledDeadlineContext) Err() error {
+	select {
+	case <-ctx.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (ctx *controlledDeadlineContext) expire() {
+	select {
+	case <-ctx.done:
+	default:
+		close(ctx.done)
+	}
 }
 
 func TestFindForcedPipeCloseStopsFallbackAndWithholdsProof(t *testing.T) {
