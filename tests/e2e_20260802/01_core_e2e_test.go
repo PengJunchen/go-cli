@@ -249,16 +249,19 @@ func (b *blockingLoop) Run(ctx context.Context, _ core.Submission, _ ...core.Eve
 // ---------------------------------------------------------------------------
 func TestSubAgentDelegation(t *testing.T) {
 	conf := core.SubAgentConfig{Name: "worker", MaxTurns: 3}
-	sub := core.NewDefaultSubAgent(conf)
+	fixture := newHeldSubAgentFixture(t, conf)
+	sub := fixture.sub
 
-	ch, err := sub.Run(context.Background(), "do the work")
+	ch, err := sub.Run(fixture.ctx, "do the work")
 	require.NoError(t, err)
 	require.NotNil(t, ch)
+	waitForSubAgentRunner(t, fixture.started)
 
 	// send a follow-up
 	serr := sub.Send(context.Background(), "more info")
 	require.NoError(t, serr)
 
+	fixture.release()
 	// consume events
 	var msgs []string
 	for ev := range ch {
@@ -268,7 +271,7 @@ func TestSubAgentDelegation(t *testing.T) {
 	}
 	assert.NotEmpty(t, msgs)
 
-	msg, werr := sub.Wait(context.Background())
+	msg, werr := sub.Wait(fixture.ctx)
 	require.NoError(t, werr)
 	assert.Equal(t, "assistant", string(msg.Role))
 }
