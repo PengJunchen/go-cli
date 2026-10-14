@@ -75,7 +75,13 @@ func TestDurableCLIBinaryKeepsQuarantineWhenEscapedDescendantOutlivesProcessGrou
 		"prompt", "-provider=openai", "-output=text", "-approve=auto", "-no-sandbox", "run escaped descendant")
 	cliCommand, cliWait = command, wait
 	physicalID := waitForDurableCLIOutput(t, stdout, "Session ID: ")
-	rows, action := waitForDurableBashDispatch(t, fixture, physicalID, "call-escaped-bash")
+	_, action := waitForDurableBashDispatch(t, fixture, physicalID, "call-escaped-bash")
+	// The dispatch marker precedes process identity persistence. User code can
+	// reach this fixture barrier only after the identity observer syncs and
+	// releases Bash's start gate; inspect a fresh snapshot after that barrier.
+	escaped.waitForStarted(t, 10*time.Second)
+	escapedPID = escaped.childPID(t)
+	rows := fixture.readRows(t, physicalID)
 	execution := requireDurableBashExecution(t, rows, action)
 	require.NotNil(t, execution.ExecutionIdentity)
 	identity := *execution.ExecutionIdentity
@@ -84,8 +90,6 @@ func TestDurableCLIBinaryKeepsQuarantineWhenEscapedDescendantOutlivesProcessGrou
 	processGroupID = identity.ProcessGroupID
 	processLeaderPID = identity.LeaderPID
 
-	escaped.waitForStarted(t, 10*time.Second)
-	escapedPID = escaped.childPID(t)
 	escaped.waitForEffect(t, 10*time.Second)
 	heartbeat := escaped.waitForHeartbeatAfter(t, 0, 10*time.Second)
 	requireWorkspaceActionLifecycleForCall(t, fixture.readWorkspaceIndex(t, action.workspaceID), physicalID, action.actionID, action.toolCallID, 1, 0)
