@@ -205,7 +205,7 @@ func TestTruncatingCompactorRejectsMalformedToolGroups(t *testing.T) {
 func TestTruncatingCompactorKeepsOrDropsToolGroupAtomically(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, _ := newTracedCtx(t)
-	est := tracedEstimator()
+	est := runeCountEstimator{}
 	items := []TurnItem{
 		{
 			Role: RoleAssistant,
@@ -221,7 +221,10 @@ func TestTruncatingCompactorKeepsOrDropsToolGroupAtomically(t *testing.T) {
 	}
 
 	t.Run("drop the complete group when only one receipt could fit", func(t *testing.T) {
-		outResult, err := NewTruncatingCompactor().Compact(ctx, items, 2, est)
+		// Current user: role4 + content4. One receipt: role4 + name4 + call ID6 + result4.
+		// This budget could fit one receipt but not the assistant's complete two-call group.
+		const currentAndOneReceiptBudget = 26
+		outResult, err := NewTruncatingCompactor().Compact(ctx, items, currentAndOneReceiptBudget, est)
 		out := outResult.Items
 		require.NoError(t, err)
 		require.Len(t, out, 1)
@@ -230,7 +233,8 @@ func TestTruncatingCompactorKeepsOrDropsToolGroupAtomically(t *testing.T) {
 	})
 
 	t.Run("retain the complete group when it fits", func(t *testing.T) {
-		outResult, err := NewTruncatingCompactor().Compact(ctx, items, 3, est)
+		const providerVisibleGroupBudget = 81
+		outResult, err := NewTruncatingCompactor().Compact(ctx, items, providerVisibleGroupBudget, est)
 		out := outResult.Items
 		require.NoError(t, err)
 		require.Len(t, out, len(items))

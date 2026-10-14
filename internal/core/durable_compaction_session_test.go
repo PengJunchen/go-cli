@@ -201,7 +201,7 @@ func TestDurableCompactionRejectsSummaryThatConsumesOversizedCurrentInput(t *tes
 		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
 		compaction.NewSummaryCompactor(summarizer),
 		durableCharacterEstimator{},
-		100,
+		104,
 	)
 	agent := core.NewAgentImpl("durable-current-input", loop)
 
@@ -409,7 +409,7 @@ func TestDurableCompactionCommitFailureBlocksProviderAndPreservesCurrentInput(t 
 		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
 		compaction.NewSummaryCompactor(summarizer),
 		oneTokenForNonEmptyText{},
-		3,
+		6,
 	)
 	agent := core.NewAgentImpl("durable-compaction-commit-failure", loop)
 	require.NoError(t, agent.SetHistoryFromSourceSnapshot(sourceSnapshot))
@@ -557,7 +557,7 @@ func TestDurableCompactionSessionProjectionSyncsBeforeRequestAndReopensExactly(t
 		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
 		compaction.NewSummaryCompactor(durableCompactionSummarizer{}),
 		oneTokenForNonEmptyText{},
-		3,
+		6,
 	)
 	secondAgent := core.NewAgentImpl("durable-compaction-second-turn", checkingLoop)
 	require.NoError(t, secondAgent.SetHistoryFromSourceSnapshot(sourceSnapshot))

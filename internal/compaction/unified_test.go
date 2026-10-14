@@ -2,6 +2,7 @@ package compaction
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -46,14 +47,201 @@ func TestUnifiedCompactorMicroFirst(t *testing.T) {
 
 	// Micro succeeds on its own (large tool results are placeholdered).
 	uni := NewUnifiedCompactor(WithTriggerReason("threshold"))
-	outResult, err := uni.Compact(ctx, items, 300, est)
+	outResult, err := uni.Compact(ctx, items, 523, est)
 	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategyMicro, uni.LastStrategy())
-	assert.LessOrEqual(t, estimateTokens(out, est), 300)
+	assert.LessOrEqual(t, estimateTokens(out, est), 523)
 
 	// A single compaction span is emitted for the routing decision.
 	assertSpanEventually(t, exp, "compaction")
+}
+
+func TestUnifiedCompactorProducesTypedProjectionForDurableHistory(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ctx, _ := newTracedCtx(t)
+	const revision = "revision-durable-unified"
+	const branch = "branch-main"
+	const runID = "run-durable-unified"
+	priorRef := func(ordinal uint64, entryID string) llm.SourceRef {
+		return llm.SourceRef{
+			Kind: llm.SourcePriorPublished, HistoryRevision: revision, BranchID: branch,
+			SourceEntryID: entryID, PriorOrdinal: ordinal,
+		}
+	}
+	runtime := func(source llm.SourceRef, receipt string) llm.RuntimeMetadata {
+		return llm.RuntimeMetadata{Source: source, ReceiptOutcome: receipt}
+	}
+	callID := "call-large-write"
+	items := []TurnItem{
+		{
+			Role: RoleUser, Content: "older user context",
+			Runtime: runtime(priorRef(0, "entry-user"), ""),
+		},
+		{
+			Role: RoleAssistant,
+			ToolCalls: []llm.ToolCall{{
+				ID: callID, Name: "write",
+				Args: map[string]any{"path": "old.go", "content": strings.Repeat("x", 500)},
+			}},
+			Runtime: runtime(priorRef(1, "entry-write-call"), ""),
+		},
+		{
+			Role: RoleTool, ToolCallID: callID, ToolName: "write",
+			ToolResult: strings.Repeat("r", 8000), ReceiptOutcome: "success",
+			Runtime: runtime(priorRef(2, "entry-write-receipt"), "success"),
+		},
+		{
+			Role: RoleUser, Content: "current user request",
+			Runtime: runtime(llm.SourceRef{
+				Kind: llm.SourceRunTranscript, RunID: runID, PriorSourceCount: 3, TranscriptIndex: 0,
+			}, ""),
+		},
+	}
+	summarizer := &fakeSummarizer{summary: "typed summary of the prior write"}
+	microResult, err := NewMicroCompactor().Compact(ctx, items, 1000, runeCountEstimator{})
+	require.NoError(t, err, "the micro strategy can fit this history by shrinking the receipt")
+	assert.LessOrEqual(t, EstimateTokens(microResult.Items, runeCountEstimator{}), 1000)
+	compactor := NewUnifiedCompactor(WithSummary(NewSummaryCompactor(summarizer)))
+
+	result, err := compactor.Compact(ctx, items, 1000, runeCountEstimator{})
+	require.NoError(t, err)
+	assert.Equal(t, StrategySummary, result.Strategy,
+		"a micro result that fits by replacing a durable tool receipt still cannot be projected")
+	require.NotNil(t, result.NewProjection,
+		"a micro or truncating result cannot establish a durable summary projection")
+	assert.Equal(t, llm.SourceThrough{PriorHistoryCount: 3}, result.NewProjection.Through)
+	require.NotEmpty(t, summarizer.conversations(), "the configured summary strategy should run")
+	assert.Equal(t, items[3].Runtime.Source, result.Items[len(result.Items)-1].Runtime.Source,
+		"the current source-backed user input must remain unchanged at the suffix")
+}
+
+func TestUnifiedCompactorDoesNotForceSummaryForFittingDurableHistory(t *testing.T) {
+	ctx, _ := newTracedCtx(t)
+	items := []TurnItem{{
+		Role: RoleUser, Content: "already fits",
+		Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{
+			Kind: llm.SourcePriorPublished, HistoryRevision: "revision-fits", BranchID: "branch-main",
+			SourceEntryID: "entry-fits", PriorOrdinal: 0,
+		}},
+	}}
+	summarizer := &fakeSummarizer{summary: "should not be used"}
+	compactor := NewUnifiedCompactor(WithSummary(NewSummaryCompactor(summarizer)))
+
+	result, err := compactor.Compact(ctx, items, 1000, runeCountEstimator{})
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1)
+	assert.Equal(t, items[0].Content, result.Items[0].Content)
+	assert.Equal(t, items[0].Runtime.Source, result.Items[0].Runtime.Source)
+	assert.Nil(t, result.NewProjection)
+	assert.Empty(t, summarizer.conversations(), "an already fitting durable request needs no forced projection")
+}
+
+func TestUnifiedCompactorReestimatesDurableHistoryInsteadOfTrustingOldCache(t *testing.T) {
+	ctx, _ := newTracedCtx(t)
+	const revision = "revision-stale-cache"
+	const branch = "branch-main"
+	priorSource := func(ordinal uint64, entryID string) llm.RuntimeMetadata {
+		return llm.RuntimeMetadata{Source: llm.SourceRef{
+			Kind: llm.SourcePriorPublished, HistoryRevision: revision, BranchID: branch,
+			SourceEntryID: entryID, PriorOrdinal: ordinal,
+		}}
+	}
+	callID := "call-large-args"
+	args := map[string]any{"path": "old.go", "content": strings.Repeat("x", 2000)}
+	writeCall := TurnItem{
+		Role: RoleAssistant, EstimatedTokens: 1,
+		ToolCalls: []llm.ToolCall{{ID: callID, Name: "write", Args: args}},
+		Runtime:   priorSource(1, "entry-write-call"),
+	}
+	current := TurnItem{
+		Role: RoleUser, Content: "fresh request",
+		Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{
+			Kind: llm.SourceRunTranscript, RunID: "run-stale-cache", PriorSourceCount: 3, TranscriptIndex: 0,
+		}},
+	}
+	items := []TurnItem{
+		{Role: RoleUser, Content: "older context", Runtime: priorSource(0, "entry-user")},
+		writeCall,
+		{
+			Role: RoleTool, ToolCallID: callID, ToolName: "write", ToolResult: "ok", ReceiptOutcome: "success",
+			Runtime: llm.RuntimeMetadata{
+				Source: priorSource(2, "entry-write-receipt").Source, ReceiptOutcome: "success",
+			},
+		},
+		current,
+	}
+	micro := NewRecordingCompactor("micro").WithError(ErrRequiresTruncating)
+	summarizer := &fakeSummarizer{summary: "summary of prior context"}
+	compactor := NewUnifiedCompactor(
+		WithMicro(micro),
+		WithSummary(NewSummaryCompactor(summarizer)),
+	)
+
+	result, err := compactor.Compact(ctx, items, 119, runeCountEstimator{})
+	require.NoError(t, err)
+	assert.Equal(t, StrategySummary, result.Strategy)
+	assert.Empty(t, micro.Called(), "fresh provider-visible size should select the durable summary path directly")
+	assert.NotEmpty(t, summarizer.conversations())
+	assert.Equal(t, current.Runtime.Source, result.Items[len(result.Items)-1].Runtime.Source,
+		"the cache regression must still keep the current source-backed input whole")
+	assert.Equal(t, 1, writeCall.EstimatedTokens, "re-estimation must not mutate caller-owned cache hints")
+}
+
+func TestUnifiedCompactorDoesNotTruncateOverBudgetDurableHistoryWithoutSummary(t *testing.T) {
+	ctx, _ := newTracedCtx(t)
+	items := []TurnItem{{
+		Role: RoleUser, Content: strings.Repeat("x", 2000),
+		Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{
+			Kind: llm.SourcePriorPublished, HistoryRevision: "revision-no-summary", BranchID: "branch-main",
+			SourceEntryID: "entry-no-summary", PriorOrdinal: 0,
+		}},
+	}}
+	truncating := NewRecordingCompactor("truncating").WithResult([]TurnItem{{Role: RoleUser, Content: "truncated"}})
+	compactor := NewUnifiedCompactor(WithTruncating(truncating))
+
+	_, err := compactor.Compact(ctx, items, 100, runeCountEstimator{})
+	require.Error(t, err, "durable source cannot use a projection-free truncating winner")
+	assert.Empty(t, truncating.Called(), "durable history must fail closed when no summary strategy exists")
+}
+
+func TestUnifiedCompactorDoesNotFallBackAfterDurableSummaryFailure(t *testing.T) {
+	ctx, _ := newTracedCtx(t)
+	items := []TurnItem{{
+		Role: RoleUser, Content: strings.Repeat("x", 2000),
+		Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{
+			Kind: llm.SourcePriorPublished, HistoryRevision: "revision-summary-fails", BranchID: "branch-main",
+			SourceEntryID: "entry-summary-fails", PriorOrdinal: 0,
+		}},
+	}}
+	summary := NewRecordingCompactor("summary").WithError(errors.New("summary service unavailable"))
+	truncating := NewRecordingCompactor("truncating").WithResult([]TurnItem{{Role: RoleUser, Content: "truncated"}})
+	compactor := NewUnifiedCompactor(WithSummary(summary), WithTruncating(truncating))
+
+	_, err := compactor.Compact(ctx, items, 100, runeCountEstimator{})
+	require.EqualError(t, err, "summary service unavailable")
+	assert.Equal(t, []string{"summary"}, summary.Called())
+	assert.Empty(t, truncating.Called(), "a failed typed-summary path cannot silently use truncating")
+}
+
+func TestUnifiedCompactorRejectsDurableSummaryWithoutProjection(t *testing.T) {
+	ctx, _ := newTracedCtx(t)
+	items := []TurnItem{{
+		Role: RoleUser, Content: strings.Repeat("x", 2000),
+		Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{
+			Kind: llm.SourcePriorPublished, HistoryRevision: "revision-unprojected", BranchID: "branch-main",
+			SourceEntryID: "entry-unprojected", PriorOrdinal: 0,
+		}},
+	}}
+	summary := NewRecordingCompactor("summary").WithResult([]TurnItem{{Role: RoleUser, Content: "summary without projection"}})
+	truncating := NewRecordingCompactor("truncating").WithResult([]TurnItem{{Role: RoleUser, Content: "truncated"}})
+	compactor := NewUnifiedCompactor(WithSummary(summary), WithTruncating(truncating))
+
+	_, err := compactor.Compact(ctx, items, 100, runeCountEstimator{})
+	require.ErrorIs(t, err, ErrDurableSummaryProjectionRequired)
+	assert.Equal(t, []string{"summary"}, summary.Called())
+	assert.Empty(t, truncating.Called(), "a projectionless summary cannot fall through to truncation")
 }
 
 func TestUnifiedCompactorEscalatesMicroToSummary(t *testing.T) {
@@ -241,12 +429,12 @@ func TestQualityAutoEvaluate(t *testing.T) {
 	rec := &recordingEvaluator{}
 	uni := NewUnifiedCompactor(WithQualityEvaluator(rec))
 
-	outResult, err := uni.Compact(ctx, items, 300, est)
+	outResult, err := uni.Compact(ctx, items, 523, est)
 
 	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategyMicro, uni.LastStrategy())
-	assert.LessOrEqual(t, estimateTokens(out, est), 300)
+	assert.LessOrEqual(t, estimateTokens(out, est), 523)
 
 	// The evaluator was called with the original and compacted items.
 	assert.True(t, rec.called, "evaluator must be invoked after compaction")
@@ -268,7 +456,7 @@ func TestQualityAutoEvaluateWithDefaultEvaluator(t *testing.T) {
 	uni := NewUnifiedCompactor(
 		WithQualityEvaluator(NewDefaultQualityEvaluator(est, WithQualityStrategy(StrategyMicro))),
 	)
-	outResult, err := uni.Compact(ctx, items, 300, est)
+	outResult, err := uni.Compact(ctx, items, 523, est)
 	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategyMicro, uni.LastStrategy())

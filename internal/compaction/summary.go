@@ -128,7 +128,10 @@ func (c *SummaryCompactor) findCutPoint(items []TurnItem, maxTokens int, estimat
 }
 
 func (c *SummaryCompactor) findCutPointAtGroups(items []TurnItem, groups []itemGroup, maxTokens int, estimator TokenEstimator) int {
-	placeholder := estimateLength(UntrustedSummaryContext(summaryPlaceholder), estimator)
+	placeholder := saturatingTokenAdd(
+		estimateLength(RoleUser, estimator),
+		estimateLength(UntrustedSummaryContext(summaryPlaceholder), estimator),
+	)
 	mandatorySystemTokens := mandatorySystemPromptTokens(items, estimator)
 
 	// Build a suffix sum by complete item group. estimateItemTokens caches each
@@ -138,10 +141,10 @@ func (c *SummaryCompactor) findCutPointAtGroups(items []TurnItem, groups []itemG
 		groupTokens := 0
 		if !groups[i].system {
 			for itemIndex := groups[i].start; itemIndex < groups[i].end; itemIndex++ {
-				groupTokens += estimateItemTokens(&items[itemIndex], estimator)
+				groupTokens = saturatingTokenAdd(groupTokens, estimateItemTokens(&items[itemIndex], estimator))
 			}
 		}
-		suffixSum[i] = suffixSum[i+1] + groupTokens
+		suffixSum[i] = saturatingTokenAdd(suffixSum[i+1], groupTokens)
 	}
 
 	for groupCut := 0; groupCut <= len(groups); groupCut++ {
@@ -149,7 +152,9 @@ func (c *SummaryCompactor) findCutPointAtGroups(items []TurnItem, groups []itemG
 		if groupCut < len(groups) {
 			cut = groups[groupCut].start
 		}
-		if placeholder+mandatorySystemTokens+suffixSum[groupCut] <= maxTokens {
+		candidateTokens := saturatingTokenAdd(placeholder, mandatorySystemTokens)
+		candidateTokens = saturatingTokenAdd(candidateTokens, suffixSum[groupCut])
+		if candidateTokens < maxTokenEstimate && candidateTokens <= maxTokens {
 			return cut
 		}
 	}
