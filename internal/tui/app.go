@@ -842,6 +842,10 @@ type teaModel struct {
 	liveToolReceipts       map[liveToolOccurrence]string
 	canonicalAssistantKeys map[AssistantOccurrenceKey]struct{}
 	canonicalToolEntryKeys map[liveToolOccurrence]string
+	canonicalToolProgress  map[liveToolOccurrence]canonicalToolProgressState
+	// One Bubbletea app is built per REPL turn; keep quiescent run IDs only for
+	// this presentation lifetime so stale events from a finished run stay closed.
+	quiescentToolRuns      map[string]struct{}
 	liveRowOrder           []string
 	liveRowSequence        uint64
 	transcriptSearchMode   bool
@@ -921,6 +925,8 @@ func newTeaModel(a *BubbleteaApp) *teaModel {
 		liveToolReceipts:                make(map[liveToolOccurrence]string),
 		canonicalAssistantKeys:          make(map[AssistantOccurrenceKey]struct{}),
 		canonicalToolEntryKeys:          make(map[liveToolOccurrence]string),
+		canonicalToolProgress:           make(map[liveToolOccurrence]canonicalToolProgressState),
+		quiescentToolRuns:               make(map[string]struct{}),
 		accordion:                       NewAccordionModel(),
 		onUpdate:                        a.onUpdate,
 		steerCallback:                   a.steerCallback,
@@ -959,6 +965,14 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.request == nil || !msg.request.apply(m) {
 			return m, nil
 		}
+		m.mu.Lock()
+		progressChanged := m.reconcileCanonicalToolProgressLocked(m.runObservation)
+		view := ""
+		if progressChanged && m.shouldNotify() {
+			view = m.renderViewLocked()
+		}
+		m.mu.Unlock()
+		m.notify(view)
 		request := msg.request
 		return m, func() tea.Msg { return transcriptRefreshViewQueuedMsg{request: request} }
 	case transcriptRefreshViewQueuedMsg:
@@ -2881,6 +2895,11 @@ func (m *teaModel) updateToolResultStatusLocked(toolCallID string, isError bool)
 func (m *teaModel) hasRunningToolLocked() bool {
 	for _, e := range m.accordion.entries {
 		if e.ContentType == ContentTypeToolCall && e.ToolStatus == ToolStatusRunning {
+			return true
+		}
+	}
+	for _, state := range m.canonicalToolProgress {
+		if state == canonicalToolProgressRunning {
 			return true
 		}
 	}
