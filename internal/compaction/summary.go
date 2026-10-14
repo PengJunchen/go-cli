@@ -132,6 +132,10 @@ func (c *SummaryCompactor) findCutPointAtGroups(items []TurnItem, groups []itemG
 		estimateLength(RoleUser, estimator),
 		estimateLength(UntrustedSummaryContext(summaryPlaceholder), estimator),
 	)
+	return c.findCutPointAtGroupsWithSummaryReservation(items, groups, maxTokens, estimator, placeholder)
+}
+
+func (c *SummaryCompactor) findCutPointAtGroupsWithSummaryReservation(items []TurnItem, groups []itemGroup, maxTokens int, estimator TokenEstimator, summaryTokens int) int {
 	mandatorySystemTokens := mandatorySystemPromptTokens(items, estimator)
 
 	// Build a suffix sum by complete item group. estimateItemTokens caches each
@@ -152,7 +156,7 @@ func (c *SummaryCompactor) findCutPointAtGroups(items []TurnItem, groups []itemG
 		if groupCut < len(groups) {
 			cut = groups[groupCut].start
 		}
-		candidateTokens := saturatingTokenAdd(placeholder, mandatorySystemTokens)
+		candidateTokens := saturatingTokenAdd(summaryTokens, mandatorySystemTokens)
 		candidateTokens = saturatingTokenAdd(candidateTokens, suffixSum[groupCut])
 		if candidateTokens < maxTokenEstimate && candidateTokens <= maxTokens {
 			return cut
@@ -184,6 +188,18 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 	)
 
 	cut := c.findCutPointAtGroups(normalized, groups, maxTokens, estimator)
+	if hasDurableSource(normalized) && c.maxSummaryTokens > 0 {
+		// Durable summaries must leave room for the largest body this compactor
+		// can actually emit, including the user role and untrusted-context
+		// framing projected to the provider. Legacy histories retain the smaller
+		// placeholder reservation and rely on the final exact-result check below.
+		summaryReservation := saturatingTokenAdd(
+			estimateLength(RoleUser, estimator),
+			estimateLength(summaryUntrustedContextPrefix, estimator),
+		)
+		summaryReservation = saturatingTokenAdd(summaryReservation, c.maxSummaryTokens)
+		cut = c.findCutPointAtGroupsWithSummaryReservation(normalized, groups, maxTokens, estimator, summaryReservation)
+	}
 	if cut == 0 {
 		// Nothing can be summarized without exceeding budget; escalate to the
 		// truncating fallback. Returning the input unchanged primitives the

@@ -199,7 +199,10 @@ func TestDurableCompactionRejectsSummaryThatConsumesOversizedCurrentInput(t *tes
 	loop := core.NewLoopAgent(core.WithLLM(model), core.WithSystemPrompt("s"))
 	loop.SetMidTurnCompaction(
 		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
-		compaction.NewSummaryCompactor(summarizer),
+		// The one-token body still projects as a user role plus untrusted
+		// summary framing; that complete replacement cannot fit beside this
+		// current input in the 104-token budget.
+		compaction.NewSummaryCompactor(summarizer, compaction.WithMaxSummaryTokens(1)),
 		durableCharacterEstimator{},
 		104,
 	)
@@ -338,7 +341,7 @@ func TestDurableCompactionWithoutCutSendsCurrentInputOnceAndReopens(t *testing.T
 	loop := core.NewLoopAgent(core.WithLLM(model), core.WithSystemPrompt("s"))
 	loop.SetMidTurnCompaction(
 		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
-		compaction.NewSummaryCompactor(summarizer),
+		compaction.NewSummaryCompactor(summarizer, compaction.WithMaxSummaryTokens(1)),
 		oneTokenForNonEmptyText{},
 		10,
 	)
@@ -407,9 +410,11 @@ func TestDurableCompactionCommitFailureBlocksProviderAndPreservesCurrentInput(t 
 	loop := core.NewLoopAgent(core.WithLLM(model), core.WithSystemPrompt("s"))
 	loop.SetMidTurnCompaction(
 		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
-		compaction.NewSummaryCompactor(summarizer),
+		// The one-token estimator charges 1 each for the summary role, prefix,
+		// and body, plus 2 each for the retained system prompt and current user.
+		compaction.NewSummaryCompactor(summarizer, compaction.WithMaxSummaryTokens(1)),
 		oneTokenForNonEmptyText{},
-		6,
+		7,
 	)
 	agent := core.NewAgentImpl("durable-compaction-commit-failure", loop)
 	require.NoError(t, agent.SetHistoryFromSourceSnapshot(sourceSnapshot))
@@ -459,7 +464,7 @@ func runDurableCompactionTurn(t *testing.T, sink core.RunCommitSink, prepared se
 	if withSummary {
 		loop.SetMidTurnCompaction(
 			compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
-			compaction.NewSummaryCompactor(durableCompactionSummarizer{}),
+			compaction.NewSummaryCompactor(durableCompactionSummarizer{}, compaction.WithMaxSummaryTokens(1)),
 			oneTokenForNonEmptyText{},
 			maxTokens,
 		)
@@ -555,9 +560,11 @@ func TestDurableCompactionSessionProjectionSyncsBeforeRequestAndReopensExactly(t
 	checkingLoop := core.NewLoopAgent(core.WithLLM(checkingModel))
 	checkingLoop.SetMidTurnCompaction(
 		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
-		compaction.NewSummaryCompactor(durableCompactionSummarizer{}),
+		// The bounded summary estimate is 3 and the retained system/current
+		// inputs cost 2 each under the one-token estimator.
+		compaction.NewSummaryCompactor(durableCompactionSummarizer{}, compaction.WithMaxSummaryTokens(1)),
 		oneTokenForNonEmptyText{},
-		6,
+		7,
 	)
 	secondAgent := core.NewAgentImpl("durable-compaction-second-turn", checkingLoop)
 	require.NoError(t, secondAgent.SetHistoryFromSourceSnapshot(sourceSnapshot))
