@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -179,6 +180,52 @@ func TestCLIBinaryGlobalHelpAndVersionIgnoreBrokenConfig(t *testing.T) {
 			assert.NotContains(t, string(output), "Interactive session started")
 			_, sessionErr := os.Stat(filepath.Join(workDir, ".go-cli", "sessions"))
 			assert.ErrorIs(t, sessionErr, os.ErrNotExist, "help/version must not create a session store")
+		})
+	}
+}
+
+func TestCLIBinaryCommandsExitWhenLogDirectoryIsUnavailable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Docker runtime working directory is Unix-specific")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root can create the Docker runtime log directory under /")
+	}
+
+	t.Setenv("CGO_ENABLED", "0")
+	binaryPath := buildCLIBinary(t)
+	homeDir := t.TempDir()
+	globalConfigDir := filepath.Join(homeDir, ".go-cli")
+	require.NoError(t, os.MkdirAll(globalConfigDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(globalConfigDir, "config.yaml"), []byte("tracing:\n  enabled: false\n"), 0o600))
+	tests := []struct {
+		name       string
+		args       []string
+		wantExit   int
+		wantOutput string
+	}{
+		{name: "help", args: []string{"--help"}, wantOutput: "Usage:"},
+		{name: "version", args: []string{"--version"}, wantOutput: cli.Version},
+		{name: "unknown command", args: []string{"unknown-help-test-command"}, wantExit: 2, wantOutput: "unknown command"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+
+			command := exec.CommandContext(ctx, binaryPath, tt.args...)
+			command.Dir = "/"
+			command.Env = []string{"HOME=" + homeDir}
+			output, runErr := command.CombinedOutput()
+			require.NotEqual(t, context.DeadlineExceeded, ctx.Err(), "CLI timed out; output=%q", output)
+			if tt.wantExit == 0 {
+				require.NoError(t, runErr, "output=%q", output)
+			} else {
+				var exitErr *exec.ExitError
+				require.ErrorAs(t, runErr, &exitErr, "output=%q", output)
+				assert.Equal(t, tt.wantExit, exitErr.ExitCode(), "output=%q", output)
+			}
+			assert.Contains(t, string(output), tt.wantOutput)
 		})
 	}
 }
