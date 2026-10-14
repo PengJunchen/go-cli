@@ -52,6 +52,10 @@ func acpStdioProcessGroupAlive(groupID int) (bool, error) {
 	return true, nil
 }
 
+func isACPStdioProcessGroupPermissionError(err error) bool {
+	return errors.Is(err, syscall.EPERM)
+}
+
 func expectedACPStdioShutdown(err error) bool {
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {

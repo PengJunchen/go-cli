@@ -19,6 +19,11 @@ const (
 	stdioProcessCallWait = 3 * time.Second
 )
 
+type stdioProcessGroupOps struct {
+	signal   func(groupID int, force bool) error
+	waitGone func(groupID int, timeout time.Duration) (bool, error)
+}
+
 var (
 	// ErrStdioProcessContainmentUnsupported reports that stdio process-group
 	// cleanup is unavailable on the current operating system.
@@ -200,6 +205,13 @@ func (o *StdioProcessOwner) Start() error {
 // pending error is returned when the group cannot be confirmed absent within
 // the bounded join; it never reports success based on direct-child exit alone.
 func (o *StdioProcessOwner) Close() error {
+	return o.closeWith(stdioProcessGroupOps{
+		signal:   signalACPStdioProcessGroup,
+		waitGone: waitACPStdioProcessGroupGone,
+	})
+}
+
+func (o *StdioProcessOwner) closeWith(ops stdioProcessGroupOps) error {
 	if o == nil {
 		return nil
 	}
@@ -207,7 +219,7 @@ func (o *StdioProcessOwner) Close() error {
 		o.mu.Lock()
 		o.closing = true
 		o.mu.Unlock()
-		go o.shutdown()
+		go o.shutdown(ops)
 	})
 	timer := time.NewTimer(stdioProcessCallWait)
 	defer timer.Stop()
@@ -266,7 +278,7 @@ func (o *StdioProcessOwner) Join() error {
 	return o.joinErr
 }
 
-func (o *StdioProcessOwner) shutdown() {
+func (o *StdioProcessOwner) shutdown(ops stdioProcessGroupOps) {
 	o.mu.Lock()
 	started := o.started
 	groupID := o.groupID
@@ -284,19 +296,8 @@ func (o *StdioProcessOwner) shutdown() {
 	}
 
 	_ = o.stdin.Close()
-	var shutdownErr error
-	if err := signalACPStdioProcessGroup(groupID, false); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		shutdownErr = errors.Join(shutdownErr, err)
-	}
-	groupGone, groupErr := waitACPStdioProcessGroupGone(groupID, stdioProcessTermWait)
-	shutdownErr = errors.Join(shutdownErr, groupErr)
-	if !groupGone {
-		if err := signalACPStdioProcessGroup(groupID, true); err != nil && !errors.Is(err, os.ErrProcessDone) {
-			shutdownErr = errors.Join(shutdownErr, err)
-		}
-		groupGone, groupErr = waitACPStdioProcessGroupGone(groupID, stdioProcessKillWait)
-		shutdownErr = errors.Join(shutdownErr, groupErr)
-	}
+	groupGone, signalErr, groupErr := stopACPStdioProcessGroup(groupID, ops)
+	shutdownErr := errors.Join(signalErr, groupErr)
 	// Once the bounded group check has settled, close this local read end so an
 	// escaped descendant that retained a duplicate writer cannot keep the
 	// adapter reader (and therefore Join) blocked. This releases only our local
@@ -312,6 +313,34 @@ func (o *StdioProcessOwner) shutdown() {
 	o.shutdownErr = shutdownErr
 	o.mu.Unlock()
 	close(o.shutdownDone)
+}
+
+func stopACPStdioProcessGroup(groupID int, ops stdioProcessGroupOps) (bool, error, error) {
+	var termSignalErr error
+	if err := ops.signal(groupID, false); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		termSignalErr = err
+	}
+	groupGone, termProbeErr := ops.waitGone(groupID, stdioProcessTermWait)
+
+	var killSignalErr error
+	var killProbeErr error
+	if !groupGone {
+		if err := ops.signal(groupID, true); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			killSignalErr = err
+		}
+		groupGone, killProbeErr = ops.waitGone(groupID, stdioProcessKillWait)
+	}
+
+	probeErr := errors.Join(termProbeErr, killProbeErr)
+	if groupGone && probeErr == nil {
+		if isACPStdioProcessGroupPermissionError(termSignalErr) {
+			termSignalErr = nil
+		}
+		if isACPStdioProcessGroupPermissionError(killSignalErr) {
+			killSignalErr = nil
+		}
+	}
+	return groupGone, errors.Join(termSignalErr, killSignalErr), probeErr
 }
 
 func (o *StdioProcessOwner) closeChildEnds() error {
