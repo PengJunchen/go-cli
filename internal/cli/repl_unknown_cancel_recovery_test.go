@@ -231,6 +231,125 @@ func TestDurableREPLUnknownUserCancellationRequiresExplicitNewSession(t *testing
 	assert.NotContains(t, bodies[1], "inspect the workspace", "the fresh provider request must use the new session only")
 }
 
+func TestUnknownCancellationAllowlistUsesRegisteredHandlers(t *testing.T) {
+	buildSessionRegistry := func(t *testing.T, mode sessionCommandMode, recoveryEnabled bool) *SlashCommandRegistry {
+		t.Helper()
+		registry := buildSlashCommandRegistry()
+		registered, ok := registry.Lookup("session")
+		require.True(t, ok)
+		handler, ok := registered.(*SessionHandler)
+		require.True(t, ok)
+		handler.mode = mode
+		if recoveryEnabled {
+			handler.recoveryNewSession = func(context.Context) (string, error) { return "new-session", nil }
+		}
+		return registry
+	}
+	registryWithHandler := func(t *testing.T, handler SlashCommandHandler) *SlashCommandRegistry {
+		t.Helper()
+		registry := NewSlashCommandRegistry()
+		require.NoError(t, registry.Register(handler))
+		return registry
+	}
+
+	tests := []struct {
+		name     string
+		command  session.SlashCommand
+		registry func(*testing.T) *SlashCommandRegistry
+		allow    bool
+	}{
+		{
+			name:     "registered help handler",
+			command:  session.SlashCommand{Name: "help"},
+			registry: func(*testing.T) *SlashCommandRegistry { return buildSlashCommandRegistry() },
+			allow:    true,
+		},
+		{
+			name:     "registered help alias",
+			command:  session.SlashCommand{Name: "h"},
+			registry: func(*testing.T) *SlashCommandRegistry { return buildSlashCommandRegistry() },
+			allow:    true,
+		},
+		{
+			name:     "custom handler cannot impersonate help",
+			command:  session.SlashCommand{Name: "help"},
+			registry: func(t *testing.T) *SlashCommandRegistry { return registryWithHandler(t, &fakeHandler{name: "help"}) },
+		},
+		{
+			name:    "durable session pending",
+			command: session.SlashCommand{Name: "session", Args: []string{"pending"}},
+			registry: func(t *testing.T) *SlashCommandRegistry {
+				return buildSessionRegistry(t, sessionCommandModeDurable, true)
+			},
+			allow: true,
+		},
+		{
+			name:    "durable session new with recovery handler",
+			command: session.SlashCommand{Name: "session", Args: []string{"new"}},
+			registry: func(t *testing.T) *SlashCommandRegistry {
+				return buildSessionRegistry(t, sessionCommandModeDurable, true)
+			},
+			allow: true,
+		},
+		{
+			name:    "durable session new without recovery handler",
+			command: session.SlashCommand{Name: "session", Args: []string{"new"}},
+			registry: func(t *testing.T) *SlashCommandRegistry {
+				return buildSessionRegistry(t, sessionCommandModeDurable, false)
+			},
+		},
+		{
+			name:    "legacy session pending",
+			command: session.SlashCommand{Name: "session", Args: []string{"pending"}},
+			registry: func(t *testing.T) *SlashCommandRegistry {
+				return buildSessionRegistry(t, sessionCommandModeLegacy, true)
+			},
+		},
+		{
+			name:    "unavailable session new",
+			command: session.SlashCommand{Name: "session", Args: []string{"new"}},
+			registry: func(t *testing.T) *SlashCommandRegistry {
+				return buildSessionRegistry(t, sessionCommandModeUnavailable, true)
+			},
+		},
+		{
+			name:    "session pending with extra argument",
+			command: session.SlashCommand{Name: "session", Args: []string{"pending", "extra"}},
+			registry: func(t *testing.T) *SlashCommandRegistry {
+				return buildSessionRegistry(t, sessionCommandModeDurable, true)
+			},
+		},
+		{
+			name:    "unsupported durable subcommand",
+			command: session.SlashCommand{Name: "session", Args: []string{"reconcile"}},
+			registry: func(t *testing.T) *SlashCommandRegistry {
+				return buildSessionRegistry(t, sessionCommandModeDurable, true)
+			},
+		},
+		{
+			name:     "custom handler cannot impersonate session",
+			command:  session.SlashCommand{Name: "session", Args: []string{"pending"}},
+			registry: func(t *testing.T) *SlashCommandRegistry { return registryWithHandler(t, &fakeHandler{name: "session"}) },
+		},
+		{
+			name:     "unknown command",
+			command:  session.SlashCommand{Name: "custom"},
+			registry: func(*testing.T) *SlashCommandRegistry { return buildSlashCommandRegistry() },
+		},
+		{
+			name:     "missing registry",
+			command:  session.SlashCommand{Name: "help"},
+			registry: func(*testing.T) *SlashCommandRegistry { return nil },
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.allow, allowedDuringUnknownCancellation(test.command, test.registry(t)))
+		})
+	}
+}
+
 func TestUnknownCancellationOwnerEvidenceFailsClosed(t *testing.T) {
 	valid := unknownCancellationOwnerEvidence{
 		explicitUICancel: true,
