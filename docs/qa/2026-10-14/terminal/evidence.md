@@ -1,8 +1,8 @@
 # Real terminal E2E evidence
 
-- Revision: `develop@e77e8058c51e5370a2ecc3eacb5fce0419829bcf`
-- Working-tree source delta SHA-256: `f9c3c483067a969ba43e275ea910bc4ee5410b3ef2444ba5097f005742e94581` (source paths only; QA evidence is excluded).
-- Built binary SHA-256: `c78011df02ac021493d9124fb9d71536926be00c1b0265e88758a78e9a4413cd`
+- Revision: `develop@89df724c491083a81239acc04bd42269c58ea6e0`
+- Working-tree source delta SHA-256: `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` (source paths only; QA evidence is excluded).
+- Built binary SHA-256: `852776240ba41f069183201a07bb5b89a2a3e454bef88e837b1581afe7b278f5`
 - Screenshot renderer: Chrome headless screenshot of the xterm.js visible viewport fed with raw bytes read from the real CLI PTY; not a text-to-image rendering and not a native Terminal window
 - HTTP fixture: the provider API endpoint is the localhost mock HTTP fixture; no live model API key is supplied
 - Process isolation: fresh temporary HOME and working directory per scenario; GO_CLI_* inherited values removed; API auth is a fixture value
@@ -46,7 +46,7 @@
 - Screenshot: [`05-approval-deny-wide-page-two.png`](05-approval-deny-wide-page-two.png) — 1440×900 requested px; PNG 1440×900 px; PTY/xterm 169×50 cells; 14 ANSI-colored cells; assertions: {"details 20-39/42": true}.
 - Screenshot: [`06-approval-deny-narrow-after-resize.png`](06-approval-deny-narrow-after-resize.png) — 560×400 requested px; PNG 560×400 px; PTY/xterm 64×22 cells; 14 ANSI-colored cells; assertions: {"details 1-17/77": true}.
 - Screenshot: [`07-approval-denied-complete.png`](07-approval-denied-complete.png) — 560×400 requested px; PNG 560×400 px; PTY/xterm 64×22 cells; 38 ANSI-colored cells; assertions: {"本地模拟器收到拒绝凭据": true}.
-- Raw PTY transcript: [`approval-deny.pty.ansi`](approval-deny.pty.ansi) — 9076 bytes, SHA-256 `33a2246ff078f3f7554cf697a9b4a19a5a0266391d9fd53581b347a17079d2bd`.
+- Raw PTY transcript: [`approval-deny.pty.ansi`](approval-deny.pty.ansi) — 8800 bytes, SHA-256 `a9ef98b3fa4f6ad9267cd7968fd3f21d6d24c080f3124a8426bc1edcf3a671db`.
 - Mock counters: 2 request(s), fixture authorization observed: true, denial receipt: true, staged output receipt: false.
 - Fixture tool call: `bash` / `call-terminal-e2e`, 41 command lines, response SHA-256 `c0ef6c04da913c42eb794bd1d92bc5c209dbeccbaabfac5f0c5436381dad34a6`.
 
@@ -73,21 +73,13 @@
 - Screenshot: [`10-approval-allow-wide-last-page.png`](10-approval-allow-wide-last-page.png) — 1440×900 requested px; PNG 1440×900 px; PTY/xterm 169×50 cells; 14 ANSI-colored cells; assertions: {"details 23-42/42": true}.
 - Screenshot: [`11-long-bash-running-followup-edited.png`](11-long-bash-running-followup-edited.png) — 1440×900 requested px; PNG 1440×900 px; PTY/xterm 169×50 cells; 0 ANSI-colored cells; assertions: {"working...": true, "[tool] bash": true, "│": true, "followup>": true, "During the active run, keep xterm colors stable and inspect 日志窗口。": true}.
 - Screenshot: [`12-long-bash-complete.png`](12-long-bash-complete.png) — 1440×900 requested px; PNG 1440×900 px; PTY/xterm 169×50 cells; 64 ANSI-colored cells; assertions: {"本地模拟器确认三阶段 shell 命令全部完成，并收到 follow-up 指令。": true}.
-- Raw PTY transcript: [`approval-allow.pty.ansi`](approval-allow.pty.ansi) — 9669 bytes, SHA-256 `9f2c27962ac8f9bea2cbd77a0a8e5b988167e825d462faf0c302a476217cfdca`.
+- Raw PTY transcript: [`approval-allow.pty.ansi`](approval-allow.pty.ansi) — 9478 bytes, SHA-256 `84c95f2dfb23e93fa785f1363588fada7ebed251bd68517b48c7a6a32da1fde3`.
 - Mock counters: 2 request(s), fixture authorization observed: true, denial receipt: false, staged output receipt: true.
 - Fixture tool call: `bash` / `call-terminal-e2e`, 41 command lines, response SHA-256 `c0ef6c04da913c42eb794bd1d92bc5c209dbeccbaabfac5f0c5436381dad34a6`.
 - Follow-up delivered in provider request: `During the active run, keep xterm colors stable and inspect 日志窗口。`.
 
 The binary is launched with stdin/stdout/stderr attached to a PTY. The capture process forwards the PTY's original byte stream into xterm.js and asks Chromium to screenshot that terminal viewport. The harness does not generate terminal pixels from extracted text.
 
-## Post-run portability follow-up
+## Capture lineage
 
-After this E2E capture, the harness's scratch directory selection was changed
-to use Python's `tempfile.gettempdir()` by default, with `--scratch-root` as an
-override. The previously captured binary and screenshots were not rebuilt or
-rerun for this harness-only setup change. Python and renderer syntax checks,
-`run.py --help`, and a startup smoke that created and removed a run directory
-under `/private/var/folders/_l/f743070s7yj3qk47q2krwqt00000gn/T` passed. The
-source working-tree delta after that change is recorded in `run-report.json`.
-The harness is runtime-verified on macOS; Linux is intended but not runtime-
-tested in this environment.
+This report, its 12 PNGs, and 3 raw PTY transcripts are the fresh capture from `89df724c491083a81239acc04bd42269c58ea6e0`; they replace the same-named terminal evidence from the earlier `224462776911986f0c9afba6b895acce1007458e` run. The older e77 gate reports at `docs/qa/2026-10-14/gates/test-e2e-e77.json` and `verify-e77.json` remain separate historical evidence and were not changed by this capture.

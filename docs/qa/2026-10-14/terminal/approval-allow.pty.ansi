@@ -84,7 +84,7 @@ Press Ctrl+\ to switch to cooked mode for better IME support.
 > followup> █[K
 [1mfixture-model | turn #1 | interact | chat[0m[K[3A▼ [38;2;108;112;134m[0m                                                                                  │  ⠏ [tool] bash(command=set -e                                                      
 ⠏ working...[K
-
+> followup> During the active run, keep xterm colors stable and█[K
 [3A
 
 > followup> During the active run, keep xterm colors stable and inspect 日志窗口。█[K
@@ -99,8 +99,6 @@ Press Ctrl+\ to switch to cooked mode for better IME support.
 ⠸ working...[K
 [2A▼ [38;2;108;112;134m[0m                                                                                  │  ⠼ [tool] bash(command=set -e                                                      
 ⠼ working...[K
-[2A▼ [38;2;108;112;134m[0m                                                                                  │  ✓ [tool] bash(command=set -e                                                      
-[Assistant response is being generated and checked][K
 [2A  [38;2;108;112;134m[0m                                                                                  │  ✓ [tool] bash(command=set -e                                                      
 ▼ [1mAI: [0m[38;2;125;86;243m本地模拟器确认三阶段 shell 命令全部完成，并收到 follow-up 指令。[0m                                                                                                   
 

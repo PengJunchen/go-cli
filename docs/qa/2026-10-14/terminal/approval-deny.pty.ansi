@@ -3,9 +3,7 @@
 ⚠ IME (input method editor) detected. CJK input may not work correctly in raw mode.
 Press Ctrl+\ to switch to cooked mode for better IME support.
 [J> 执[J> 执行[J> 执行本[J> 执行本地[J> 执行本地模[J> 执行本地模拟[J> 执行本地模拟器[J> 执行本地模拟器提[J> 执行本地模拟器提交[J> 执行本地模拟器提交的[J> 执行本地模拟器提交的多[J> 执行本地模拟器提交的多阶[J> 执行本地模拟器提交的多阶段[J> 执行本地模拟器提交的多阶段 [J> 执行本地模拟器提交的多阶段 s[J> 执行本地模拟器提交的多阶段 sh[J> 执行本地模拟器提交的多阶段 she[J> 执行本地模拟器提交的多阶段 shel[J> 执行本地模拟器提交的多阶段 shell[J> 执行本地模拟器提交的多阶段 shell [J> 执行本地模拟器提交的多阶段 shell 命[J> 执行本地模拟器提交的多阶段 shell 命令[J> 执行本地模拟器提交的多阶段 shell 命令。
-[?2004l[?25l[?2004h▼ [38;2;108;112;134m[0m                                                                                  │  ⠙ [tool] bash(command=set -e                                                      
-⠙ working...[K
-[1mfixture-model | turn #1 | interact | chat[0m[K[2A[1;38;2;255;192;0m[approval][0m [38;2;0;217;255mbash[0m[K
+[?2004l[?25l[?2004h[1;38;2;255;192;0m[approval][0m [38;2;0;217;255mbash[0m[K
   local interaction #1[K
   scope: unknown; once only; reuse unavailable[K
   view truncated · details 1-20/42 · ↑/↓ PgUp/PgDn[K
@@ -158,9 +156,9 @@ the visible review window[K
 
       # approval detail row 35 keeps this command longer than[K
 
-  [y] once [n] reject [Esc] cancel[K[21A  ⠋ [tool] bash(command=set -e[K
+  [y] once [n] reject [Esc] cancel[K[21A  ⠏ [tool] bash(command=set -e[K
 ▼ [38;2;108;112;134m[0m[K
-⠋ working...[K
+⠏ working...[K
 [1mfixture-model | turn #1 | interact | chat[0m[K[J[3A  ✗ [tool] bash(command=set -e[K
   [38;2;108;112;134m[0m[K
 ▼ [1mAI: [0m[38;2;125;86;243m本地模拟器收到拒绝凭据，命令没有运行。[0m[K

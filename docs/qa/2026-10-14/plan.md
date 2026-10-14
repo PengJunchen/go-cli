@@ -32,7 +32,10 @@
 ## 进度
 
 1. 仓库和分支定位完成。
-2. 三个子代理完成入口探索，开始真实 binary 验证。
-3. 首次 `make test` 同时纳入新增工具测试：8704 个测试，8692 通过、6 失败、6 跳过。不是纯净基线结果。正在复现失败；`make vet` 和 `make scan` 通过，扫描 ERROR=0 / WARN=1802。
-4. 工具测试的 read/deny 与默认 read 两个失败已归因为 fixture 断言及 trusted read scope 配置，修正测试装置后重跑。
-5. 最终结果待所有独立验收及交叉审查完成后填写报告。
+2. 三个实现子代理完成真实 binary 验证；另由独立 Standards / Spec 子代理交叉审查，主代理检查源码、原始记录和截图。
+3. 初次混合新增测试的 `make test` 为 8704 total / 8692 pass / 6 fail / 6 skip，不是纯净基线。随后在纯净 e77 基线测得 8695 total / 8686 pass / 3 fail / 6 skip，失败为 ACP、Grep 与 gate 测试夹具。
+4. 修复 follow-up / steering 空格产品缺陷；补真实工具结果、文件副作用、独立进程恢复、120 轮压缩、运行中补充指令与 Esc 取消证据。修正测试装置同步和原有夹具，未扩大生产工具功能。
+5. 初始基线加 patch 的 `make verify` 和 `make test-e2e` 均通过；整合时保留已到达的上游 `1cd1951` 与 `4d1497b` 两个提交。
+6. 最新整合树的完整 tagged 运行又发现 Esc 正常取消误报生命周期错误，保存失败证据后修复，并增加取消后新输入回归。独立审查拒绝额外两秒兜底设计，最终保持任务和事件桥 join 契约。
+7. 最终门禁、截图和审查结果统一记录在 [完整报告](README.md) 及 `gates/*.json`，不以旧基线或定向通过替代最新源码全量验收。
+8. 最终源码 `6aa6f93` 串行通过 `make verify`（8707 pass / 0 fail / 6 skip）和 `make test-e2e`（4781 pass / 0 fail / 6 skip）；源码运行前后均无差异。截图 36/36 检查、12 PNG、3 raw PTY，Linux/amd64 测试包交叉编译通过，两轴审查完成。

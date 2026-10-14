@@ -1,6 +1,9 @@
 # Long-task binary and PTY regression gate
 
-Baseline: `develop` at `e77e8058c51e5370a2ecc3eacb5fce0419829bcf`.
+Starting baseline: `develop` at `e77e8058c51e5370a2ecc3eacb5fce0419829bcf`.
+The integrated verification and tagged E2E gates passed on
+`6aa6f9318f3d3c40822c368e489c9284cd932072`; see `results.json` and
+[`evidence.md`](evidence.md) for the run details.
 
 The gate in `tests/e2e_binary_longtask_test.go` builds the real `./cmd/cli`
 binary with Go's race detector and talks only to an isolated local
@@ -19,8 +22,19 @@ OpenAI-compatible HTTP server. It covers three distinct behaviors:
    appears, so visible editor text alone cannot release the command.
 3. A second PTY process approves a Bash command that waits before writing a
    file, presses standalone Escape during execution, and verifies the CLI shows
-   `[interrupted]`, returns before the delayed write, sends no continuation
-   request, and leaves the file absent after the command's full delay.
+   `[interrupted]`, returns before the delayed write, sends no automatic
+   continuation request, and leaves the file absent after the command's full
+   delay. A separate explicit user prompt then completes as a fresh turn.
+
+The PTY cases wait for shell-written PID and start files to prove Bash began;
+text in the approval view is only a command preview. Follow-up also waits for
+the production queue-acceptance log before releasing Bash, then checks the
+actual next HTTP request and side-effect file. Failure cleanup signals a Bash
+process group only after matching the fixture PID, process-group ID, and unique
+command token twice. Cleanup does not signal an unverified process group after
+the Bash leader exits. The cancellation fixture's foreground sleep can then
+remain for at most five seconds; it cannot write the side-effect file without
+its parent, and the test waits through the full delay before checking it.
 
 The two PTY helper files allocate a native PTY on Darwin and Linux. Linux does
 not skip based on the `CI` environment variable: the test attempts to allocate

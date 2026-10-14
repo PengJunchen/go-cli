@@ -1,21 +1,23 @@
 # Spec review
 
-Review target: the request to validate `develop` at `e77e8058c51e5370a2ecc3eacb5fce0419829bcf` with a deterministic mock LLM, using the real terminal UI, tool execution, and long-task workflows; fix discovered defects; and report evidence without claiming unverified results.
+Request: validate the real Dot CLI/TUI and tool effects with a deterministic mock LLM, exercise long tasks, repair defects, and preserve evidence. Review began at `e77e8058`; upstream `1cd1951` and `4d1497b` were retained. Current tree `6aa6f93` includes product fixes `2244627` and `89df724` plus fixture updates.
 
 ## Coverage
 
-- **Terminal UI:** [`terminal/evidence.md`](terminal/evidence.md) and [`terminal/run-report.json`](terminal/run-report.json) record 36/36 checks across startup, streamed Chinese output, approval denial and approval, long-running Bash, follow-up input, and completion. The evidence includes 12 PNG screenshots and three raw PTY ANSI transcripts. I inspected screenshots 11 and 12 and the renderer: real CLI PTY bytes are fed to xterm.js, and captures/assertions use the current `buffer.viewportY` viewport.
-- **Tools and persistence:** [`tools/approval-binary-e2e.md`](tools/approval-binary-e2e.md) records real-binary read/write/edit/bash auto and deny behavior, default allowed-path read and non-TTY write denial, recoverable edit error followed by correction, and session resume in a second process. Assertions check provider receipts and filesystem effects.
-- **Long tasks:** [`longtask/evidence.md`](longtask/evidence.md) and [`longtask/results.json`](longtask/results.json) record a real race-instrumented CLI completing 120 local HTTP turns with compaction, a PTY follow-up verified in the actual second provider request after production queue acknowledgment, and Escape cancellation with the delayed side effect absent. The focused long-task run passed.
-- **Discovered defect:** the follow-up and steering editors dropped spaces. The narrow `tea.KeySpace` fix in `internal/tui/app.go` has red/green regression evidence and the terminal follow-up scenario verifies spaces and Chinese text reach the provider unchanged.
-- **Regression gate:** [`gates/verify.json`](gates/verify.json) records `make verify` exit 0: 8,700 passed, 0 failed, 6 skipped across 28 packages; lint reported 0 issues; the scanner reported 0 errors and 1,803 warnings; log and leak gates passed 10/10 and 6/6.
+- **Terminal:** [`terminal/evidence.md`](terminal/evidence.md) records 36/36 checks, 12 screenshots, and three raw PTY transcripts covering startup, Chinese streaming, approval deny/allow, long Bash, follow-up, and completion. xterm.js renders real binary PTY bytes.
+- **Tools and sessions:** [`tools/approval-binary-e2e.md`](tools/approval-binary-e2e.md) covers real-binary read/write/edit/bash auto and deny, default permissions, error correction, actual receipts and file effects, and session resume in a second process.
+- **Long tasks:** [`longtask/evidence.md`](longtask/evidence.md) records 120 local HTTP turns with compaction, follow-up in the next provider request after queue acknowledgment, and Escape cancellation. The focused race run confirmed no delayed side effect after five seconds, no automatic follow-up, then a successful fresh prompt.
+- **Product fixes:** `2244627` preserves spaces in follow-up and steering input. `89df724` fixes cancelled legacy TUI lifecycle misreporting while retaining turn/event joins. Both have regression evidence; the focused run on `6aa6f93` returns from Escape in 18 ms.
 
-## Scope and limits
+## Status and limits
 
-The implementation and test harness map to the requested terminal, tools, persistence, and long-task acceptance scope. The only production behavior change addresses the reproduced input defect; the other code changes support requested E2E coverage and existing test-fixture reliability. No unrelated product feature was added.
+An earlier tagged run on `2244627` reproduced the Escape lifecycle error (`[quitting...]` before `[interrupted]`); `89df724` fixes it. Both final gates on stable commit `6aa6f93` pass:
 
-The provider is deterministic and local, so this is protocol and CLI acceptance, not live-model quality testing. Screenshots are genuine xterm.js viewport pixels in headless Chrome, not native Terminal captures. Runtime evidence is from Darwin; Linux was cross-compiled but not run. The long-task Bash invocations use `--no-sandbox`, so the evidence does not validate OS sandbox enforcement.
+- `make verify`: exit 0; 8,713 started, 8,707 passed, 0 failed, 6 skipped across 28 packages; lint 0 issues; scan 0 errors / 1,803 warnings; log 10/10 and leak 6/6.
+- `make test-e2e`: exit 0; 4,787 started, 4,781 passed, 0 failed, 6 skipped across 7 packages.
 
-## Current verdict
+The mixed-source intermediate verify run was disqualified and archived as [`verify-intermediate-startup-red.json`](gates/verify-intermediate-startup-red.json); it is excluded from the final results above.
 
-Spec coverage is sufficient, with no identified missing requested scenario or unrelated feature work. **Final acceptance remains pending the current full tagged E2E suite.** `longtask/results.json` retains an earlier tagged-suite failure caused by releasing Bash before the production follow-up queue acknowledgment; the harness was corrected and the focused rerun passed. Do not mark the overall task passed until the current full tagged run is recorded.
+The provider is a local deterministic mock, so no live-model quality claim is made. Runtime evidence is macOS; Linux was cross-compiled but not run. Headless Chrome captures xterm.js, not native Terminal. Bash E2E uses `--no-sandbox`, so OS sandbox enforcement is outside this evidence.
+
+**Spec acceptance passes for the stated scope on `6aa6f93`.** The integrated tree has two scoped product fixes and no unrelated feature addition. See the [full report](README.md) for the plan, screenshot gallery, gate records, and evidence limits.

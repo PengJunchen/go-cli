@@ -2,12 +2,13 @@
   "date": "2026-10-14",
   "revision": {
     "branch": "develop",
-    "commit": "e77e8058c51e5370a2ecc3eacb5fce0419829bcf",
-    "working_tree_source_delta_sha256": "f9c3c483067a969ba43e275ea910bc4ee5410b3ef2444ba5097f005742e94581"
+    "commit": "89df724c491083a81239acc04bd42269c58ea6e0",
+    "working_tree_source_delta_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   },
-  "binary": "/private/tmp/go-cli-terminal-e2e-dpnug29k/build/go-cli",
+  "scratch_root": "/private/var/folders/_l/f743070s7yj3qk47q2krwqt00000gn/T",
+  "binary": "/private/var/folders/_l/f743070s7yj3qk47q2krwqt00000gn/T/go-cli-terminal-e2e-0s7j8id9/build/go-cli",
   "binary_built_by_harness": true,
-  "binary_sha256": "c78011df02ac021493d9124fb9d71536926be00c1b0265e88758a78e9a4413cd",
+  "binary_sha256": "852776240ba41f069183201a07bb5b89a2a3e454bef88e837b1581afe7b278f5",
   "screenshot_source": "Chrome headless screenshot of the xterm.js visible viewport fed with raw bytes read from the real CLI PTY; not a text-to-image rendering and not a native Terminal window",
   "network": "the provider API endpoint is the localhost mock HTTP fixture; no live model API key is supplied",
   "isolation": "fresh temporary HOME and working directory per scenario; GO_CLI_* inherited values removed; API auth is a fixture value",
@@ -68,9 +69,9 @@
           "file": "02-chinese-stream-midstream.png",
           "scenario": "streaming answer",
           "source": "Chrome headless rendering xterm.js fed with raw bytes read from the real binary PTY",
-          "screen_excerpt": "Interactive session started. Type 'exit' to quit. > ⚠ IME (input method editor) detected. CJK input may not work c orrectly in raw mode. Press Ctrl+\\ to switch to cooked mode for b etter IME support. > 请用本地中文流式回答保持原样。 ▼ AI: 这是本地模拟模型逐段返回的中文答案。 fixture-model | turn #1 | interact | chat Tokens: unknown | Cost: unknown",
+          "screen_excerpt": "Interactive session started. Type 'exit' to quit. > \u26a0 IME (input method editor) detected. CJK input may not work c orrectly in raw mode. Press Ctrl+\\ to switch to cooked mode for b etter IME support. > \u8bf7\u7528\u672c\u5730\u4e2d\u6587\u6d41\u5f0f\u56de\u7b54\u4fdd\u6301\u539f\u6837\u3002 \u25bc AI: \u8fd9\u662f\u672c\u5730\u6a21\u62df\u6a21\u578b\u9010\u6bb5\u8fd4\u56de\u7684\u4e2d\u6587\u7b54\u6848\u3002 fixture-model | turn #1 | interact | chat Tokens: unknown | Cost: unknown",
           "assertions": {
-            "这是本地模拟": true
+            "\u8fd9\u662f\u672c\u5730\u6a21\u62df": true
           },
           "terminal": {
             "viewport_width_px": 560,
@@ -89,9 +90,9 @@
           "file": "03-chinese-stream-complete.png",
           "scenario": "streaming answer",
           "source": "Chrome headless rendering xterm.js fed with raw bytes read from the real binary PTY",
-          "screen_excerpt": "Interactive session started. Type 'exit' to quit. > ⚠ IME (input method editor) detected. CJK input may not work c orrectly in raw mode. Press Ctrl+\\ to switch to cooked mode for b etter IME support. > 请用本地中文流式回答保持原样。 ▼ AI: 这是本地模拟模型逐段返回的中文答案。 fixture-model | turn #1 | interact | chat Tokens: unknown | Cost: unknown >",
+          "screen_excerpt": "Interactive session started. Type 'exit' to quit. > \u26a0 IME (input method editor) detected. CJK input may not work c orrectly in raw mode. Press Ctrl+\\ to switch to cooked mode for b etter IME support. > \u8bf7\u7528\u672c\u5730\u4e2d\u6587\u6d41\u5f0f\u56de\u7b54\u4fdd\u6301\u539f\u6837\u3002 \u25bc AI: \u8fd9\u662f\u672c\u5730\u6a21\u62df\u6a21\u578b\u9010\u6bb5\u8fd4\u56de\u7684\u4e2d\u6587\u7b54\u6848\u3002 fixture-model | turn #1 | interact | chat Tokens: unknown | Cost: unknown >",
           "assertions": {
-            "这是本地模拟模型逐段返回的中文答案。": true
+            "\u8fd9\u662f\u672c\u5730\u6a21\u62df\u6a21\u578b\u9010\u6bb5\u8fd4\u56de\u7684\u4e2d\u6587\u7b54\u6848\u3002": true
           },
           "terminal": {
             "viewport_width_px": 560,
@@ -207,7 +208,7 @@
           "file": "04-approval-deny-wide-page-one.png",
           "scenario": "approval deny",
           "source": "Chrome headless rendering xterm.js fed with raw bytes read from the real binary PTY",
-          "screen_excerpt": "Ctrl+\\ to switch to cooked mode for better IME support. > 执行本地模拟器提交的多阶段 shell 命令。 [approval] bash local interaction #1 scope: unknown; once only; reuse unavailable view truncated · details 1-20/42 · ↑/↓ PgUp/PgDn args: command: set -e printf 'E2E_STAGE_ONE\\\\n' | tee stage-one.done sleep 6 printf 'E2E_STAGE_TWO\\\\n' | tee stage-two.done sleep 2.5 printf 'E2E_STAGE_THREE\\\\n' | tee stage-three.done # approval detail row 01 keeps this command longer than the visible review window # approval detail row 02 keeps this command longer than the visible review window # approval detail row 03 keeps this command longer than the visible review window # approval detail row 04 keeps this command longer than the visible review window # approval detail row 05 keeps this command longer than the visible review window # approval detail row 06 keeps this command longer than the visible review window # approval",
+          "screen_excerpt": "ode. Press Ctrl+\\ to switch to cooked mode for better IME support. > \u6267\u884c\u672c\u5730\u6a21\u62df\u5668\u63d0\u4ea4\u7684\u591a\u9636\u6bb5 shell \u547d\u4ee4\u3002 [approval] bash local interaction #1 scope: unknown; once only; reuse unavailable view truncated \u00b7 details 1-20/42 \u00b7 \u2191/\u2193 PgUp/PgDn args: command: set -e printf 'E2E_STAGE_ONE\\\\n' | tee stage-one.done sleep 6 printf 'E2E_STAGE_TWO\\\\n' | tee stage-two.done sleep 2.5 printf 'E2E_STAGE_THREE\\\\n' | tee stage-three.done # approval detail row 01 keeps this command longer than the visible review window # approval detail row 02 keeps this command longer than the visible review window # approval detail row 03 keeps this command longer than the visible review window # approval detail row 04 keeps this command longer than the visible review window # approval detail row 05 keeps this command longer than the visible review window # approval detail row 06 keeps this command longer than the visible review window",
           "assertions": {
             "[approval]": true,
             "bash": true,
@@ -225,7 +226,7 @@
             "pty_cols": 169,
             "pty_rows": 50,
             "colored_cells": 14,
-            "occupied_cells": 1105
+            "occupied_cells": 1091
           }
         },
         {
@@ -253,7 +254,7 @@
           "file": "06-approval-deny-narrow-after-resize.png",
           "scenario": "approval deny",
           "source": "Chrome headless rendering xterm.js fed with raw bytes read from the real binary PTY",
-          "screen_excerpt": "[approval] bash local interaction #1 scope: unknown; once only; reuse unavailable view truncated · details 1-17/77 · ↑/↓ PgUp/PgDn args: command: set -e printf 'E2E_STAGE_ONE\\\\n' | tee stage-one.done sleep 6 printf 'E2E_STAGE_TWO\\\\n' | tee stage-two.done sleep 2.5 printf 'E2E_STAGE_THREE\\\\n' | tee stage-three.done # approval detail row 01 keeps this command longer than the visible review window # approval detail row 02 keeps this command longer than the visible review window # approval detail row 03 keeps this command longer than the visible review window # approval detail row 04 keeps this command longer than the visible review window # approval detail row 05 keeps this command longer than the visible review window [y] review details [n] reject",
+          "screen_excerpt": "[approval] bash local interaction #1 scope: unknown; once only; reuse unavailable view truncated \u00b7 details 1-17/77 \u00b7 \u2191/\u2193 PgUp/PgDn args: command: set -e printf 'E2E_STAGE_ONE\\\\n' | tee stage-one.done sleep 6 printf 'E2E_STAGE_TWO\\\\n' | tee stage-two.done sleep 2.5 printf 'E2E_STAGE_THREE\\\\n' | tee stage-three.done # approval detail row 01 keeps this command longer than the visible review window # approval detail row 02 keeps this command longer than the visible review window # approval detail row 03 keeps this command longer than the visible review window # approval detail row 04 keeps this command longer than the visible review window # approval detail row 05 keeps this command longer than the visible review window [y] review details [n] reject",
           "assertions": {
             "details 1-17/77": true
           },
@@ -274,9 +275,9 @@
           "file": "07-approval-denied-complete.png",
           "scenario": "approval deny",
           "source": "Chrome headless rendering xterm.js fed with raw bytes read from the real binary PTY",
-          "screen_excerpt": "✗ [tool] bash(command=set -e ▼ AI: 本地模拟器收到拒绝凭据，命令没有运行。 fixture-model | turn #1 | interact | chat Tokens: unknown | Cost: unknown >",
+          "screen_excerpt": "\u2717 [tool] bash(command=set -e \u25bc AI: \u672c\u5730\u6a21\u62df\u5668\u6536\u5230\u62d2\u7edd\u51ed\u636e\uff0c\u547d\u4ee4\u6ca1\u6709\u8fd0\u884c\u3002 fixture-model | turn #1 | interact | chat Tokens: unknown | Cost: unknown >",
           "assertions": {
-            "本地模拟器收到拒绝凭据": true
+            "\u672c\u5730\u6a21\u62df\u5668\u6536\u5230\u62d2\u7edd\u51ed\u636e": true
           },
           "terminal": {
             "viewport_width_px": 560,
@@ -335,8 +336,8 @@
       },
       "pty_transcript": {
         "file": "approval-deny.pty.ansi",
-        "bytes": 9076,
-        "sha256": "33a2246ff078f3f7554cf697a9b4a19a5a0266391d9fd53581b347a17079d2bd",
+        "bytes": 8800,
+        "sha256": "a9ef98b3fa4f6ad9267cd7968fd3f21d6d24c080f3124a8426bc1edcf3a671db",
         "source": "raw bytes read from the real CLI PTY before xterm.js rendering"
       }
     },
@@ -413,7 +414,7 @@
           "file": "08-approval-allow-wide-page-one.png",
           "scenario": "approval allow",
           "source": "Chrome headless rendering xterm.js fed with raw bytes read from the real binary PTY",
-          "screen_excerpt": "ode. Press Ctrl+\\ to switch to cooked mode for better IME support. > 执行本地模拟器提交的多阶段 shell 命令。 [approval] bash local interaction #1 scope: unknown; once only; reuse unavailable view truncated · details 1-20/42 · ↑/↓ PgUp/PgDn args: command: set -e printf 'E2E_STAGE_ONE\\\\n' | tee stage-one.done sleep 6 printf 'E2E_STAGE_TWO\\\\n' | tee stage-two.done sleep 2.5 printf 'E2E_STAGE_THREE\\\\n' | tee stage-three.done # approval detail row 01 keeps this command longer than the visible review window # approval detail row 02 keeps this command longer than the visible review window # approval detail row 03 keeps this command longer than the visible review window # approval detail row 04 keeps this command longer than the visible review window # approval detail row 05 keeps this command longer than the visible review window # approval detail row 06 keeps this command longer than the visible review window",
+          "screen_excerpt": "ode. Press Ctrl+\\ to switch to cooked mode for better IME support. > \u6267\u884c\u672c\u5730\u6a21\u62df\u5668\u63d0\u4ea4\u7684\u591a\u9636\u6bb5 shell \u547d\u4ee4\u3002 [approval] bash local interaction #1 scope: unknown; once only; reuse unavailable view truncated \u00b7 details 1-20/42 \u00b7 \u2191/\u2193 PgUp/PgDn args: command: set -e printf 'E2E_STAGE_ONE\\\\n' | tee stage-one.done sleep 6 printf 'E2E_STAGE_TWO\\\\n' | tee stage-two.done sleep 2.5 printf 'E2E_STAGE_THREE\\\\n' | tee stage-three.done # approval detail row 01 keeps this command longer than the visible review window # approval detail row 02 keeps this command longer than the visible review window # approval detail row 03 keeps this command longer than the visible review window # approval detail row 04 keeps this command longer than the visible review window # approval detail row 05 keeps this command longer than the visible review window # approval detail row 06 keeps this command longer than the visible review window",
           "assertions": {
             "[approval]": true,
             "bash": true,
@@ -480,13 +481,13 @@
           "file": "11-long-bash-running-followup-edited.png",
           "scenario": "approval allow",
           "source": "Chrome headless rendering xterm.js fed with raw bytes read from the real binary PTY",
-          "screen_excerpt": "Interactive session started. Type 'exit' to quit. > ⚠ IME (input method editor) detected. CJK input may not work correctly in raw mode. Press Ctrl+\\ to switch to cooked mode for better IME support. > 执行本地模拟器提交的多阶段 shell 命令。 ▼ │ ⠏ [tool] bash(command=set -e ⠏ working... > followup> During the active run, keep xterm colors stable and inspect 日志窗口。█ fixture-model | turn #1 | interact | chat",
+          "screen_excerpt": "Interactive session started. Type 'exit' to quit. > \u26a0 IME (input method editor) detected. CJK input may not work correctly in raw mode. Press Ctrl+\\ to switch to cooked mode for better IME support. > \u6267\u884c\u672c\u5730\u6a21\u62df\u5668\u63d0\u4ea4\u7684\u591a\u9636\u6bb5 shell \u547d\u4ee4\u3002 \u25bc \u2502 \u280f [tool] bash(command=set -e \u280f working... > followup> During the active run, keep xterm colors stable and inspect \u65e5\u5fd7\u7a97\u53e3\u3002\u2588 fixture-model | turn #1 | interact | chat",
           "assertions": {
             "working...": true,
             "[tool] bash": true,
-            "│": true,
+            "\u2502": true,
             "followup>": true,
-            "During the active run, keep xterm colors stable and inspect 日志窗口。": true
+            "During the active run, keep xterm colors stable and inspect \u65e5\u5fd7\u7a97\u53e3\u3002": true
           },
           "terminal": {
             "viewport_width_px": 1440,
@@ -505,9 +506,9 @@
           "file": "12-long-bash-complete.png",
           "scenario": "approval allow",
           "source": "Chrome headless rendering xterm.js fed with raw bytes read from the real binary PTY",
-          "screen_excerpt": "Interactive session started. Type 'exit' to quit. > ⚠ IME (input method editor) detected. CJK input may not work correctly in raw mode. Press Ctrl+\\ to switch to cooked mode for better IME support. > 执行本地模拟器提交的多阶段 shell 命令。 │ ✓ [tool] bash(command=set -e ▼ AI: 本地模拟器确认三阶段 shell 命令全部完成，并收到 follow-up 指令。 fixture-model | turn #1 | interact | chat Tokens: unknown | Cost: unknown >",
+          "screen_excerpt": "Interactive session started. Type 'exit' to quit. > \u26a0 IME (input method editor) detected. CJK input may not work correctly in raw mode. Press Ctrl+\\ to switch to cooked mode for better IME support. > \u6267\u884c\u672c\u5730\u6a21\u62df\u5668\u63d0\u4ea4\u7684\u591a\u9636\u6bb5 shell \u547d\u4ee4\u3002 \u2502 \u2713 [tool] bash(command=set -e \u25bc AI: \u672c\u5730\u6a21\u62df\u5668\u786e\u8ba4\u4e09\u9636\u6bb5 shell \u547d\u4ee4\u5168\u90e8\u5b8c\u6210\uff0c\u5e76\u6536\u5230 follow-up \u6307\u4ee4\u3002 fixture-model | turn #1 | interact | chat Tokens: unknown | Cost: unknown >",
           "assertions": {
-            "本地模拟器确认三阶段 shell 命令全部完成，并收到 follow-up 指令。": true
+            "\u672c\u5730\u6a21\u62df\u5668\u786e\u8ba4\u4e09\u9636\u6bb5 shell \u547d\u4ee4\u5168\u90e8\u5b8c\u6210\uff0c\u5e76\u6536\u5230 follow-up \u6307\u4ee4\u3002": true
           },
           "terminal": {
             "viewport_width_px": 1440,
@@ -563,32 +564,17 @@
         ],
         "followup_received": true,
         "followup_messages": [
-          "During the active run, keep xterm colors stable and inspect 日志窗口。"
+          "During the active run, keep xterm colors stable and inspect \u65e5\u5fd7\u7a97\u53e3\u3002"
         ]
       },
       "pty_transcript": {
         "file": "approval-allow.pty.ansi",
-        "bytes": 9669,
-        "sha256": "9f2c27962ac8f9bea2cbd77a0a8e5b988167e825d462faf0c302a476217cfdca",
+        "bytes": 9478,
+        "sha256": "84c95f2dfb23e93fa785f1363588fada7ebed251bd68517b48c7a6a32da1fde3",
         "source": "raw bytes read from the real CLI PTY before xterm.js rendering"
       }
     }
   ],
   "failure": null,
-  "retained_workdir": "/private/tmp/go-cli-terminal-e2e-dpnug29k",
-  "post_run_validation": {
-    "applied_after_e2e_capture": true,
-    "change_scope": "harness setup only: default scratch parent now uses tempfile.gettempdir(); --scratch-root overrides it",
-    "validated_scratch_root": "/private/var/folders/_l/f743070s7yj3qk47q2krwqt00000gn/T",
-    "checks": [
-      "python3 -m py_compile scripts/e2e_terminal/run.py",
-      "node --check scripts/e2e_terminal/renderer.cjs",
-      "scripts/e2e_terminal/run.py --help exposes --scratch-root",
-      "created and removed a smoke run directory beneath tempfile.gettempdir()"
-    ],
-    "full_e2e_repeated": false,
-    "application_binary_rebuilt": false,
-    "source_working_tree_delta_sha256_after_setup_change": "3ba4b41e766d17ec3c27493cd05faa95bda4e82654b62c419c49ab28375242a2",
-    "platform_note": "macOS startup smoke passed; Linux is intended but not runtime-tested here"
-  }
+  "retained_workdir": "/private/var/folders/_l/f743070s7yj3qk47q2krwqt00000gn/T/go-cli-terminal-e2e-0s7j8id9"
 }
