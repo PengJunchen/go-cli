@@ -447,17 +447,25 @@ func TestE2EInteractive_FullPipeline(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- app.Run(ctx) }()
 
-	// Wait for the stream to complete.
+	// Runtime completion can precede the TUI consuming the final events.
+	// Wait for the model to process source closure before requesting shutdown.
 	result, streamErr := waitForStream(ctx, stream)
-	waitForTUIEvents(app, 5, 2*time.Second)
+	var sourceErr error
+	select {
+	case <-app.EventSourceDone():
+	case <-ctx.Done():
+		sourceErr = ctx.Err()
+	}
 	app.Quit()
 
 	select {
-	case <-errCh:
+	case runErr := <-errCh:
+		require.NoError(t, runErr)
 	case <-time.After(3 * time.Second):
 		t.Fatal("app did not shut down in time")
 	}
 
+	require.NoError(t, sourceErr, "TUI did not process event-source closure")
 	require.NoError(t, streamErr)
 	assert.Equal(t, "Analysis complete. The result is 42.", result.Content)
 
@@ -470,8 +478,8 @@ func TestE2EInteractive_FullPipeline(t *testing.T) {
 	// Verify LLM was called 3 times.
 	assert.Equal(t, 3, llmServer.CallCount())
 
-	// Verify the TUI processed all events.
-	// Expected events: message, tool_call, tool_result, message, tool_call, tool_result, message, done = 8+
+	// Keep a count sanity check; source closure, not this minimum, establishes
+	// that the TUI processed the complete event stream.
 	assert.GreaterOrEqual(t, app.EventsProcessed(), int64(5), "should process multiple events across the pipeline")
 
 	// Verify the view contains key content.
