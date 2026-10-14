@@ -284,28 +284,49 @@ func TestSubAgentWaitReturnsResult(t *testing.T) {
 func TestSubAgentStateTransitions(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	// Idle -> Running -> Completed.
-	sub := newTestSubAgent("worker")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	releaseRunner := func() { once.Do(func() { close(release) }) }
+	runner := &heldInboxSubAgentRunner{started: started, release: release}
+
+	// Idle -> Running -> Completed. Hold the runner until the Running
+	// assertion has observed the live state, independently of scheduling.
+	sub := mustSubAgent(NewDefaultSubAgent(SubAgentConfig{Name: "worker"},
+		WithSubAgentRunner(func(SubAgentConfig) subAgentRunner { return runner })))
 	assert.Equal(t, SubAgentIdle, sub.State())
-	_, err := sub.Run(context.Background(), "p")
+	_, err := sub.Run(ctx, "p")
 	require.NoError(t, err)
+	defer func() {
+		releaseRunner()
+		_, _ = sub.Wait(ctx)
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("runner did not reach the live barrier")
+	}
 	assert.Equal(t, SubAgentRunning, sub.State())
-	_, werr := sub.Wait(context.Background())
+	releaseRunner()
+	_, werr := sub.Wait(ctx)
 	require.NoError(t, werr)
 	assert.Equal(t, SubAgentCompleted, sub.State())
 
 	// A second Run on a completed sub-agent is rejected.
-	_, err = sub.Run(context.Background(), "again")
+	_, err = sub.Run(ctx, "again")
 	require.Error(t, err)
 
 	// Idle -> Running -> Failed when the runner errors (blocking ctx cancel
 	// without an explicit Interrupt yields a failed terminal state).
 	blocker := mustSubAgent(NewDefaultSubAgent(SubAgentConfig{Name: "b"}, WithSubAgentRunner(blockingFactory)))
-	rctx, rcancel := context.WithCancel(context.Background())
+	rctx, rcancel := context.WithCancel(ctx)
+	defer rcancel()
 	_, err = blocker.Run(rctx, "p")
 	require.NoError(t, err)
 	rcancel()
-	_, err = blocker.Wait(context.Background())
+	_, err = blocker.Wait(ctx)
 	require.Error(t, err)
 	assert.Equal(t, SubAgentFailed, blocker.State())
 }
