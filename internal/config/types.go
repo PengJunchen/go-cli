@@ -329,7 +329,15 @@ type WebSearchConfig struct {
 type ProductionConfig struct {
 	CircuitBreaker CircuitBreakerConfig `json:"circuit_breaker"`
 	LoopDetector   LoopDetectorConfig   `json:"loop_detector"`
+	ModelTimeout   ModelTimeoutConfig   `json:"model_timeout"`
 	Audit          AuditConfig          `json:"audit"`
+}
+
+// ModelTimeoutConfig overrides the model middleware's per-request total and
+// stream-idle budgets. Empty values preserve the middleware defaults.
+type ModelTimeoutConfig struct {
+	Total      string `json:"total"`
+	StreamIdle string `json:"stream_idle"`
 }
 
 // AuditConfig controls the audit log that records tool calls and their

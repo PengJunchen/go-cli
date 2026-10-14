@@ -671,13 +671,15 @@ type assembleState struct {
 	thinkingLevel llm.ThinkingLevel
 
 	// Model section
-	model         llm.BaseChatModel
-	modelInfo     llm.ModelInfo
-	modelResolver *cliModelResolver
-	modelCycler   *llm.ModelCycler
-	modelRegistry llm.ModelRegistry
-	smallModel    llm.BaseChatModel
-	modelSelector *llm.DefaultModelSelector
+	model                  llm.BaseChatModel
+	modelInfo              llm.ModelInfo
+	modelResolver          *cliModelResolver
+	modelCycler            *llm.ModelCycler
+	modelRegistry          llm.ModelRegistry
+	smallModel             llm.BaseChatModel
+	modelSelector          *llm.DefaultModelSelector
+	modelTotalTimeout      time.Duration
+	modelStreamIdleTimeout time.Duration
 
 	// Tracing section
 	tracer *tracing.Tracer
@@ -790,6 +792,13 @@ func (s *assembleState) runCleanup() error {
 // assembleModel builds the primary model, ModelCycler, ModelRegistry, and small
 // model. It registers the model provider and appends model cleanups.
 func (s *assembleState) assembleModel() error {
+	totalTimeout, streamIdleTimeout, timeoutConfigured, timeoutErr := resolveModelTimeouts(s.rc)
+	if timeoutErr != nil {
+		return fmt.Errorf("assemble: resolve production model timeouts: %w", timeoutErr)
+	}
+	s.modelTotalTimeout = totalTimeout
+	s.modelStreamIdleTimeout = streamIdleTimeout
+
 	modelResolver, err := newCLIModelResolver(s.rc, s.providerName, true, s.modelName)
 	if err != nil {
 		return fmt.Errorf("assemble: resolve model providers: %w", err)
@@ -862,6 +871,9 @@ func (s *assembleState) assembleModel() error {
 		if smErr != nil {
 			s.logger.Warn("assemble_small_model_failed", "err", smErr, "model", s.rc.SmallModel.Model)
 		} else {
+			if timeoutConfigured {
+				sm = newConfiguredTimeoutMiddleware(totalTimeout, streamIdleTimeout).WrapModel(sm)
+			}
 			s.smallModel = sm
 			if smallCleanup != nil {
 				s.smallModelCleanup = smallCleanup
@@ -1344,6 +1356,41 @@ func (s *assembleState) assembleApproval() error {
 	return nil
 }
 
+const maxConfiguredModelTimeout = 24 * time.Hour
+
+func resolveModelTimeouts(rc *config.Config) (total, streamIdle time.Duration, explicitlyConfigured bool, err error) {
+	total = 30 * time.Second
+	streamIdle = 10 * time.Second
+	if rc == nil {
+		return total, streamIdle, false, nil
+	}
+	timeoutConfig := rc.Production.ModelTimeout
+	explicitlyConfigured = timeoutConfig.Total != "" || timeoutConfig.StreamIdle != ""
+	if timeoutConfig.Total != "" {
+		total, err = time.ParseDuration(timeoutConfig.Total)
+		if err != nil || total <= 0 || total > maxConfiguredModelTimeout {
+			return 0, 0, explicitlyConfigured, fmt.Errorf("production.model_timeout.total must be a duration greater than 0 and no more than 24h")
+		}
+	}
+	if timeoutConfig.StreamIdle != "" {
+		streamIdle, err = time.ParseDuration(timeoutConfig.StreamIdle)
+		if err != nil || streamIdle <= 0 || streamIdle > maxConfiguredModelTimeout {
+			return 0, 0, explicitlyConfigured, fmt.Errorf("production.model_timeout.stream_idle must be a duration greater than 0 and no more than 24h")
+		}
+	}
+	if streamIdle > total {
+		return 0, 0, explicitlyConfigured, fmt.Errorf("production.model_timeout.stream_idle must be no greater than total")
+	}
+	return total, streamIdle, explicitlyConfigured, nil
+}
+
+func newConfiguredTimeoutMiddleware(total, streamIdle time.Duration) *llm.TimeoutModelMiddleware {
+	return llm.NewTimeoutModelMiddleware(
+		llm.WithTotalTimeout(total),
+		llm.WithStreamChunkTimeout(streamIdle),
+	)
+}
+
 // assembleProductionResilience wires retry, cost tracking, circuit breaker,
 // idempotent cache, audit log, and telemetry. It installs only the explicit
 // prepared execution stages on the registry assembled by assembleApproval.
@@ -1367,7 +1414,7 @@ func (s *assembleState) assembleProductionResilience() error {
 	s.modelChain = llm.NewStandardMiddlewareChain(
 		llm.NewFailoverModelMiddleware(),
 		llm.NewRetryModelMiddleware(llm.WithRetryPolicy(providerRetryPolicy)),
-		llm.NewTimeoutModelMiddleware(),
+		newConfiguredTimeoutMiddleware(s.modelTotalTimeout, s.modelStreamIdleTimeout),
 		llm.NewSanitizeModelMiddleware(),
 		llm.NewLoopDetectionModelMiddleware(),
 		llm.NewValidateModelMiddleware(),

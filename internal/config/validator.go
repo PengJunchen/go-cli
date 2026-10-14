@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
@@ -37,8 +38,9 @@ func NewDefaultValidator() Validator {
 
 // minTemperature and maxTemperature bound the allowed model temperature.
 const (
-	minTemperature = 0.0
-	maxTemperature = 2.0
+	minTemperature  = 0.0
+	maxTemperature  = 2.0
+	maxModelTimeout = 24 * time.Hour
 )
 
 func validTemperature(value float64) bool {
@@ -106,6 +108,7 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 	if !contains(validLoopDetectorDispositions, cfg.Production.LoopDetector.Disposition) {
 		errs = append(errs, "invalid production.loop_detector disposition (supported: warn, steer, terminate)")
 	}
+	validateProductionModelTimeout(cfg.Production.ModelTimeout, &errs)
 
 	// LSP config: when ServerCommand is non-empty, WorkspaceRoot (if set)
 	// must be an existing directory.
@@ -207,6 +210,34 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 		return errors.New(strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+func validateProductionModelTimeout(cfg ModelTimeoutConfig, errs *[]string) {
+	total := 30 * time.Second
+	idle := 10 * time.Second
+	totalValid := true
+	idleValid := true
+	if cfg.Total != "" {
+		parsed, err := time.ParseDuration(cfg.Total)
+		if err != nil || parsed <= 0 || parsed > maxModelTimeout {
+			*errs = append(*errs, "production.model_timeout.total must be a duration greater than 0 and no more than 24h")
+			totalValid = false
+		} else {
+			total = parsed
+		}
+	}
+	if cfg.StreamIdle != "" {
+		parsed, err := time.ParseDuration(cfg.StreamIdle)
+		if err != nil || parsed <= 0 || parsed > maxModelTimeout {
+			*errs = append(*errs, "production.model_timeout.stream_idle must be a duration greater than 0 and no more than 24h")
+			idleValid = false
+		} else {
+			idle = parsed
+		}
+	}
+	if totalValid && idleValid && idle > total {
+		*errs = append(*errs, "production.model_timeout.stream_idle must be no greater than total")
+	}
 }
 
 func contains(all []string, target string) bool {

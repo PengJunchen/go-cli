@@ -287,6 +287,9 @@ func loadFromEnv(prefix string) *Config {
 	cfg.Compaction.Strategy = os.Getenv(envKey(prefix, "COMPACTION_STRATEGY"))
 	cfg.Compaction.MaxTokens = parseIntEnv(envKey(prefix, "COMPACTION_MAX_TOKENS"))
 
+	cfg.Production.ModelTimeout.Total = os.Getenv(envKey(prefix, "PRODUCTION_MODEL_TIMEOUT_TOTAL"))
+	cfg.Production.ModelTimeout.StreamIdle = os.Getenv(envKey(prefix, "PRODUCTION_MODEL_TIMEOUT_STREAM_IDLE"))
+
 	// LSP server command: space-separated string (e.g. "gopls serve").
 	if cmd := os.Getenv(envKey(prefix, "LSP_SERVER_COMMAND")); cmd != "" {
 		cfg.LSP.ServerCommand = parseCommandString(cmd)
