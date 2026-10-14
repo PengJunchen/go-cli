@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"net/http"
@@ -276,4 +277,125 @@ func TestFiniteMultimodalReserveIsBoundedInPreparedLoopPlan(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body.Messages[1].Content, &imageBlocks))
 	require.Len(t, imageBlocks, 2, "the prepared plan and actual request should include both image parts")
 	require.Greater(t, len(requestBody), 0)
+}
+
+func TestCompactPreparedMessagesReservesProviderMessageMetadata(t *testing.T) {
+	messages := []llm.Message{{Role: llm.RoleSystem, Content: "rules"}}
+	for index := 0; index < 100; index++ {
+		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: "short user input"})
+	}
+	messages = append(messages, llm.Message{Role: llm.RoleUser, Content: "current request"})
+	estimator := compaction.NewHeuristicTokenEstimator()
+	const budget = 400
+	compacted, current, err := compactPreparedMessages(context.Background(), messages, nil, nil,
+		compaction.NewTruncatingCompactor(), estimator, budget, 0, len(messages)-1)
+	require.NoError(t, err)
+	require.Equal(t, messages[len(messages)-1], compacted[current], "current user input must survive unchanged")
+	tokens, _, err := estimateProviderMessages(compacted, estimator, 0)
+	require.NoError(t, err)
+	require.LessOrEqual(t, tokens, budget, "compaction must leave room for per-message provider metadata")
+}
+
+func TestPreparedCompactionDropsOversizedOldMetadataAtExactBoundary(t *testing.T) {
+	system := llm.Message{Role: llm.RoleSystem, Content: "rules"}
+	droppedCall := llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{
+		ID: "drop-call", Name: "write", Args: map[string]any{"path": "old"},
+	}}}
+	droppedReceipt := llm.Message{Role: llm.RoleTool, Name: "write", ToolCallID: "drop-call", Content: "old result",
+		Runtime: llm.RuntimeMetadata{ReceiptOutcome: "success"}}
+	keptCall := llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{
+		ID: "keep-call", Name: "write", Args: map[string]any{"path": "current"},
+	}}}
+	keptReceipt := llm.Message{Role: llm.RoleTool, Name: "write", ToolCallID: "keep-call", Content: "kept result",
+		Runtime: llm.RuntimeMetadata{ReceiptOutcome: "success"}}
+	current := llm.Message{Role: llm.RoleUser, Content: "current input"}
+	messages := []llm.Message{system, droppedCall, droppedReceipt, keptCall, keptReceipt, current}
+	before := make([]llm.Message, len(messages))
+	for i := range messages {
+		before[i] = cloneLLMMessage(messages[i])
+	}
+	estimator := oneTokenPerNonEmptyText{}
+	const budget = 12
+
+	for _, test := range []struct {
+		name    string
+		compact func() ([]llm.Message, int, error)
+	}{
+		{
+			name: "prepared request",
+			compact: func() ([]llm.Message, int, error) {
+				return compactPreparedMessages(context.Background(), messages, nil, nil,
+					compaction.NewTruncatingCompactor(), estimator, budget, 0, len(messages)-1)
+			},
+		},
+		{
+			name: "provider overflow recovery",
+			compact: func() ([]llm.Message, int, error) {
+				return compactPreparedOverflowRequest(context.Background(), messages, len(messages)-1, nil,
+					compaction.NewTruncatingCompactor(), estimator, budget)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			compacted, currentIndex, err := test.compact()
+			require.NoError(t, err)
+			require.Equal(t, len(compacted)-1, currentIndex)
+			require.Equal(t, []llm.Message{system, keptCall, keptReceipt, current}, compacted,
+				"keep the exact-fit latest tool-call group and current input, while dropping old metadata")
+			tokens, _, err := estimateProviderMessages(compacted, estimator, 0)
+			require.NoError(t, err)
+			require.Equal(t, budget, tokens, "the retained provider-visible messages should fit exactly")
+			require.Equal(t, before, messages, "compaction must not mutate the original request")
+		})
+	}
+}
+
+func TestPreparedCompactionMessageBudgetValidatesMetadataWithoutReservingIt(t *testing.T) {
+	messages := []llm.Message{{
+		Role: llm.RoleAssistant, Name: "named sender", ToolCallID: "receipt-id",
+		Content:       "body must not count as metadata",
+		ContentBlocks: []llm.ContentBlock{{Type: "image_url", ImageURL: &llm.ImageURL{URL: "https://example.invalid/image"}}},
+		ToolCalls:     []llm.ToolCall{{ID: "call-id", Name: "tool-name", Args: map[string]any{"argument": "value"}}},
+	}}
+	before := cloneLLMMessage(messages[0])
+	estimator := oneTokenPerNonEmptyText{}
+	// The compactor counts provider-visible role/name/ID/argument metadata. Only
+	// the separate multimodal reserve is removed from its budget, exactly once.
+	budget, err := preparedCompactionMessageBudget(messages, estimator, 30, 7)
+	require.NoError(t, err)
+	require.Equal(t, 23, budget)
+	require.Equal(t, before, messages[0])
+	lessBudget, err := preparedCompactionMessageBudget(messages, estimator, 12, 7)
+	require.NoError(t, err, "history metadata must not be pre-reserved before the compactor can remove it")
+	require.Equal(t, 5, lessBudget, "the multimodal reserve must be subtracted once")
+}
+
+type requestMetadataEstimator struct {
+	tokens int
+	err    error
+}
+
+func (estimator requestMetadataEstimator) Estimate(string) (int, error) {
+	return estimator.tokens, estimator.err
+}
+
+func TestPreparedCompactionMessageBudgetFailsClosedOnInvalidEstimates(t *testing.T) {
+	failure := errors.New("estimator failed")
+	for _, test := range []struct {
+		name      string
+		estimator compaction.TokenEstimator
+	}{
+		{"missing", nil},
+		{"negative", requestMetadataEstimator{tokens: -1}},
+		{"overflow", requestMetadataEstimator{tokens: math.MaxInt}},
+		{"failed", requestMetadataEstimator{err: failure}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := preparedCompactionMessageBudget([]llm.Message{{Role: llm.RoleUser, Name: "sender"}}, test.estimator, 100, 0)
+			require.ErrorIs(t, err, ErrRequestEnvelopeRejected)
+			if test.name == "failed" {
+				require.ErrorIs(t, err, failure)
+			}
+		})
+	}
 }

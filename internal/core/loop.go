@@ -2433,6 +2433,10 @@ func compactPreparedOverflowRequest(
 	if compactor == nil || estimator == nil || messageBudget <= 0 {
 		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow recovery requires a positive prepared message budget and compactor"}
 	}
+	textBudget, err := preparedCompactionMessageBudget(messages, estimator, messageBudget, 0)
+	if err != nil {
+		return nil, currentSubmissionIndex, err
+	}
 	items := messagesToTurnItems(messages)
 	if currentSubmissionIndex < 0 || currentSubmissionIndex >= len(items) {
 		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "current submission cannot be preserved during overflow recovery"}
@@ -2458,7 +2462,7 @@ func compactPreparedOverflowRequest(
 			return nil, currentSubmissionIndex, err
 		}
 	}
-	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), messageBudget, estimator)
+	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), textBudget, estimator)
 	if err != nil {
 		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow request compaction failed", Cause: err}
 	}

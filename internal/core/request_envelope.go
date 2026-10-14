@@ -442,6 +442,27 @@ func estimateProviderToolSchemas(tools []llm.ToolDefinition, estimator compactio
 	return tokens, nil
 }
 
+// preparedCompactionMessageBudget validates provider-visible metadata estimates
+// and subtracts only the configured multimodal reserve. The compactor estimates
+// message metadata itself; subtracting the same metadata again here would
+// double-reserve it. The final envelope check still validates the actual
+// compacted output, including custom summaries.
+func preparedCompactionMessageBudget(messages []llm.Message, estimator compaction.TokenEstimator, messageBudget, multimodalTokens int) (int, error) {
+	if estimator == nil || messageBudget < 0 || multimodalTokens < 0 || multimodalTokens > messageBudget {
+		return 0, &RequestEnvelopeError{Reason: "compaction message budget or estimator is unavailable"}
+	}
+	metadata := append([]llm.Message(nil), messages...)
+	for index := range metadata {
+		metadata[index].Content = ""
+		metadata[index].ContentBlocks = nil
+	}
+	_, _, err := estimateProviderMessages(metadata, estimator, 0)
+	if err != nil {
+		return 0, &RequestEnvelopeError{Reason: "compaction message metadata estimate failed", Cause: err}
+	}
+	return messageBudget - multimodalTokens, nil
+}
+
 func compactPreparedMessages(
 	ctx context.Context,
 	messages []llm.Message,
@@ -453,9 +474,9 @@ func compactPreparedMessages(
 	multimodalTokens int,
 	currentSubmissionIndex int,
 ) ([]llm.Message, int, error) {
-	textBudget := messageBudget - multimodalTokens
-	if textBudget < 0 {
-		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "multimodal reserve exceeds the available message budget"}
+	textBudget, err := preparedCompactionMessageBudget(messages, estimator, messageBudget, multimodalTokens)
+	if err != nil {
+		return nil, currentSubmissionIndex, err
 	}
 	if consumer != nil {
 		return preflightDurableRequestAt(ctx, messages, consumer, compactor, estimator, textBudget, currentSubmissionIndex)
@@ -467,7 +488,7 @@ func compactPreparedMessages(
 		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "current submission cannot be preserved during compaction"}
 	}
 	items := messagesToTurnItems(messages)
-	items, err := compaction.NormalizeToolCallGroups(items)
+	items, err = compaction.NormalizeToolCallGroups(items)
 	if err != nil {
 		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "tool-call groups cannot be compacted safely", Cause: err}
 	}

@@ -23,6 +23,8 @@ extend-ignore-re = [
 ]
 
 [default.extend-identifiers]
+# Plural file-format abbreviation, not the misspelled word PN.
+PNGs = "PNGs"
 # Short variable names in Go code that trigger false positives
 typ = "typ"
 ue = "ue"
@@ -30,3 +32,14 @@ ue = "ue"
 [default.extend-words]
 # Valid variant used in provider documentation.
 unparseable = "unparseable"
+
+# Preserve partial terminal writes in these two immutable QA captures only.
+[type.qa-pty-fragments]
+extend-glob = ["pty-followup-space-red.jsonl", "pty-preview-marker-false-positive-red.jsonl"]
+extend-ignore-re = [
+  '''report the resul\\\\r\\\\x1b\[J\\u003e ''',
+  '''printf 'FO\\\\x1b\[K\\\\r\\\\nLLOWUP_SIDE_EFFECT''',
+  '''wait fo\\\\r\\\\x1b\[J\\u003e ''',
+  '''⠹ workin"\}''',
+  '''\[tool\] bash\(comman"\}''',
+]
