@@ -316,6 +316,13 @@ func TestRunTimeoutReturnsWhenDescendantHoldsPipes(t *testing.T) {
 	if !processGroupsSupported() {
 		t.Skip("owned process-group cleanup is supported only on Darwin and Linux")
 	}
+	const (
+		commandTimeout    = 2 * time.Second
+		waitDelay         = 3 * time.Second
+		cleanupBudget     = 500 * time.Millisecond
+		schedulerOverhead = 2500 * time.Millisecond
+		outerBound        = commandTimeout + waitDelay + cleanupBudget + schedulerOverhead
+	)
 	module := t.TempDir()
 	pidFile := filepath.Join(t.TempDir(), "holder.pid")
 	t.Cleanup(func() { cleanupDescendantFromFile(pidFile) })
@@ -327,21 +334,24 @@ func TestRunTimeoutReturnsWhenDescendantHoldsPipes(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	started := time.Now()
-	code := runWithCaptureLimits([]string{"-dir", module, "-go-command", fakeGo, "-timeout=500ms", "-package=fixture"}, &stdout, &stderr, gatecapture.Limits{StdoutBytes: 1024, StderrBytes: 1024, WaitDelay: 750 * time.Millisecond})
+	code := runWithCaptureLimits([]string{"-dir", module, "-go-command", fakeGo, "-timeout=" + commandTimeout.String(), "-package=fixture"}, &stdout, &stderr, gatecapture.Limits{StdoutBytes: 1024, StderrBytes: 1024, WaitDelay: waitDelay})
 	elapsed := time.Since(started)
 	markerExists := false
 	if _, err := os.Stat(pidFile); err == nil {
 		markerExists = true
 	}
 	t.Logf("timeout fixture evidence: elapsed=%s, descendant PID marker created=%t, stdout=%q, stderr=%q", elapsed, markerExists, stdout.String(), stderr.String())
-	// The command timeout remains 500ms. Cancellation can then use the owned
-	// process-group cleanup budget (up to 500ms), while WaitDelay bounds inherited
-	// pipes. Allow two seconds for those bounded stages plus scheduler overhead.
-	if elapsed > 2*time.Second {
-		t.Fatalf("test-gate run took %s with a 500ms timeout and bounded cleanup; stderr=%q", elapsed, stderr.String())
+	// Keep startup scheduling room before the timeout, then allow WaitDelay, the
+	// gate's 500ms process-group cleanup, and ordinary scheduler overhead. The
+	// fake parent still exits immediately after launching its pipe-holding child.
+	if elapsed > outerBound {
+		t.Fatalf("test-gate run took %s, exceeding timeout + WaitDelay + cleanup + scheduling budget %s; stderr=%q", elapsed, outerBound, stderr.String())
 	}
-	if code != 124 || !strings.Contains(stderr.String(), "timed out after 500ms") {
-		t.Fatalf("runWithCaptureLimits() = %d, want bounded timeout 124; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	if code != 124 || !strings.Contains(stderr.String(), "timed out after "+commandTimeout.String()) {
+		t.Fatalf("runWithCaptureLimits() = %d, want timeout 124 after %s; stdout=%q stderr=%q", code, commandTimeout, stdout.String(), stderr.String())
+	}
+	if !markerExists {
+		t.Fatalf("fake command did not create descendant PID marker before the gate returned; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 	assertDescendantStoppedFromFile(t, pidFile)
 }
