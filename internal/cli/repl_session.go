@@ -700,7 +700,7 @@ func (s *REPLSession) readInput() error {
 			if cmd.Name == "exit" {
 				break
 			}
-			if s.unknownCancelRecovery != nil && !allowedDuringUnknownCancellation(cmd) {
+			if s.unknownCancelRecovery != nil && !allowedDuringUnknownCancellation(cmd, s.slashReg) {
 				printUnknownCancellationFence(s.out)
 				continue
 			}
@@ -1240,12 +1240,29 @@ func (s *REPLSession) startNewSessionAfterUnknownCancellation(ctx context.Contex
 	return snapshot.SessionID, nil
 }
 
-func allowedDuringUnknownCancellation(command session.SlashCommand) bool {
-	switch command.Name {
-	case "help":
-		return true
-	case "session":
-		return len(command.Args) == 1 && (command.Args[0] == "pending" || command.Args[0] == "new")
+func allowedDuringUnknownCancellation(command session.SlashCommand, registry *SlashCommandRegistry) bool {
+	if registry == nil {
+		return false
+	}
+	registered, ok := registry.Lookup(command.Name)
+	if !ok {
+		return false
+	}
+	switch handler := registered.(type) {
+	case *HelpHandler:
+		return handler != nil
+	case *SessionHandler:
+		if handler == nil || handler.mode != sessionCommandModeDurable || len(command.Args) != 1 {
+			return false
+		}
+		switch command.Args[0] {
+		case "pending":
+			return true
+		case "new":
+			return handler.recoveryNewSession != nil
+		default:
+			return false
+		}
 	default:
 		return false
 	}
