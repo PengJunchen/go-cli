@@ -257,6 +257,34 @@ func newPreparedConsumerScopedSearchRegistry(t *testing.T, root, name string) *t
 	return registry
 }
 
+func newPreparedConsumerDefaultSearchRegistry(t *testing.T, name string) *tools.MiddlewareToolRegistry {
+	t.Helper()
+	ctx := context.Background()
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	deferred := tools.NewDeferredToolRegistryAdapter(base)
+	require.NoError(t, tools.RegisterDefaults(ctx, deferred, tools.WithRegisteredBuiltinWhitelist([]string{name})))
+	registry := tools.NewMiddlewareToolRegistry(deferred)
+	require.NoError(t, registry.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+	return registry
+}
+
+func newPreparedConsumerOrdinaryToolRegistry(t *testing.T, def tools.ToolDefinition) *tools.MiddlewareToolRegistry {
+	t.Helper()
+	ctx := context.Background()
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	deferred := tools.NewDeferredToolRegistryAdapter(base)
+	require.NoError(t, deferred.Register(ctx, def))
+	registry := tools.NewMiddlewareToolRegistry(deferred)
+	require.NoError(t, registry.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+	return registry
+}
+
 type panicPreparedInvocation struct{ tools.PreparedInvocation }
 
 func (panicPreparedInvocation) Dispatch(context.Context) (*tools.ToolResult, error) {
@@ -533,7 +561,7 @@ func TestRunCommitConsumerStopsAfterPreparedActionWithoutCompletionProof(t *test
 	}}
 	agent := NewAgentImpl("durable-proofless", NewLoopAgent(
 		WithLLM(model),
-		WithTools(newPreparedConsumerRegistry(t, "grep")),
+		WithTools(newPreparedConsumerOrdinaryToolRegistry(t, tools.NewGrepTool())),
 	))
 	owner := newRunOwner(context.Background(), nil, RunClaim{ID: "run-consumer-proofless"}, nil)
 	owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "session-1", WorkspaceID: "workspace-1"})
@@ -552,16 +580,21 @@ func TestRunCommitConsumerStopsAfterPreparedActionWithoutCompletionProof(t *test
 	require.Equal(t, 1, model.idx, "a nil completion proof keeps the dispatch marker unresolved and stops the provider")
 }
 
-func TestRunCommitConsumerResolvesScopedSearchAfterCompletionProof(t *testing.T) {
+func TestRunCommitConsumerResolvesSearchAfterCompletionProof(t *testing.T) {
 	for _, testCase := range []struct {
 		name       string
 		toolName   string
 		helperMode bool
+		unscoped   bool
 	}{
-		{name: "grep pure-Go fallback", toolName: "grep"},
-		{name: "grep managed helper", toolName: "grep", helperMode: true},
-		{name: "find pure-Go fallback", toolName: "find"},
-		{name: "find managed helper", toolName: "find", helperMode: true},
+		{name: "scoped grep pure-Go fallback", toolName: "grep"},
+		{name: "scoped grep managed helper", toolName: "grep", helperMode: true},
+		{name: "scoped find pure-Go fallback", toolName: "find"},
+		{name: "scoped find managed helper", toolName: "find", helperMode: true},
+		{name: "default unscoped grep pure-Go fallback", toolName: "grep", unscoped: true},
+		{name: "default unscoped grep managed helper", toolName: "grep", helperMode: true, unscoped: true},
+		{name: "default unscoped find pure-Go fallback", toolName: "find", unscoped: true},
+		{name: "default unscoped find managed helper", toolName: "find", helperMode: true, unscoped: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -588,9 +621,13 @@ func TestRunCommitConsumerResolvesScopedSearchAfterCompletionProof(t *testing.T)
 				{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "search-1", Name: testCase.toolName, Args: args}}},
 				{Role: llm.RoleAssistant, Content: "search completed"},
 			}}
+			registry := newPreparedConsumerScopedSearchRegistry(t, root, testCase.toolName)
+			if testCase.unscoped {
+				registry = newPreparedConsumerDefaultSearchRegistry(t, testCase.toolName)
+			}
 			agent := NewAgentImpl("durable-scoped-search", NewLoopAgent(
 				WithLLM(model),
-				WithTools(newPreparedConsumerScopedSearchRegistry(t, root, testCase.toolName)),
+				WithTools(registry),
 			))
 			owner := newRunOwner(context.Background(), nil, RunClaim{ID: "run-consumer-scoped-search"}, nil)
 			owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "session-1", WorkspaceID: "workspace-1"})
