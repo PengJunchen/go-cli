@@ -1,6 +1,9 @@
 package core
 
-import "time"
+import (
+	"reflect"
+	"time"
+)
 
 // TurnStatus describes the lifecycle state of a Turn.
 type TurnStatus int
@@ -99,10 +102,8 @@ func cloneStringAnyMap(input map[string]any) map[string]any {
 	if input == nil {
 		return nil
 	}
-	cloned := make(map[string]any, len(input))
-	for key, value := range input {
-		cloned[key] = cloneProtocolJSONValue(value)
-	}
+	var cloned map[string]any
+	reflect.ValueOf(&cloned).Elem().Set(cloneJSONValue(reflect.ValueOf(input), make(map[jsonCloneIdentity]reflect.Value)))
 	return cloned
 }
 

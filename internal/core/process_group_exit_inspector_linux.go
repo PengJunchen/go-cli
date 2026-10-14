@@ -46,7 +46,7 @@ func currentLinuxHostGeneration() (string, error) {
 	}
 	bootID := strings.TrimSpace(string(data))
 	if bootID == "" {
-		return "", errors.New("Linux boot generation is empty")
+		return "", errors.New("core: Linux boot generation is empty")
 	}
 	return "linux:" + bootID, nil
 }
@@ -56,22 +56,73 @@ func currentLinuxPIDNamespaceToken() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("inspect current PID namespace: %w", err)
 	}
-	initNamespace, err := os.Stat("/proc/1/ns/pid")
+	// NSpid lists IDs from the procfs mount's namespace down to the
+	// process's current namespace. A single entry proves these views agree,
+	// without dereferencing the root-owned init process's namespace link.
+	status, err := os.ReadFile("/proc/self/status")
 	if err != nil {
-		return "", fmt.Errorf("inspect PID namespace init: %w", err)
+		return "", fmt.Errorf("inspect procfs PID namespace view: %w", err)
 	}
-	if !os.SameFile(currentNamespace, initNamespace) {
-		return "", errors.New("procfs view does not match the current PID namespace")
+	if err := validateLinuxProcPIDNamespaceView(status, os.Getpid()); err != nil {
+		return "", err
 	}
 	namespaceStat, ok := currentNamespace.Sys().(*syscall.Stat_t)
 	if !ok {
 		return "", errors.New("current PID namespace has an unsupported stat type")
 	}
-	initStartToken, _, err := readLinuxProcessStat(1)
+	initStat, err := os.ReadFile("/proc/1/stat")
+	if err != nil {
+		return "", fmt.Errorf("inspect PID namespace init: %w", err)
+	}
+	initStartToken, err := parseLinuxInitStartToken(initStat)
 	if err != nil {
 		return "", fmt.Errorf("inspect PID namespace init start token: %w", err)
 	}
 	return fmt.Sprintf("linux:pidns:v1:%x:%x:init:%s", uint64(namespaceStat.Dev), namespaceStat.Ino, initStartToken), nil
+}
+
+// parseLinuxInitStartToken reads only the init lifetime identity. Its process
+// group may belong to an ancestor namespace and therefore appear as zero.
+func parseLinuxInitStartToken(data []byte) (string, error) {
+	contents := string(data)
+	close := strings.LastIndex(contents, ")")
+	if close < 0 {
+		return "", errors.New("init process stat is malformed")
+	}
+	fields := strings.Fields(contents[close+1:])
+	if len(fields) <= 19 {
+		return "", errors.New("init process stat is incomplete")
+	}
+	if _, err := strconv.ParseUint(fields[19], 10, 64); err != nil {
+		return "", fmt.Errorf("inspect init process start token: %w", err)
+	}
+	return "linux:" + fields[19], nil
+}
+
+func validateLinuxProcPIDNamespaceView(status []byte, pid int) error {
+	found := false
+	for _, line := range strings.Split(string(status), "\n") {
+		value, ok := strings.CutPrefix(line, "NSpid:")
+		if !ok {
+			continue
+		}
+		if found {
+			return errors.New("procfs status has duplicate PID namespace identities")
+		}
+		found = true
+		fields := strings.Fields(value)
+		if len(fields) != 1 {
+			return errors.New("procfs view does not match the current PID namespace")
+		}
+		observedPID, err := strconv.Atoi(fields[0])
+		if err != nil || observedPID <= 0 || observedPID != pid {
+			return errors.New("procfs PID namespace identity does not match the current process")
+		}
+	}
+	if !found {
+		return errors.New("procfs PID namespace identity is unavailable")
+	}
+	return nil
 }
 
 func inspectLinuxLeader(pid int) (string, int, string, error) {
@@ -243,7 +294,7 @@ func currentLinuxPIDMax() (int, error) {
 	}
 	pidMax, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil || pidMax <= 0 {
-		return 0, errors.New("Linux PID limit is invalid")
+		return 0, errors.New("core: Linux PID limit is invalid")
 	}
 	return pidMax, nil
 }

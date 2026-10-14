@@ -18,7 +18,7 @@ func openTrustPTY(t *testing.T) (*os.File, *os.File, func()) {
 	}
 	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)
 	require.NoError(t, err)
-	require.NoError(t, unix.IoctlSetInt(int(master.Fd()), unix.TIOCSPTLCK, 0))
+	require.NoError(t, unix.IoctlSetPointerInt(int(master.Fd()), unix.TIOCSPTLCK, 0))
 	ptyNumber, err := unix.IoctlGetInt(int(master.Fd()), unix.TIOCGPTN)
 	require.NoError(t, err)
 	slave, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", ptyNumber), os.O_RDWR|unix.O_NOCTTY, 0)

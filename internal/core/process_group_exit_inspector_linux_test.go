@@ -536,3 +536,46 @@ func TestInspectProcessGroupExitIsUnknownForLegacyIdentity(t *testing.T) {
 		t.Fatalf("legacy process-group inspection = %#v, want unknown", inspection)
 	}
 }
+
+func TestValidateLinuxProcPIDNamespaceView(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		status    string
+		wantError bool
+	}{
+		{"same namespace", "Name:\ttest\nNSpid:\t42\n", false},
+		{"ancestor procfs", "NSpid:\t42\t42\n", true},
+		{"missing", "Name:\ttest\n", true},
+		{"mismatch", "NSpid:\t43\n", true},
+		{"empty", "NSpid:\n", true},
+		{"malformed", "NSpid:\tinvalid\n", true},
+		{"duplicate", "NSpid:\t42\nNSpid:\t42\n", true},
+		{"nonpositive", "NSpid:\t0\n", true},
+		{"negative", "NSpid:\t-42\n", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateLinuxProcPIDNamespaceView([]byte(test.status), 42)
+			if (err != nil) != test.wantError {
+				t.Fatalf("validateLinuxProcPIDNamespaceView() = %v, want error %t", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestLinuxPIDNamespaceInitStartTokenAllowsInvisibleProcessGroup(t *testing.T) {
+	// A container init can inherit its process group from outside the current
+	// PID namespace, where procfs correctly represents that group as zero.
+	stat := []byte("1 (init) S " + strings.Repeat("0 ", 18) + "26")
+	token, err := parseLinuxInitStartToken(stat)
+	if err != nil || token != "linux:26" {
+		t.Fatalf("parseLinuxInitStartToken() = %q, %v", token, err)
+	}
+	if _, _, err := parseLinuxProcessStat(stat); err == nil {
+		t.Fatal("ordinary process-group identities must still reject group zero")
+	}
+	for _, invalid := range []string{"", "1 (init) S", "1 (init) S " + strings.Repeat("0 ", 18) + "invalid", "1 (init) S " + strings.Repeat("0 ", 18) + "-1"} {
+		if _, err := parseLinuxInitStartToken([]byte(invalid)); err == nil {
+			t.Fatalf("accepted invalid init stat %q", invalid)
+		}
+	}
+}

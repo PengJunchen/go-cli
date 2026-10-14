@@ -89,23 +89,32 @@ func TestSubAgentRunExecutesIndependentRun(t *testing.T) {
 func TestSubAgentSendRecordsMessage(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	sub := newTestSubAgent("worker")
-	_, err := sub.Run(context.Background(), "go")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	releaseRunner := func() { once.Do(func() { close(release) }) }
+	runner := &heldInboxSubAgentRunner{started: started, release: release}
+	sub := mustSubAgent(NewDefaultSubAgent(SubAgentConfig{Name: "worker"},
+		WithSubAgentRunner(func(SubAgentConfig) subAgentRunner { return runner })))
+	_, err := sub.Run(ctx, "go")
 	require.NoError(t, err)
-
-	require.NoError(t, sub.Send(context.Background(), "follow-up"))
-
-	// the message is recorded against the running sub-agent.
-	require.Eventually(t, func() bool {
-		received := sub.Received()
-		if len(received) != 1 {
-			return false
-		}
-		return received[0] == "follow-up"
-	}, time.Second, time.Millisecond*5)
-
-	_, werr := sub.Wait(context.Background())
+	defer func() {
+		releaseRunner()
+		_, _ = sub.Wait(ctx)
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("runner did not reach the live barrier")
+	}
+	require.NoError(t, sub.Send(ctx, "follow-up"))
+	assert.Equal(t, []string{"follow-up"}, sub.Received())
+	releaseRunner()
+	_, werr := sub.Wait(ctx)
 	require.NoError(t, werr)
+	assert.Equal(t, SubAgentCompleted, sub.State())
 }
 
 type heldInboxSubAgentRunner struct {

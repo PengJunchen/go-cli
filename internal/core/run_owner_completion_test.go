@@ -491,39 +491,53 @@ func TestRunOwnerCompletionWaitDoesNotTurnNilPendingHandleIntoProof(t *testing.T
 }
 
 func TestRunOwnerPreparedSignalCanBeRegisteredBeforeDoneIsAttached(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	guard := newCountingRunSlotGuard()
-	owner := newRunOwner(context.Background(), guard, guard.claim, nil)
-	started := make(chan struct{})
+	owner := newRunOwner(parent, guard, guard.claim, nil)
+	invocation, closeQueue := prepareCompletionTestWrite(withRunID(owner.ctx, owner.claim.ID), t)
+	defer closeQueue()
+	api := completionTestAPI(t, owner)
 	var registeredProof tools.PreparedCompletionProof
 	result, err := owner.run(time.Second, func(ctx context.Context) (Result, error) {
-		invocation, closeQueue := prepareCompletionTestWrite(ctx, t)
-		defer closeQueue()
 		signal := invocation.CompletionSignal()
-		assert.Nil(t, signal.Done(), "Prepare returns the fixed handle before Dispatch attaches Done")
-		api := completionTestAPI(t, owner)
+		if !assert.Nil(t, signal.Done(), "Prepare returns the fixed handle before Dispatch attaches Done") {
+			return Result{}, errors.New("prepared completion signal was attached before dispatch")
+		}
 		taskID := registerRunCompletionTask(ctx, completionTestIntent(ctx, owner, "dynamic"), signal)
-		require.NotZero(t, taskID)
+		if !assert.NotZero(t, taskID) {
+			return Result{}, errors.New("prepared completion task was not registered")
+		}
 		assert.Equal(t, 1, owner.Snapshot().PendingWorkers)
-		close(started)
 		_, dispatchErr := invocation.Dispatch(ctx)
-		require.NoError(t, dispatchErr)
+		if dispatchErr != nil {
+			return Result{}, dispatchErr
+		}
 		assert.True(t, invocation.DispatchCommitted())
-		assert.NotNil(t, signal.Done(), "Dispatch attaches the final channel to the same prepared handle")
+		done := signal.Done()
+		if !assert.NotNil(t, done, "Dispatch attaches the final channel to the same prepared handle") {
+			return Result{}, errors.New("dispatch did not attach a completion channel")
+		}
+		// The queued result is published before the job's Done channel closes.
+		// Wait for that separate join fact before asserting its completion proof.
 		select {
-		case <-signal.Done():
-		default:
-			t.Fatal("the synchronous prepared write should have joined before Dispatch returned")
+		case <-done:
+		case <-ctx.Done():
+			return Result{}, ctx.Err()
 		}
 		registeredProof = signal.Proof()
-		require.NotEmpty(t, registeredProof)
+		if !assert.NotEmpty(t, registeredProof) {
+			return Result{}, errors.New("joined prepared job did not provide a completion proof")
+		}
 		handoffRunCompletionTask(ctx, taskID)
 		state, proof, ok := api.completionTaskSnapshot(taskID)
-		require.True(t, ok)
+		if !assert.True(t, ok) {
+			return Result{}, errors.New("prepared completion task snapshot was not found")
+		}
 		assert.Equal(t, runCompletionTaskReady, state)
 		assert.Equal(t, registeredProof, proof)
 		return Result{}, nil
 	})
-	<-started
 	require.NoError(t, err)
 	assert.Equal(t, tools.CompletionQueuedJobJoined, registeredProof)
 	assert.Equal(t, RunExecutionQuiescent, result.ExecutionState)

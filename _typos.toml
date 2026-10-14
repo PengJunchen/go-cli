@@ -1,7 +1,22 @@
 # typos spell checker configuration
 # https://github.com/crate-ci/typos
 
+[default]
+extend-ignore-re = [
+    # Commit IDs and trace IDs are machine-generated hex, not words.
+    '\b(?:s_)?[0-9a-f]*[0-9][0-9a-f]*\b',
+    # Exact truncation assertion; "hel" is the first three cells of "hello".
+    'input: "hello", width: 3, want: "hel"',
+    # Preserve partial frames/lines in historical PTY and test evidence.
+    'afe-review-row-0123456789',
+    '(?:PTY cancel|R8) activ\r',
+    'PTY cancel queu\r',
+    'run retur\.\.\.',
+]
+
 [default.extend-identifiers]
+# Plural of the scanner severity, not a misspelled word.
+ERRORs = "ERRORs"
 # Short variable names in Go code that trigger false positives
 typ = "typ"
 ue = "ue"
