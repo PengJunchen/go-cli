@@ -69,7 +69,7 @@ func TestRegisterDefaultsMintsOnlyReviewedWriteEffects(t *testing.T) {
 			assert.Equal(t, CompletionInlinePipelineJoined, snapshot.completionProof)
 		} else {
 			assert.Equal(t, RegistrationSourceToolRegistry, snapshot.identity.RegistrationSource())
-			assert.Empty(t, snapshot.completionProof)
+			assert.Equal(t, completionScopedSearchJoined, snapshot.completionProof)
 		}
 		assert.Equal(t, []TrustedToolEffect{EffectUnknown}, snapshot.effects.Values())
 	}
