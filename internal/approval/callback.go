@@ -11,10 +11,8 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
-	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
 var errApprovalCacheBoundToDifferentFence = errors.New("approval: cache is bound to a different dispatch fence")
@@ -129,10 +127,10 @@ type DiffPreviewFunc func(ctx context.Context, toolName string, args map[string]
 // TeaApprovalCallback sends approval requests to the TUI via a channel instead
 // of blocking on stdin readline. It implements ApprovalCallback so it can be a
 // drop-in replacement for InteractiveApprovalCallback: the middleware calls
-// RequestApproval, which sends a tui.ApprovalRequest on the channel and blocks
-// until the TUI delivers a tui.ApprovalResponse (or the context is canceled).
+// RequestApproval, which sends a InteractiveRequest on the channel and blocks
+// until the TUI delivers a InteractiveResponse (or the context is canceled).
 type TeaApprovalCallback struct {
-	requestCh     chan<- tui.ApprovalRequest
+	requestCh     chan<- InteractiveRequest
 	diffPreviewFn DiffPreviewFunc
 }
 
@@ -142,7 +140,7 @@ var _ ApprovalCallback = (*TeaApprovalCallback)(nil)
 // requests to the given channel. The channel is typically shared with the
 // BubbleteaApp's approval listener (see tui.WithApprovalChannel). An optional
 // diffPreviewFn generates a unified diff for edit/write tool calls.
-func NewTeaApprovalCallback(ch chan<- tui.ApprovalRequest, opts ...TeaApprovalOption) *TeaApprovalCallback {
+func NewTeaApprovalCallback(ch chan<- InteractiveRequest, opts ...TeaApprovalOption) *TeaApprovalCallback {
 	c := &TeaApprovalCallback{requestCh: ch}
 	for _, opt := range opts {
 		opt(c)
@@ -164,8 +162,8 @@ func WithDiffPreviewFunc(fn DiffPreviewFunc) TeaApprovalOption {
 // denied and the context error is returned. When a DiffPreviewFunc is wired,
 // the diff preview is generated and included in the request for edit/write tools.
 func (c *TeaApprovalCallback) RequestApproval(ctx context.Context, toolName string, args map[string]any) (ApprovalResult, error) {
-	respCh := make(chan tui.ApprovalResponse, 1)
-	req := tui.ApprovalRequest{
+	respCh := make(chan InteractiveResponse, 1)
+	req := InteractiveRequest{
 		ToolName:   toolName,
 		Args:       args,
 		ResponseCh: respCh,
@@ -187,14 +185,14 @@ func (c *TeaApprovalCallback) RequestApproval(ctx context.Context, toolName stri
 	}
 }
 
-func approvalResultFromResponse(ctx context.Context, resp tui.ApprovalResponse) (ApprovalResult, error) {
+func approvalResultFromResponse(ctx context.Context, resp InteractiveResponse) (ApprovalResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ApprovalDeny, err
 	}
 	switch resp.Decision {
-	case tui.ApprovalAllow:
+	case InteractiveAllow:
 		return ApprovalAllow, nil
-	case tui.ApprovalAlwaysAllow:
+	case InteractiveAlwaysAllow:
 		return ApprovalAlwaysAllow, nil
 	default:
 		return ApprovalDeny, nil
@@ -244,13 +242,10 @@ func (c *ApprovalCache) LoadFromFile(path string) error {
 			loadErr = fmt.Errorf("approval cache %s has permissions %o, expected 0600", path, perm)
 		}
 
-		// Verify file ownership on Unix-like systems. On platforms where the
-		// Sys() call does not return *syscall.Stat_t, the check is skipped.
+		// Reuse the platform owner check; unsupported platforms reject rather
+		// than treating an unverifiable cache as a grant of authority.
 		if loadErr == nil {
-			if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Uid != uint32(os.Getuid()) {
-				slog.Warn("approval.cache_foreign_owner", "path", path, "uid", stat.Uid, "expected", os.Getuid())
-				loadErr = fmt.Errorf("approval cache %s owned by uid %d, expected %d", path, stat.Uid, os.Getuid())
-			}
+			loadErr = validateFileOwner(info, path)
 		}
 
 		if loadErr == nil {

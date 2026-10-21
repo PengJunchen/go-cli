@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
+	"github.com/pengjunchen/go-cli/internal/capability"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
+	api "github.com/pengjunchen/go-cli/pkg/extensionapi/v1"
 )
 
 // ErrPluginManagerShutdownNotStarted is returned when WaitShutdown is called
@@ -28,16 +32,17 @@ type PluginManager struct {
 	loader      PluginLoader
 	coordinator *extensionCoordinator
 
-	mu               sync.RWMutex
-	extensions       []Extension
-	extensionNames   []string
-	loadOp           *pluginManagerOperation
-	initOp           *pluginManagerOperation
-	shutdownOp       *pluginManagerOperation
-	lifecycleStarted bool
-	closing          bool
-	shutdownComplete bool
-	shutdownResult   error
+	mu                  sync.RWMutex
+	initializationOrder []Extension
+	extensions          []Extension
+	extensionNames      []string
+	loadOp              *pluginManagerOperation
+	initOp              *pluginManagerOperation
+	shutdownOp          *pluginManagerOperation
+	lifecycleStarted    bool
+	closing             bool
+	shutdownComplete    bool
+	shutdownResult      error
 }
 
 // NewPluginManager creates a PluginManager using the given PluginLoader. When
@@ -109,6 +114,15 @@ func (pm *PluginManager) loadPaths(ctx context.Context, paths []string) error {
 		}
 		if err := pm.appendLoaded(path, extensions); err != nil {
 			errs = append(errs, err)
+			// A process adapter may acquire resources during Load/handshake.
+			// Failed publication still owns and must dispose that candidate.
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			for index := len(extensions) - 1; index >= 0; index-- {
+				if _, ownedProcess := extensions[index].(*sdkExtension); ownedProcess {
+					errs = append(errs, shutdownUnpublishedExtension(cleanupCtx, extensions[index]))
+				}
+			}
+			cancel()
 		}
 	}
 	return errors.Join(errs...)
@@ -179,11 +193,22 @@ func (pm *PluginManager) Init(ctx context.Context) error {
 		pm.mu.Unlock()
 
 		var errs []error
+		ordered, orderErr := orderManifestExtensions(extensions)
+		if orderErr != nil {
+			errs = append(errs, orderErr)
+			extensions = nil
+		} else {
+			extensions = ordered
+			pm.mu.Lock()
+			pm.initializationOrder = append([]Extension(nil), ordered...)
+			pm.mu.Unlock()
+		}
 		for _, ext := range extensions {
 			err := pm.coordinator.initExtension(initCtx, ext)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("extension %q Init: %w", ext.Name(), err))
-				if errors.Is(err, ErrCleanupPending) || initCtx.Err() != nil {
+				_, declared := ext.(ManifestProvider)
+				if declared || errors.Is(err, ErrCleanupPending) || initCtx.Err() != nil {
 					break
 				}
 			}
@@ -305,11 +330,14 @@ func (pm *PluginManager) runShutdownOwner(waitCtx, callbackCtx context.Context, 
 
 	pm.mu.RLock()
 	extensions := append([]Extension(nil), pm.extensions...)
+	if len(pm.initializationOrder) > 0 {
+		extensions = append([]Extension(nil), pm.initializationOrder...)
+	}
 	pm.mu.RUnlock()
 	var errs []error
 	for i := len(extensions) - 1; i >= 0; i-- {
 		ext := extensions[i]
-		if err := pm.coordinator.shutdownExtensionWithContexts(waitCtx, callbackCtx, ext); err != nil {
+		if err := pm.coordinator.shutdownLoadedExtensionWithContexts(waitCtx, callbackCtx, ext); err != nil {
 			errs = append(errs, fmt.Errorf("extension %q Shutdown: %w", ext.Name(), err))
 		}
 	}
@@ -425,4 +453,99 @@ func (pm *PluginManager) Middleware() []Middleware {
 		return der.AllMiddleware()
 	}
 	return nil
+}
+
+// CommandRegistrations returns only successfully initialized, named commands.
+func (pm *PluginManager) CommandRegistrations() []CommandRegistration {
+	if registry, ok := pm.coordinator.registry().(*DefaultExtensionRegistry); ok {
+		return registry.AllCommandRegistrations()
+	}
+	return nil
+}
+
+// Providers returns successfully initialized providers before model resolution.
+func (pm *PluginManager) Providers() []llm.ModelProvider {
+	if registry, ok := pm.coordinator.registry().(*DefaultExtensionRegistry); ok {
+		return registry.AllProviders()
+	}
+	return nil
+}
+
+// Prompts returns successful prompt contributions for deterministic projection.
+func (pm *PluginManager) Prompts() []PromptRegistration {
+	if registry, ok := pm.coordinator.registry().(*DefaultExtensionRegistry); ok {
+		return registry.AllPrompts()
+	}
+	return nil
+}
+
+func shutdownUnpublishedExtension(ctx context.Context, ext Extension) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("extension: unpublished candidate shutdown panicked")
+		}
+	}()
+	return ext.Shutdown(ctx)
+}
+
+// ManifestProvider optionally declares extension dependencies after Load and before Init.
+type ManifestProvider interface{ Manifest() api.Manifest }
+
+// Manifests returns detached public declarations for the composition root's compiler.
+func (pm *PluginManager) Manifests() []api.Manifest {
+	extensions := pm.Extensions()
+	manifests := make([]api.Manifest, 0, len(extensions))
+	for _, ext := range extensions {
+		if manifest, ok := extensionManifest(ext); ok {
+			manifests = append(manifests, manifest)
+		}
+	}
+	return manifests
+}
+
+func extensionManifest(ext Extension) (manifest api.Manifest, ok bool) {
+	provider, ok := ext.(ManifestProvider)
+	if !ok {
+		return api.Manifest{}, false
+	}
+	defer func() {
+		if recover() != nil {
+			manifest = api.Manifest{}
+			ok = true
+		}
+	}()
+	return provider.Manifest().Clone(), true
+}
+
+func orderManifestExtensions(extensions []Extension) ([]Extension, error) {
+	var nodes []capability.Node
+	declared := map[string]Extension{}
+	var legacy []Extension
+	for _, ext := range extensions {
+		manifest, ok := extensionManifest(ext)
+		if !ok {
+			legacy = append(legacy, ext)
+			continue
+		}
+		if err := manifest.Validate(); err != nil {
+			return nil, fmt.Errorf("extension: manifest validation: %w", err)
+		}
+		if manifest.ID != ext.Name() {
+			return nil, errors.New("extension: manifest ID differs from extension name")
+		}
+		nodes = append(nodes, capability.Node{ID: manifest.ID, Owner: manifest.ID, Requires: manifest.Requires, Provides: manifest.Provides})
+		declared[manifest.ID] = ext
+	}
+	if len(nodes) == 0 {
+		return extensions, nil
+	}
+	snapshot, err := capability.NewSnapshot(capability.Input{Nodes: nodes})
+	if err != nil {
+		return nil, fmt.Errorf("extension: dependency plan: %w", err)
+	}
+	ordered := make([]Extension, 0, len(extensions))
+	for _, node := range snapshot.Nodes() {
+		ordered = append(ordered, declared[node.ID])
+	}
+	return append(ordered, legacy...), nil
 }

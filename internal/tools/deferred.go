@@ -62,6 +62,18 @@ type DefaultDeferredToolRegistry struct {
 	mcpEntries      map[string]mcpDeferredEntry
 }
 
+// Version combines the local exposure revision with the backing registry's
+// monotonic version. It deliberately does not change the dispatch authority fence.
+func (r *DefaultDeferredToolRegistry) Version() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	version := int(r.revision)
+	if underlying, ok := r.underlying.(interface{ Version() int }); ok {
+		version += underlying.Version()
+	}
+	return version
+}
+
 var _ DeferredToolRegistry = (*DefaultDeferredToolRegistry)(nil)
 
 // NewDefaultDeferredToolRegistry wraps the given underlying ToolRegistry. The

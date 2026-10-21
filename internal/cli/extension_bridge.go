@@ -2,7 +2,10 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"time"
+
+	"github.com/pengjunchen/go-cli/internal/tools"
 
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/extension"
@@ -23,6 +26,7 @@ import (
 // the run by surfacing as an error.
 type extensionHookAdapter struct {
 	registration extension.HookRegistration
+	binding      tools.ProjectTrustBinding
 }
 
 // ExtensionHookObserverIdentity lets callers inspect which registration
@@ -98,6 +102,9 @@ func (a *extensionHookAdapter) Name() string { return a.registration.Hook.Name()
 // snapshot or Hook failure stops the run with a fixed-message error.
 func (a *extensionHookAdapter) BeforeRun(ctx context.Context, submission core.Submission) error {
 	const eventName = "agent.before_run"
+	if a.binding != nil && !a.binding.Valid() {
+		return errors.New("cli: project extension hook trust revoked")
+	}
 	event, err := buildBeforeRunHookEvent(a.registration.Owner, submission)
 	if err != nil {
 		return a.observerError(eventName, err)
@@ -109,6 +116,9 @@ func (a *extensionHookAdapter) BeforeRun(ctx context.Context, submission core.Su
 // observe the completed run. A non-pass HookResult surfaces as an error.
 func (a *extensionHookAdapter) AfterRun(ctx context.Context, submission core.Submission, result core.Result, runErr error) error {
 	const eventName = "agent.after_run"
+	if a.binding != nil && !a.binding.Valid() {
+		return errors.New("cli: project extension hook trust revoked")
+	}
 	event, err := buildAfterRunHookEvent(ctx, a.registration.Owner, submission, result, runErr)
 	if err != nil {
 		return a.observerError(eventName, err)
@@ -130,7 +140,8 @@ func (a *extensionHookAdapter) observerError(eventName string, cause error) erro
 // translates between the Submission/AgentEvent and AgentInput/AgentOutput
 // models so extension middleware participates in the runtime onion chain.
 type extensionMiddlewareAdapter struct {
-	extMW extension.Middleware
+	extMW   extension.Middleware
+	binding tools.ProjectTrustBinding
 }
 
 var _ core.Middleware = (*extensionMiddlewareAdapter)(nil)
@@ -195,7 +206,7 @@ func (a *extensionMiddlewareAdapter) Wrap(next core.AgentLoop) core.AgentLoop {
 	}
 
 	wrapped := a.extMW.WrapAgent(agentFunc)
-	return &extensionMiddlewareLoop{fn: wrapped}
+	return &extensionMiddlewareLoop{fn: wrapped, binding: a.binding}
 }
 
 // extensionMiddlewareLoop is the core.AgentLoop produced by
@@ -203,10 +214,14 @@ func (a *extensionMiddlewareAdapter) Wrap(next core.AgentLoop) core.AgentLoop {
 // AgentInput, invokes the wrapped extension.AgentFunc, and converts the
 // AgentOutput back into agent events.
 type extensionMiddlewareLoop struct {
-	fn extension.AgentFunc
+	fn      extension.AgentFunc
+	binding tools.ProjectTrustBinding
 }
 
 func (l *extensionMiddlewareLoop) Run(ctx context.Context, submission core.Submission, stream ...core.EventStream) ([]core.AgentEvent, error) {
+	if l.binding != nil && !l.binding.Valid() {
+		return nil, errors.New("cli: project extension middleware trust revoked")
+	}
 	// Thread the EventStream through context so the inner agentFunc can
 	// forward it to the wrapped core.AgentLoop, preserving real-time
 	// streaming.
@@ -222,6 +237,9 @@ func (l *extensionMiddlewareLoop) Run(ctx context.Context, submission core.Submi
 	out, err := l.fn(ctx, input)
 	if err != nil {
 		return nil, err
+	}
+	if l.binding != nil && !l.binding.Valid() {
+		return nil, errors.New("cli: project extension middleware trust revoked; external outcome may be unknown")
 	}
 	return bridgeOutputToEvents(out), nil
 }

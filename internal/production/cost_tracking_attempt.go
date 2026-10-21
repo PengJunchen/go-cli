@@ -165,10 +165,13 @@ func (t *CostTracker) AttemptCostSnapshot() ([]AttemptCostRecord, AttemptCostSum
 }
 
 func validateAttemptResult(result llm.ProviderAttemptResult) error {
+	validOrigin := result.Identity.OriginKind == llm.OriginResolverDefaultEndpoint ||
+		result.Identity.OriginKind == llm.OriginExplicitRequestEndpoint ||
+		(result.Identity.OriginKind == llm.OriginExtensionProcess && result.Identity.ProtocolID == llm.ProtocolExtensionRPC)
 	if result.OperationID == "" || result.AttemptID == "" ||
 		result.Identity.ProviderID == "" || result.Identity.ModelID == "" ||
 		result.Identity.ProtocolID == "" || result.Identity.Candidate == "" ||
-		(result.Identity.OriginKind != llm.OriginResolverDefaultEndpoint && result.Identity.OriginKind != llm.OriginExplicitRequestEndpoint) {
+		!validOrigin {
 		return fmt.Errorf("%w: missing operation, attempt, or resolved candidate identity", ErrInvalidAttemptResult)
 	}
 	if result.Outcome < llm.AttemptSuccess || result.Outcome > llm.AttemptCancelled || result.Failure > llm.FailureOther {

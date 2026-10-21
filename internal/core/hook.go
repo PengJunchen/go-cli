@@ -216,7 +216,8 @@ func (l *canonicalHookLoop) RunCanonical(ctx context.Context, submission Submiss
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, nil)
 
-	result, err := l.chain.beforeCanonical(spanCtx, submission)
+	chain := runHookChain(spanCtx, l.chain)
+	result, err := chain.beforeCanonical(spanCtx, submission)
 	if err != nil {
 		logger.Info("hook.before.error", canonicalErrorLogAttrs(err)...)
 		span.SetStatus(tracing.SpanStatusError, "canonical hook failed before run")
@@ -243,7 +244,7 @@ func (l *canonicalHookLoop) RunCanonical(ctx context.Context, submission Submiss
 			resultForHook.Message = entry.Message.Content
 		}
 	}
-	if afterErr := l.chain.afterCanonical(spanCtx, submission, resultForHook, runErr); afterErr != nil {
+	if afterErr := chain.afterCanonical(spanCtx, submission, resultForHook, runErr); afterErr != nil {
 		afterErrAttrs := canonicalErrorLogAttrs(afterErr)
 		slog.Warn("core.hook.after_error", afterErrAttrs...)
 		logger.Warn("hook.after.error", afterErrAttrs...)
@@ -266,7 +267,8 @@ func (l *hookLoop) Run(ctx context.Context, submission Submission, stream ...Eve
 	logger := tracing.NewTraceLogger(span, nil)
 
 	// Before hooks.
-	result, err := l.chain.Before(spanCtx, submission)
+	chain := runHookChain(spanCtx, l.chain)
+	result, err := chain.Before(spanCtx, submission)
 	if err != nil {
 		logger.Info("hook.before.error", "err", err)
 		span.SetStatus(tracing.SpanStatusError, err.Error())
@@ -287,7 +289,7 @@ func (l *hookLoop) Run(ctx context.Context, submission Submission, stream ...Eve
 	}
 
 	// After hooks - errors are logged but do not replace the run error.
-	if afterErr := l.chain.After(spanCtx, submission, res, runErr); afterErr != nil {
+	if afterErr := chain.After(spanCtx, submission, res, runErr); afterErr != nil {
 		slog.Warn("core.hook.after_error", "err", afterErr)
 	}
 

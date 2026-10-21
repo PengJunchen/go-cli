@@ -56,6 +56,8 @@ type DefaultExtensionRegistry struct {
 	hookOwner       string
 	middlewares     map[string]Middleware
 	middlewareOrder []string
+	prompts         map[string]PromptRegistration
+	promptOrder     []string
 	sealed          bool
 }
 
@@ -65,6 +67,7 @@ var _ ExtensionRegistry = (*DefaultExtensionRegistry)(nil)
 func NewExtensionRegistry() ExtensionRegistry {
 	return &DefaultExtensionRegistry{
 		tools:       make(map[string]tools.ToolDefinition),
+		prompts:     make(map[string]PromptRegistration),
 		toolOwners:  make(map[string]string),
 		commands:    make(map[string]func(args []string) error),
 		providers:   make(map[string]llm.ModelProvider),
@@ -221,6 +224,11 @@ func (r *DefaultExtensionRegistry) commitFromLocked(staging *DefaultExtensionReg
 			conflicts = append(conflicts, "middleware "+name)
 		}
 	}
+	for _, name := range staging.promptOrder {
+		if _, exists := r.prompts[name]; exists {
+			conflicts = append(conflicts, "prompt "+name)
+		}
+	}
 	if len(conflicts) > 0 {
 		return fmt.Errorf("extension already registered: %s", strings.Join(conflicts, ", "))
 	}
@@ -246,6 +254,10 @@ func (r *DefaultExtensionRegistry) commitFromLocked(staging *DefaultExtensionReg
 		r.middlewares[name] = staging.middlewares[name]
 	}
 	r.middlewareOrder = append(r.middlewareOrder, staging.middlewareOrder...)
+	for _, name := range staging.promptOrder {
+		r.prompts[name] = staging.prompts[name]
+	}
+	r.promptOrder = append(r.promptOrder, staging.promptOrder...)
 	return nil
 }
 
@@ -361,6 +373,67 @@ func (r *DefaultExtensionRegistry) AllMiddleware() []Middleware {
 	result := make([]Middleware, 0, len(r.middlewareOrder))
 	for _, name := range r.middlewareOrder {
 		result = append(result, r.middlewares[name])
+	}
+	return result
+}
+
+// CommandRegistration preserves a successful command name and its handler.
+type CommandRegistration struct {
+	Name string
+	Run  func([]string) error
+}
+
+// AllCommandRegistrations returns named commands in successful registration order.
+func (r *DefaultExtensionRegistry) AllCommandRegistrations() []CommandRegistration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	registrations := make([]CommandRegistration, 0, len(r.commandOrder))
+	for _, name := range r.commandOrder {
+		registrations = append(registrations, CommandRegistration{Name: name, Run: r.commands[name]})
+	}
+	return registrations
+}
+
+// PromptRegistration contributes trusted text to the deterministic prompt plan.
+type PromptRegistration struct {
+	Name, Text, Owner string
+	Priority          int
+}
+
+// PromptRegistrar is an additive optional extension registry capability.
+type PromptRegistrar interface {
+	RegisterPrompt(PromptRegistration) error
+}
+
+// RegisterPrompt adds one prompt contribution to the atomic staging registry.
+func (r *DefaultExtensionRegistry) RegisterPrompt(prompt PromptRegistration) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sealed {
+		return ErrExtensionRegistrySealed
+	}
+	if prompt.Name == "" {
+		return errors.New("extension: prompt name is empty")
+	}
+	if r.prompts == nil {
+		r.prompts = make(map[string]PromptRegistration)
+	}
+	if _, exists := r.prompts[prompt.Name]; exists {
+		return fmt.Errorf("extension already registered: prompt %s", prompt.Name)
+	}
+	prompt.Owner = r.toolOwner
+	r.prompts[prompt.Name] = prompt
+	r.promptOrder = append(r.promptOrder, prompt.Name)
+	return nil
+}
+
+// AllPrompts returns detached successful prompt declarations.
+func (r *DefaultExtensionRegistry) AllPrompts() []PromptRegistration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]PromptRegistration, 0, len(r.promptOrder))
+	for _, name := range r.promptOrder {
+		result = append(result, r.prompts[name])
 	}
 	return result
 }

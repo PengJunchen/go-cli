@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -357,8 +356,7 @@ func contentFingerprint(filePath string) string {
 // ValidateGlobalConfigFile validates that a global config file (e.g.
 // ~/.config/go-cli/mcp.json) is owned by the current user and has 0600
 // permissions (owner read/write only). This prevents tampering via
-// world-writable or foreign-owned config files. On non-Unix systems where
-// file ownership cannot be determined, the owner check is skipped.
+// world-writable or foreign-owned config files. When ownership cannot be established on a platform, validation fails closed.
 func ValidateGlobalConfigFile(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -368,17 +366,4 @@ func ValidateGlobalConfigFile(path string) error {
 		return fmt.Errorf("global config %s has permissions %o, expected 0600", path, info.Mode().Perm())
 	}
 	return validateFileOwner(info, path)
-}
-
-// validateFileOwner checks that the file is owned by the current user. On
-// non-Unix systems where ownership cannot be determined, it is a no-op.
-func validateFileOwner(info os.FileInfo, path string) error {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return nil
-	}
-	if stat.Uid != uint32(os.Getuid()) {
-		return fmt.Errorf("global config %s owned by uid %d, expected %d", path, stat.Uid, os.Getuid())
-	}
-	return nil
 }

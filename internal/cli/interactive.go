@@ -20,8 +20,6 @@ import (
 	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/tui"
-
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // Interactive command constants. They live in one place so the scanner does not
@@ -370,17 +368,15 @@ var _ Command = (*interactiveCmd)(nil)
 // running. When program is nil (plain CLI mode), Emit falls back to direct
 // stdout output.
 type cliHITLEmitter struct {
-	out     io.Writer
-	mu      sync.RWMutex
-	program *tea.Program
+	out  io.Writer
+	mu   sync.RWMutex
+	send func(HITLMessage)
 }
 
-// SetProgram sets the bubbletea program used to route HITL questions through
-// the TUI. It is safe for concurrent use with Emit.
-func (e *cliHITLEmitter) SetProgram(p *tea.Program) {
+func (e *cliHITLEmitter) clearProgram() {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.program = p
+	e.send = nil
+	e.mu.Unlock()
 }
 
 // HITLMessage is retained as an alias for compatibility with cli callers.
@@ -393,11 +389,11 @@ func (e *cliHITLEmitter) Emit(ctx context.Context, event core.HITLQuestionEvent)
 	// TUI mode: route the question through the bubbletea program so it renders
 	// inside the TUI instead of corrupting stdout.
 	e.mu.RLock()
-	prog := e.program
+	send := e.send
 	e.mu.RUnlock()
-	if prog != nil {
+	if send != nil {
 		respCh := make(chan HITLResponse, 1)
-		prog.Send(HITLMessage{
+		send(HITLMessage{
 			QuestionID: event.QuestionID,
 			Question:   event.Question,
 			Options:    event.Options,

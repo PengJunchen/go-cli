@@ -220,6 +220,10 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 		finalMsg = lastAssistant.Content
 	}
 
+	if fenceErr := CheckRunGeneration(spanCtx); fenceErr != nil {
+		_ = a.transitionState(StateError)
+		return Result{Outcome: RunOutcomeUnknown}, toolOutcomeUnknownError{cause: fenceErr}
+	}
 	a.mu.Lock()
 	a.events = evs
 	if hasCanonicalTranscript {
@@ -245,6 +249,9 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 		compacted, compErr := a.compactionHook(spanCtx, historyCopy)
 		if compErr != nil {
 			logger.Warn("core.agent.compaction_failed", "err", compErr)
+		} else if fenceErr := CheckRunGeneration(spanCtx); fenceErr != nil {
+			err = errors.Join(err, toolOutcomeUnknownError{cause: fenceErr})
+			finalMsg = ""
 		} else {
 			a.mu.Lock()
 			a.history = cloneAgentMessages(compacted)
