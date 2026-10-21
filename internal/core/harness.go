@@ -11,14 +11,15 @@ import (
 
 // harnessConfig holds the configurable knobs of a HarnessImpl.
 type harnessConfig struct {
-	startSpan      string
-	bufferSize     int
-	discard        DiscardPolicy
-	tracer         *tracing.Tracer
-	runSlot        RunSlotGuard
-	cleanupTimeout time.Duration
-	lifetimeCtx    context.Context
-	bus            EventBus
+	startSpan          string
+	bufferSize         int
+	discard            DiscardPolicy
+	tracer             *tracing.Tracer
+	runSlot            RunSlotGuard
+	cleanupTimeout     time.Duration
+	lifetimeCtx        context.Context
+	bus                EventBus
+	generationProvider RunGenerationProvider
 }
 
 // HarnessOption configures a HarnessImpl at construction time.
@@ -93,15 +94,16 @@ func WithHarnessEventBus(bus EventBus) HarnessOption {
 // HarnessImpl is the full runtime facade. It accepts a user message and
 // returns an EventStream that streams agent events until the run completes.
 type HarnessImpl struct {
-	agent          Agent
-	startSpanName  string
-	bufferSize     int
-	discard        DiscardPolicy
-	tracer         *tracing.Tracer
-	runSlot        RunSlotGuard
-	cleanupTimeout time.Duration
-	lifetimeCtx    context.Context
-	bus            EventBus
+	agent              Agent
+	startSpanName      string
+	bufferSize         int
+	discard            DiscardPolicy
+	tracer             *tracing.Tracer
+	runSlot            RunSlotGuard
+	cleanupTimeout     time.Duration
+	lifetimeCtx        context.Context
+	bus                EventBus
+	generationProvider RunGenerationProvider
 }
 
 var _ Harness = (*HarnessImpl)(nil)
@@ -124,15 +126,16 @@ func NewHarnessImpl(agent Agent, opts ...HarnessOption) *HarnessImpl {
 		cfg.runSlot = defaultRunSlotGuard
 	}
 	h := &HarnessImpl{
-		agent:          agent,
-		startSpanName:  cfg.startSpan,
-		bufferSize:     cfg.bufferSize,
-		discard:        cfg.discard,
-		tracer:         cfg.tracer,
-		runSlot:        cfg.runSlot,
-		cleanupTimeout: cfg.cleanupTimeout,
-		lifetimeCtx:    cfg.lifetimeCtx,
-		bus:            cfg.bus,
+		agent:              agent,
+		startSpanName:      cfg.startSpan,
+		bufferSize:         cfg.bufferSize,
+		discard:            cfg.discard,
+		tracer:             cfg.tracer,
+		runSlot:            cfg.runSlot,
+		cleanupTimeout:     cfg.cleanupTimeout,
+		lifetimeCtx:        cfg.lifetimeCtx,
+		bus:                cfg.bus,
+		generationProvider: cfg.generationProvider,
 	}
 	slog.Info("core.harness.new",
 		"agent", agent.Name(),
@@ -198,6 +201,19 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (returnStream Even
 		panic(leaseCapturePanic)
 	}
 
+	var generationLease RunGenerationLease
+	if h.generationProvider != nil {
+		runInputCtx, generationLease, err = h.generationProvider.AcquireRun(runInputCtx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	defer func() {
+		if !transferred {
+			returnErr = errors.Join(returnErr, releaseGeneration(generationLease))
+		}
+	}()
+
 	// Borrowed tracing and bus producers are touched only after the guard has
 	// accepted this run, so a closed Assembly cannot race its teardown with a
 	// late Submit.
@@ -241,6 +257,7 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (returnStream Even
 
 	submission := Submission{Type: SubmissionUserMessage, Content: msg}
 
+	owner.generationLease = generationLease
 	owner.adoptRunCommitLease(leaseGuard)
 	leaseTransferred = true
 	transferred = true

@@ -352,14 +352,15 @@ func validateProjectedToolGroups(entries []SessionEntry) error {
 
 func sessionEntryToAgentMessage(entry SessionEntry) (core.AgentMessage, bool) {
 	message := core.AgentMessage{
-		Content:        entry.Content,
-		ContentBlocks:  entry.ContentBlocks,
-		Usage:          entry.Usage,
-		ToolCalls:      entry.ToolCalls,
-		ToolCallID:     entry.ToolCallID,
-		ToolName:       entry.ToolName,
-		InputKind:      entry.InputKind,
-		ReceiptOutcome: entry.ReceiptOutcome,
+		Content:                    entry.Content,
+		ContentBlocks:              entry.ContentBlocks,
+		Usage:                      entry.Usage,
+		ToolCalls:                  entry.ToolCalls,
+		ToolCallID:                 entry.ToolCallID,
+		ToolName:                   entry.ToolName,
+		MaterializedArtifactDigest: entry.MaterializedArtifactDigest,
+		InputKind:                  entry.InputKind,
+		ReceiptOutcome:             entry.ReceiptOutcome,
 	}
 	switch entry.Type {
 	case EntryTypeUser:

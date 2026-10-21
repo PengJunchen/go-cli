@@ -8,8 +8,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
 // Compile-time assertion that TeaApprovalCallback satisfies ApprovalCallback.
@@ -28,7 +26,7 @@ type requestResult struct {
 // *TeaApprovalCallback can be assigned to the ApprovalCallback interface.
 // (The compile-time check is the package-level var above.)
 func TestTeaApprovalCallback_ImplementsInterface(t *testing.T) {
-	ch := make(chan tui.ApprovalRequest, 1)
+	ch := make(chan InteractiveRequest, 1)
 	var cb ApprovalCallback = NewTeaApprovalCallback(ch)
 	assert.NotNil(t, cb)
 }
@@ -37,7 +35,7 @@ func TestTeaApprovalCallback_ImplementsInterface(t *testing.T) {
 // ApprovalRequest carrying the correct ToolName and Args through the channel,
 // and that the returned result mirrors the user's response.
 func TestTeaApprovalCallback_SendsRequest(t *testing.T) {
-	ch := make(chan tui.ApprovalRequest, 1)
+	ch := make(chan InteractiveRequest, 1)
 	cb := NewTeaApprovalCallback(ch)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -58,7 +56,7 @@ func TestTeaApprovalCallback_SendsRequest(t *testing.T) {
 		assert.NotNil(t, req.ResponseCh, "ResponseCh must be initialized")
 		assert.Same(t, ctx, req.Context, "the UI must observe cancellation of the approval waiter")
 		// Unblock the goroutine by replying with Allow.
-		req.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
+		req.ResponseCh <- InteractiveResponse{Decision: InteractiveAllow}
 	case <-time.After(time.Second):
 		t.Fatal("did not receive approval request on channel")
 	}
@@ -78,7 +76,7 @@ func TestTeaApprovalCallback_DeniesAlwaysAllowResponseAfterCancellation(t *testi
 
 	// Exercise the response-mapping path after the UI response was selected but
 	// the request context has become canceled before the callback returns it.
-	decision, err := approvalResultFromResponse(ctx, tui.ApprovalResponse{Decision: tui.ApprovalAlwaysAllow})
+	decision, err := approvalResultFromResponse(ctx, InteractiveResponse{Decision: InteractiveAlwaysAllow})
 	assert.Equal(t, ApprovalDeny, decision, "a canceled approval must not become an always-allow decision")
 	require.ErrorIs(t, err, context.Canceled)
 }
@@ -86,7 +84,7 @@ func TestTeaApprovalCallback_DeniesAlwaysAllowResponseAfterCancellation(t *testi
 // TestTeaApprovalCallback_ReceivesAllow verifies that when the user sends an
 // ApprovalAllow decision, the callback returns ApprovalAllow with no error.
 func TestTeaApprovalCallback_ReceivesAllow(t *testing.T) {
-	ch := make(chan tui.ApprovalRequest)
+	ch := make(chan InteractiveRequest)
 	cb := NewTeaApprovalCallback(ch)
 
 	done := make(chan requestResult, 1)
@@ -98,7 +96,7 @@ func TestTeaApprovalCallback_ReceivesAllow(t *testing.T) {
 	// Receive the request and respond with Allow.
 	select {
 	case req := <-ch:
-		req.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
+		req.ResponseCh <- InteractiveResponse{Decision: InteractiveAllow}
 	case <-time.After(time.Second):
 		t.Fatal("did not receive approval request on channel")
 	}
@@ -115,7 +113,7 @@ func TestTeaApprovalCallback_ReceivesAllow(t *testing.T) {
 // TestTeaApprovalCallback_ReceivesDeny verifies that when the user sends an
 // ApprovalDeny decision, the callback returns ApprovalDeny with no error.
 func TestTeaApprovalCallback_ReceivesDeny(t *testing.T) {
-	ch := make(chan tui.ApprovalRequest)
+	ch := make(chan InteractiveRequest)
 	cb := NewTeaApprovalCallback(ch)
 
 	done := make(chan requestResult, 1)
@@ -127,7 +125,7 @@ func TestTeaApprovalCallback_ReceivesDeny(t *testing.T) {
 	// Receive the request and respond with Deny.
 	select {
 	case req := <-ch:
-		req.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalDeny}
+		req.ResponseCh <- InteractiveResponse{Decision: InteractiveDeny}
 	case <-time.After(time.Second):
 		t.Fatal("did not receive approval request on channel")
 	}
@@ -145,7 +143,7 @@ func TestTeaApprovalCallback_ReceivesDeny(t *testing.T) {
 // an ApprovalAlwaysAllow decision, the callback returns ApprovalAlwaysAllow
 // with no error.
 func TestTeaApprovalCallback_ReceivesAlwaysAllow(t *testing.T) {
-	ch := make(chan tui.ApprovalRequest)
+	ch := make(chan InteractiveRequest)
 	cb := NewTeaApprovalCallback(ch)
 
 	done := make(chan requestResult, 1)
@@ -157,7 +155,7 @@ func TestTeaApprovalCallback_ReceivesAlwaysAllow(t *testing.T) {
 	// Receive the request and respond with AlwaysAllow.
 	select {
 	case req := <-ch:
-		req.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAlwaysAllow}
+		req.ResponseCh <- InteractiveResponse{Decision: InteractiveAlwaysAllow}
 	case <-time.After(time.Second):
 		t.Fatal("did not receive approval request on channel")
 	}
@@ -175,7 +173,7 @@ func TestTeaApprovalCallback_ReceivesAlwaysAllow(t *testing.T) {
 // canceled while the callback is blocked waiting for a user response, the
 // callback returns ApprovalDeny and the context's error.
 func TestTeaApprovalCallback_ContextCanceled(t *testing.T) {
-	ch := make(chan tui.ApprovalRequest)
+	ch := make(chan InteractiveRequest)
 	cb := NewTeaApprovalCallback(ch)
 
 	ctx, cancel := context.WithCancel(context.Background())

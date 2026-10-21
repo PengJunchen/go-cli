@@ -78,6 +78,7 @@ type runOwnerContextKey struct{}
 
 type runOwner struct {
 	mu                 sync.Mutex
+	generationLease    RunGenerationLease
 	guard              RunSlotGuard
 	claim              RunClaim
 	ownerGeneration    string
@@ -866,6 +867,12 @@ func (o *runOwner) run(timeout time.Duration, fn func(context.Context) (Result, 
 		o.mu.Unlock()
 		go func() {
 			result, panicked, err := invokeRunCallback(callbackCtx, fn)
+			if fenceErr := CheckRunGeneration(callbackCtx); fenceErr != nil {
+				result.Message = ""
+				result.Success = false
+				result.Outcome = RunOutcomeUnknown
+				err = toolOutcomeUnknownError{cause: errors.Join(err, fenceErr)}
+			}
 			o.mu.Lock()
 			o.callbackFinished = true
 			commitFailure := errors.Is(err, ErrCanonicalTranscriptInvalid) || errors.Is(err, ErrCanonicalTranscriptRequired)
@@ -1053,10 +1060,16 @@ func (o *runOwner) supervise() {
 		if closeLease {
 			leasePanicked = leaseGuard.close()
 		}
+		generationErr := releaseGeneration(o.generationLease)
 		releasePanicked := releaseRunSlotGuard(guard, claim)
 
 		o.mu.Lock()
 		o.released = true
+		if generationErr != nil {
+			o.runErr = errors.Join(o.runErr, generationErr)
+			o.unknown = true
+			o.status.Outcome = RunOutcomeUnknown
+		}
 		o.leaseCloseFailed = leasePanicked
 		o.runSlotReleaseFailed = releasePanicked
 		if lateCommitErr != nil {
@@ -1074,7 +1087,7 @@ func (o *runOwner) supervise() {
 			o.unknown = true
 			o.status.Outcome = RunOutcomeUnknown
 		}
-		if lateCommitErr != nil || leasePanicked || releasePanicked || !o.durableCommitSucceededLocked() {
+		if lateCommitErr != nil || generationErr != nil || leasePanicked || releasePanicked || !o.durableCommitSucceededLocked() {
 			o.status.ExecutionState = RunExecutionQuarantined
 		} else {
 			o.status.ExecutionState = RunExecutionQuiescent

@@ -185,6 +185,12 @@ func (s *SessionRunCommitSink) CommitInput(ctx context.Context, input core.RunCo
 	row.RunID = input.RunID
 	row.WorkspaceID = s.workspaceID
 	row.InputKind = input.InputKind
+	if metadata, ok := core.RunGenerationMetadataFromContext(ctx); ok {
+		row.Generation = &metadata
+	} else if input.Generation != nil {
+		copy := *input.Generation
+		row.Generation = &copy
+	}
 	row.TranscriptIndex = &index
 	row.Timestamp = time.Now().UTC()
 	return s.appendAndRefreshLocked(ctx, row)
@@ -811,6 +817,13 @@ func (s *SessionRunCommitSink) CommitTerminal(ctx context.Context, terminal core
 		ID: terminalID, Type: EntryTypeCheckpoint, RunID: terminal.RunID,
 		WorkspaceID: s.workspaceID, CheckpointKind: CheckpointRunTerminal,
 		RunOutcome: terminal.Outcome,
+		Generation: terminal.Generation,
+	}
+	if metadata, ok := core.RunGenerationMetadataFromContext(ctx); ok {
+		checkpoint.Generation = &metadata
+	} else if terminal.Generation != nil {
+		metadata := *terminal.Generation
+		checkpoint.Generation = &metadata
 	}
 	rows = append(rows, checkpoint)
 	canonical, err := s.appendAndRefreshRowsLocked(ctx, rows...)
@@ -1283,6 +1296,7 @@ func sameReceiptRow(existing, candidate SessionEntry) bool {
 		durableRowMatchesMessage(existing, core.AgentMessage{
 			Role: "tool", Content: candidate.Content, ContentBlocks: candidate.ContentBlocks, Usage: candidate.Usage,
 			ToolCallID: candidate.ToolCallID, ToolName: candidate.ToolName, ReceiptOutcome: candidate.ReceiptOutcome,
+			MaterializedArtifactDigest: candidate.MaterializedArtifactDigest,
 		})
 }
 
@@ -1560,6 +1574,7 @@ func sessionEntryFromRunCommitMessage(message core.AgentMessage, entryType Entry
 		Type: entryType, Content: message.Content, ContentBlocks: message.ContentBlocks,
 		Usage: message.Usage, ToolCalls: message.ToolCalls, ToolCallID: message.ToolCallID,
 		ToolName: message.ToolName, InputKind: message.InputKind, ReceiptOutcome: message.ReceiptOutcome,
+		MaterializedArtifactDigest: message.MaterializedArtifactDigest,
 	}
 }
 

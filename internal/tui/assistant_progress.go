@@ -1,3 +1,5 @@
+//go:build !headless
+
 package tui
 
 import "github.com/pengjunchen/go-cli/internal/core"

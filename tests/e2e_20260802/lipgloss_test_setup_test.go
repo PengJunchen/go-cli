@@ -1,3 +1,5 @@
+//go:build !headless
+
 package e2e_20260802 //nolint:staticcheck
 
 import (
