@@ -89,7 +89,7 @@ func TestDurableREPLProviderLocalTimeoutRefreshesAndContinues(t *testing.T) {
 	defer server.Close()
 
 	storeDirectory := filepath.Join(t.TempDir(), "sessions")
-	cfg := durablePromptConfig(server.URL, storeDirectory)
+	cfg := durablePromptConfig(t, server.URL, storeDirectory)
 	cfg.Production.ModelTimeout.Total = "250ms"
 	cfg.Production.ModelTimeout.StreamIdle = "150ms"
 

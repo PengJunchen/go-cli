@@ -867,7 +867,7 @@ func (o *runOwner) run(timeout time.Duration, fn func(context.Context) (Result, 
 		o.mu.Unlock()
 		go func() {
 			result, panicked, err := invokeRunCallback(callbackCtx, fn)
-			if fenceErr := CheckRunGeneration(callbackCtx); fenceErr != nil {
+			if fenceErr := CheckRunGeneration(o.CleanupCommitContext(callbackCtx)); fenceErr != nil {
 				result.Message = ""
 				result.Success = false
 				result.Outcome = RunOutcomeUnknown

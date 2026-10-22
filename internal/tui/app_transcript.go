@@ -332,21 +332,27 @@ func applyLiveToolMetadataToCanonicalRow(
 	if !canonicalTranscriptHasTool(snapshot, occurrence) {
 		return
 	}
-	for index, source := range snapshot.Rows {
+	for _, source := range snapshot.Rows {
 		if source.Kind != TranscriptRowTool || source.Occurrence == nil ||
 			source.Occurrence.RunID != occurrence.Key.RunID ||
 			source.Occurrence.AssistantTranscriptOrdinal != occurrence.Key.AssistantTranscriptOrdinal ||
 			source.Occurrence.ToolCallID != occurrence.Key.ToolCallID {
 			continue
 		}
-		if rows[index].sourceTruncated == nil && fact != nil {
-			value := *fact
-			rows[index].sourceTruncated = &value
+		for index := range rows {
+			if rows[index].key != source.Key.EntryID {
+				continue
+			}
+			if rows[index].sourceTruncated == nil && fact != nil {
+				value := *fact
+				rows[index].sourceTruncated = &value
+			}
+			if receipt != "" {
+				rows[index].receiptOutcome = receipt
+			}
+			composeTranscriptViewportRowText(&rows[index])
+			return
 		}
-		if receipt != "" {
-			rows[index].receiptOutcome = receipt
-		}
-		composeTranscriptViewportRowText(&rows[index])
 		return
 	}
 }
@@ -410,6 +416,10 @@ func composeTranscriptViewportRowText(row *transcriptViewportRow) {
 func canonicalTranscriptViewportRows(snapshot CanonicalTranscriptSnapshot) []transcriptViewportRow {
 	rows := make([]transcriptViewportRow, 0, len(snapshot.Rows))
 	for index, source := range snapshot.Rows {
+		if source.Kind == TranscriptRowAssistant && source.Message.Content == "" &&
+			len(source.Message.ContentBlocks) == 0 && len(source.Message.ToolCalls) > 0 && source.Message.ReceiptOutcome == "" {
+			continue
+		}
 		content := source.Message.Content
 		if content == "" && source.Compaction != nil {
 			content = source.Compaction.Summary
@@ -689,6 +699,31 @@ func (m *teaModel) handleCanonicalTranscriptEvent(event AgentEvent) tea.Cmd {
 	if _, exists := m.canonicalAssistantKeys[occurrence]; exists {
 		m.mu.Unlock()
 		return nil
+	}
+	if !event.Incremental && event.Content == "" && len(event.ToolCalls) > 0 && !event.IsError && event.ReceiptOutcome == "" {
+		renderer := m.liveAssistantRenderers[occurrence]
+		if renderer == nil || renderer.inputBytes == 0 {
+			if key := m.liveAssistantRows[occurrence]; key != "" {
+				delete(m.liveTranscriptRows, key)
+				delete(m.liveAssistantRows, occurrence)
+				delete(m.liveAssistantRenderers, occurrence)
+				for index, orderedKey := range m.liveRowOrder {
+					if orderedKey == key {
+						m.liveRowOrder = append(m.liveRowOrder[:index], m.liveRowOrder[index+1:]...)
+						break
+					}
+				}
+				if err := m.rebuildTranscriptPaneLayoutLocked(); err != nil {
+					slog.Debug("tui.transcript.hide_tool_only_body_failed", "err", err)
+				}
+			}
+			if notify {
+				view = m.renderViewLocked()
+			}
+			m.mu.Unlock()
+			m.notify(view)
+			return nil
+		}
 	}
 	renderer := m.liveAssistantRenderers[occurrence]
 	if renderer == nil {

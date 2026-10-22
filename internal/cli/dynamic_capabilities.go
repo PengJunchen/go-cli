@@ -69,6 +69,11 @@ func (d *dynamicRuntime) AcquireRun(ctx context.Context) (context.Context, core.
 		return nil, nil, err
 	}
 	plan := lease.Value()
+	if err := checkCurrentProjectBindings(ctx, plan.bindings); err != nil {
+		lease.Release()
+		d.gate <- struct{}{}
+		return nil, nil, err
+	}
 	snapshot := lease.Snapshot()
 	ctx = context.WithValue(ctx, runtimePlanKey{}, plan)
 	ctx = core.WithRunGenerationMetadata(ctx, core.RunGenerationMetadata{GenerationID: snapshot.ID(), PromptDigest: snapshot.PromptDigest(), CapabilityDigest: snapshot.CapabilityDigest(), PolicyEpoch: snapshot.PolicyEpoch(), TrustEpoch: snapshot.TrustEpoch()})
@@ -492,6 +497,9 @@ type runtimePromptBuilder struct {
 func (b *runtimePromptBuilder) Build(ctx context.Context, options core.SystemPromptOptions) string {
 	compiler, maxBytes := b.inner, b.maxBytes
 	if plan, ok := ctx.Value(runtimePlanKey{}).(*runtimePlan); ok {
+		if err := checkCurrentProjectBindings(ctx, plan.bindings); err != nil {
+			return "Project capability authorization is no longer current. Refresh trusted project sources before continuing."
+		}
 		toolsForRequest := options.Tools
 		options = plan.promptOptions
 		options.Tools = toolsForRequest
@@ -531,13 +539,11 @@ func (g *runtimeCapabilityGuard) BeginCall(ctx context.Context, id string) (core
 	if err := g.checkPolicy(); err != nil {
 		return nil, err
 	}
-	if err := g.checkBudget(ctx); err != nil {
+	if err := checkCurrentProjectBindings(ctx, g.bindings); err != nil {
 		return nil, err
 	}
-	for _, binding := range g.bindings {
-		if !binding.Valid() {
-			return nil, errors.New("cli: project capability trust revoked")
-		}
+	if err := g.checkBudget(ctx); err != nil {
+		return nil, err
 	}
 	invocation, err := g.lease.BeginCall(ctx, id)
 	if err != nil {
@@ -546,7 +552,13 @@ func (g *runtimeCapabilityGuard) BeginCall(ctx context.Context, id string) (core
 	return &runtimeInvocation{Invocation: invocation, bindings: g.bindings, guard: g}, nil
 }
 func (g *runtimeCapabilityGuard) Check() error {
-	invocation, err := g.BeginCall(context.Background(), "completion-fence")
+	return g.CheckContext(context.Background())
+}
+
+// CheckContext preserves the active caller's cancellation during persisted
+// authority checks. Check remains compatible with the original guard port.
+func (g *runtimeCapabilityGuard) CheckContext(ctx context.Context) error {
+	invocation, err := g.BeginCall(ctx, "completion-fence")
 	if err != nil {
 		return err
 	}
@@ -569,9 +581,25 @@ func (i *runtimeInvocation) Complete() error {
 	if err := i.Invocation.Complete(); err != nil {
 		return err
 	}
-	for _, binding := range i.bindings {
-		if !binding.Valid() {
-			return errors.New("cli: project capability trust revoked; external outcome may be unknown")
+	if err := checkCurrentProjectBindings(i.Context(), i.bindings); err != nil {
+		return fmt.Errorf("cli: project capability authorization changed; external outcome may be unknown: %w", err)
+	}
+	return nil
+}
+
+// checkCurrentProjectBindings reads the persisted source authority; Valid only
+// checks the minted proof's shape. The no-op callback must never enter a
+// registry/manager lock or run user code while the trust transaction is held.
+func checkCurrentProjectBindings(ctx context.Context, bindings []tools.ProjectTrustBinding) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for _, binding := range bindings {
+		if binding == nil || !binding.Valid() {
+			return errors.New("cli: project capability trust proof is invalid")
+		}
+		if err := binding.CommitIfCurrent(ctx, func() error { return nil }); err != nil {
+			return fmt.Errorf("cli: project capability trust is not current: %w", err)
 		}
 	}
 	return nil
@@ -706,8 +734,8 @@ func validateRuntimeHooks(cfg *config.Config) error {
 	declarations := append([]config.HookConfig(nil), cfg.Hooks.Hooks...)
 	if verified := cfg.VerifiedProjectSources(); verified != nil {
 		if data, ok := verified.SourceBytes(config.ProjectHooksSourceID); ok {
-			var project config.HooksConfig
-			if err := config.UnmarshalConfig(data, config.ConfigFormatYAML, &project); err != nil {
+			project, err := parseShellHooksConfig(data)
+			if err != nil {
 				return fmt.Errorf("cli: hook configuration: %w", err)
 			}
 			declarations = append(declarations, project.Hooks...)
@@ -817,7 +845,15 @@ func (a *AgentAssembly) SearchSkills(ctx context.Context, query string) ([]skill
 		return nil, err
 	}
 	defer lease.Release()
-	return lease.Value().catalog.Search(query, 100), nil
+	plan := lease.Value()
+	if err := checkCurrentProjectBindings(ctx, plan.bindings); err != nil {
+		return nil, err
+	}
+	entries := plan.catalog.Search(query, 100)
+	if err := checkCurrentProjectBindings(ctx, plan.bindings); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 // LoadSkillInstructions materializes one skill for an explicit terminal command.
@@ -831,11 +867,14 @@ func (a *AgentAssembly) LoadSkillInstructions(ctx context.Context, name string) 
 	}
 	defer lease.Release()
 	plan := lease.Value()
-	if plan.binding != nil && !plan.binding.Valid() {
-		return "", errors.New("cli: skill trust revoked")
+	if err := checkCurrentProjectBindings(ctx, plan.bindings); err != nil {
+		return "", err
 	}
 	definition, err := plan.catalog.Load(ctx, name)
 	if err != nil {
+		return "", err
+	}
+	if err := checkCurrentProjectBindings(ctx, plan.bindings); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("Use skill %s from %s. Follow these instructions:\n\n%s", name, plan.catalog.EntryPath(name), definition.Prompt()), nil

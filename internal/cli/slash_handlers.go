@@ -57,8 +57,8 @@ func (h *HelpHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 		"Serve requires --approve auto or --approve deny. Hard cost budgets are unsupported; usage and cost reports may be incomplete or estimated, and a displayed $0 is not proof of zero spend.",
 		"Plan Mode changes only through the user's /plan enter|exit commands; model calls cannot switch it.",
 		"Themes cover a renderer subset. Diffs are unified; ASCII mode is unsupported; NO_COLOR only disables color.",
-		"MCP server configuration hot reload is unsupported.",
-		"Interactive terminal evidence is limited to one native Darwin arm64 journey; Linux and Windows are unverified.",
+		"MCP: lazy mode supports /mcp list, /mcp load <server>, and idle /mcp reload <server>; /reload reindexes descriptors. Compatibility eager mode retains owned reloaders. Dynamic mode with eager MCP sources requires restart, as do active source-identity or project trust-grant changes.",
+		"Interactive rendering depends on terminal capabilities; Linux and Windows interactive runtime are unverified. Build success does not establish native UI validation.",
 		"Docker target is linux/amd64; runtime support is unverified.",
 	} {
 		fmt.Fprintf(deps.Out(), "  %s\n", boundary) //nolint:errcheck

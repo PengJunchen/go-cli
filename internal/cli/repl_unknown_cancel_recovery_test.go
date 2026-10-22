@@ -107,7 +107,7 @@ func TestDurableREPLUnknownUserCancellationRequiresExplicitNewSession(t *testing
 	defer server.Close()
 
 	storeDirectory := filepath.Join(testRoot, "sessions")
-	cfg := durablePromptConfig(server.URL, storeDirectory)
+	cfg := durablePromptConfig(t, server.URL, storeDirectory)
 	lineEditor := &recoveryGatedLineEditor{results: []lineReadResult{
 		{line: "inspect the workspace"},
 		{line: "this prompt must remain fenced"},

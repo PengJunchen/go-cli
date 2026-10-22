@@ -63,7 +63,7 @@ func TestDurableREPLBashPolicyRejectionIsKnownAndNextTurnContinues(t *testing.T)
 	defer server.Close()
 
 	storeDirectory := filepath.Join(t.TempDir(), "sessions")
-	cfg := durablePromptConfig(server.URL, storeDirectory)
+	cfg := durablePromptConfig(t, server.URL, storeDirectory)
 	cfg.Git.WorkDir = workspace
 	lineEditor := &scriptedLineEditor{results: []lineReadResult{
 		{line: "try the blocked interpreter"},

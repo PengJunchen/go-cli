@@ -59,6 +59,9 @@ func WithRunCapabilityGuard(ctx context.Context, guard RunCapabilityGuard) conte
 func CheckRunGeneration(ctx context.Context) error {
 	if ctx != nil {
 		if guard, ok := ctx.Value(runCapabilityGuardKey{}).(RunCapabilityGuard); ok {
+			if contextual, ok := guard.(interface{ CheckContext(context.Context) error }); ok {
+				return contextual.CheckContext(ctx)
+			}
 			return guard.Check()
 		}
 	}

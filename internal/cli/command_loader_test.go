@@ -312,15 +312,8 @@ func TestPendingInput_REPLIntegration(t *testing.T) {
 	// User types "/review" then "exit".
 	in := strings.NewReader("/review\nexit\n")
 	cmd := newInteractiveCmd(in, &out)
-	cfg := &config.Config{
-		Provider: config.ProviderConfig{
-			Name:    "test",
-			BaseURL: srv.URL,
-			APIKey:  "test",
-			Model:   "test-model",
-		},
-		Commands: config.CommandsConfig{Dir: cmdDir},
-	}
+	cfg := newPromptConfig(t, srv.URL)
+	cfg.Commands.Dir = cmdDir
 
 	err := cmd.Run(t.Context(), cfg, nil)
 	require.NoError(t, err)

@@ -52,9 +52,7 @@ func TestPublicSDKExtensionCommandAndProviderThroughCLIEntry(t *testing.T) {
 	t.Chdir(project)
 	project, err = filepath.EvalSymlinks(project)
 	require.NoError(t, err)
-	privateHome := t.TempDir()
 	for key, value := range map[string]string{
-		"HOME": privateHome, "XDG_CONFIG_HOME": filepath.Join(privateHome, "config"),
 		"GO_CLI_PROVIDER_NAME": "entrysdk", "GO_CLI_MODEL_NAME": "entrymodel",
 		"GO_CLI_PROVIDER_API_KEY": "", "GO_CLI_PROVIDER_BASE_URL": "",
 		"GO_CLI_TRACING_ENABLED": "false", "GO_CLI_GIT_ENABLED": "false", "GO_CLI_EXTENSIONS_ENABLED": "true",
@@ -70,6 +68,7 @@ func TestPublicSDKExtensionCommandAndProviderThroughCLIEntry(t *testing.T) {
 		"runtime":    map[string]any{"profile": "edge", "max_prompt_bytes": 131072},
 		"extensions": map[string]any{"enabled": true, "plugin_paths": []string{"entry.rpc.json"}},
 	}
+	isolateEntryFixtureStorage(t, project, settings)
 	settingsBytes, err := json.Marshal(settings)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(project, ".go-cli.json"), settingsBytes, 0600))

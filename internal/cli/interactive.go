@@ -36,6 +36,26 @@ const (
 	exitCommand = "exit"
 )
 
+// resolveApprovalMode keeps both CLI entries and library assembly on the same
+// explicit flag/option > configuration > ask contract.
+func resolveApprovalMode(cfg *config.Config, requested ApproveMode, explicit bool) (ApproveMode, error) {
+	if explicit {
+		switch requested {
+		case ApproveAsk, ApproveAuto, ApproveDeny:
+			return requested, nil
+		default:
+			return ApproveAsk, newUsageError("invalid approval mode (want: ask|auto|deny)")
+		}
+	}
+	mode := ApproveAsk
+	if cfg != nil && cfg.Approval.Mode != "" {
+		if err := mode.Set(cfg.Approval.Mode); err != nil {
+			return ApproveAsk, newUsageError("approval.mode: %v", err)
+		}
+	}
+	return mode, nil
+}
+
 // ErrInteractiveRemoteModeUnsupported indicates that interactive remote mode
 // has no prompt-and-dispatch protocol in the current CLI.
 var ErrInteractiveRemoteModeUnsupported = errors.New("cli: interactive remote mode is unsupported")

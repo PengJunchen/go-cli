@@ -74,6 +74,7 @@ type REPLSession struct {
 	resumeSessionID  string
 	noSandboxFlag    bool
 	noOnboardingFlag bool
+	approveMode      ApproveMode
 
 	// Agent assembly
 	assembly        *AgentAssembly
@@ -240,6 +241,7 @@ func (s *REPLSession) parseFlags() error {
 		thinkingFlag     string
 		noSandboxFlag    bool
 		noOnboardingFlag bool
+		approveMode      ApproveMode
 	)
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
@@ -250,6 +252,7 @@ func (s *REPLSession) parseFlags() error {
 	fs.StringVar(&thinkingFlag, "thinking", "medium", "thinking level: none|minimal|low|medium|high|max")
 	fs.BoolVar(&noSandboxFlag, "no-sandbox", false, "disable bash sandbox enforcement")
 	fs.BoolVar(&noOnboardingFlag, "no-onboarding", false, "skip first-run onboarding wizard")
+	fs.Var(&approveMode, "approve", "approval mode: ask|auto|deny (flag > approval.mode > ask)")
 	if err := fs.Parse(s.args); err != nil {
 		return newUsageError("interactive: %v", err)
 	}
@@ -262,6 +265,17 @@ func (s *REPLSession) parseFlags() error {
 	if v, ok := s.cfg.(*config.Config); ok {
 		s.rc = v
 	}
+	approveExplicit := false
+	fs.Visit(func(option *flag.Flag) {
+		if option.Name == "approve" {
+			approveExplicit = true
+		}
+	})
+	resolvedApproval, err := resolveApprovalMode(s.rc, approveMode, approveExplicit)
+	if err != nil {
+		return err
+	}
+	s.approveMode = resolvedApproval
 	if s.rc != nil && s.rc.Session.StorePath != "" && resumeFlag {
 		return newUsageError("interactive: durable sessions require --resume-session <physical-id>; --resume is ambiguous")
 	}
@@ -334,6 +348,7 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 		}
 	}
 	assembleOpts := []AssembleOption{
+		WithApproveMode(s.approveMode),
 		WithMaxTokens(s.maxTokens),
 		WithResume(s.resumeFlag),
 		WithSessionPersistence(true),
@@ -347,7 +362,7 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 	if s.noSandboxFlag {
 		assembleOpts = append(assembleOpts, WithNoSandbox())
 	}
-	if interactiveApprovalsEnabled() {
+	if s.approveMode == ApproveAsk && interactiveApprovalsEnabled() {
 		approvalCh = make(chan tui.ApprovalRequest, 32)
 		assembleOpts = append(assembleOpts, WithApprovalChannel(approvalCh))
 	}
@@ -357,6 +372,9 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 		return newExecutionError("interactive: assemble agent", err)
 	}
 	s.assembly = assembly
+	if _, err := fmt.Fprintf(s.out, "Approval mode: %s\n", assembly.ApprovalMode.String()); err != nil {
+		return errors.Join(newExecutionError("interactive: display approval mode", err), assembly.Close(context.Background()))
+	}
 	if err := assembly.setInteractiveCloseHooks(func() {
 		s.stopFlushTicker()
 	}, func(ctx context.Context) error {
@@ -953,6 +971,9 @@ func (s *REPLSession) finishTurnSpanAfterCompletion(interrupted bool) error {
 	} else if s.assembly.durableSession != nil && s.turnResult.DurablePublication.State == core.DurablePublicationFailed {
 		completionErr = errors.New("interactive: durable run finished without positive transcript publication")
 	}
+	if completionErr != nil {
+		completionErr = errors.Join(completionErr, s.turnErr)
+	}
 
 	spanErr := completionErr
 	if spanErr == nil {
@@ -975,7 +996,14 @@ func durableTurnIsJoinable(result core.Result) bool {
 	return result.ExecutionState == core.RunExecutionQuiescent && result.Outcome != core.RunOutcomeUnknown
 }
 
-func (s *REPLSession) applyDurableTurnRefresh(initial *session.PreparedSessionSnapshot) error {
+func (s *REPLSession) applyDurableTurnRefresh(initial *session.PreparedSessionSnapshot) (refreshErr error) {
+	defer func() {
+		if refreshErr != nil {
+			// Publication failures remain fatal. Keep the run's typed cause so
+			// callers can distinguish denial, timeout, and persistence failures.
+			refreshErr = errors.Join(refreshErr, s.turnErr)
+		}
+	}()
 	if initial == nil || s.app == nil || s.uiCtx == nil {
 		return errors.New("interactive: durable transcript refresh requires its initial snapshot and active TUI")
 	}

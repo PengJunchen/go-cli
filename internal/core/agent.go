@@ -220,7 +220,11 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 		finalMsg = lastAssistant.Content
 	}
 
-	if fenceErr := CheckRunGeneration(spanCtx); fenceErr != nil {
+	completionCtx := spanCtx
+	if owner := runOwnerFromContext(spanCtx); owner != nil {
+		completionCtx = owner.CleanupCommitContext(spanCtx)
+	}
+	if fenceErr := CheckRunGeneration(completionCtx); fenceErr != nil {
 		_ = a.transitionState(StateError)
 		return Result{Outcome: RunOutcomeUnknown}, toolOutcomeUnknownError{cause: fenceErr}
 	}

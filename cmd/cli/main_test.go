@@ -1300,6 +1300,8 @@ func TestDefaultInteractiveTraceContainsNoPrompt(t *testing.T) {
 	}
 	cfg.Session.StorePath = filepath.Join(workDir, "sessions")
 	cfg.History.Path = filepath.Join(workDir, "history.jsonl")
+	cfg.Memory.StorePath = filepath.Join(workDir, "memories.jsonl")
+	cfg.Production.Audit.Path = filepath.Join(workDir, "audit.jsonl")
 	var stdout, stderr bytes.Buffer
 	code := run(nil, &stdout, &stderr, func() (*config.Config, error) { return cfg, nil })
 	require.Equal(t, 0, code, "stderr: %s", stderr.String())

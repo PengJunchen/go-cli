@@ -91,15 +91,16 @@ func (c *promptCmd) Name() string { return "prompt" }
 func (c *promptCmd) Synopsis() string { return "Run an agent with a natural-language prompt" }
 
 type parsedPromptArgs struct {
-	modelFlag     string
-	providerFlag  string
-	verboseFlag   bool
-	outputMode    OutputMode
-	approveMode   ApproveMode
-	forkFlag      string
-	resumeSession string
-	noSandbox     bool
-	remaining     []string
+	modelFlag       string
+	providerFlag    string
+	verboseFlag     bool
+	outputMode      OutputMode
+	approveMode     ApproveMode
+	approveExplicit bool
+	forkFlag        string
+	resumeSession   string
+	noSandbox       bool
+	remaining       []string
 }
 
 func parsePromptArgs(args []string, out io.Writer) (parsedPromptArgs, error) {
@@ -111,13 +112,18 @@ func parsePromptArgs(args []string, out io.Writer) (parsedPromptArgs, error) {
 	fs.StringVar(&parsed.providerFlag, "provider", "", "provider name to use")
 	fs.BoolVar(&parsed.verboseFlag, "verbose", false, "enable verbose output")
 	fs.Var(&parsed.outputMode, "output", "output format: json|stream|text (default text)")
-	fs.Var(&parsed.approveMode, "approve", "approval mode: auto|deny|ask (default ask)")
+	fs.Var(&parsed.approveMode, "approve", "approval mode: auto|deny|ask (flag > approval.mode > ask)")
 	fs.StringVar(&parsed.forkFlag, "fork", "", "fork from an existing session id")
 	fs.StringVar(&parsed.resumeSession, "resume-session", "", "resume an exact durable physical session ID")
 	fs.BoolVar(&parsed.noSandbox, "no-sandbox", false, "disable bash sandbox enforcement")
 	if err := fs.Parse(args); err != nil {
 		return parsed, newUsageError("prompt: %v", err)
 	}
+	fs.Visit(func(option *flag.Flag) {
+		if option.Name == "approve" {
+			parsed.approveExplicit = true
+		}
+	})
 	parsed.remaining = fs.Args()
 	if len(parsed.remaining) == 0 {
 		return parsed, newUsageError("prompt: missing message argument")
@@ -154,6 +160,10 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 	var rc *config.Config
 	if v, ok := cfg.(*config.Config); ok {
 		rc = v
+	}
+	approveMode, err = resolveApprovalMode(rc, approveMode, parsed.approveExplicit)
+	if err != nil {
+		return err
 	}
 	if rc != nil && rc.Session.StorePath != "" && forkFlag != "" {
 		return &UnsupportedDurableCLIError{Feature: "durable prompt fork"}

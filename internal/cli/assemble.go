@@ -176,6 +176,8 @@ type Observability struct {
 
 // InteractiveControl holds channels and emitters for interactive sessions.
 type InteractiveControl struct {
+	// ApprovalMode is the effective mode after explicit option/config resolution.
+	ApprovalMode ApproveMode
 	// SteerChannel is the shared steering channel between the
 	// InterruptHandler (writer) and the LoopAgent (reader). The REPL writes
 	// steering messages here when the user presses Esc and types an
@@ -322,11 +324,10 @@ type assembleConfig struct {
 	noSandbox bool
 	// approvalCh, when non-nil, enables TUI-based approval via TeaApprovalCallback.
 	approvalCh chan approval.InteractiveRequest
-	// approveMode controls headless tool approval behavior when approvalCh is
-	// nil. ApproveAsk (default) uses SafetyPolicyClassifier with interactive
-	// callback; ApproveAuto uses AllowAllClassifier; ApproveDeny uses
-	// DenyAllClassifier.
-	approveMode ApproveMode
+	// approveMode is resolved before resource construction; only Ask uses the
+	// optional approval channel. Auto/Deny retain the same prepared middleware.
+	approveMode    ApproveMode
+	approveModeSet bool
 }
 
 // WithMaxTokens sets the compaction token budget.
@@ -334,20 +335,22 @@ func WithMaxTokens(n int) AssembleOption {
 	return func(c *assembleConfig) { c.maxTokens = n }
 }
 
-// WithApprovalChannel enables TUI-based interactive approval. When set,
-// AssembleAgent constructs a TeaApprovalCallback backed by this channel instead
-// of the fallback InteractiveApprovalCallback. The same channel must be passed
-// to the BubbleteaApp via tui.WithApprovalChannel.
+// WithApprovalChannel enables TUI-based approval in Ask mode. Auto/Deny ignore
+// the channel. The same Ask channel is passed to the BubbleteaApp rather than
+// using the fallback InteractiveApprovalCallback.
 func WithApprovalChannel(ch chan approval.InteractiveRequest) AssembleOption {
 	return func(c *assembleConfig) { c.approvalCh = ch }
 }
 
-// WithApproveMode sets the headless tool approval mode. This is used by the
-// prompt command when no TUI approval channel is available.
+// WithApproveMode explicitly overrides the configured approval mode for either
+// CLI entry or library caller. Only Ask uses an available TUI approval channel.
 // ApproveAuto automatically approves all tool calls; ApproveDeny automatically
 // denies all tool calls; ApproveAsk (default) prompts via InteractiveApprovalCallback.
 func WithApproveMode(mode ApproveMode) AssembleOption {
-	return func(c *assembleConfig) { c.approveMode = mode }
+	return func(c *assembleConfig) {
+		c.approveMode = mode
+		c.approveModeSet = true
+	}
 }
 
 // WithResume enables session history restoration on startup.
@@ -401,6 +404,11 @@ func AssembleAgent(
 	opts ...AssembleOption,
 ) (*AgentAssembly, error) {
 	s, thinkingLevel := newAssembleState(ctx, rc, providerName, modelName, out, opts...)
+	mode, approvalErr := resolveApprovalMode(s.rc, s.ac.approveMode, s.ac.approveModeSet)
+	if approvalErr != nil {
+		return nil, errors.Join(approvalErr, s.runCleanup())
+	}
+	s.ac.approveMode = mode
 	if s.durableSession != nil {
 		snapshot, err := s.durableSession.snapshotSelected()
 		if err != nil {
@@ -552,6 +560,7 @@ func AssembleAgent(
 			AuditLog: s.auditLog,
 		},
 		InteractiveControl: InteractiveControl{
+			ApprovalMode:    s.ac.approveMode,
 			SteerChannel:    s.steerCh,
 			ApprovalChannel: s.ac.approvalCh,
 			FollowUpChannel: s.followUpCh,
@@ -1286,15 +1295,21 @@ func (s *assembleState) loadConfiguredShellHooks() {
 	s.loadShellHooks(hooksPath, data, verified)
 }
 
-// loadShellHooks parses verified hooks.yaml bytes and stores guarded shell
-// hooks for later assembly into the HookManager.
-func (s *assembleState) loadShellHooks(path string, data []byte, verified *approval.VerifiedProjectSources) {
-	var hooksCfg config.HooksConfig
+func parseShellHooksConfig(data []byte) (config.HooksConfig, error) {
+	var hooks config.HooksConfig
 	format := config.ConfigFormatYAML
 	if strings.HasPrefix(strings.TrimSpace(string(data)), "{") {
 		format = config.ConfigFormatJSON
 	}
-	if err := config.UnmarshalConfig(data, format, &hooksCfg); err != nil {
+	err := config.UnmarshalConfig(data, format, &hooks)
+	return hooks, err
+}
+
+// loadShellHooks parses verified hooks.yaml bytes and stores guarded shell
+// hooks for later assembly into the HookManager.
+func (s *assembleState) loadShellHooks(path string, data []byte, verified *approval.VerifiedProjectSources) {
+	hooksCfg, err := parseShellHooksConfig(data)
+	if err != nil {
 		s.logger.Warn("assemble_hooks_parse_failed", "path", path, "err", err)
 		return
 	}
@@ -1343,6 +1358,9 @@ func parseHookEvent(s string) (core.HookEvent, error) {
 // assembleApproval installs the approval policy and mutation queue on the
 // registry's prepared-dispatch pipeline.
 func (s *assembleState) assembleApproval() error {
+	if s.ac.approveMode != ApproveAsk {
+		s.ac.approvalCh = nil
+	}
 	fence, err := tools.DispatchFenceFromRegistry(s.tr)
 	if err != nil {
 		return fmt.Errorf("assemble: get prepared-dispatch fence: %w", err)
@@ -1879,11 +1897,9 @@ func (s *assembleState) assembleLoopAgent() {
 		loopOpts = append(loopOpts, core.WithExecutionMode(core.ExecutionModeSequential))
 	}
 
-	// Wire memory store for cross-session memory persistence.
-	memoryPath := ""
-	if home, homeErr := os.UserHomeDir(); homeErr == nil && home != "" {
-		memoryPath = filepath.Join(home, ".go-cli", "memories.jsonl")
-	}
+	// Explicit project/user configuration selects only that memory file; it
+	// never falls back to the personal store if opening the selected file fails.
+	memoryPath := memoryStorePath(s.rc)
 	if memoryPath != "" {
 		if mkErr := os.MkdirAll(filepath.Dir(memoryPath), 0o755); mkErr != nil {
 			s.logger.Warn("assemble_memory_mkdir_failed", "err", mkErr)
@@ -1937,6 +1953,16 @@ func (s *assembleState) assembleLoopAgent() {
 			s.loopAgent.WithToolSearchThreshold(30)
 		}
 	}
+}
+
+func memoryStorePath(cfg *config.Config) string {
+	if cfg != nil && cfg.Memory.StorePath != "" {
+		return cfg.Memory.StorePath
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".go-cli", "memories.jsonl")
+	}
+	return ""
 }
 
 // assembleMiddleware wires the loop detector, reminder manager, failure

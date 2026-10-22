@@ -110,6 +110,14 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 	}
 	defer func() {
 		if fenceErr := finishCapability(); fenceErr != nil {
+			if result.returned && !result.committed && ctx.Err() != nil && fenceErr == ctx.Err() {
+				// The sealed prepared invocation positively never entered its
+				// executor. Only the exact caller cancellation may retain this
+				// known outcome; wrapped/combined authority errors stay unknown.
+				result.isError = true
+				result.err = errors.Join(result.err, fenceErr)
+				return
+			}
 			result.output = "Error: capability authorization revoked; execution outcome unknown"
 			result.isError = true
 			result.err = toolOutcomeUnknownError{cause: errors.Join(result.err, fenceErr)}
@@ -443,7 +451,7 @@ func (consumer *runCommitConsumer) commitTerminal(transcript []TranscriptEntry, 
 	if projections == nil {
 		projections = consumer.projections
 	}
-	if err := CheckRunGeneration(consumer.ctx); err != nil {
+	if err := CheckRunGeneration(consumer.commitContext()); err != nil {
 		return toolOutcomeUnknownError{cause: err}
 	}
 	terminal := RunTerminal{

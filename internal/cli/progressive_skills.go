@@ -94,8 +94,10 @@ func (t *skillCatalogTool) Execute(ctx context.Context, call tools.ToolCall) (*t
 	if plan, ok := ctx.Value(runtimePlanKey{}).(*runtimePlan); ok {
 		catalog, binding = plan.catalog, plan.binding
 	}
-	if binding != nil && !binding.Valid() {
-		return nil, errors.New("cli: skill trust revoked")
+	if binding != nil {
+		if err := checkCurrentProjectBindings(ctx, []tools.ProjectTrustBinding{binding}); err != nil {
+			return nil, err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -106,6 +108,11 @@ func (t *skillCatalogTool) Execute(ctx context.Context, call tools.ToolCall) (*t
 		if err != nil {
 			return nil, err
 		}
+		if binding != nil {
+			if err := checkCurrentProjectBindings(ctx, []tools.ProjectTrustBinding{binding}); err != nil {
+				return nil, err
+			}
+		}
 		return &tools.ToolResult{Output: string(data)}, nil
 	}
 	name, _ := call.Args["name"].(string)
@@ -113,8 +120,10 @@ func (t *skillCatalogTool) Execute(ctx context.Context, call tools.ToolCall) (*t
 	if err != nil {
 		return nil, fmt.Errorf("cli: load skill: %w", err)
 	}
-	if binding != nil && !binding.Valid() {
-		return nil, errors.New("cli: skill trust revoked")
+	if binding != nil {
+		if err := checkCurrentProjectBindings(ctx, []tools.ProjectTrustBinding{binding}); err != nil {
+			return nil, err
+		}
 	}
 	path := filepath.ToSlash(catalog.EntryPath(name))
 	digest := sha256.Sum256([]byte(definition.Prompt()))
@@ -133,11 +142,11 @@ func (s *assembleState) registerProgressiveSkills(dtr tools.DeferredRegistry) er
 	}
 	for _, load := range []bool{false, true} {
 		tool := &skillCatalogTool{catalog: catalog, binding: binding, load: load}
-		registrar, ok := dtr.(tools.TrustedControlRegistrar)
+		registrar, ok := dtr.(tools.TrustedInlineControlRegistrar)
 		if !ok {
 			return tools.ErrTrustedControlRegistrationUnavailable
 		}
-		if err := registrar.RegisterTrustedControl(s.ctx, tool); err != nil {
+		if err := registrar.RegisterTrustedInlineControl(s.ctx, tool); err != nil {
 			return err
 		}
 	}
