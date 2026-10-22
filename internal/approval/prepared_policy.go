@@ -501,7 +501,7 @@ func (m *ApprovalMiddleware) publishPreparedRevocation(expected tools.DispatchFe
 	if m.fence == nil {
 		return ErrPreparedPolicyUnavailable
 	}
-	_, err := m.fence.Publish(tools.DispatchFenceApproval, &expected, func() {
+	_, err := m.fence.Publish(tools.DispatchFenceDecision, &expected, func() {
 		m.sessionMu.Lock()
 		defer m.sessionMu.Unlock()
 		m.policyEpoch++

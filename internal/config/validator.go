@@ -177,6 +177,7 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 	for _, p := range []struct{ value, name string }{
 		{cfg.Tracing.FilePath, "tracing file_path"},
 		{cfg.Session.StorePath, "session store_path"},
+		{cfg.Memory.StorePath, "memory store_path"},
 		{cfg.Skill.Dir, "skill dir"},
 		{cfg.Commands.Dir, "commands dir"},
 		{cfg.Production.Audit.Path, "audit path"},

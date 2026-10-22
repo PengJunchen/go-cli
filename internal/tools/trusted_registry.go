@@ -59,6 +59,13 @@ type TrustedControlRegistrar interface {
 	RegisterTrustedControl(context.Context, ToolDefinition) error
 }
 
+// TrustedInlineControlRegistrar is a host-only declaration that a reviewed
+// control tool owns no work after Execute returns. It must not be used for
+// extension callbacks or controls that hand untracked work to another owner.
+type TrustedInlineControlRegistrar interface {
+	RegisterTrustedInlineControl(context.Context, ToolDefinition) error
+}
+
 // TrustedNetworkReadRegistrar exposes only the reviewed first-party network
 // readers. It does not accept a caller-selected effect or scope.
 type TrustedNetworkReadRegistrar interface {
@@ -296,6 +303,12 @@ func (r *DefaultToolRegistry) RegisterTrustedControl(ctx context.Context, def To
 		completionProof = CompletionInlinePipelineJoined
 	}
 	return r.registerDefinitionWithCompletion(def, RegistrationSourceTrustedControl, newTrustedEffectSet(EffectControl), completionProof)
+}
+
+// RegisterTrustedInlineControl records an explicit host completion contract;
+// ordinary Register and RegisterTrustedControl retain their existing proofs.
+func (r *DefaultToolRegistry) RegisterTrustedInlineControl(_ context.Context, def ToolDefinition) error {
+	return r.registerDefinitionWithCompletion(def, RegistrationSourceTrustedControl, newTrustedEffectSet(EffectControl), CompletionInlinePipelineJoined)
 }
 
 func (r *DefaultToolRegistry) RegisterTrustedNetworkRead(ctx context.Context, def ToolDefinition) error {

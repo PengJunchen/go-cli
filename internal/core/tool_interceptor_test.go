@@ -57,8 +57,9 @@ func TestToolInterceptor_CancelsBeforeExecution(t *testing.T) {
 		return nil
 	})
 
-	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	result, err := loop.RunCanonical(context.Background(), Submission{Content: "go"})
 	require.NoError(t, err)
+	events := result.Events
 
 	// Tool must NOT have been executed.
 	assert.False(t, tool.executed.Load(), "tool should not execute when interceptor cancels")
@@ -68,9 +69,39 @@ func TestToolInterceptor_CancelsBeforeExecution(t *testing.T) {
 	require.Len(t, cancelled, 1)
 	assert.Equal(t, "danger", cancelled[0])
 
-	// No tool_result event for the cancelled call.
-	results := findEvents(events, "tool_result")
-	assert.Empty(t, results)
+	// Cancellation must finish the proposal with one known interrupted result,
+	// rather than leave event consumers waiting for a tool that never ran.
+	var canceledEvents, results []AgentEvent
+	for _, event := range events {
+		switch event.Kind {
+		case "tool_canceled":
+			canceledEvents = append(canceledEvents, event)
+		case "tool_result":
+			results = append(results, event)
+		}
+	}
+	require.Len(t, canceledEvents, 1)
+	assert.Equal(t, "c1", canceledEvents[0].ToolCallID)
+	assert.Equal(t, ReceiptOutcomeInterrupted, canceledEvents[0].ReceiptOutcome)
+	require.Len(t, results, 1)
+	assert.Equal(t, "c1", results[0].ToolCallID)
+	assert.Equal(t, "Tool call canceled by interceptor", results[0].Content)
+	assert.True(t, results[0].IsError)
+	assert.Equal(t, ReceiptOutcomeInterrupted, results[0].ReceiptOutcome)
+	assert.Empty(t, findEvents(events, "tool_call"), "cancellation must precede dispatch")
+
+	// The canonical receipt retains the exact tool identity and terminal truth.
+	var receipts []AgentMessage
+	for _, entry := range result.Transcript {
+		if entry.Message.Role == string(llm.RoleTool) {
+			receipts = append(receipts, entry.Message)
+		}
+	}
+	require.Len(t, receipts, 1)
+	assert.Equal(t, "c1", receipts[0].ToolCallID)
+	assert.Equal(t, "danger", receipts[0].ToolName)
+	assert.Equal(t, results[0].Content, receipts[0].Content)
+	assert.Equal(t, ReceiptOutcomeInterrupted, receipts[0].ReceiptOutcome)
 }
 
 // AC-1 (negative): When the interceptor allows the call, the tool executes.

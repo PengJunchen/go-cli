@@ -114,15 +114,23 @@ func TestSlashHelp(t *testing.T) {
 		"Themes cover a renderer subset",
 		"Diffs are unified; ASCII mode is unsupported",
 		"NO_COLOR only disables color",
-		"MCP server configuration hot reload is unsupported",
-		"Darwin arm64",
-		"Linux and Windows are unverified",
+		"lazy mode supports /mcp list, /mcp load <server>, and idle /mcp reload <server>",
+		"/reload reindexes descriptors",
+		"Compatibility eager mode retains owned reloaders",
+		"Dynamic mode with eager MCP sources requires restart",
+		"active source-identity or project trust-grant changes",
+		"Linux and Windows interactive runtime are unverified",
+		"Build success does not establish native UI validation",
 		"Docker target is linux/amd64; runtime support is unverified",
 	} {
 		assert.Contains(t, output, want, "help output must state boundary: %s", want)
 	}
 	assert.NotContains(t, output, "Fork, branch switch, snapshot, and migration are unsupported",
 		"legacy mutable handlers support fork and switch, so the boundary must distinguish durable mode")
+	assert.NotContains(t, output, "MCP server configuration hot reload is unsupported",
+		"refresh support depends on the loading mode and source authority")
+	assert.NotContains(t, output, "one native Darwin arm64 journey",
+		"product help must not hardcode a historical validation run as current evidence")
 }
 
 func TestSlashCost(t *testing.T) {

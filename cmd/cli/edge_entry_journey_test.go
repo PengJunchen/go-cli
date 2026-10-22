@@ -103,6 +103,7 @@ func TestEdgeEntryLoaderReadEditRead(t *testing.T) {
 		"skill":   map[string]any{"dir": ".go-cli/skills"},
 		"mcp":     map[string]any{"servers": []any{map[string]any{"name": "unselected", "url": mcpPeer.URL}}},
 	}
+	isolateEntryFixtureStorage(t, project, settings)
 	configPath := filepath.Join(project, ".go-cli.json")
 	writeSettings := func() {
 		data, encodeErr := json.Marshal(settings)
@@ -160,4 +161,13 @@ func TestEdgeEntryLoaderReadEditRead(t *testing.T) {
 	mu.Unlock()
 	require.Equal(t, len(observed), requestsAfterBudgetRefusal, "budget refusal must precede a model dispatch")
 	require.Zero(t, mcpRequests.Load())
+}
+
+func isolateEntryFixtureStorage(t *testing.T, project string, settings map[string]any) {
+	t.Helper()
+	root := filepath.Join(project, ".go-cli", "test-storage")
+	require.NoError(t, os.MkdirAll(root, 0700))
+	settings["memory"] = map[string]any{"store_path": filepath.Join(root, "memories.jsonl")}
+	settings["history"] = map[string]any{"path": filepath.Join(root, "history.jsonl")}
+	settings["production"] = map[string]any{"audit": map[string]any{"path": filepath.Join(root, "audit.jsonl")}}
 }

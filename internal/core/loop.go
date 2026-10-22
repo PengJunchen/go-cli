@@ -732,14 +732,14 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 	}
 
 	for iter := 0; l.maxIterations < 0 || iter < l.maxIterations; iter++ {
-		if fenceErr := CheckRunGeneration(spanCtx); fenceErr != nil {
-			return CanonicalRunResult{Events: events, Transcript: transcript}, toolOutcomeUnknownError{cause: fenceErr}
-		}
 		if err := spanCtx.Err(); err != nil {
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("core.loop.canceled", "iteration", iter, "err", err)
 			sendEvent(errEvent(err))
 			return CanonicalRunResult{Events: events, Transcript: transcript}, err
+		}
+		if fenceErr := CheckRunGeneration(spanCtx); fenceErr != nil {
+			return CanonicalRunResult{Events: events, Transcript: transcript}, toolOutcomeUnknownError{cause: fenceErr}
 		}
 
 		// Block here if the loop has been paused via Pause(). This allows
@@ -1108,6 +1108,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 					} else {
 						appendToolReceipt(&messages, &transcript, tc, canceledOutput, ReceiptOutcomeInterrupted, consumer)
 					}
+					sendToolResultEvent(canceledOutput, true, tc.ID, ReceiptOutcomeInterrupted, nil)
 					continue
 				}
 

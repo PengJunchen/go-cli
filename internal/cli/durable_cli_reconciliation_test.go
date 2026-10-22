@@ -155,7 +155,7 @@ func TestInteractiveDurableSessionReconcilesUnknownActionThroughSlashRoute(t *te
 	repl := &REPLSession{cmd: cmd, out: &output, lineEditor: lines}
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
-	require.NoError(t, repl.Run(ctx, durablePromptConfig(server.URL, storeDirectory), []string{"--resume-session", physicalID.SessionID, "--no-onboarding"}))
+	require.NoError(t, repl.Run(ctx, durablePromptConfig(t, server.URL, storeDirectory), []string{"--resume-session", physicalID.SessionID, "--no-onboarding"}))
 	require.Empty(t, provider.requestBodies(), "slash recovery commands must not issue a model request")
 	require.Contains(t, output.String(), "Unresolved durable actions (tool arguments are omitted):")
 	require.Contains(t, output.String(), "action=action-unknown tool=reconcile_seed dispatch=dispatched receipt=unknown reconcile=available")

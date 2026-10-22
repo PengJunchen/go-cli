@@ -418,6 +418,16 @@ func (a *DeferredToolRegistryAdapter) RegisterTrustedControl(ctx context.Context
 	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.RegisterTrustedControl(ctx, def) })
 }
 
+// RegisterTrustedInlineControl forwards the host completion declaration while
+// preserving deferred MCP name reservations.
+func (a *DeferredToolRegistryAdapter) RegisterTrustedInlineControl(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := a.underlying.(TrustedInlineControlRegistrar)
+	if !ok {
+		return ErrTrustedControlRegistrationUnavailable
+	}
+	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.RegisterTrustedInlineControl(ctx, def) })
+}
+
 // RegisterTrustedNetworkRead forwards the narrow reviewed network-reader
 // capability when the underlying registry supports it.
 func (a *DeferredToolRegistryAdapter) RegisterTrustedNetworkRead(ctx context.Context, def ToolDefinition) error {

@@ -399,14 +399,7 @@ func TestInteractiveCmd_RunConversation(t *testing.T) {
 	var out bytes.Buffer
 	in := strings.NewReader("hello\nexit\n")
 	cmd := newInteractiveCmd(in, &out)
-	cfg := &config.Config{
-		Provider: config.ProviderConfig{
-			Name:    "test",
-			BaseURL: srv.URL,
-			APIKey:  "test",
-			Model:   "test-model",
-		},
-	}
+	cfg := newPromptConfig(t, srv.URL)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
@@ -424,22 +417,16 @@ func TestInteractiveCmd_MaxTokensFlag(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	makeCfg := func() *config.Config {
-		return &config.Config{
-			Provider: config.ProviderConfig{
-				Name:    "test",
-				BaseURL: srv.URL,
-				APIKey:  "test",
-				Model:   "test-model",
-			},
-		}
+	makeCfg := func(t *testing.T) *config.Config {
+		t.Helper()
+		return newPromptConfig(t, srv.URL)
 	}
 
 	t.Run("valid value", func(t *testing.T) {
 		defer verify.AssertNoGoroutineLeak(t)()
 		var out bytes.Buffer
 		cmd := newInteractiveCmd(strings.NewReader("exit\n"), &out)
-		err := cmd.Run(t.Context(), makeCfg(), []string{"-max-tokens", "1000"})
+		err := cmd.Run(t.Context(), makeCfg(t), []string{"-max-tokens", "1000"})
 		require.NoError(t, err)
 		assert.Contains(t, out.String(), "Session ended")
 	})
@@ -448,7 +435,7 @@ func TestInteractiveCmd_MaxTokensFlag(t *testing.T) {
 		defer verify.AssertNoGoroutineLeak(t)()
 		var out bytes.Buffer
 		cmd := newInteractiveCmd(strings.NewReader("exit\n"), &out)
-		err := cmd.Run(t.Context(), makeCfg(), []string{"-max-tokens", "0"})
+		err := cmd.Run(t.Context(), makeCfg(t), []string{"-max-tokens", "0"})
 		require.NoError(t, err)
 		assert.Contains(t, out.String(), "Session ended")
 	})

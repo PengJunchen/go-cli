@@ -23,6 +23,7 @@ type Config struct {
 	Tracing       TracingConfig       `json:"tracing"`
 	Approval      ApprovalConfig      `json:"approval"`
 	Session       SessionConfig       `json:"session"`
+	Memory        MemoryConfig        `json:"memory"`
 	Compaction    CompactionConfig    `json:"compaction"`
 	Runtime       RuntimeConfig       `json:"runtime"`
 	MCP           MCPConfig           `json:"mcp"`
@@ -251,6 +252,12 @@ type TracingConfig struct {
 type ApprovalConfig struct {
 	Mode       string `json:"mode"`
 	Classifier string `json:"classifier"`
+}
+
+// MemoryConfig selects the cross-session memory file. Empty preserves the
+// default user store; a trusted project can choose its own workspace path.
+type MemoryConfig struct {
+	StorePath string `json:"store_path"`
 }
 
 // SessionConfig controls the active session and its persistence location.
