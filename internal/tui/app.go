@@ -3112,7 +3112,7 @@ func (m *teaModel) resolveApprovalLocked(decision ApprovalDecision) {
 		return
 	}
 	responseCh := m.activeInteraction.approval.ResponseCh
-	respondApproval(responseCh, decision)
+	respondApprovalWithSource(responseCh, decision, "user")
 	m.finishActiveInteractionLocked()
 }
 
@@ -3195,11 +3195,15 @@ func (m *teaModel) cancelApprovalInteractionsLocked() {
 }
 
 func respondApproval(responseCh chan ApprovalResponse, decision ApprovalDecision) {
+	respondApprovalWithSource(responseCh, decision, "canceled")
+}
+
+func respondApprovalWithSource(responseCh chan ApprovalResponse, decision ApprovalDecision, source string) {
 	if responseCh == nil {
 		return
 	}
 	select {
-	case responseCh <- ApprovalResponse{Decision: decision}:
+	case responseCh <- ApprovalResponse{Decision: decision, DecisionSource: source}:
 	default:
 	}
 }
