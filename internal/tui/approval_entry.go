@@ -47,6 +47,9 @@ type ApprovalRequest struct {
 // ApprovalResponse carries the user's decision back to the middleware.
 type ApprovalResponse struct {
 	Decision ApprovalDecision
+	// DecisionSource is "user" only for an actual approval key. Cleanup and
+	// canceled waiters use "canceled"; an empty value has unknown provenance.
+	DecisionSource string
 	// Pattern is a suggested glob for "always allow" (e.g. "git *"). Empty when
 	// the decision is not ApprovalAlwaysAllow.
 	Pattern string

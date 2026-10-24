@@ -1,0 +1,16 @@
+[
+  {
+    "id": "T201",
+    "prompt": "TURN_GZ_T201。请实际使用 tool_search 工具搜索 read，然后报告搜索工具是否真正完成及结果；不要执行其他工具。保留本轮标记。",
+    "phase": "tool-search-regression",
+    "kind": "tool-task",
+    "approval": "allow"
+  },
+  {
+    "id": "T202",
+    "prompt": "TURN_GZ_T202。不要使用工具，确认上一轮工具调用后仍能持续对话；广州酒店400—600元每晚目前是什么价格口径？最多80字，保留本轮标记。",
+    "phase": "tool-search-recovery",
+    "kind": "short-text",
+    "approval": "none"
+  }
+]

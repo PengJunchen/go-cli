@@ -295,6 +295,14 @@ func (r *DefaultToolRegistry) RegisterTrustedControl(ctx context.Context, def To
 		// keep the default unproven completion behavior.
 		completionProof = CompletionInlinePipelineJoined
 	}
+	if search, ok := def.(*ToolSearchTool); ok {
+		if search == nil {
+			return errors.New("tools: trusted tool_search control must be non-nil")
+		}
+		if synchronousToolSearchRegistry(search.reg) {
+			completionProof = CompletionInlinePipelineJoined
+		}
+	}
 	return r.registerDefinitionWithCompletion(def, RegistrationSourceTrustedControl, newTrustedEffectSet(EffectControl), completionProof)
 }
 

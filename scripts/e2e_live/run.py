@@ -371,6 +371,8 @@ def request_metadata(body: bytes, memory_canary: str = "", expected_fixture_fact
             canary_roles.append(str(role))
         if role == "tool":
             call_id = message.get("tool_call_id")
+            decision_source = re.search(r"\bdecision_source=(user|callback|canceled|non_tty_deny|input_ended|invalid_response)(?=[; )]|$)", content)
+            decision_choice = re.search(r"\bchoice=(deny|none|allow_once|allow_always)(?=[; )]|$)", content)
             receipts.append({
                 "toolCallId": call_id,
                 "tool": message.get("name"),
@@ -379,6 +381,8 @@ def request_metadata(body: bytes, memory_canary: str = "", expected_fixture_fact
                 "mentionsDenied": "denied" in content.lower(),
                 "mentionsError": any(term in content.lower() for term in ("error", "failed", "blocked", "denied")),
                 "mentionsPolicyBlocked": "command blocked" in content.lower(),
+                "decisionSource": decision_source.group(1) if decision_source else None,
+                "decisionChoice": decision_choice.group(1) if decision_choice else None,
                 "fixtureFactsMatched": sorted(
                     label for label, fact in (expected_fixture_facts or {}).items() if fact and fact in content
                 ),
@@ -592,7 +596,7 @@ class Renderer:
 
 
 class LivePTY:
-    def __init__(self, binary: Path, home: Path, cwd: Path, bridge: LiveForwarder, node: str, model: str, max_tokens: int, viewport: tuple[int, int] = (1440, 900)):
+    def __init__(self, binary: Path, home: Path, cwd: Path, bridge: LiveForwarder, node: str, model: str, max_tokens: int, viewport: tuple[int, int] = (1440, 900), resume_session_id: str | None = None):
         self.binary, self.home, self.cwd, self.bridge, self.model = binary, home, cwd, bridge, model
         self.viewport = viewport
         helper_env = os.environ.copy()
@@ -608,6 +612,8 @@ class LivePTY:
             try:
                 os.chdir(cwd)
                 args = [str(binary), "interactive", "--no-onboarding", "--provider", "openai", "--model", model, "--thinking", "none", "--max-tokens", str(max_tokens)]
+                if resume_session_id:
+                    args.extend(["--resume-session", resume_session_id])
                 os.execvpe(str(binary), args, child_env)
             except BaseException as error:  # pragma: no cover - subprocess failure path
                 os.write(2, f"live e2e exec failure: {type(error).__name__}\n".encode())
@@ -817,7 +823,7 @@ class LivePTY:
             "source": "headless Chromium rendering xterm.js fed with raw bytes read from the real CLI PTY",
             "assertions": {item: item.lower() in screen.lower() for item in assertions or []},
             "screenExcerpt": screen[-1000:],
-            "terminal": {"widthPx": width, "heightPx": height, "cols": capture.get("cols"), "rows": capture.get("rows"), "coloredCells": capture.get("colored_cells")},
+            "terminal": {"widthPx": width, "heightPx": height, "cols": capture.get("cols"), "rows": capture.get("rows"), "coloredCells": capture.get("colored_cells"), "geometry": capture.get("geometry")},
         }
 
     def save_transcript(self, output: Path) -> dict[str, Any]:

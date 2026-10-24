@@ -33,7 +33,7 @@ async function main() {
   });
   await page.setContent(`<!doctype html><html><head><meta charset="utf-8"></head><body><div id="terminal"></div></body></html>`);
   await page.addStyleTag({ path: path.join(root, "node_modules", "@xterm", "xterm", "css", "xterm.css") });
-  await page.addStyleTag({ content: `html,body,#terminal{width:100%;height:100%;margin:0;overflow:hidden;background:#0b0d10}body{padding:0}#terminal{box-sizing:border-box;padding:8px}` });
+  await page.addStyleTag({ content: `html,body,#terminal{width:100%;height:100%;margin:0;overflow:hidden;background:#0b0d10}body{padding:0}#terminal{box-sizing:border-box;padding:0}` });
   await page.addScriptTag({ path: path.join(xtermDir, "xterm.js") });
   await page.addScriptTag({ path: path.join(fitDir, "addon-fit.js") });
   const dimensions = await page.evaluate(() => {
@@ -106,8 +106,15 @@ async function main() {
             rows: window.__e2eTerminal.rows,
             colored_cells: coloredCells,
             occupied_cells: occupiedCells,
+            geometry: (() => {
+              const rect = document.querySelector(".xterm-screen").getBoundingClientRect();
+              return { top: rect.top, bottom: rect.bottom, height: rect.height, viewportHeight: innerHeight, cellHeight: rect.height / window.__e2eTerminal.rows };
+            })(),
           };
         });
+        if (terminal.geometry.bottom > terminal.geometry.viewportHeight || terminal.geometry.top < 0) {
+          throw new Error(`terminal screen is clipped: ${JSON.stringify(terminal.geometry)}`);
+        }
         await page.locator("#terminal").screenshot({ path: request.path, animations: "disabled" });
         reply({ ok: true, ...terminal });
         return;
