@@ -1,5 +1,0 @@
-{"kind":"assistant_generation_started","content":"","timestamp":"2026-10-14T14:59:56.642119+08:00","run_id":"7e84629e92b65f34","canonical_transcript_index":1}
-{"kind":"message","content":"MAGPIE_TEXT_0b5da450b1206d80","timestamp":"2026-10-14T15:00:00.596812+08:00","incremental":true,"run_id":"7e84629e92b65f34","canonical_transcript_index":1}
-{"kind":"assistant_generation_finished","content":"","timestamp":"2026-10-14T15:00:00.59683+08:00","run_id":"7e84629e92b65f34","canonical_transcript_index":1}
-{"kind":"message","content":"MAGPIE_TEXT_0b5da450b1206d80","timestamp":"2026-10-14T15:00:00.596883+08:00","usage":{"input_tokens":6260,"output_tokens":19,"total_tokens":6279},"run_id":"7e84629e92b65f34","canonical_transcript_index":1}
-{"kind":"done","content":"MAGPIE_TEXT_0b5da450b1206d80","timestamp":"2026-10-14T15:00:00.602544+08:00"}

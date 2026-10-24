@@ -1,5 +1,8 @@
 # 真实交互验收中的集成发现
 
+> Retention note (2026-10-24): raw evidence JSON and screenshots were removed after the findings and report retained the observed failures, repairs, results, and limits.
+
+
 日期：2026-10-22。最终状态：原始 `make verify` 与 `make test-e2e` 均已通过。前者 9036 started / 9030 passed / 0 failed / 6 skipped，31 包，536.385s；后者 4907 started / 4901 passed / 0 failed / 6 skipped，8 包，178.945s。1245 个源码文件的 manifest 未变（SHA `4f04c8f51ab0000a7ee9b2302835d671220a21d70bfe80b0c157297c5906ecfc`），最后的测试隔离修正未改变实际生产 binary `1e74`。真实旅程按各 binary 分别记录，不能拼接成全部属于最终 SHA 的证据。
 
 全部 22 个 CLI action 与前端已关闭；已精确移除两个自有 trust key、四个 authority 文件和六个自有 ignored 日志。最终 scoped 扫描覆盖 2141 个目录，匹配的自有测试 authority 残留为 0，trust 自有前缀残留为 0。主代理已实际执行严格的连续尾部清理：history 删除 8 行/64B 后为 3872B，audit 删除末尾 20 行/7260B 后为 124841B；较早六条不确定 audit 记录共 2118B 保留。两者保留前缀均经校验未变，没有恢复时间戳；不公开个人摘要或 inode。主代理已在全部自有进程退出后精确删除原始任务临时根目录，源码、报告与24张截图保留，现有Magpie未停止。

@@ -1,365 +1,0 @@
-Interactive session started. Type 'exit' to quit.
-> > P> PT> PTY> PTY > PTY c> PTY ca> PTY can> PTY canc> PTY cance> PTY cancel> PTY cancel > PTY cancel q> PTY cancel qu> PTY cancel que> PTY cancel queu> PTY cancel queue> PTY cancel queued
-  
-  ⠹ [tool] write
-  
-▶ ⠙ [tool] write
-⠹ working...
-pty-review-model | turn #1 | interact | chat[approval] write
-  local interaction #1 · 1 waiting
-  scope: unknown; once only; reuse unavailable
-  view truncated · details 1-1/7 · ↑/↓ PgUp/PgDn
-  args:
-  [y] review details [n] reject [d] diff[interrupted]
-> > P> PT> PTY> PTY > PTY d> PTY de> PTY den> PTY deny
-  AI: 
-  
-▶ ⠙ [tool] write
-⠙ working...
-pty-review-model | turn #2 | interact | chat[approval] write
-  local interaction #1
-  scope: unknown; once only; reuse unavailable
-  view truncated · details 1-1/7 · ↑/↓ PgUp/PgDn
-  args:
-  [y] review details [n] reject [d] diff[approval] write
-  local interaction 
-scope unknown · resi
-[y] locked [n] no  AI: 
-  
-▶ ✗ [tool] write
-pty-review-model | td the requested inte
-raction.            
-pty-review-model | t
-Tokens: 59/8000 (0%)> > P> PT> PTY> PTY > PTY o> PTY on> PTY onc> PTY once
-  AI: 
-  
-▶ ⠙ [tool] write
-⠙ working...
-pty-review-model | turn #3 | interact | chat[approval] write
-  local interaction #1
-  scope: unknown; once only; reuse unavailable
-  view truncated · details 1-1/29 · ↑/↓ PgUp/PgDn
-  args:
-  [y] review details [n] reject [d] diff[approval] write
-  local interaction 
-scope unknown · resi
-[y] locked [n] no[approval] write
-  local interaction #1
-  scope: unknown; once only; reuse unavailable
-  view truncated · details 1-7/29 · ↑/↓ PgUp/PgDn
-  args:
-    content: PTY_ONCE_BEGIN safe-review-row-0123456789-saf
-e-review-row-0123456789-safe-review-row-0123456789-safe-re
-view-row-0123456789-safe-review-row-0123456789-safe-review
--row-0123456789-safe-review-row-0123456789-safe-review-row
--0123456789-safe-review-row-0123456789-safe-review-row-012
-3456789-safe-review-row-0123456789-safe-review-row-0123456
-  [y] review details [n] reject [d] diff
-
-
-  view truncated · details 2-8/29 · ↑/↓ PgUp/PgDn
-    content: PTY_ONCE_BEGIN safe-review-row-0123456789-saf
-e-review-row-0123456789-safe-review-row-0123456789-safe-re
-view-row-0123456789-safe-review-row-0123456789-safe-review
--row-0123456789-safe-review-row-0123456789-safe-review-row
--0123456789-safe-review-row-0123456789-safe-review-row-012
-3456789-safe-review-row-0123456789-safe-review-row-0123456
-789-safe-review-row-0123456789-safe-review-row-0123456789-
-
-
-
-  view truncated · details 3-9/29 · ↑/↓ PgUp/PgDn
-e-review-row-0123456789-safe-review-row-0123456789-safe-re
-view-row-0123456789-safe-review-row-0123456789-safe-review
--row-0123456789-safe-review-row-0123456789-safe-review-row
--0123456789-safe-review-row-0123456789-safe-review-row-012
-3456789-safe-review-row-0123456789-safe-review-row-0123456
-789-safe-review-row-0123456789-safe-review-row-0123456789-
-safe-review-row-0123456789-safe-review-row-0123456789-safe
-
-
-
-  view truncated · details 4-10/29 · ↑/↓ PgUp/PgDn
-view-row-0123456789-safe-review-row-0123456789-safe-review
--row-0123456789-safe-review-row-0123456789-safe-review-row
--0123456789-safe-review-row-0123456789-safe-review-row-012
-3456789-safe-review-row-0123456789-safe-review-row-0123456
-789-safe-review-row-0123456789-safe-review-row-0123456789-
-safe-review-row-0123456789-safe-review-row-0123456789-safe
--review-row-0123456789-safe-review-row-0123456789-safe-rev
-
-
-
-  view truncated · details 5-11/29 · ↑/↓ PgUp/PgDn
--row-0123456789-safe-review-row-0123456789-safe-review-row
--0123456789-safe-review-row-0123456789-safe-review-row-012
-3456789-safe-review-row-0123456789-safe-review-row-0123456
-789-safe-review-row-0123456789-safe-review-row-0123456789-
-safe-review-row-0123456789-safe-review-row-0123456789-safe
--review-row-0123456789-safe-review-row-0123456789-safe-rev
-iew-row-0123456789-safe-review-row-0123456789-safe-review-
-
-
-
-  view truncated · details 6-12/29 · ↑/↓ PgUp/PgDn
--0123456789-safe-review-row-0123456789-safe-review-row-012
-3456789-safe-review-row-0123456789-safe-review-row-0123456
-789-safe-review-row-0123456789-safe-review-row-0123456789-
-safe-review-row-0123456789-safe-review-row-0123456789-safe
--review-row-0123456789-safe-review-row-0123456789-safe-rev
-iew-row-0123456789-safe-review-row-0123456789-safe-review-
-row-0123456789-safe-review-row-0123456789-safe-review-row-
-
-
-
-  view truncated · details 7-13/29 · ↑/↓ PgUp/PgDn
-3456789-safe-review-row-0123456789-safe-review-row-0123456
-789-safe-review-row-0123456789-safe-review-row-0123456789-
-safe-review-row-0123456789-safe-review-row-0123456789-safe
--review-row-0123456789-safe-review-row-0123456789-safe-rev
-iew-row-0123456789-safe-review-row-0123456789-safe-review-
-row-0123456789-safe-review-row-0123456789-safe-review-row-
-0123456789-safe-review-row-0123456789- PTY_ONCE_END
-
-
-
-  view truncated · details 8-14/29 · ↑/↓ PgUp/PgDn
-789-safe-review-row-0123456789-safe-review-row-0123456789-
-safe-review-row-0123456789-safe-review-row-0123456789-safe
--review-row-0123456789-safe-review-row-0123456789-safe-rev
-iew-row-0123456789-safe-review-row-0123456789-safe-review-
-row-0123456789-safe-review-row-0123456789-safe-review-row-
-0123456789-safe-review-row-0123456789- PTY_ONCE_END
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T
-
-
-
-  view truncated · details 9-15/29 · ↑/↓ PgUp/PgDn
-safe-review-row-0123456789-safe-review-row-0123456789-safe
--review-row-0123456789-safe-review-row-0123456789-safe-rev
-iew-row-0123456789-safe-review-row-0123456789-safe-review-
-row-0123456789-safe-review-row-0123456789-safe-review-row-
-0123456789-safe-review-row-0123456789- PTY_ONCE_END
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T
-/go-cli-r5-pty-o_3_c6ff/workspace/once.txt
-
-
-
-  view truncated · details 10-16/29 · ↑/↓ PgUp/PgDn
--review-row-0123456789-safe-review-row-0123456789-safe-rev
-iew-row-0123456789-safe-review-row-0123456789-safe-review-
-row-0123456789-safe-review-row-0123456789-safe-review-row-
-0123456789-safe-review-row-0123456789- PTY_ONCE_END
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T
-/go-cli-r5-pty-o_3_c6ff/workspace/once.txt
-  diff:
-
-
-
-  view truncated · details 11-17/29 · ↑/↓ PgUp/PgDn
-iew-row-0123456789-safe-review-row-0123456789-safe-review-
-row-0123456789-safe-review-row-0123456789-safe-review-row-
-0123456789-safe-review-row-0123456789- PTY_ONCE_END
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T
-/go-cli-r5-pty-o_3_c6ff/workspace/once.txt
-  diff:
-    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review
-
-
-
-  view truncated · details 12-18/29 · ↑/↓ PgUp/PgDn
-row-0123456789-safe-review-row-0123456789-safe-review-row-
-0123456789-safe-review-row-0123456789- PTY_ONCE_END
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T
-/go-cli-r5-pty-o_3_c6ff/workspace/once.txt
-  diff:
-    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review
--row-0123456789-safe-review-row-0123456789-safe-review-row
-
-
-
-  view truncated · details 13-19/29 · ↑/↓ PgUp/PgDn
-0123456789-safe-review-row-0123456789- PTY_ONCE_END
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T
-/go-cli-r5-pty-o_3_c6ff/workspace/once.txt
-  diff:
-    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review
--row-0123456789-safe-review-row-0123456789-safe-review-row
--0123456789-safe-review-row-0123456789-safe-review-row-012
-
-
-
-  view truncated · details 14-20/29 · ↑/↓ PgUp/PgDn
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T
-/go-cli-r5-pty-o_3_c6ff/workspace/once.txt
-  diff:
-    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review
--row-0123456789-safe-review-row-0123456789-safe-review-row
--0123456789-safe-review-row-0123456789-safe-review-row-012
-3456789-safe-review-row-0123456789-safe-review-row-0123456
-
-
-
-  view truncated · details 15-21/29 · ↑/↓ PgUp/PgDn
-/go-cli-r5-pty-o_3_c6ff/workspace/once.txt
-  diff:
-    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review
--row-0123456789-safe-review-row-0123456789-safe-review-row
--0123456789-safe-review-row-0123456789-safe-review-row-012
-3456789-safe-review-row-0123456789-safe-review-row-0123456
-789-safe-review-row-0123456789-safe-review-row-0123456789-
-
-
-
-  view truncated · details 16-22/29 · ↑/↓ PgUp/PgDn
-  diff:
-    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review
--row-0123456789-safe-review-row-0123456789-safe-review-row
--0123456789-safe-review-row-0123456789-safe-review-row-012
-3456789-safe-review-row-0123456789-safe-review-row-0123456
-789-safe-review-row-0123456789-safe-review-row-0123456789-
-safe-review-row-0123456789-safe-review-row-0123456789-safe
-
-
-
-  view truncated · details 17-23/29 · ↑/↓ PgUp/PgDn
-    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review
--row-0123456789-safe-review-row-0123456789-safe-review-row
--0123456789-safe-review-row-0123456789-safe-review-row-012
-3456789-safe-review-row-0123456789-safe-review-row-0123456
-789-safe-review-row-0123456789-safe-review-row-0123456789-
-safe-review-row-0123456789-safe-review-row-0123456789-safe
--review-row-0123456789-safe-review-row-0123456789-safe-rev
-
-
-
-  view truncated · details 18-24/29 · ↑/↓ PgUp/PgDn
--row-0123456789-safe-review-row-0123456789-safe-review-row
--0123456789-safe-review-row-0123456789-safe-review-row-012
-3456789-safe-review-row-0123456789-safe-review-row-0123456
-789-safe-review-row-0123456789-safe-review-row-0123456789-
-safe-review-row-0123456789-safe-review-row-0123456789-safe
--review-row-0123456789-safe-review-row-0123456789-safe-rev
-iew-row-0123456789-safe-review-row-0123456789-safe-review-
-
-
-
-  view truncated · details 19-25/29 · ↑/↓ PgUp/PgDn
--0123456789-safe-review-row-0123456789-safe-review-row-012
-3456789-safe-review-row-0123456789-safe-review-row-0123456
-789-safe-review-row-0123456789-safe-review-row-0123456789-
-safe-review-row-0123456789-safe-review-row-0123456789-safe
--review-row-0123456789-safe-review-row-0123456789-safe-rev
-iew-row-0123456789-safe-review-row-0123456789-safe-review-
-row-0123456789-safe-review-row-0123456789-safe-review-row-
-
-
-
-  view truncated · details 20-26/29 · ↑/↓ PgUp/PgDn
-3456789-safe-review-row-0123456789-safe-review-row-0123456
-789-safe-review-row-0123456789-safe-review-row-0123456789-
-safe-review-row-0123456789-safe-review-row-0123456789-safe
--review-row-0123456789-safe-review-row-0123456789-safe-rev
-iew-row-0123456789-safe-review-row-0123456789-safe-review-
-row-0123456789-safe-review-row-0123456789-safe-review-row-
-0123456789-safe-review-row-0123456789-safe-review-row-0123
-
-
-
-  view truncated · details 21-27/29 · ↑/↓ PgUp/PgDn
-789-safe-review-row-0123456789-safe-review-row-0123456789-
-safe-review-row-0123456789-safe-review-row-0123456789-safe
--review-row-0123456789-safe-review-row-0123456789-safe-rev
-iew-row-0123456789-safe-review-row-0123456789-safe-review-
-row-0123456789-safe-review-row-0123456789-safe-review-row-
-0123456789-safe-review-row-0123456789-safe-review-row-0123
-456789-safe-review-row-0123456789-safe-review-row-01234567
-
-
-
-  view truncated · details 22-28/29 · ↑/↓ PgUp/PgDn
-safe-review-row-0123456789-safe-review-row-0123456789-safe
--review-row-0123456789-safe-review-row-0123456789-safe-rev
-iew-row-0123456789-safe-review-row-0123456789-safe-review-
-row-0123456789-safe-review-row-0123456789-safe-review-row-
-0123456789-safe-review-row-0123456789-safe-review-row-0123
-456789-safe-review-row-0123456789-safe-review-row-01234567
-89-safe-review-row-0123456789- PTY_ONCE_END
-
-
-
-  view truncated · details 23-29/29 · ↑/↓ PgUp/PgDn
--review-row-0123456789-safe-review-row-0123456789-safe-rev
-iew-row-0123456789-safe-review-row-0123456789-safe-review-
-row-0123456789-safe-review-row-0123456789-safe-review-row-
-0123456789-safe-review-row-0123456789-safe-review-row-0123
-456789-safe-review-row-0123456789-safe-review-row-01234567
-89-safe-review-row-0123456789- PTY_ONCE_END
-
-  [y] once [n] reject [Esc] cancel [d] diff  AI: 
-  
-▶ ⠏ [tool] write
-⠏ working...
-pty-review-model | turn #3 | interact | chat
-
-  ✓ [tool] write
-  AI: PTY fixture completed the requested interaction.
-▼ PTY fixture completed the requested interaction.
-pty-review-model | turn #3 | interact | chat
-Tokens: 107/8000 (1%) | Cost: $0.0000> > P> PT> PTY> PTY > PTY a> PTY as> PTY ask
-[approval] ask_user
-  local interaction #1
-  scope: unknown; once only; reuse unavailable
-  details 1-2/2
-  args:
-    question: 请用中文确认临时测试方案。
-  [y] once [n] reject [Esc] cancel  AI: 
-  
-▶ ⠸ [tool] ask_user
-⠸ working...
-[ask_user] 请用中文确认临时测试方案。
-  answer: █
-  [Enter] submit  [Esc] cancel
-pty-review-model | turn #4 | interact | chat
-
-▶ ⠼ [tool] ask_user
-⠼ working...
-
-
-
-
-
-
-
-
-  answer: X保留队列：交互通过✅🙂█
-
-
-
-▶ ⠴ [tool] ask_user
-⠴ working...
-
-
-
-
-
-▶ ⠦ [tool] ask_user
-⠦ working...
-
-
-
-
-
-  ✓ [tool] ask_user
-  AI: PTY fixture completed the requested interaction.
-▼ PTY fixture completed the requested interaction.
-pty-review-model | turn #4 | interact | chat
-Tokens: 142/8000 (1%) | Cost: $0.0000> 
-⚠ IME (input method editor) detected. CJK input may not work correctly in raw mode.
-Press Ctrl+\ to switch to cooked mode for better IME support.
-> 测> 测试> 测试🙂> 测试🙂B> 测试🙂XB> 测试XB
-  AI: PTY fixture received the input.
-▼ PTY fixture received the input.
-pty-review-model | turn #5 | interact | chat
-Tokens: 156/8000 (1%) | Cost: $0.0000> > e> ex> exi> exit
-Session ended.

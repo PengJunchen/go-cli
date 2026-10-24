@@ -1,5 +1,0 @@
-{
-  "reportsChecked": 11,
-  "allReferencedLogSHA256Match": true,
-  "corrections": "Two early copied legacy summaries still named verify.log; their paths corrected to preserved exact failed logs, no byte/hash changes."
-}

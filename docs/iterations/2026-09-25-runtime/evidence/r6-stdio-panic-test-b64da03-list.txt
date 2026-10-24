@@ -1,2 +1,0 @@
-TestStdioWriterPanicIsContainedAndFencesSession
-ok  	github.com/pengjunchen/go-cli/internal/acp	0.007s

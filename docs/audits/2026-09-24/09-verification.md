@@ -1,5 +1,8 @@
 # 验证与测试覆盖审计
 
+> Retention note (2026-10-24): raw command logs were removed after the verification summary retained gate status, failure cases, and next steps.
+
+
 审计对象是 `go-cli` 在 `2026-09-24` 的干净基线 `40692e35e4815f0dff1c9f91b13905008f7221a4`。基线采样时 `git status --porcelain` 为空；执行前 `gofmt -l` 与 `gofmt -s -l` 均无输出。本验证 lane 只在审计目录写报告、inventory 和运行日志，没有修改产品源码或受保护配置。原始命令输出保存在 [`evidence/`](evidence/)，按 Git 跟踪文件制作的逐文件快照在 [`source-inventory.csv`](source-inventory.csv) 与 [`source-inventory.json`](source-inventory.json)。行数按文件物理行计数；inventory 记录基线 commit、路径、模块、种类、行数和 SHA-256。
 
 ## 执行结果

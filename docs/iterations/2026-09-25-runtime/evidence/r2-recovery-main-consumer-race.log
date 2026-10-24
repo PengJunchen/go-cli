@@ -1,8 +1,0 @@
-HEAD=56fc98008737cdad8dceceba0940e735f61e9888
-GOMAXPROCS=2 NO_COLOR=1 TERM=dumb
-COMMAND=go test -race -p 2 -count=1 ./internal/session ./internal/cli ./tests
-ok  	github.com/pengjunchen/go-cli/internal/session	2.647s
-ok  	github.com/pengjunchen/go-cli/internal/cli	16.658s
-ok  	github.com/pengjunchen/go-cli/tests	24.762s
-
-EXIT=0 ELAPSED_SECONDS=60.23

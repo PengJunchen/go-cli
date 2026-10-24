@@ -1,8 +1,0 @@
-source=3bc67cf01c7b1f51539d529629fd7b06cdf4c0b9
-command=go test -race -p 2 -count=1 ./internal/session ./internal/tools
-env=GOMAXPROCS=2 NO_COLOR=1 TERM=dumb
-ok  	github.com/pengjunchen/go-cli/internal/session	1.274s
-ok  	github.com/pengjunchen/go-cli/internal/tools	39.865s
-
-exit_code=0
-elapsed_seconds=73.40

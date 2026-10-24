@@ -1,8 +1,0 @@
-Source: /tmp/r0-scannerfix-c82336b-green.json
-Producer: build_verify in scannerfix worktree
-Base: c82336b335eefb26a500dc2362382100f9e7ef84
-Source tree: b88388a03f10d368dfb5aed999dcc5184a4a3c4d (same source content before commit)
-Integrated source: 76feefb
-Command: GOMAXPROCS=2 go run ./internal/verify/cmd/scanner -dir ./internal -format json
-Exit: 1
-This is the builder direct-scanner report. Parent separately ran scanner-gate at 76feefb; see r0-scanner-gate-followup.log.

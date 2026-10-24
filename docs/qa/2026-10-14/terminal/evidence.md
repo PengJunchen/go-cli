@@ -1,5 +1,8 @@
 # Real terminal E2E evidence
 
+> Retention note (2026-10-24): generated screenshots, run-report JSON, and raw PTY transcripts were removed after their results were summarized in the live QA digest and this report. The scenario claims and capture limitations remain documented; the binary evidence is no longer available.
+
+
 - Revision: `develop@89df724c491083a81239acc04bd42269c58ea6e0`
 - Working-tree source delta SHA-256: `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` (source paths only; QA evidence is excluded).
 - Built binary SHA-256: `852776240ba41f069183201a07bb5b89a2a3e454bef88e837b1581afe7b278f5`

@@ -1,3 +1,0 @@
-go test -race -count=1 -run "TestLogCapturer" ./internal/verify/...
-ok  	github.com/pengjunchen/go-cli/internal/verify	1.014s
-ok  	github.com/pengjunchen/go-cli/internal/verify/cmd/scanner	1.014s [no tests to run]

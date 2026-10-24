@@ -1,6 +1,0 @@
-Command: go test ./internal/core -run '^TestAudit_PlanModeInterceptorsCrossAssemblies$' -count=1
-Result: PASS (1 test, 1 package; 0.729s)
-
-The temporary test source is preserved in plan-mode-cross-assembly-repro.go.txt.
-The temporary internal/core test file was removed after this targeted run; no
-product source was changed.

@@ -1,5 +1,8 @@
 # Real go-cli to Magpie CLI smoke
 
+> Retention note (2026-10-24): generated build probes and JSONL run captures were removed after this README retained their summarized outcomes.
+
+
 Captured 2026-10-14 using the existing executable `/Users/yinyuepeng/projects/go-cli/bin/go-cli` (SHA-256 `32680dee2e53eb44644986d6410a66a3280d5fb00c664c0ddf30de21f19081c2`), with Magpie already running on loopback at `http://127.0.0.1:3425/v1`. No source was changed or rebuilt. The child environment was an explicit allowlist with an isolated `HOME`, XDG config/cache/state roots, working directory, and temporary directory; `GO_CLI_PROVIDER_BASE_URL` was explicitly set to the loopback gateway. The only API key value was the dummy local string `magpie`. The isolated config enabled only the `read` builtin, constrained its configured path to the temporary fixture workspace, and enabled JSONL tracing at redaction level `redact`.
 
 Two actual, non-mock CLI invocations completed with exit code 0 and empty stderr. The text run returned exactly `MAGPIE_TEXT_0b5da450b1206d80`. The second run invoked the real `read` tool on `fixture.txt`, received a successful tool receipt containing `MAGPIE_READ_b9295b8782a71ac5`, and returned exactly that nonce. See `runs.jsonl` and the redacted CLI stdout files.

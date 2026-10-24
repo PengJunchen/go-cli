@@ -1,7 +1,0 @@
-source_snapshot=c4fca5eb65ad6297e58d5f1e092e177549f17145
-command=go test -race -p 2 -count=1 ./internal/tools ./internal/core ./internal/cli
-ok  	github.com/pengjunchen/go-cli/internal/tools	40.096s
-ok  	github.com/pengjunchen/go-cli/internal/core	3.907s
-ok  	github.com/pengjunchen/go-cli/internal/cli	16.600s
-
-exit_code=0 elapsed_seconds=73.5

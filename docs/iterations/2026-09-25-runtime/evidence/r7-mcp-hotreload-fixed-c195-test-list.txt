@@ -1,4 +1,0 @@
-TestHotReloaderWatchDetectsChange
-TestHotReloaderRequestStopBeforeWatchClosesStableDone
-TestHotReloaderInvalidPollIntervalIsRejectedWithoutOwnerOrPanic
-ok  	github.com/pengjunchen/go-cli/internal/mcp	0.006s

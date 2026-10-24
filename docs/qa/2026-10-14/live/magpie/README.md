@@ -1,5 +1,8 @@
 # Magpie local gateway evidence
 
+> Retention note (2026-10-24): raw/sanitized session JSONL was removed after this document retained the connection, route, and acceptance findings. Any local JSONL links below refer to removed artifacts.
+
+
 Captured 2026-10-14 on macOS 26.5.2 (Apple Silicon) for the local go-cli live-provider run.
 
 ## Install and lifecycle

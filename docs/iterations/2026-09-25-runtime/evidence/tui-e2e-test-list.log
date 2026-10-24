@@ -1,8 +1,0 @@
-TestTUI_DarkTheme
-TestTUI_LightTheme
-TestTUI_MonokaiTheme
-TestTUI_SolarizedTheme
-TestTUI_StyleANSIEscapeSequences
-TestTUI_StyleChaining
-TestTUI_StyleFaintAttribute
-ok  	github.com/pengjunchen/go-cli/tests/e2e_20260802	0.017s

@@ -1,4 +1,0 @@
-{"source": "7b0499355a043b699d7fa8df14089a97ca023184", "argv": ["go", "test", "-race", "-p", "2", "-count=1", "./internal/tools"], "env": {"GOMAXPROCS": "2", "NO_COLOR": "1", "TERM": "dumb"}}
-ok  	github.com/pengjunchen/go-cli/internal/tools	38.716s
-
-{"exit_code": 0, "elapsed_seconds": 71.35}

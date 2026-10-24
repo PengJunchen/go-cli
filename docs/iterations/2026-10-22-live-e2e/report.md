@@ -1,5 +1,8 @@
 # 真实模型与 PTY E2E 报告
 
+> Retention note (2026-10-24): raw evidence JSON and 24 UI screenshots were removed after this report and `findings.md` retained the scenario outcomes, fixes, failure history, and limits.
+
+
 2026-10-22。**本轮基础工具、ask/auto/deny、审批 Esc 后继续交互，以及同进程 Skill/hook 刷新、候选拒绝与恢复、撤销信任后的拒绝调度，均已有真实 live 验收证据。** 基础/审批使用 `43d47…`，parser 修复后的动态链路使用 `1e74d58…`，分别归因。原`make verify`与`make test-e2e`均完整exit0，已精确清理可证明的个人连续尾部；主代理已精确删除原始任务临时目录，源码、报告与24张截图保留；本轮列明范围已通过，MCP durable等未覆盖项见文末。
 
 实际链路是 Go binary → owned PTY → 浏览器 xterm → Magpie → `codex/gpt-6.1-sol`。操作者通过 CUA 输入和捕获 JPEG。以下是**真实 PTY 的浏览器画面，非原生 Terminal 截图**；所有输入由CUA驱动到真实PTY，终端画面与模型响应均非预制。正式截图只用 viewport capture。

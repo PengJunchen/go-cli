@@ -1,9 +1,0 @@
-gofmt -s -w .
-go vet ./...
-golangci-lint run ./...
-internal/cli/assembly_model_timeout_test.go:13:1: File is not properly formatted (goimports)
-	"github.com/pengjunchen/go-cli/internal/config"
-^
-1 issues:
-* goimports: 1
-make: *** [lint] Error 1

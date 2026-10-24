@@ -1,5 +1,8 @@
 # Long-task binary and PTY regression gate
 
+> Retention note (2026-10-24): raw event JSONL and cross-compile output files were removed after their conclusions were preserved in `evidence.md` and `results.json`. References below are historical provenance, not available raw files.
+
+
 Starting baseline: `develop` at `e77e8058c51e5370a2ecc3eacb5fce0419829bcf`.
 The integrated verification and tagged E2E gates passed on
 `6aa6f9318f3d3c40822c368e489c9284cd932072`; see `results.json` and

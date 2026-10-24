@@ -1,5 +1,8 @@
 # 真实运行轮次索引
 
+> Retention note (2026-10-24): raw per-run reports and terminal artifacts were removed after the outcomes and failure sequence were distilled into the live QA digest. This index preserves status and counts only.
+
+
 完整最终193912在合并bdb76ef通过；191314是ec267历史通过。失败、诊断模型、局部smoke/artifact-focus保留原报告。请求数不等于用户轮数；184011第30请求是内部summary，不能当pressure4主响应。源码身份及diff以每轮报告为准。
 
 | 运行 | 请求模型 | 状态 | 用户轮记录 | 请求记录 | 截图记录 | 源码 |

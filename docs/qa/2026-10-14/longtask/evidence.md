@@ -1,5 +1,8 @@
 # Long-task verification evidence
 
+> Retention note (2026-10-24): raw `.jsonl` runs and cross-compile output were removed after this report retained the red/green sequence, measured outcomes, and caveats. Paths to those files below identify historical evidence only.
+
+
 An isolated Darwin run built `./cmd/cli` with `-race` and exercised the real
 `interactive` command against a local OpenAI-compatible HTTP server. The
 initial focused pass was followed by a full-tagged-suite failure that exposed
