@@ -157,11 +157,15 @@ func WithDiffPreviewFunc(fn DiffPreviewFunc) TeaApprovalOption {
 	return func(c *TeaApprovalCallback) { c.diffPreviewFn = fn }
 }
 
-// RequestApproval sends an ApprovalRequest to the TUI and blocks until the user
-// responds. If the context is canceled before a response arrives, the call is
-// denied and the context error is returned. When a DiffPreviewFunc is wired,
-// the diff preview is generated and included in the request for edit/write tools.
+// RequestApproval sends an interactive request and blocks until a response.
+// If the context is canceled first, the call is denied with the context error.
+// When configured, a diff preview is included for edit/write tools.
 func (c *TeaApprovalCallback) RequestApproval(ctx context.Context, toolName string, args map[string]any) (ApprovalResult, error) {
+	result, _, _, err := c.requestApprovalWithChoice(ctx, toolName, args)
+	return result, err
+}
+
+func (c *TeaApprovalCallback) requestApprovalWithChoice(ctx context.Context, toolName string, args map[string]any) (ApprovalResult, string, string, error) {
 	respCh := make(chan InteractiveResponse, 1)
 	req := InteractiveRequest{
 		ToolName:   toolName,
@@ -175,13 +179,35 @@ func (c *TeaApprovalCallback) RequestApproval(ctx context.Context, toolName stri
 	select {
 	case c.requestCh <- req:
 	case <-ctx.Done():
-		return ApprovalDeny, ctx.Err()
+		return ApprovalDeny, "", "canceled", ctx.Err()
 	}
 	select {
 	case resp := <-respCh:
-		return approvalResultFromResponse(ctx, resp)
+		result, err := approvalResultFromResponse(ctx, resp)
+		if err != nil {
+			return ApprovalDeny, "", "canceled", err
+		}
+		choice := ""
+		switch resp.Decision {
+		case InteractiveAllow:
+			choice = "allow_once"
+		case InteractiveAlwaysAllow:
+			choice = "allow_always"
+		case InteractiveDeny:
+			choice = "deny"
+		default:
+			return ApprovalDeny, "", "invalid_response", nil
+		}
+		switch resp.DecisionSource {
+		case "user":
+			return result, choice, "user", nil
+		case "canceled":
+			return ApprovalDeny, "", "canceled", nil
+		default:
+			return result, choice, "callback", nil
+		}
 	case <-ctx.Done():
-		return ApprovalDeny, ctx.Err()
+		return ApprovalDeny, "", "canceled", ctx.Err()
 	}
 }
 
