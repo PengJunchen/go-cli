@@ -37,8 +37,8 @@ var (
 )
 
 // ProviderSpec is the immutable protocol and endpoint description used for
-// request resolution. Only explicitly registered OpenAI-compatible specs are
-// constructible in this checkpoint; native Claude/Gemini remain disabled.
+// request resolution. OpenAI-compatible specs and explicit credential-free
+// extension adapters are constructible; native Claude/Gemini remain disabled.
 type ProviderSpec struct {
 	ProviderID              string
 	Aliases                 []string
@@ -177,6 +177,15 @@ func (r *ModelResolver) CredentialRefFor(providerID, endpoint string) (Credentia
 	if !ok {
 		return CredentialRef{}, fmt.Errorf("%w: %s", errProviderNotFound, providerID)
 	}
+	if definition.spec.Enabled && definition.spec.ProtocolID == ProtocolExtensionRPC {
+		if _, ok := definition.provider.(*extensionProvider); !ok {
+			return CredentialRef{}, ErrMissingProviderSpec
+		}
+		if endpoint != "" {
+			return CredentialRef{}, ErrCredentialScopeMismatch
+		}
+		return CredentialRef{}, nil
+	}
 	if isDisabledNativeIdentity(providerID) || isNativeProvider(definition.provider) || !definition.spec.Enabled || definition.spec.ProtocolID != ProtocolOpenAICompatible {
 		return CredentialRef{}, fmt.Errorf("%w: %s", ErrUnsupportedProviderProtocol, providerID)
 	}
@@ -209,6 +218,9 @@ func (r *ModelResolver) resolveModel(ctx context.Context, request ModelRequest, 
 		return ResolvedModel{}, fmt.Errorf("%w: %s", ErrUnsupportedProviderProtocol, providerID)
 	}
 	spec := cloneProviderSpec(definition.spec)
+	if spec.Enabled && spec.ProtocolID == ProtocolExtensionRPC {
+		return r.resolveExtensionModel(ctx, definition, request, inlineKey)
+	}
 	if !spec.Enabled || spec.ProtocolID != ProtocolOpenAICompatible {
 		return ResolvedModel{}, fmt.Errorf("%w: %s (%s)", ErrUnsupportedProviderProtocol, spec.ProviderID, spec.ProtocolID)
 	}

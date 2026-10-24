@@ -109,6 +109,15 @@ func (r *MiddlewareToolRegistry) RegisterTrustedControl(ctx context.Context, def
 	return registrar.RegisterTrustedControl(ctx, def)
 }
 
+// RegisterTrustedInlineControl preserves the explicit host completion contract.
+func (r *MiddlewareToolRegistry) RegisterTrustedInlineControl(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := r.inner.(TrustedInlineControlRegistrar)
+	if !ok {
+		return ErrTrustedControlRegistrationUnavailable
+	}
+	return registrar.RegisterTrustedInlineControl(ctx, def)
+}
+
 // RegisterTrustedNetworkRead forwards the narrow reviewed network-reader
 // capability when the wrapped registry supports it.
 func (r *MiddlewareToolRegistry) RegisterTrustedNetworkRead(ctx context.Context, def ToolDefinition) error {

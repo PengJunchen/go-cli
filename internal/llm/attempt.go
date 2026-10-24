@@ -71,6 +71,8 @@ const (
 	OriginResolverDefaultEndpoint OriginKind = iota + 1
 	// OriginExplicitRequestEndpoint identifies an endpoint supplied by the request.
 	OriginExplicitRequestEndpoint
+	// OriginExtensionProcess identifies an extension-owned provider call without an HTTP endpoint.
+	OriginExtensionProcess
 )
 
 // AttemptOutcome describes the terminal outcome of a dispatched provider call.

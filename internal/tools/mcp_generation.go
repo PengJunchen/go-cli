@@ -173,6 +173,7 @@ type mcpSourceState struct {
 }
 
 type mcpDeferredEntry struct {
+	appendOnly  bool
 	owner       mcpGenerationOwner
 	registry    *DefaultToolRegistry
 	definition  ToolDefinition
@@ -214,13 +215,15 @@ func (d *frozenMCPGenerationDefinition) Execute(ctx context.Context, call ToolCa
 // It stages only local metadata; client construction and network work must be
 // complete before BeginMCPGenerationUpdate is called.
 type MCPGenerationUpdate struct {
-	dtr        *DeferredToolRegistryAdapter
-	registry   *DefaultToolRegistry
-	sourceID   string
-	generation uint64
-	oldNames   map[string]struct{}
-	candidates []mcpGenerationCandidate
-	active     bool
+	dtr         *DeferredToolRegistryAdapter
+	registry    *DefaultToolRegistry
+	sourceID    string
+	generation  uint64
+	oldNames    map[string]struct{}
+	candidates  []mcpGenerationCandidate
+	appendOnly  bool
+	materialize bool
+	active      bool
 }
 
 // BeginMCPGenerationUpdate validates and freezes the complete candidate, then
@@ -302,6 +305,19 @@ func (a *DeferredToolRegistryAdapter) BeginMCPGenerationUpdate(
 	}, nil
 }
 
+// BeginMCPGenerationAddition requests additive disclosure for a source never
+// published before. Existing/revoked sources retain the normal replacement fence.
+// Names are revalidated atomically under the dispatch fence before publication.
+func (a *DeferredToolRegistryAdapter) BeginMCPGenerationAddition(ctx context.Context, sourceID string, generation uint64, candidates []MCPToolCandidate) (*MCPGenerationUpdate, error) {
+	update, err := a.BeginMCPGenerationUpdate(ctx, sourceID, generation, candidates)
+	if err != nil {
+		return nil, err
+	}
+	_, exists := a.mcpSources[sourceID]
+	update.appendOnly = !exists
+	return update, nil
+}
+
 // Publish atomically replaces this source's names, definitions, and deferred
 // loaders, advancing the Registry fence once. A checked publication error
 // leaves the transaction lock held so the caller may Disable or Abort.
@@ -315,6 +331,16 @@ func (u *MCPGenerationUpdate) Publish() error {
 	}
 	u.finish()
 	return nil
+}
+
+// PublishMaterialized publishes frozen definitions and exact executors in one
+// checked transaction. No deferred loader or network work remains after commit.
+func (u *MCPGenerationUpdate) PublishMaterialized() error {
+	if !u.isActive() {
+		return ErrMCPGenerationTransactionClosed
+	}
+	u.materialize = true
+	return u.Publish()
 }
 
 // Disable removes only this source's current names and definitions, advances
@@ -408,6 +434,13 @@ func (r *DefaultToolRegistry) publishMCPGeneration(update *MCPGenerationUpdate, 
 	if r == nil || r.fence == nil {
 		return ErrDispatchFenceUnavailable
 	}
+	if update.appendOnly && !disable {
+		published, err := r.publishMCPAddition(update)
+		if published || err != nil {
+			return err
+		}
+		update.appendOnly = false
+	}
 	_, err := r.fence.publishChecked(DispatchFenceRegistry, nil, func() error {
 		r.mu.Lock()
 		defer r.mu.Unlock()
@@ -457,6 +490,35 @@ func (r *DefaultToolRegistry) publishMCPGeneration(update *MCPGenerationUpdate, 
 	return err
 }
 
+// publishMCPAddition preserves the authority fence only when no previously
+// visible registration or source can change. The caller holds the DTR lock.
+func (r *DefaultToolRegistry) publishMCPAddition(update *MCPGenerationUpdate) (bool, error) {
+	r.fence.mu.Lock()
+	defer r.fence.mu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ensureMCPMapsLocked()
+	if _, exists := update.dtr.mcpSources[update.sourceID]; exists || len(update.oldNames) > 0 {
+		return false, nil
+	}
+	for _, candidate := range update.candidates {
+		if _, exists := r.tools[candidate.name]; exists {
+			return false, nil
+		}
+		if _, reserved := r.mcpReservations[candidate.name]; reserved {
+			return false, nil
+		}
+	}
+	names := make(map[string]struct{}, len(update.candidates))
+	for _, candidate := range update.candidates {
+		r.mcpReservations[candidate.name] = mcpGenerationOwner{sourceID: update.sourceID, generation: update.generation}
+		names[candidate.name] = struct{}{}
+	}
+	r.version++
+	update.applyDTRState(false, names)
+	return true, nil
+}
+
 func (u *MCPGenerationUpdate) applyDTRState(disable bool, newNames map[string]struct{}) {
 	for name := range u.oldNames {
 		if entry, exists := u.dtr.mcpEntries[name]; exists && entry.owner.sourceID == u.sourceID {
@@ -473,6 +535,7 @@ func (u *MCPGenerationUpdate) applyDTRState(disable bool, newNames map[string]st
 		for _, candidate := range u.candidates {
 			name := candidate.name
 			entry := mcpDeferredEntry{
+				appendOnly:  u.appendOnly,
 				owner:       owner,
 				registry:    u.registry,
 				definition:  candidate.definition,
@@ -484,6 +547,15 @@ func (u *MCPGenerationUpdate) applyDTRState(disable bool, newNames map[string]st
 			u.dtr.mcpReservations[name] = owner
 			definition := candidate.definition
 			u.dtr.loaders[name] = func() (ToolDefinition, error) { return definition, nil }
+			if u.materialize {
+				metadata := candidate.metadata
+				metadata.identity = newTrustedToolIdentity(RegistrationSourceMCP, name, u.generation, candidate.fingerprint, TrustedToolScope{})
+				u.registry.tools[name] = definition
+				u.registry.metadata[name] = metadata
+				u.registry.order = append(u.registry.order, name)
+				u.registry.mcpMaterialized[name] = mcpMaterializedOwner{mcpGenerationOwner: owner, lease: candidate.lease}
+				u.dtr.loaded[name] = definition
+			}
 		}
 	}
 	u.dtr.mcpSources[u.sourceID] = mcpSourceState{generation: u.generation, names: newNames}
@@ -503,7 +575,7 @@ func (r *DefaultToolRegistry) registerMCPMaterialization(ctx context.Context, en
 	if r == nil || r.fence == nil {
 		return ErrDispatchFenceUnavailable
 	}
-	_, err := r.fence.publishChecked(DispatchFenceRegistry, nil, func() error {
+	publish := func() error {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		r.ensureMCPMapsLocked()
@@ -527,7 +599,13 @@ func (r *DefaultToolRegistry) registerMCPMaterialization(ctx context.Context, en
 		r.mcpMaterialized[def.Name()] = mcpMaterializedOwner{mcpGenerationOwner: entry.owner, lease: entry.lease}
 		r.version++
 		return nil
-	})
+	}
+	if entry.appendOnly {
+		r.fence.mu.Lock()
+		defer r.fence.mu.Unlock()
+		return publish()
+	}
+	_, err := r.fence.publishChecked(DispatchFenceRegistry, nil, publish)
 	return err
 }
 
@@ -659,4 +737,22 @@ func (f *DispatchFence) publishChecked(domain DispatchFenceDomain, expected *Dis
 		f.generations.Plan++
 	}
 	return f.generations, nil
+}
+
+// PreviewDefinition returns detached model metadata for candidate budget/plan
+// compilation. It intentionally cannot invoke the unpublished executor.
+func (candidate MCPToolCandidate) PreviewDefinition() ToolDefinition {
+	return &mcpCandidatePreview{name: candidate.name, description: candidate.description, schema: candidate.schema}
+}
+
+type mcpCandidatePreview struct {
+	name, description string
+	schema            ToolSchemaSnapshot
+}
+
+func (p *mcpCandidatePreview) Name() string        { return p.name }
+func (p *mcpCandidatePreview) Description() string { return p.description }
+func (p *mcpCandidatePreview) Parameters() any     { return p.schema.Schema() }
+func (p *mcpCandidatePreview) Execute(context.Context, ToolCall) (*ToolResult, error) {
+	return nil, ErrPreparedInvocationUnavailable
 }

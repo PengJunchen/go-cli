@@ -1,4 +1,4 @@
-//go:build !race
+//go:build !race && !no_plugin
 
 package cli
 

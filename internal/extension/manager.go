@@ -368,13 +368,33 @@ func (c *extensionCoordinator) initResult(managed *managedExtension) error {
 	return managed.initErr
 }
 
-// shutdownExtension shuts down an initialized extension exactly once. If Init
+// shutdownExtension shuts down a loaded or initialized extension exactly once. If Init
 // is still running, Shutdown cancels its owner and waits for its cleanup path.
 func (c *extensionCoordinator) shutdownExtension(ctx context.Context, ext Extension) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return c.shutdownExtensionWithContexts(ctx, ctx, ext)
+}
+
+// shutdownLoadedExtensionWithContexts enrolls only the exact instance already
+// owned by PluginManager.Load. Unknown callers keep the coordinator's noop contract.
+func (c *extensionCoordinator) shutdownLoadedExtensionWithContexts(waitCtx, callbackCtx context.Context, ext Extension) error {
+	if ext == nil {
+		return nil
+	}
+	name := ext.Name()
+	c.mu.Lock()
+	if managed, exists := c.managed[name]; exists {
+		if !sameExtensionInstance(managed.ext, ext) {
+			c.mu.Unlock()
+			return fmt.Errorf("%w: %s", ErrExtensionNameConflict, name)
+		}
+	} else {
+		c.managed[name] = &managedExtension{ext: ext, name: name, state: extensionStateRunning}
+	}
+	c.mu.Unlock()
+	return c.shutdownExtensionWithContexts(waitCtx, callbackCtx, ext)
 }
 
 // shutdownExtensionWithContexts separates the callback context from the wait
@@ -397,6 +417,7 @@ func (c *extensionCoordinator) shutdownExtensionWithContexts(waitCtx, callbackCt
 		c.mu.Unlock()
 		return nil
 	}
+
 	if !sameExtensionInstance(managed.ext, ext) {
 		c.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrExtensionNameConflict, name)

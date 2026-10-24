@@ -23,7 +23,9 @@ type Config struct {
 	Tracing       TracingConfig       `json:"tracing"`
 	Approval      ApprovalConfig      `json:"approval"`
 	Session       SessionConfig       `json:"session"`
+	Memory        MemoryConfig        `json:"memory"`
 	Compaction    CompactionConfig    `json:"compaction"`
+	Runtime       RuntimeConfig       `json:"runtime"`
 	MCP           MCPConfig           `json:"mcp"`
 	Skill         SkillConfig         `json:"skill"`
 	Commands      CommandsConfig      `json:"commands"`
@@ -252,6 +254,12 @@ type ApprovalConfig struct {
 	Classifier string `json:"classifier"`
 }
 
+// MemoryConfig selects the cross-session memory file. Empty preserves the
+// default user store; a trusted project can choose its own workspace path.
+type MemoryConfig struct {
+	StorePath string `json:"store_path"`
+}
+
 // SessionConfig controls the active session and its persistence location.
 type SessionConfig struct {
 	ID        string `json:"id"`
@@ -285,6 +293,8 @@ type MCPServerConfig struct {
 // MCPConfig holds MCP server connection settings.
 type MCPConfig struct {
 	Servers []MCPServerConfig `json:"servers"`
+	// Loading is eager (compatibility) or lazy (connect on explicit selection).
+	Loading string `json:"loading"`
 }
 
 // MCPServersMap holds MCP servers in the common mcpServers format:
@@ -303,6 +313,8 @@ type MCPServersMap map[string]struct {
 type SkillConfig struct {
 	// Dir is the directory to load skill definitions from.
 	Dir string `json:"dir"`
+	// Progressive indexes metadata and loads skill instructions on demand.
+	Progressive bool `json:"progressive"`
 }
 
 // CommandsConfig holds custom slash command loading settings.
@@ -611,4 +623,14 @@ func (s Source) String() string {
 		return "unknown"
 	}
 	return [...]string{"default", "file", "env", "flag", "override"}[s]
+}
+
+// RuntimeConfig selects bounded capability discovery and execution.
+type RuntimeConfig struct {
+	// Profile is default or edge. Edge enables progressive skill and MCP loading.
+	Profile        string `json:"profile"`
+	Dynamic        bool   `json:"dynamic"`
+	MaxSkills      int    `json:"max_skills"`
+	MaxPromptBytes int    `json:"max_prompt_bytes"`
+	MaxMCPServers  int    `json:"max_mcp_servers"`
 }

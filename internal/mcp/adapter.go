@@ -622,7 +622,7 @@ func (c *adapterCore) Connect(ctx context.Context) error {
 				return fmt.Errorf("mcp: server %q requires a command for stdio transport", c.cfg.Name)
 			}
 
-			cmd := exec.CommandContext(ctx, c.cfg.Command, c.cfg.Args...) //nolint:gosec // G204: server executable comes from trusted config
+			cmd := exec.Command(c.cfg.Command, c.cfg.Args...) //nolint:gosec // G204: server executable comes from trusted config
 			cmd.Env = append(cmd.Environ(), c.cfg.Env...)
 			stdin, err := cmd.StdinPipe()
 			if err != nil {
@@ -872,25 +872,9 @@ func (c *adapterCore) callWithReconnect(ctx context.Context, method string, para
 // ListTools returns the tools declared by the server via the tools/list
 // JSON-RPC method.
 func (c *adapterCore) ListTools(ctx context.Context) ([]MCPTool, error) {
-	res, err := c.callWithReconnect(ctx, "tools/list", map[string]any{})
-	if err != nil {
-		return nil, fmt.Errorf("mcp: list tools: %w", err)
-	}
-
-	raw, ok := res["tools"].([]any)
-	if !ok {
-		return nil, fmt.Errorf("mcp: unexpected tools/list result")
-	}
-
-	tools := make([]MCPTool, 0, len(raw))
-	for _, item := range raw {
-		obj, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		tools = append(tools, mcpToolFromProtocolObject(obj))
-	}
-	return tools, nil
+	return listToolPages(ctx, func(ctx context.Context, params map[string]any) (map[string]any, error) {
+		return c.callWithReconnect(ctx, "tools/list", params)
+	})
 }
 
 // CallTool invokes the named tool via the tools/call JSON-RPC method, emitting

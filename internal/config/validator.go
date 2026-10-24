@@ -61,6 +61,21 @@ var (
 // every constraint violation, or nil when the config is valid.
 func (v *DefaultValidator) Validate(cfg Config) error {
 	var errs []string
+	if cfg.Runtime.Profile != "" && cfg.Runtime.Profile != "default" && cfg.Runtime.Profile != "edge" {
+		errs = append(errs, "invalid runtime profile (supported: default, edge)")
+	}
+	if cfg.MCP.Loading != "" && cfg.MCP.Loading != "eager" && cfg.MCP.Loading != "lazy" {
+		errs = append(errs, "invalid mcp loading (supported: eager, lazy)")
+	}
+	if cfg.Runtime.MaxSkills < 0 || cfg.Runtime.MaxSkills > 1024 {
+		errs = append(errs, "runtime max_skills must be between 0 and 1024")
+	}
+	if cfg.Runtime.MaxMCPServers < 0 || cfg.Runtime.MaxMCPServers > 128 {
+		errs = append(errs, "runtime max_mcp_servers must be between 0 and 128")
+	}
+	if cfg.Runtime.MaxPromptBytes < 0 || cfg.Runtime.MaxPromptBytes > 16<<20 {
+		errs = append(errs, "runtime max_prompt_bytes must be between 0 and 16777216")
+	}
 
 	if !validTemperature(cfg.Provider.Temperature) {
 		errs = append(errs, "provider temperature out of range")
@@ -162,6 +177,7 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 	for _, p := range []struct{ value, name string }{
 		{cfg.Tracing.FilePath, "tracing file_path"},
 		{cfg.Session.StorePath, "session store_path"},
+		{cfg.Memory.StorePath, "memory store_path"},
 		{cfg.Skill.Dir, "skill dir"},
 		{cfg.Commands.Dir, "commands dir"},
 		{cfg.Production.Audit.Path, "audit path"},

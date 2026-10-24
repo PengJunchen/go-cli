@@ -1,3 +1,5 @@
+//go:build !headless
+
 package tui
 
 // SpinnerRenderer is a standalone component (NOT a Renderer interface

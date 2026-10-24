@@ -22,7 +22,7 @@ import (
 // calls), so assembly succeeds without a live endpoint.
 func newAssembleTestConfig(t *testing.T) *config.Config {
 	t.Helper()
-	return &config.Config{
+	cfg := &config.Config{
 		Git: config.GitConfig{
 			WorkDir: t.TempDir(),
 		},
@@ -32,6 +32,16 @@ func newAssembleTestConfig(t *testing.T) *config.Config {
 			APIKey:  "test-key",
 		},
 	}
+	isolateCLITestStorage(cfg, cfg.Git.WorkDir)
+	return cfg
+}
+
+// isolateCLITestStorage keeps implicit storage consumers inside the fixture
+// without changing HOME, persistence enablement, or workspace authority.
+func isolateCLITestStorage(cfg *config.Config, root string) {
+	cfg.Memory.StorePath = filepath.Join(root, "memories.jsonl")
+	cfg.History.Path = filepath.Join(root, "history.jsonl")
+	cfg.Production.Audit.Path = filepath.Join(root, "audit.jsonl")
 }
 
 func TestNewAssembleTestConfigUsesIsolatedWorkDir(t *testing.T) {
@@ -43,6 +53,14 @@ func TestNewAssembleTestConfigUsesIsolatedWorkDir(t *testing.T) {
 	require.NotEqual(t, first.Git.WorkDir, second.Git.WorkDir)
 	require.True(t, filepath.IsAbs(first.Git.WorkDir))
 	require.True(t, filepath.IsAbs(second.Git.WorkDir))
+	for _, cfg := range []*config.Config{first, second} {
+		for _, path := range []string{cfg.Memory.StorePath, cfg.History.Path, cfg.Production.Audit.Path} {
+			relative, err := filepath.Rel(cfg.Git.WorkDir, path)
+			require.NoError(t, err)
+			require.True(t, filepath.IsLocal(relative), "fixture storage must stay in its owned work directory: %s", path)
+		}
+		require.Nil(t, cfg.Production.Audit.Enabled, "storage isolation must not enable audit")
+	}
 }
 
 // TestAssembleAgent_RegistryNotNil verifies that AssembleAgent populates the

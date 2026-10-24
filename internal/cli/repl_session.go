@@ -74,6 +74,7 @@ type REPLSession struct {
 	resumeSessionID  string
 	noSandboxFlag    bool
 	noOnboardingFlag bool
+	approveMode      ApproveMode
 
 	// Agent assembly
 	assembly        *AgentAssembly
@@ -88,7 +89,7 @@ type REPLSession struct {
 	// Session
 	sessionTree    session.SessionTree
 	sessionHandler *session.SessionSlashHandler
-	sharedThemeMgr *tui.ThemeManager
+	sharedThemeMgr ThemeController
 
 	// pendingWrites buffers session entries for batched persistence,
 	// reducing syscall overhead by flushing multiple entries in a single
@@ -134,7 +135,7 @@ type REPLSession struct {
 	turnDone          chan struct{}
 	uiCancelRequested atomic.Bool
 	isTTY             bool
-	app               *tui.BubbleteaApp
+	app               *replApp
 	eventSource       *tui.OwnedAgentEventStream
 	uiCtx             context.Context
 	cancelUI          context.CancelFunc
@@ -240,6 +241,7 @@ func (s *REPLSession) parseFlags() error {
 		thinkingFlag     string
 		noSandboxFlag    bool
 		noOnboardingFlag bool
+		approveMode      ApproveMode
 	)
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
@@ -250,6 +252,7 @@ func (s *REPLSession) parseFlags() error {
 	fs.StringVar(&thinkingFlag, "thinking", "medium", "thinking level: none|minimal|low|medium|high|max")
 	fs.BoolVar(&noSandboxFlag, "no-sandbox", false, "disable bash sandbox enforcement")
 	fs.BoolVar(&noOnboardingFlag, "no-onboarding", false, "skip first-run onboarding wizard")
+	fs.Var(&approveMode, "approve", "approval mode: ask|auto|deny (flag > approval.mode > ask)")
 	if err := fs.Parse(s.args); err != nil {
 		return newUsageError("interactive: %v", err)
 	}
@@ -262,6 +265,17 @@ func (s *REPLSession) parseFlags() error {
 	if v, ok := s.cfg.(*config.Config); ok {
 		s.rc = v
 	}
+	approveExplicit := false
+	fs.Visit(func(option *flag.Flag) {
+		if option.Name == "approve" {
+			approveExplicit = true
+		}
+	})
+	resolvedApproval, err := resolveApprovalMode(s.rc, approveMode, approveExplicit)
+	if err != nil {
+		return err
+	}
+	s.approveMode = resolvedApproval
 	if s.rc != nil && s.rc.Session.StorePath != "" && resumeFlag {
 		return newUsageError("interactive: durable sessions require --resume-session <physical-id>; --resume is ambiguous")
 	}
@@ -334,6 +348,7 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 		}
 	}
 	assembleOpts := []AssembleOption{
+		WithApproveMode(s.approveMode),
 		WithMaxTokens(s.maxTokens),
 		WithResume(s.resumeFlag),
 		WithSessionPersistence(true),
@@ -347,7 +362,7 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 	if s.noSandboxFlag {
 		assembleOpts = append(assembleOpts, WithNoSandbox())
 	}
-	if tui.IsTerminal() {
+	if s.approveMode == ApproveAsk && interactiveApprovalsEnabled() {
 		approvalCh = make(chan tui.ApprovalRequest, 32)
 		assembleOpts = append(assembleOpts, WithApprovalChannel(approvalCh))
 	}
@@ -357,6 +372,9 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 		return newExecutionError("interactive: assemble agent", err)
 	}
 	s.assembly = assembly
+	if _, err := fmt.Fprintf(s.out, "Approval mode: %s\n", assembly.ApprovalMode.String()); err != nil {
+		return errors.Join(newExecutionError("interactive: display approval mode", err), assembly.Close(context.Background()))
+	}
 	if err := assembly.setInteractiveCloseHooks(func() {
 		s.stopFlushTicker()
 	}, func(ctx context.Context) error {
@@ -464,6 +482,7 @@ func (s *REPLSession) setupSlashContext() error {
 		promptBuilder:          s.assembly.PromptBuilder,
 		contextLoader:          s.assembly.ContextLoader,
 		mcpResources:           s.assembly.mcpResources,
+		capabilities:           s.assembly,
 	}
 	if s.assembly.PhysicalSessionID != "" {
 		s.slashCtx.sessionID = s.assembly.PhysicalSessionID
@@ -473,8 +492,8 @@ func (s *REPLSession) setupSlashContext() error {
 	// without restarting. The initial theme is set from config; subsequent
 	// switches via /theme persist across turns because the same manager is
 	// passed to every BubbleteaApp via WithThemeManager.
-	s.sharedThemeMgr = tui.NewThemeManager()
-	if s.rc != nil {
+	s.sharedThemeMgr = newREPLThemeManager()
+	if s.rc != nil && s.sharedThemeMgr != nil {
 		themeName := strings.TrimSpace(strings.ToLower(s.rc.TUI.Theme))
 		if themeName == "" || themeName == "auto" {
 			themeName = "dark"
@@ -779,7 +798,7 @@ func (s *REPLSession) executeTurn() error {
 	// The bubbletea program from this turn has exited; leaving a stale
 	// reference would cause the next turn to send to a dead program.
 	if s.assembly.HITLEmitter != nil {
-		s.assembly.HITLEmitter.SetProgram(nil)
+		s.assembly.HITLEmitter.clearProgram()
 	}
 
 	// Wait for RunTurn to finish so turnResult and turnErr are populated.
@@ -952,6 +971,9 @@ func (s *REPLSession) finishTurnSpanAfterCompletion(interrupted bool) error {
 	} else if s.assembly.durableSession != nil && s.turnResult.DurablePublication.State == core.DurablePublicationFailed {
 		completionErr = errors.New("interactive: durable run finished without positive transcript publication")
 	}
+	if completionErr != nil {
+		completionErr = errors.Join(completionErr, s.turnErr)
+	}
 
 	spanErr := completionErr
 	if spanErr == nil {
@@ -974,7 +996,14 @@ func durableTurnIsJoinable(result core.Result) bool {
 	return result.ExecutionState == core.RunExecutionQuiescent && result.Outcome != core.RunOutcomeUnknown
 }
 
-func (s *REPLSession) applyDurableTurnRefresh(initial *session.PreparedSessionSnapshot) error {
+func (s *REPLSession) applyDurableTurnRefresh(initial *session.PreparedSessionSnapshot) (refreshErr error) {
+	defer func() {
+		if refreshErr != nil {
+			// Publication failures remain fatal. Keep the run's typed cause so
+			// callers can distinguish denial, timeout, and persistence failures.
+			refreshErr = errors.Join(refreshErr, s.turnErr)
+		}
+	}()
 	if initial == nil || s.app == nil || s.uiCtx == nil {
 		return errors.New("interactive: durable transcript refresh requires its initial snapshot and active TUI")
 	}
@@ -1350,156 +1379,6 @@ func (s *REPLSession) runAgentGoroutine(runCtx context.Context) {
 		}
 		s.stream.Close()
 	}()
-}
-
-// renderTUI builds the TUI options, creates the BubbleteaApp, starts the
-// render goroutine, and wires HITL through the bubbletea program.
-func (s *REPLSession) renderTUI(initialTranscript *tui.CanonicalTranscriptSnapshot) error {
-	// Bridge core events to TUI events and render. Bubbletea owns terminal
-	// rendering in TTY mode (raw mode, diff-based repaint on stderr), so
-	// the legacy onUpdate manual redraw and ANSI cursor logic has been
-	// removed.
-	var eventSource *tui.OwnedAgentEventStream
-	if s.rc != nil && s.rc.TUI.Mode == "remote" && s.rc.TUI.RemoteURL != "" {
-		eventSource = tui.NewACPStreamAdapter(s.rc.TUI.RemoteURL).StreamOwned(s.turnCtx)
-	} else {
-		eventSource = tui.BridgeEventsOwned(s.turnCtx, s.stream)
-	}
-	s.eventSource = eventSource
-	s.turnCounter++
-	s.isTTY = tui.IsTerminal()
-	tsp := tui.NewDefaultTerminalSizeProvider()
-	appOpts := []tui.AppOption{
-		tui.WithWidth(tsp.Width()),
-		tui.WithModelInfo(s.slashCtx.ModelName()),
-		tui.WithTurnCount(s.turnCounter),
-		tui.WithSessionInfo(s.assembly.SessionID),
-	}
-	if snapshot, ok := s.assembly.todoSnapshot(); ok {
-		appOpts = append(appOpts, tui.WithTodoSnapshot(todoUpdateMsg(snapshot)))
-	}
-	// Mode label: show "plan" when plan mode is active, otherwise "chat".
-	if s.assembly.PlanCtrl != nil && s.assembly.PlanCtrl.IsActive() {
-		appOpts = append(appOpts, tui.WithModeLabel("plan"))
-	} else {
-		appOpts = append(appOpts, tui.WithModeLabel("chat"))
-	}
-	// TUIConfig: word wrap, diff style. The shared theme manager is
-	// passed separately so runtime /theme switches persist across turns.
-	if s.rc != nil {
-		appOpts = append(appOpts,
-			tui.WithWordWrap(s.rc.TUI.WordWrap),
-			tui.WithDiffStyle(s.rc.TUI.DiffStyle),
-		)
-	}
-	appOpts = append(appOpts, tui.WithThemeManager(s.sharedThemeMgr))
-	if s.assembly.ApprovalChannel != nil {
-		appOpts = append(appOpts, tui.WithApprovalChannel(s.assembly.ApprovalChannel))
-	}
-	if s.slashCtx.thinkingVisibility != "" {
-		appOpts = append(appOpts, tui.WithThinkingVisibility(s.slashCtx.thinkingVisibility))
-	}
-	if s.assembly.durableSession != nil {
-		appOpts = append(appOpts, tui.WithDeferQuitUntilTranscriptRefresh())
-	}
-	appOpts = append(appOpts, s.buildCallbackOptions()...)
-	s.uiCtx, s.cancelUI = context.WithCancel(s.spanCtx)
-	if initialTranscript != nil {
-		app, err := tui.NewBubbleteaAppWithTranscript(eventSource.Events(), *initialTranscript, appOpts...)
-		if err != nil {
-			s.cancelUI()
-			return fmt.Errorf("interactive: create canonical transcript TUI: %w", err)
-		}
-		s.app = app
-	} else {
-		s.app = tui.NewBubbleteaApp(eventSource.Events(), appOpts...)
-	}
-
-	s.appStarted = true
-	go func() {
-		if runErr := s.app.Run(s.uiCtx); runErr != nil && runErr != context.Canceled {
-			s.logger.Debug("cli_interactive_tui_error", "err", runErr)
-		}
-	}()
-
-	s.wireHITL()
-	return nil
-}
-
-// buildCallbackOptions constructs the steer, follow-up, cancel, pause, and
-// resume callback options for the BubbleteaApp.
-func (s *REPLSession) buildCallbackOptions() []tui.AppOption {
-	return []tui.AppOption{
-		tui.WithSteerCallback(func(input string) {
-			turnID := s.assembly.TurnRunner.RunningTurnID()
-			if turnID != "" {
-				if steerErr := s.assembly.TurnRunner.Steer(s.turnCtx, turnID, input); steerErr != nil {
-					s.logger.Warn("cli_interactive_steer_callback_failed", "err", steerErr)
-				}
-			} else if s.assembly.SteerChannel != nil {
-				select {
-				case s.assembly.SteerChannel <- input:
-				default:
-				}
-			}
-		}),
-		tui.WithFollowUpCallback(func(input string) {
-			turnID := s.assembly.TurnRunner.RunningTurnID()
-			if turnID != "" {
-				if err := s.assembly.TurnRunner.FollowUp(s.turnCtx, turnID, input); err != nil {
-					s.logger.Warn("cli_interactive_followup_callback_failed", "err", err)
-				}
-			} else if s.assembly.FollowUpChannel != nil {
-				select {
-				case s.assembly.FollowUpChannel <- input:
-				default:
-					s.logger.Warn("cli_interactive_followup_channel_full")
-				}
-			}
-		}),
-		tui.WithCancelCallback(func() {
-			if s.turnCtx != nil && s.turnCtx.Err() == nil && s.spanCtx != nil && s.spanCtx.Err() == nil {
-				s.uiCancelRequested.Store(true)
-			}
-			if s.cancelTurn != nil {
-				s.cancelTurn()
-			}
-		}),
-		tui.WithPauseCallback(func() {
-			if s.assembly.LoopAgent != nil {
-				s.assembly.LoopAgent.Pause()
-			}
-		}),
-		tui.WithResumeCallback(func() {
-			if s.assembly.LoopAgent != nil {
-				s.assembly.LoopAgent.Resume()
-			}
-		}),
-	}
-}
-
-// wireHITL waits for the bubbletea program to be initialized so HITL can
-// route through it.
-func (s *REPLSession) wireHITL() {
-	// Wait for the tea.Program to be initialized so HITL can route
-	// through it. The program is created inside Run (which runs in the
-	// goroutine above); instead of polling, we wait on the
-	// ProgramReady channel which closes once the program is stored.
-	// In TTY mode this routes HITL questions through bubbletea instead
-	// of corrupting stdout.
-	if s.assembly.HITLEmitter != nil {
-		select {
-		case <-s.app.ProgramReady():
-			if prog := s.app.Program(); prog != nil {
-				s.assembly.HITLEmitter.SetProgram(prog)
-			}
-		case <-time.After(5 * time.Second):
-			s.logger.Warn("cli_interactive_hitl_program_timeout",
-				"op", "cli.interactive.hitl.program_timeout",
-			)
-		case <-s.turnCtx.Done():
-		}
-	}
 }
 
 // waitForTurnCompletion waits for the render loop to finish, forwarding any

@@ -1,3 +1,5 @@
+//go:build !headless
+
 // Package tui implements the functional TUI layer. It provides a
 // message-queue-driven render loop (BubbleteaApp), a set of content renderers
 // and a theme system. The layer sits on top of the charmbracelet/bubbletea and

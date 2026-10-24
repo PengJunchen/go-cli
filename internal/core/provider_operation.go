@@ -91,6 +91,15 @@ type providerOperationAuthority struct {
 func (a *providerOperationAuthority) ID() llm.ProviderOperationID { return a.id }
 
 func (a *providerOperationAuthority) AuthorizeCandidate(ctx context.Context, proposal llm.CandidateProposal) (llm.DispatchDecision, error) {
+	// This is the admission boundary for each initial/retry/failover dispatch.
+	// Current project authority may require store I/O, so check it before the
+	// operation lock. A later concurrent revocation cannot undo prior admission.
+	if ctx.Err() == nil {
+		if fenceErr := CheckRunGeneration(ctx); fenceErr != nil && ctx.Err() == nil {
+			denial := &llm.DispatchDeniedError{Code: llm.DeniedSafetyFact}
+			return llm.DispatchDecision{Denial: &llm.DispatchDenial{Code: llm.DeniedSafetyFact}}, errors.Join(denial, fenceErr)
+		}
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	deny := func(code llm.DispatchDenialCode) (llm.DispatchDecision, error) {

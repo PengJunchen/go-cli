@@ -21,6 +21,10 @@ func registerMCPToolsOwned(ctx context.Context, rc *config.Config, registry tool
 }
 
 func registerMCPSource(ctx context.Context, rc *config.Config, registry tools.DeferredRegistry, owner *assemblyMCPResources) error {
+	return registerMCPSourceWithReload(ctx, rc, registry, owner, true)
+}
+
+func registerMCPSourceWithReload(ctx context.Context, rc *config.Config, registry tools.DeferredRegistry, owner *assemblyMCPResources, automaticReload bool) error {
 	dtr, ok := registry.(*tools.DeferredToolRegistryAdapter)
 	if !ok || dtr == nil {
 		return tools.ErrMCPGenerationUnavailable
@@ -55,7 +59,7 @@ func registerMCPSource(ctx context.Context, rc *config.Config, registry tools.De
 		slog.Info("assemble_mcp_generation_published", "servers", len(servers))
 	}
 
-	if !providedOwner || !source.reloadable() {
+	if !automaticReload || !providedOwner || !source.reloadable() {
 		return nil
 	}
 	reloader := mcp.NewConfigHotReloader(func(reloadCtx context.Context, _ string) error {
@@ -234,6 +238,9 @@ func buildMCPGeneration(
 	definitions := make([]tools.MCPToolCandidate, 0)
 	for _, group := range serverTools {
 		definitions = append(definitions, group...)
+	}
+	for _, definition := range definitions {
+		candidate.toolNames = append(candidate.toolNames, definition.PreviewDefinition().Name())
 	}
 	return candidate, definitions, nil
 }

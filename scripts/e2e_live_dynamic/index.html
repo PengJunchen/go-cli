@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>go-cli · live PTY QA</title>
+  <link rel="stylesheet" href="/assets/xterm.css">
+  <style>
+    *{box-sizing:border-box}body{margin:0;background:#11151d;color:#d8dee9;font:14px system-ui,sans-serif}
+    header{padding:14px 20px;background:#1c2432;border-bottom:1px solid #3b465c}h1{font-size:20px;margin:0 0 6px}
+    p{margin:4px 0;color:#aebbd0}.controls{padding:12px 20px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    button,select,input,textarea{font:inherit;color:#e6edf7;background:#222e42;border:1px solid #526383;border-radius:5px;padding:8px}
+    button{cursor:pointer}button:hover{background:#31445f}button:disabled{opacity:.45;cursor:default}
+    label{display:flex;align-items:center;gap:6px}#viewport{margin:0 20px;background:#0b0d10;border:1px solid #526383;border-radius:7px}
+    #terminal{height:420px;min-height:420px;max-height:420px;padding:0}#terminal .xterm{height:100%}
+    .caption{padding:7px 10px;background:#1c2432;color:#bbc8db;font-size:12px;border-bottom:1px solid #526383}
+    .input-box{padding:12px 20px;display:grid;grid-template-columns:1fr auto;gap:8px}textarea{min-height:70px;resize:vertical}
+    .input-actions{display:flex;flex-direction:column;gap:7px}.keys{padding:0 20px 12px;display:flex;gap:7px;flex-wrap:wrap}
+    #status,#notice{padding:8px 20px;white-space:pre-wrap;overflow-wrap:anywhere}#notice{color:#ffd28a;min-height:35px}
+    #audit{margin:0 20px 20px;max-height:160px;overflow:auto;white-space:pre-wrap;font:12px ui-monospace,monospace}
+    @media(max-width:650px){header,.controls{padding:10px}.input-box{padding:10px;grid-template-columns:1fr}.input-actions{flex-direction:row}#viewport{margin:0 10px}.keys{padding:0 10px 10px}}
+  </style>
+</head>
+<body>
+  <header><h1>go-cli · 真实 PTY 测试</h1><p>本页是测试控制器。下方终端只显示实际 go-cli PTY 字节，由 xterm.js 绘制；这是浏览器终端，非原生 Terminal 窗口。</p></header>
+  <section class="controls" aria-label="测试进程控制">
+    <label>场景 <select id="role" aria-label="场景"></select></label>
+    <button id="grant">启动 Trust grant 终端</button>
+    <button id="start">启动 go-cli 交互</button>
+    <button id="revoke">启动 Trust revoke 终端</button>
+    <label>终端 <select id="session" aria-label="当前真实终端"><option value="">尚未启动</option></select></label>
+    <button id="close">关闭当前进程组</button><button id="scroll-bottom">滚到最新输出</button>
+  </section>
+  <div id="status" role="status">连接本地控制服务…</div>
+  <div id="viewport"><div class="caption" id="caption">真实 PTY 输出 · 无模型响应替身 · 等待人工启动</div><div id="terminal" aria-label="真实 go-cli PTY 输出"></div></div>
+  <section class="input-box" aria-label="测试输入控制">
+    <textarea id="input" aria-label="发送到真实 PTY 的文本" placeholder="测试输入；交互终端以 bracketed paste 发送，Trust 终端发送原始文本。"></textarea>
+    <div class="input-actions"><button id="send">发送文本</button><button id="send-enter">发送并 Enter</button></div>
+  </section>
+  <section class="keys" aria-label="真实终端按键">
+    <button data-key="enter">Enter</button><button data-key="escape">Esc</button>
+    <button data-key="page-down">PageDown</button><button data-key="page-up">PageUp</button>
+    <button data-key="up">↑</button><button data-key="down">↓</button>
+    <button data-key="y">y</button><button data-key="n">n</button><button data-key="ctrl-c">Ctrl+C</button><button data-key="ctrl-d">Ctrl+D</button>
+  </section>
+  <section class="controls" aria-label="观测控制">
+    <label>下一请求标签 <input id="label" value="manual-live-turn" aria-label="请求标签"></label>
+    <button id="set-label">设置标签</button><button id="audit-button">保存并核验 Magpie route / usage</button>
+  </section>
+  <div id="notice" role="alert"></div><pre id="audit" aria-label="安全观测摘要"></pre>
+  <script src="/assets/xterm.js"></script><script src="/assets/addon-fit.js"></script>
+  <script>
+    'use strict';
+    const nonce='__CONTROL_NONCE__';
+    const $=id=>document.getElementById(id);
+    const term=new Terminal({allowProposedApi:true,screenReaderMode:true,cursorBlink:false,convertEol:false,
+      fontFamily:'Menlo, Monaco, SFMono-Regular, monospace',fontSize:14,lineHeight:1.15,scrollback:4000,
+      theme:{background:'#0b0d10',foreground:'#d8dee9',cursor:'#e5e9f0'}});
+    const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open($('terminal'));fit.fit();
+    let current='',offset=0,viewEpoch=0,sessions=[],polling=false,replayEnd=0,suppressTerminalData=0;
+    async function api(path,body){const options={headers:{'X-Live-Control':nonce}};
+      if(body!==undefined){options.method='POST';options.headers['Content-Type']='application/json';options.body=JSON.stringify(body)}
+      const response=await fetch(path,options);const value=await response.json();if(!response.ok)throw new Error(value.error||'Control request failed');return value;}
+    function notice(error){$('notice').textContent=error instanceof Error?error.message:String(error||'')}
+    async function action(fn){try{notice('');return await fn()}catch(error){notice(error)}}
+    async function refresh(){const state=await api('/api/status');sessions=state.sessions;
+      const previousRole=$('role').value;const roleSignature=JSON.stringify(state.roles);
+      if($('role').dataset.signature!==roleSignature){$('role').replaceChildren(...state.roles.map(role=>{
+        const option=new Option(role.name+(role.enabled?'':' (off)'),role.name);option.disabled=!role.enabled;return option}));
+        $('role').dataset.signature=roleSignature;if(previousRole)$('role').value=previousRole;}
+      const signature=sessions.map(item=>item.id+':'+item.exit).join('|');
+      if($('session').dataset.signature!==signature){$('session').replaceChildren(...sessions.map(item=>new Option(`${item.role} · ${item.action} · ${item.exit===null?'运行中':'exit '+item.exit}`,item.id)));
+        $('session').dataset.signature=signature;if(current)$('session').value=current;}
+      const selected=sessions.find(item=>item.id===current);
+      $('status').textContent=`模型：${state.model} | ready 文件：${state.ready?'存在（启动时校验 SHA）':'未放行'} | 终端 ${term.cols}×${term.rows}`;
+      $('caption').textContent=selected?`真实 PTY · ${selected.role}/${selected.action} · PID ${selected.pid} · ${selected.cols}×${selected.rows} · ${selected.bytes} B${selected.captureTruncated?' · 捕获已达上限':''}`:'真实 PTY 输出 · 等待人工启动';
+      return state;
+    }
+    async function writeTerminal(bytes,historical){if(historical)suppressTerminalData++;
+      try{await new Promise(resolve=>term.write(bytes,resolve))}finally{if(historical)suppressTerminalData--}}
+    async function select(id){viewEpoch++;current='';offset=0;
+      // Drain any previous terminal write before choosing a new PTY target.
+      await writeTerminal(new Uint8Array(),true);term.reset();
+      const state=await api('/api/status');const selected=state.sessions.find(item=>item.id===id);
+      if(!selected)throw new Error('所选真实终端不存在');
+      replayEnd=selected.bytes;current=id;$('session').value=id;await refresh();}
+    async function start(actionName){const result=await api('/api/start',{role:$('role').value,action:actionName,cols:term.cols,rows:term.rows});await select(result.id)}
+    $('grant').onclick=()=>action(()=>start('trust-grant'));$('start').onclick=()=>action(()=>start('interactive'));$('revoke').onclick=()=>action(()=>start('trust-revoke'));
+    $('session').onchange=()=>action(()=>select($('session').value));
+    async function send(enter){if(!current)throw new Error('请先选择真实终端');await api('/api/input',{id:current,text:$('input').value,enter,paste:true});$('input').value=''}
+    $('send').onclick=()=>action(()=>send(false));$('send-enter').onclick=()=>action(()=>send(true));
+    $('input').onkeydown=event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();action(()=>send(true))}};
+    for(const button of document.querySelectorAll('[data-key]'))button.onclick=()=>action(()=>api('/api/key',{id:current,key:button.dataset.key}));
+    term.onData(data=>{if(current&&!suppressTerminalData)action(()=>api('/api/terminal-data',{id:current,data:btoa(unescape(encodeURIComponent(data)))}))});
+    $('close').onclick=()=>action(async()=>{await api('/api/close',{id:current});await refresh()});
+    $('scroll-bottom').onclick=()=>term.scrollToBottom();
+    $('set-label').onclick=()=>action(()=>api('/api/label',{id:current,label:$('label').value}));
+    $('audit-button').onclick=()=>action(async()=>{const result=await api('/api/audit',{id:current});
+      $('audit').textContent=JSON.stringify({providerExpected:result.providerExpected,joinPolicy:result.evidence?.joinPolicy,
+        inference:result.evidence?.inference?.map(row=>({sequence:row.sequence,askedModel:row.askedModel,servedModel:row.servedModel,
+          provider:row.provider,status:row.status,routeIdentity:row.routeIdentity,usageIdentity:row.usageIdentity,usage:row.gatewayUsage}))},null,2)});
+    let resizeTimer;new ResizeObserver(()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{fit.fit();if(current)action(()=>api('/api/resize',{id:current,cols:term.cols,rows:term.rows}))},150)}).observe($('terminal'));
+    async function poll(){if(polling)return;polling=true;try{if(current){const epoch=viewEpoch,startOffset=offset;
+      const result=await api(`/api/output?id=${encodeURIComponent(current)}&offset=${offset}`);
+      if(epoch===viewEpoch){offset=result.offset;if(result.data){const bytes=Uint8Array.from(atob(result.data),value=>value.charCodeAt(0));
+        const historical=result.state.exit!==null?bytes.length:Math.min(bytes.length,Math.max(0,replayEnd-startOffset));
+        if(historical)await writeTerminal(bytes.subarray(0,historical),true);
+        if(epoch===viewEpoch&&historical<bytes.length)await writeTerminal(bytes.subarray(historical),false);}}}
+      await refresh();}catch(error){notice(error)}finally{polling=false;setTimeout(poll,200)}}poll();
+  </script>
+</body>
+</html>
