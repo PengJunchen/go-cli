@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/acp"
 	"github.com/pengjunchen/go-cli/internal/approval"
+	"github.com/pengjunchen/go-cli/internal/capability"
 	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
@@ -37,7 +39,6 @@ import (
 	"github.com/pengjunchen/go-cli/internal/skill"
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
-	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
 // defaultMaxTokens is the default compaction token budget used when no
@@ -175,6 +176,8 @@ type Observability struct {
 
 // InteractiveControl holds channels and emitters for interactive sessions.
 type InteractiveControl struct {
+	// ApprovalMode is the effective mode after explicit option/config resolution.
+	ApprovalMode ApproveMode
 	// SteerChannel is the shared steering channel between the
 	// InterruptHandler (writer) and the LoopAgent (reader). The REPL writes
 	// steering messages here when the user presses Esc and types an
@@ -184,7 +187,7 @@ type InteractiveControl struct {
 	// (writer, inside the approval middleware) and the BubbleteaApp (reader,
 	// via tui.WithApprovalChannel). It is nil when the assembly was built
 	// without TUI-based approval (non-interactive mode).
-	ApprovalChannel chan tui.ApprovalRequest
+	ApprovalChannel chan approval.InteractiveRequest
 	// FollowUpChannel is the shared follow-up channel between the
 	// TurnRunner (writer) and the LoopAgent (reader). The REPL writes
 	// follow-up messages here so the running loop picks them up between LLM
@@ -258,6 +261,8 @@ type AgentAssembly struct {
 	Cleanup  func()
 
 	closeOwner          *assemblyCloseOwner
+	dynamicRuntime      *dynamicRuntime
+	progressiveMCP      *progressiveMCP
 	mcpResources        *assemblyMCPResources
 	durableSession      *durableCLISession
 	runSlotGuard        core.RunSlotGuard
@@ -318,12 +323,11 @@ type assembleConfig struct {
 	// sandbox with an AllowAllSandbox that permits every command.
 	noSandbox bool
 	// approvalCh, when non-nil, enables TUI-based approval via TeaApprovalCallback.
-	approvalCh chan tui.ApprovalRequest
-	// approveMode controls headless tool approval behavior when approvalCh is
-	// nil. ApproveAsk (default) uses SafetyPolicyClassifier with interactive
-	// callback; ApproveAuto uses AllowAllClassifier; ApproveDeny uses
-	// DenyAllClassifier.
-	approveMode ApproveMode
+	approvalCh chan approval.InteractiveRequest
+	// approveMode is resolved before resource construction; only Ask uses the
+	// optional approval channel. Auto/Deny retain the same prepared middleware.
+	approveMode    ApproveMode
+	approveModeSet bool
 }
 
 // WithMaxTokens sets the compaction token budget.
@@ -331,20 +335,22 @@ func WithMaxTokens(n int) AssembleOption {
 	return func(c *assembleConfig) { c.maxTokens = n }
 }
 
-// WithApprovalChannel enables TUI-based interactive approval. When set,
-// AssembleAgent constructs a TeaApprovalCallback backed by this channel instead
-// of the fallback InteractiveApprovalCallback. The same channel must be passed
-// to the BubbleteaApp via tui.WithApprovalChannel.
-func WithApprovalChannel(ch chan tui.ApprovalRequest) AssembleOption {
+// WithApprovalChannel enables TUI-based approval in Ask mode. Auto/Deny ignore
+// the channel. The same Ask channel is passed to the BubbleteaApp rather than
+// using the fallback InteractiveApprovalCallback.
+func WithApprovalChannel(ch chan approval.InteractiveRequest) AssembleOption {
 	return func(c *assembleConfig) { c.approvalCh = ch }
 }
 
-// WithApproveMode sets the headless tool approval mode. This is used by the
-// prompt command when no TUI approval channel is available.
+// WithApproveMode explicitly overrides the configured approval mode for either
+// CLI entry or library caller. Only Ask uses an available TUI approval channel.
 // ApproveAuto automatically approves all tool calls; ApproveDeny automatically
 // denies all tool calls; ApproveAsk (default) prompts via InteractiveApprovalCallback.
 func WithApproveMode(mode ApproveMode) AssembleOption {
-	return func(c *assembleConfig) { c.approveMode = mode }
+	return func(c *assembleConfig) {
+		c.approveMode = mode
+		c.approveModeSet = true
+	}
 }
 
 // WithResume enables session history restoration on startup.
@@ -398,6 +404,11 @@ func AssembleAgent(
 	opts ...AssembleOption,
 ) (*AgentAssembly, error) {
 	s, thinkingLevel := newAssembleState(ctx, rc, providerName, modelName, out, opts...)
+	mode, approvalErr := resolveApprovalMode(s.rc, s.ac.approveMode, s.ac.approveModeSet)
+	if approvalErr != nil {
+		return nil, errors.Join(approvalErr, s.runCleanup())
+	}
+	s.ac.approveMode = mode
 	if s.durableSession != nil {
 		snapshot, err := s.durableSession.snapshotSelected()
 		if err != nil {
@@ -412,6 +423,9 @@ func AssembleAgent(
 	}
 
 	// Assemble subsystems in dependency order.
+	if err := s.prepareExtensions(); err != nil {
+		return nil, errors.Join(err, s.runCleanup())
+	}
 	if err := s.assembleModel(); err != nil {
 		return nil, errors.Join(err, s.runCleanup())
 	}
@@ -441,6 +455,9 @@ func AssembleAgent(
 	}
 	s.assembleMiddleware()
 	s.assembleSession()
+	if err := s.assembleDynamicRuntime(); err != nil {
+		return nil, errors.Join(err, s.runCleanup())
+	}
 
 	// Resume history from session store if requested.
 	var restoredHistory []core.AgentMessage
@@ -461,7 +478,11 @@ func AssembleAgent(
 		agentOpts = append(agentOpts, core.WithHistory(restoredHistory))
 	}
 	agent := core.NewAgentImpl(s.ac.agentName, s.loop, agentOpts...)
-	h := core.NewHarnessImpl(agent, core.WithEventBuffer(256), core.WithHarnessTracer(s.tracer), core.WithRunSlotGuard(s.runSlotGuard), core.WithHarnessEventBus(s.eventBus), core.WithRunLifetimeContext(s.lifetimeCtx))
+	harnessOpts := []core.HarnessOption{core.WithEventBuffer(256), core.WithHarnessTracer(s.tracer), core.WithRunSlotGuard(s.runSlotGuard), core.WithHarnessEventBus(s.eventBus), core.WithRunLifetimeContext(s.lifetimeCtx)}
+	if s.dynamicRuntime != nil {
+		harnessOpts = append(harnessOpts, core.WithRunGenerationProvider(s.dynamicRuntime))
+	}
+	h := core.NewHarnessImpl(agent, harnessOpts...)
 
 	// Build TurnRunner wired with the shared steering channel and agent.
 	turnRunner := core.NewEinoTurnRunner(s.loop)
@@ -471,6 +492,9 @@ func AssembleAgent(
 	turnRunner.SetHookChain(s.hookChain)
 	turnRunner.SetRunSlotGuard(s.runSlotGuard)
 	turnRunner.SetRunLifetimeContext(s.lifetimeCtx)
+	if s.dynamicRuntime != nil {
+		turnRunner.SetRunGenerationProvider(s.dynamicRuntime)
+	}
 	s.reg.RegisterTurnRunner(turnRunner)
 
 	// Emit assemble span for observability.
@@ -536,6 +560,7 @@ func AssembleAgent(
 			AuditLog: s.auditLog,
 		},
 		InteractiveControl: InteractiveControl{
+			ApprovalMode:    s.ac.approveMode,
 			SteerChannel:    s.steerCh,
 			ApprovalChannel: s.ac.approvalCh,
 			FollowUpChannel: s.followUpCh,
@@ -554,10 +579,11 @@ func AssembleAgent(
 			LSPClient:          s.lspClientField,
 			LSPWorkspaceRoot:   s.lspWorkspaceRoot,
 		},
-		Registry:            s.reg,
-		Cleanup:             func() { _ = s.runCleanup() },
-		closeOwner:          s.closeOwner,
-		mcpResources:        s.mcpResources,
+		Registry:       s.reg,
+		Cleanup:        func() { _ = s.runCleanup() },
+		closeOwner:     s.closeOwner,
+		mcpResources:   s.mcpResources,
+		dynamicRuntime: s.dynamicRuntime, progressiveMCP: s.progressiveMCP,
 		durableSession:      s.durableSession,
 		runSlotGuard:        s.runSlotGuard,
 		todoState:           s.todoState,
@@ -577,6 +603,7 @@ func newAssembleState(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	rc = effectiveRuntimeConfig(rc)
 	ac := assembleConfig{
 		maxTokens:     0, // 0 means "not set"; resolved below
 		enableSession: false,
@@ -768,11 +795,20 @@ type assembleState struct {
 	// Cleanup
 	cleanupList []func(context.Context) error
 
-	lifetimeCtx    context.Context
-	lifetimeCancel context.CancelFunc
-	closeOwner     *assemblyCloseOwner
-	mcpResources   *assemblyMCPResources
-	pluginManagers []*extension.PluginManager
+	lifetimeCtx           context.Context
+	lifetimeCancel        context.CancelFunc
+	closeOwner            *assemblyCloseOwner
+	extensionFingerprints map[string]string
+	extensionsPrepared    bool
+	extensionManager      *extension.PluginManager
+	extensionBinding      tools.ProjectTrustBinding
+	runtimePromptOptions  core.SystemPromptOptions
+	skillCatalog          *skill.Catalog
+	skillBinding          tools.ProjectTrustBinding
+	progressiveMCP        *progressiveMCP
+	dynamicRuntime        *dynamicRuntime
+	mcpResources          *assemblyMCPResources
+	pluginManagers        []*extension.PluginManager
 
 	primaryModelCleanup func()
 	modelDisposer       func() error
@@ -799,7 +835,11 @@ func (s *assembleState) assembleModel() error {
 	s.modelTotalTimeout = totalTimeout
 	s.modelStreamIdleTimeout = streamIdleTimeout
 
-	modelResolver, err := newCLIModelResolver(s.rc, s.providerName, true, s.modelName)
+	var extensionProviders []llm.ModelProvider
+	if s.extensionManager != nil {
+		extensionProviders = s.extensionManager.Providers()
+	}
+	modelResolver, err := newCLIModelResolverWithProviders(s.rc, s.providerName, true, extensionProviders, s.modelName)
 	if err != nil {
 		return fmt.Errorf("assemble: resolve model providers: %w", err)
 	}
@@ -1069,7 +1109,7 @@ func (s *assembleState) assembleTools() error {
 	registerCustomTools(s.ctx, s.rc, s.tr, s.logger)
 
 	// Register MCP tools.
-	if mcpErr := registerMCPToolsOwned(s.ctx, s.rc, dtr, s.mcpResources); mcpErr != nil {
+	if mcpErr := s.registerConfiguredMCP(dtr); mcpErr != nil {
 		s.logger.Warn("assemble_mcp_failed", "error_class", mcpGenerationErrorClass(mcpErr))
 	}
 
@@ -1104,14 +1144,24 @@ func (s *assembleState) assembleTools() error {
 	}
 
 	// Register skill tools.
-	s.skillInfos = registerSkillTools(s.ctx, s.rc, dtr)
+	if progressiveSkillsEnabled(s.rc) {
+		if err := s.registerProgressiveSkills(dtr); err != nil {
+			return fmt.Errorf("assemble: progressive skills: %w", err)
+		}
+	} else {
+		s.skillInfos = registerSkillTools(s.ctx, s.rc, dtr)
+	}
 
 	return nil
 }
 
 // assembleExtensions loads and initializes extensions, registering their tools,
 // hooks, and middleware. It also builds the hook chain.
-func (s *assembleState) assembleExtensions() error {
+func (s *assembleState) prepareExtensions() error {
+	if s.extensionsPrepared {
+		return nil
+	}
+	s.extensionsPrepared = true
 	if s.rc != nil && s.rc.Extensions.Enabled != nil && *s.rc.Extensions.Enabled && len(s.rc.Extensions.PluginPaths) > 0 {
 		var projectBinding tools.ProjectTrustBinding
 		if projectOverlay := s.rc.ProjectOverlayForVerifiedSources(); projectOverlay != nil && len(projectOverlay.Extensions.PluginPaths) > 0 {
@@ -1123,7 +1173,7 @@ func (s *assembleState) assembleExtensions() error {
 		}
 		loader := s.pluginLoader
 		if loader == nil {
-			loader = extension.NewDefaultPluginLoader()
+			loader = extension.NewSDKPluginLoader(extension.NewDefaultPluginLoader())
 		}
 		pm := extension.NewPluginManager(loader)
 		s.pluginManagers = append(s.pluginManagers, pm)
@@ -1136,12 +1186,42 @@ func (s *assembleState) assembleExtensions() error {
 			s.cleanupList = append(s.cleanupList, cleanup)
 			pluginPaths = materializedPaths
 		}
+		if s.pluginLoader == nil {
+			s.extensionFingerprints = map[string]string{}
+			for _, path := range s.rc.Extensions.PluginPaths {
+				fingerprint, err := extensionFingerprint(s.rc, path)
+				if err != nil {
+					return err
+				}
+				s.extensionFingerprints[path] = fingerprint
+			}
+		}
 		if err := pm.Load(s.ctx, pluginPaths); err != nil {
 			return fmt.Errorf("assemble: load extensions: %w", err)
+		}
+		nodes, sources, err := extensionPlanInputs(pm)
+		if err != nil {
+			return err
+		}
+		if _, err := capability.NewSnapshot(capability.Input{Nodes: nodes, Sources: sources}); err != nil {
+			return fmt.Errorf("assemble: validate extension dependency plan: %w", err)
 		}
 		if err := pm.Init(s.ctx); err != nil {
 			return fmt.Errorf("assemble: initialize extensions: %w", err)
 		}
+		s.extensionManager = pm
+		s.extensionBinding = projectBinding
+	}
+	return nil
+}
+
+func (s *assembleState) assembleExtensions() error {
+	if err := s.prepareExtensions(); err != nil {
+		return err
+	}
+	if s.extensionManager != nil {
+		pm := s.extensionManager
+		projectBinding := s.extensionBinding
 		for _, registration := range pm.ToolRegistrations() {
 			t := registration.Tool
 			var regErr error
@@ -1162,10 +1242,14 @@ func (s *assembleState) assembleExtensions() error {
 			}
 		}
 		for _, registration := range pm.HookRegistrations() {
-			s.extHooks = append(s.extHooks, newExtensionHookAdapter(registration))
+			adapter := newExtensionHookAdapter(registration)
+			adapter.binding = s.extensionBinding
+			s.extHooks = append(s.extHooks, adapter)
 		}
 		for _, m := range pm.Middleware() {
-			s.extMiddleware = append(s.extMiddleware, newExtensionMiddlewareAdapter(m))
+			adapter := newExtensionMiddlewareAdapter(m)
+			adapter.binding = s.extensionBinding
+			s.extMiddleware = append(s.extMiddleware, adapter)
 		}
 		s.logger.Info("assemble_extensions_ready", "extensions", len(pm.Extensions()), "paths", len(s.rc.Extensions.PluginPaths), "hooks", len(s.extHooks), "middleware", len(s.extMiddleware))
 	}
@@ -1189,6 +1273,12 @@ func (s *assembleState) loadConfiguredShellHooks() {
 		return
 	}
 	verified := s.rc.VerifiedProjectSources()
+	if len(s.rc.Hooks.Hooks) > 0 {
+		data, err := json.Marshal(s.rc.Hooks)
+		if err == nil {
+			s.loadShellHooks("config.hooks", data, verified)
+		}
+	}
 	if verified == nil {
 		return
 	}
@@ -1205,11 +1295,21 @@ func (s *assembleState) loadConfiguredShellHooks() {
 	s.loadShellHooks(hooksPath, data, verified)
 }
 
+func parseShellHooksConfig(data []byte) (config.HooksConfig, error) {
+	var hooks config.HooksConfig
+	format := config.ConfigFormatYAML
+	if strings.HasPrefix(strings.TrimSpace(string(data)), "{") {
+		format = config.ConfigFormatJSON
+	}
+	err := config.UnmarshalConfig(data, format, &hooks)
+	return hooks, err
+}
+
 // loadShellHooks parses verified hooks.yaml bytes and stores guarded shell
 // hooks for later assembly into the HookManager.
 func (s *assembleState) loadShellHooks(path string, data []byte, verified *approval.VerifiedProjectSources) {
-	var hooksCfg config.HooksConfig
-	if err := config.UnmarshalConfig(data, config.ConfigFormatYAML, &hooksCfg); err != nil {
+	hooksCfg, err := parseShellHooksConfig(data)
+	if err != nil {
 		s.logger.Warn("assemble_hooks_parse_failed", "path", path, "err", err)
 		return
 	}
@@ -1233,6 +1333,9 @@ func (s *assembleState) loadShellHooks(path string, data []byte, verified *appro
 		}
 		name := fmt.Sprintf("shell-hook-%d", i)
 		startGuard := core.ShellHookStartGuard(func(ctx context.Context, start func() error) error {
+			if verified == nil {
+				return planModeShellHookStart(event, s.planCtrl, start)
+			}
 			return verified.CommitIfCurrent(ctx, func() error {
 				return planModeShellHookStart(event, s.planCtrl, start)
 			})
@@ -1255,6 +1358,9 @@ func parseHookEvent(s string) (core.HookEvent, error) {
 // assembleApproval installs the approval policy and mutation queue on the
 // registry's prepared-dispatch pipeline.
 func (s *assembleState) assembleApproval() error {
+	if s.ac.approveMode != ApproveAsk {
+		s.ac.approvalCh = nil
+	}
 	fence, err := tools.DispatchFenceFromRegistry(s.tr)
 	if err != nil {
 		return fmt.Errorf("assemble: get prepared-dispatch fence: %w", err)
@@ -1791,11 +1897,9 @@ func (s *assembleState) assembleLoopAgent() {
 		loopOpts = append(loopOpts, core.WithExecutionMode(core.ExecutionModeSequential))
 	}
 
-	// Wire memory store for cross-session memory persistence.
-	memoryPath := ""
-	if home, homeErr := os.UserHomeDir(); homeErr == nil && home != "" {
-		memoryPath = filepath.Join(home, ".go-cli", "memories.jsonl")
-	}
+	// Explicit project/user configuration selects only that memory file; it
+	// never falls back to the personal store if opening the selected file fails.
+	memoryPath := memoryStorePath(s.rc)
 	if memoryPath != "" {
 		if mkErr := os.MkdirAll(filepath.Dir(memoryPath), 0o755); mkErr != nil {
 			s.logger.Warn("assemble_memory_mkdir_failed", "err", mkErr)
@@ -1811,6 +1915,9 @@ func (s *assembleState) assembleLoopAgent() {
 	// Wire dynamic system prompt builder with project context.
 	s.contextLoader = core.NewDefaultProjectContextLoader()
 	s.promptBuilder = core.NewDefaultSystemPromptBuilder()
+	if s.rc != nil && (s.rc.Runtime.Dynamic || progressiveSkillsEnabled(s.rc) || s.rc.MCP.Loading == "lazy") {
+		s.promptBuilder = &runtimePromptBuilder{inner: s.promptBuilder, maxBytes: s.rc.Runtime.MaxPromptBytes}
+	}
 	cwd, _ := os.Getwd() //nolint:errcheck
 	contextFiles, ctxErr := s.contextLoader.Load(s.ctx, cwd)
 	if ctxErr != nil {
@@ -1821,22 +1928,41 @@ func (s *assembleState) assembleLoopAgent() {
 		customPrompt = s.rc.Agent.SystemPrompt
 		appendPrompt = s.rc.Agent.AppendSystemPrompt
 	}
-	loopOpts = append(loopOpts,
-		core.WithSystemPromptBuilder(s.promptBuilder),
-		core.WithSystemPromptOptions(core.SystemPromptOptions{
-			Cwd:          cwd,
-			ContextFiles: contextFiles,
-			Skills:       s.skillInfos,
-			CustomPrompt: customPrompt,
-			AppendPrompt: appendPrompt,
-		}),
-	)
+	if s.extensionManager != nil {
+		prompts := s.extensionManager.Prompts()
+		sort.Slice(prompts, func(i, j int) bool {
+			if prompts[i].Priority != prompts[j].Priority {
+				return prompts[i].Priority < prompts[j].Priority
+			}
+			if prompts[i].Owner != prompts[j].Owner {
+				return prompts[i].Owner < prompts[j].Owner
+			}
+			return prompts[i].Name < prompts[j].Name
+		})
+		for _, prompt := range prompts {
+			appendPrompt += "\n" + prompt.Text
+		}
+	}
+	s.runtimePromptOptions = core.SystemPromptOptions{Cwd: cwd, ContextFiles: contextFiles, Skills: s.skillInfos, CustomPrompt: customPrompt, AppendPrompt: appendPrompt}
+	loopOpts = append(loopOpts, core.WithSystemPromptBuilder(s.promptBuilder), core.WithSystemPromptOptions(s.runtimePromptOptions))
 
 	s.loop = core.NewLoopAgent(loopOpts...)
 	if la, ok := s.loop.(*core.LoopAgent); ok {
 		s.loopAgent = la
-		s.loopAgent.WithToolSearchThreshold(30)
+		if !progressiveSkillsEnabled(s.rc) && (s.rc == nil || s.rc.MCP.Loading != "lazy") {
+			s.loopAgent.WithToolSearchThreshold(30)
+		}
 	}
+}
+
+func memoryStorePath(cfg *config.Config) string {
+	if cfg != nil && cfg.Memory.StorePath != "" {
+		return cfg.Memory.StorePath
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".go-cli", "memories.jsonl")
+	}
+	return ""
 }
 
 // assembleMiddleware wires the loop detector, reminder manager, failure
@@ -1972,6 +2098,10 @@ type cliProviderCredential struct {
 // one resolver snapshot. Credentials remain in the scoped AuthChain and are
 // never stored in provider metadata or provider constructors.
 func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeSmall bool, primaryModelName ...string) (*cliModelResolver, error) {
+	return newCLIModelResolverWithProviders(rc, primaryProviderName, includeSmall, nil, primaryModelName...)
+}
+
+func newCLIModelResolverWithProviders(rc *config.Config, primaryProviderName string, includeSmall bool, extensionProviders []llm.ModelProvider, primaryModelName ...string) (*cliModelResolver, error) {
 	primaryProviderName = normalizeProviderName(primaryProviderName)
 	if primaryProviderName == "" {
 		return nil, fmt.Errorf("assemble: provider identity is required")
@@ -1980,10 +2110,14 @@ func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeS
 		return nil, unsupportedCLIProviderError(primaryProviderName)
 	}
 
+	extensionNames := map[string]bool{}
+	for _, provider := range extensionProviders {
+		extensionNames[normalizeProviderName(provider.Name())] = true
+	}
 	primary := cliProviderCredential{providerID: primaryProviderName}
 	if rc != nil {
 		configuredProviderName := resolveProviderName("", rc)
-		if providerIdentityMatches(configuredProviderName, primaryProviderName) {
+		if providerIdentityMatches(configuredProviderName, primaryProviderName) && !extensionNames[primaryProviderName] {
 			primary.endpoint = rc.Provider.BaseURL
 			primary.apiKey = rc.Provider.APIKey
 		}
@@ -2055,6 +2189,13 @@ func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeS
 	}
 	registry := llm.NewProviderRegistryWithDefaultProviderOptions(defaultProviderOptions...)
 	registered := map[string]struct{}{"eino": {}}
+	for _, provider := range extensionProviders {
+		if err := registry.RegisterExtensionProvider(provider); err != nil {
+			return nil, fmt.Errorf("assemble: register extension provider: %w", err)
+		}
+		registered[normalizeProviderName(provider.Name())] = struct{}{}
+	}
+
 	for _, binding := range bindings {
 		providerID := normalizeProviderName(binding.providerID)
 		if providerID == "" || isDisabledCLIProvider(providerID) {
@@ -2083,8 +2224,13 @@ func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeS
 	resolver := registry.SnapshotResolver()
 	authChain := config.NewAuthChain()
 	configuredKeys := make(map[llm.CredentialRef]string)
+	extensionIDs := map[string]bool{}
+	for _, provider := range extensionProviders {
+		extensionIDs[normalizeProviderName(provider.Name())] = true
+	}
+
 	for _, binding := range bindings {
-		if binding.apiKey == "" || isDisabledCLIProvider(binding.providerID) {
+		if binding.apiKey == "" || isDisabledCLIProvider(binding.providerID) || extensionIDs[normalizeProviderName(binding.providerID)] {
 			continue
 		}
 		if _, registeredProvider := registered[normalizeProviderName(binding.providerID)]; !registeredProvider {
@@ -2847,8 +2993,20 @@ func relativeSkillDirectory(root, dir string) (string, bool) {
 }
 
 func loadVerifiedProjectSkills(ctx context.Context, verified *approval.VerifiedProjectSources, relativeDir string) (skill.SkillLoadResult, error) {
+	sources, err := verifiedProjectSkillFiles(verified, relativeDir)
+	if err != nil {
+		return skill.SkillLoadResult{}, err
+	}
+	sourceLoader, ok := skill.NewYAMLSkillLoader().(skill.SkillSourceLoadReporter)
+	if !ok {
+		return skill.SkillLoadResult{}, errors.New("cli: skill source report capability unavailable")
+	}
+	return sourceLoader.LoadSourcesWithReport(ctx, sources)
+}
+
+func verifiedProjectSkillFiles(verified *approval.VerifiedProjectSources, relativeDir string) ([]skill.SkillSourceFile, error) {
 	if verified == nil || !verified.Valid() {
-		return skill.SkillLoadResult{}, errors.New("cli: verified project skill sources are unavailable")
+		return nil, errors.New("cli: verified project skill sources are unavailable")
 	}
 	cleanRelativeDir := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativeDir)))
 	directoryID := ""
@@ -2859,11 +3017,11 @@ func loadVerifiedProjectSkills(ctx context.Context, verified *approval.VerifiedP
 		}
 	}
 	if directoryID == "" {
-		return skill.SkillLoadResult{}, errors.New("cli: verified project skill directory is missing from the source manifest")
+		return nil, errors.New("cli: verified project skill directory is missing from the source manifest")
 	}
 	members, ok := verified.DirectoryMembers(directoryID)
 	if !ok {
-		return skill.SkillLoadResult{}, errors.New("cli: verified project skill membership is unavailable")
+		return nil, errors.New("cli: verified project skill membership is unavailable")
 	}
 	memberSet := make(map[string]struct{}, len(members))
 	for _, member := range members {
@@ -2882,28 +3040,40 @@ func loadVerifiedProjectSkills(ctx context.Context, verified *approval.VerifiedP
 			continue
 		}
 		if _, isMember := memberSet[record.RelativePath]; !isMember {
-			return skill.SkillLoadResult{}, fmt.Errorf("cli: project skill source %q is not in its verified directory membership", record.RelativePath)
+			return nil, fmt.Errorf("cli: project skill source %q is not in its verified directory membership", record.RelativePath)
 		}
 		content, present := verified.SourceBytes(record.ID)
 		if !present {
-			return skill.SkillLoadResult{}, fmt.Errorf("cli: verified project skill bytes are unavailable for %q", record.RelativePath)
+			return nil, fmt.Errorf("cli: verified project skill bytes are unavailable for %q", record.RelativePath)
 		}
 		sources = append(sources, skill.SkillSourceFile{RelativePath: memberRelativePath, Content: content})
 		capturedPaths[record.RelativePath] = struct{}{}
 	}
+	standardRoots := []string{}
+	for captured := range capturedPaths {
+		if filepath.Base(captured) == "SKILL.md" {
+			standardRoots = append(standardRoots, filepath.ToSlash(filepath.Dir(captured))+"/")
+		}
+	}
 	for _, member := range members {
+		auxiliary := false
+		for _, root := range standardRoots {
+			if strings.HasPrefix(member, root) && member != root+"SKILL.md" {
+				auxiliary = true
+				break
+			}
+		}
+		if auxiliary {
+			continue
+		}
 		if !isSkillSourceCandidate(member) {
 			continue
 		}
 		if _, captured := capturedPaths[member]; !captured {
-			return skill.SkillLoadResult{}, fmt.Errorf("cli: project skill source %q is missing from its verified manifest", member)
+			return nil, fmt.Errorf("cli: project skill source %q is missing from its verified manifest", member)
 		}
 	}
-	sourceLoader, ok := skill.NewYAMLSkillLoader().(skill.SkillSourceLoadReporter)
-	if !ok {
-		return skill.SkillLoadResult{}, errors.New("cli: built-in skill loader cannot report captured sources")
-	}
-	return sourceLoader.LoadSourcesWithReport(ctx, sources)
+	return sources, nil
 }
 
 func formatSkillLoadErrorCounts(counts []skill.SkillLoadErrorCount) string {

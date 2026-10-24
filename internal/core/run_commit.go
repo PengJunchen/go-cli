@@ -249,10 +249,11 @@ func (guard *runCommitLeaseGuard) close() bool {
 // RunCommitInput is an input message at its canonical per-run transcript
 // position.
 type RunCommitInput struct {
-	RunID           string       `json:"run_id"`
-	TranscriptIndex uint64       `json:"transcript_index"`
-	Message         AgentMessage `json:"message"`
-	InputKind       string       `json:"input_kind"`
+	Generation      *RunGenerationMetadata `json:"generation,omitempty"`
+	RunID           string                 `json:"run_id"`
+	TranscriptIndex uint64                 `json:"transcript_index"`
+	Message         AgentMessage           `json:"message"`
+	InputKind       string                 `json:"input_kind"`
 }
 
 // RunIntentBatch is one sequential reservation or parallel assistant call
@@ -343,6 +344,7 @@ type TerminalCheckpointID string
 // RunTerminal is the final immutable per-run transcript and its durable
 // terminal checkpoint request.
 type RunTerminal struct {
+	Generation           *RunGenerationMetadata `json:"generation,omitempty"`
 	RunID                string                 `json:"run_id"`
 	Transcript           []TranscriptEntry      `json:"transcript"`
 	Projections          []CompactionProjection `json:"projections,omitempty"`

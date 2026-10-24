@@ -1,3 +1,5 @@
+//go:build !headless
+
 package cli
 
 import (
@@ -159,7 +161,8 @@ func TestHITLEmitViaProgram(t *testing.T) {
 	program, runDone := newHitlProgram(t, model)
 	defer stopHitlProgram(t, program, runDone)
 
-	emitter := &cliHITLEmitter{out: io.Discard, program: program}
+	emitter := &cliHITLEmitter{out: io.Discard}
+	emitter.SetProgram(program)
 	event := core.HITLQuestionEvent{
 		QuestionID: "q1",
 		Question:   "Proceed?",
@@ -209,7 +212,7 @@ func TestHITLFallbackNoProgram(t *testing.T) {
 	require.NoError(t, err)
 
 	var out bytes.Buffer
-	emitter := &cliHITLEmitter{out: &out, program: nil}
+	emitter := &cliHITLEmitter{out: &out}
 	event := core.HITLQuestionEvent{
 		QuestionID: "q2",
 		Question:   "Continue?",
@@ -250,7 +253,8 @@ func TestHITLNoDirectStdoutWithProgram(t *testing.T) {
 	program, runDone := newHitlProgram(t, model)
 	defer stopHitlProgram(t, program, runDone)
 
-	emitter := &cliHITLEmitter{out: &out, program: program}
+	emitter := &cliHITLEmitter{out: &out}
+	emitter.SetProgram(program)
 	event := core.HITLQuestionEvent{
 		QuestionID: "q3",
 		Question:   "Direct write?",
@@ -279,7 +283,8 @@ func TestHITLMultipleEventsAllForwarded(t *testing.T) {
 	program, runDone := newHitlProgram(t, model)
 	defer stopHitlProgram(t, program, runDone)
 
-	emitter := &cliHITLEmitter{out: io.Discard, program: program}
+	emitter := &cliHITLEmitter{out: io.Discard}
+	emitter.SetProgram(program)
 
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("q%d", i)
@@ -496,7 +501,8 @@ func TestHITLStaleProgramCleared(t *testing.T) {
 	defer stopHitlProgram(t, program, runDone)
 
 	var out bytes.Buffer
-	emitter := &cliHITLEmitter{out: &out, program: program}
+	emitter := &cliHITLEmitter{out: &out}
+	emitter.SetProgram(program)
 
 	// Verify program is initially wired and Emit routes through it.
 	event1 := core.HITLQuestionEvent{

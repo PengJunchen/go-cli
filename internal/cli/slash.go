@@ -17,7 +17,6 @@ import (
 	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
-	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
 // ---------------------------------------------------------------------------
@@ -51,10 +50,17 @@ type ToolAccessor interface {
 	SnapshotManager() *tools.SnapshotManager
 }
 
+// ThemeController is the small theme interface needed by slash commands.
+type ThemeController interface {
+	CurrentName() string
+	Names() []string
+	Set(string) error
+}
+
 // DisplayAccessor provides access to output and TUI.
 type DisplayAccessor interface {
 	Out() io.Writer
-	ThemeMgr() *tui.ThemeManager
+	ThemeMgr() ThemeController
 	ThinkingVisibility() string
 	SetThinkingVisibility(v string)
 }
@@ -141,7 +147,7 @@ type slashContext struct {
 	snapshotManager *tools.SnapshotManager
 	// themeMgr enables runtime theme switching via the /theme slash command.
 	// It is nil in headless mode; the ThemeHandler degrades gracefully.
-	themeMgr *tui.ThemeManager
+	themeMgr ThemeController
 	// modelSelector enables runtime model switching via the /model slash
 	// command. It is nil when the selector was not wired (e.g. in tests).
 	modelSelector *llm.DefaultModelSelector
@@ -154,6 +160,7 @@ type slashContext struct {
 	// contextLoader loads CLAUDE.md / AGENTS.md files for the /context
 	// command. It is nil when not wired; /context degrades gracefully.
 	contextLoader core.ProjectContextLoader
+	capabilities  CapabilityBackend
 	mcpResources  *assemblyMCPResources
 }
 
@@ -197,7 +204,7 @@ func (sc *slashContext) SnapshotManager() *tools.SnapshotManager { return sc.sna
 // --- DisplayAccessor ---
 
 func (sc *slashContext) Out() io.Writer                 { return sc.out }
-func (sc *slashContext) ThemeMgr() *tui.ThemeManager    { return sc.themeMgr }
+func (sc *slashContext) ThemeMgr() ThemeController      { return sc.themeMgr }
 func (sc *slashContext) ThinkingVisibility() string     { return sc.thinkingVisibility }
 func (sc *slashContext) SetThinkingVisibility(v string) { sc.thinkingVisibility = v }
 
@@ -315,6 +322,9 @@ func buildSlashCommandRegistry() *SlashCommandRegistry {
 
 	// MCP server management (reload hot reloaders).
 	add(&MCPHandler{})
+	add(&capabilityHandler{name: "capabilities"})
+	add(&capabilityHandler{name: "skills"})
+	add(&capabilityHandler{name: "reload"})
 
 	// Aliases.
 	reg.RegisterAlias("h", "help")

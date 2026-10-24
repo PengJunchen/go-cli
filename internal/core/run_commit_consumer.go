@@ -104,6 +104,27 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 		handoffRunCompletionTask(ctx, taskID)
 	}()
 
+	guardedCtx, finishCapability, admissionErr := beginRunCapability(ctx, invocation.NormalizedCall().Name)
+	if admissionErr != nil {
+		return runCommitDispatchResult{output: "Error: capability authorization revoked", isError: true, err: admissionErr}
+	}
+	defer func() {
+		if fenceErr := finishCapability(); fenceErr != nil {
+			if result.returned && !result.committed && ctx.Err() != nil && fenceErr == ctx.Err() {
+				// The sealed prepared invocation positively never entered its
+				// executor. Only the exact caller cancellation may retain this
+				// known outcome; wrapped/combined authority errors stay unknown.
+				result.isError = true
+				result.err = errors.Join(result.err, fenceErr)
+				return
+			}
+			result.output = "Error: capability authorization revoked; execution outcome unknown"
+			result.isError = true
+			result.err = toolOutcomeUnknownError{cause: errors.Join(result.err, fenceErr)}
+			markRunOutcomeUnknown(ctx)
+		}
+	}()
+	ctx = guardedCtx
 	var toolResult *tools.ToolResult
 	var err error
 	if streamSink != nil {
@@ -145,6 +166,7 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 		result.err = errToolMissingReceipt
 		return result
 	}
+	captureMaterializedArtifact(ctx, invocation.NormalizedCall(), toolResult)
 	result.output = toolResult.Output
 	result.isError = toolResult.IsError
 	result.sourceTruncated = sourceTruncatedFromMetadata(toolResult.Metadata)
@@ -240,6 +262,7 @@ func (consumer *runCommitConsumer) commitInput(index uint64, message AgentMessag
 		TranscriptIndex: index,
 		Message:         message,
 		InputKind:       message.InputKind,
+		Generation:      runGenerationMetadataPointer(consumer.ctx),
 	})
 	return persistenceError("input", err)
 }
@@ -428,7 +451,11 @@ func (consumer *runCommitConsumer) commitTerminal(transcript []TranscriptEntry, 
 	if projections == nil {
 		projections = consumer.projections
 	}
+	if err := CheckRunGeneration(consumer.commitContext()); err != nil {
+		return toolOutcomeUnknownError{cause: err}
+	}
 	terminal := RunTerminal{
+		Generation:           runGenerationMetadataPointer(consumer.ctx),
 		RunID:                consumer.runID,
 		Transcript:           cloneTranscriptEntries(transcript),
 		Projections:          append([]CompactionProjection(nil), projections...),

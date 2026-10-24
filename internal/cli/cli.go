@@ -218,6 +218,14 @@ func RunWithRegistry(ctx context.Context, cfg Config, args []string, out io.Writ
 
 	cmd, ok := reg.Get(subArgs[0])
 	if !ok {
+		cleanup, err := registerExtensionCommands(ctx, cfg, out, reg)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		cmd, ok = reg.Get(subArgs[0])
+	}
+	if !ok {
 		return newUsageError("unknown command: %s", subArgs[0])
 	}
 

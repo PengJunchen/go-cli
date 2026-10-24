@@ -32,8 +32,9 @@ func writePromptResponse(t *testing.T, w http.ResponseWriter, body string) {
 
 // newPromptConfig builds a *config.Config pointing at the given base URL so the
 // prompt command builds a custom provider backed by the httptest endpoint.
-func newPromptConfig(baseURL string) *config.Config {
-	return &config.Config{
+func newPromptConfig(t *testing.T, baseURL string) *config.Config {
+	t.Helper()
+	cfg := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    "test",
 			BaseURL: baseURL,
@@ -41,6 +42,8 @@ func newPromptConfig(baseURL string) *config.Config {
 			Model:   "test-model",
 		},
 	}
+	isolateCLITestStorage(cfg, t.TempDir())
+	return cfg
 }
 
 // TestPromptCmd_RunCannedCompletion wires a prompt command to an httptest
@@ -62,7 +65,7 @@ func TestPromptCmd_RunCannedCompletion(t *testing.T) {
 
 	var out bytes.Buffer
 	cmd := newPromptCmd(&out)
-	cfg := newPromptConfig(srv.URL)
+	cfg := newPromptConfig(t, srv.URL)
 
 	err := cmd.Run(t.Context(), cfg, []string{"hello"})
 	require.NoError(t, err)
@@ -85,7 +88,7 @@ func TestPromptCmd_RunFlagsOverridesConfig(t *testing.T) {
 
 	var out bytes.Buffer
 	cmd := newPromptCmd(&out)
-	cfg := newPromptConfig(srv.URL)
+	cfg := newPromptConfig(t, srv.URL)
 
 	err := cmd.Run(t.Context(), cfg, []string{"-model", "flagged-model", "-provider", "test", "-verbose", "hello"})
 	require.NoError(t, err)
@@ -97,7 +100,7 @@ func TestPromptCmd_RunUnknownFlag(t *testing.T) {
 	var out bytes.Buffer
 	cmd := newPromptCmd(&out)
 
-	err := cmd.Run(t.Context(), newPromptConfig("ignored"), []string{"-bogus", "hello"})
+	err := cmd.Run(t.Context(), newPromptConfig(t, "ignored"), []string{"-bogus", "hello"})
 	require.Error(t, err)
 	var usageErr *UsageError
 	assert.True(t, errors.As(err, &usageErr))
@@ -110,7 +113,7 @@ func TestPromptCmd_RunMissingMessage(t *testing.T) {
 	var out bytes.Buffer
 	cmd := newPromptCmd(&out)
 
-	err := cmd.Run(t.Context(), newPromptConfig("ignored"), nil)
+	err := cmd.Run(t.Context(), newPromptConfig(t, "ignored"), nil)
 	require.Error(t, err)
 	var usageErr *UsageError
 	assert.True(t, errors.As(err, &usageErr))
@@ -221,7 +224,7 @@ func TestPromptCmd_ConfiguredStoreUsesDurableSession(t *testing.T) {
 
 	var out bytes.Buffer
 	cmd := newPromptCmd(&out)
-	cfg := newPromptConfig(srv.URL)
+	cfg := newPromptConfig(t, srv.URL)
 	cfg.Session.StorePath = storePath
 
 	err := cmd.Run(t.Context(), cfg, []string{"hello"})

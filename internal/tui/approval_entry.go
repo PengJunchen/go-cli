@@ -1,7 +1,8 @@
+//go:build !headless
+
 package tui
 
 import (
-	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -10,47 +11,6 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 )
-
-// ApprovalDecision is the user's verdict on a pending tool-call approval.
-type ApprovalDecision int
-
-const (
-	// ApprovalDeny rejects the tool call.
-	ApprovalDeny ApprovalDecision = iota
-	// ApprovalAllow allows the tool call once.
-	ApprovalAllow
-	// ApprovalAlwaysAllow allows the tool call and persists the decision.
-	ApprovalAlwaysAllow
-)
-
-// ApprovalRequest is sent from the approval middleware to the TUI for
-// interactive resolution. The TUI renders it as a special accordion entry and
-// delivers the user's decision through ResponseCh.
-type ApprovalRequest struct {
-	// RequestID is an optional identity supplied by the request source. The
-	// TUI leaves it empty when the caller has no authoritative ID; it uses a
-	// separately labeled local interaction token for queue cancellation.
-	RequestID string
-	// Context cancels this request if the approval waiter is no longer active.
-	Context context.Context
-	// ToolName is the name of the tool requesting approval.
-	ToolName string
-	// Args are the tool call arguments, displayed as key=value pairs.
-	Args map[string]any
-	// DiffPreview carries a unified diff for edit/write tools; empty for others.
-	DiffPreview string
-	// ResponseCh receives the user's decision. It is buffered (1) so the TUI
-	// can send the response without blocking even if the middleware has moved on.
-	ResponseCh chan ApprovalResponse
-}
-
-// ApprovalResponse carries the user's decision back to the middleware.
-type ApprovalResponse struct {
-	Decision ApprovalDecision
-	// Pattern is a suggested glob for "always allow" (e.g. "git *"). Empty when
-	// the decision is not ApprovalAlwaysAllow.
-	Pattern string
-}
 
 // approvalHeaderStyle styles the "[approval]" prefix in warning yellow.
 var approvalHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFC000")).Bold(true)

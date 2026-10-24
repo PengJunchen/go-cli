@@ -634,23 +634,9 @@ func (a *HTTPClientAdapter) Name() string { return a.cfg.Name }
 
 // ListTools calls the tools/list JSON-RPC method.
 func (a *HTTPClientAdapter) ListTools(ctx context.Context) ([]MCPTool, error) {
-	res, err := a.request(ctx, "tools/list", map[string]any{})
-	if err != nil {
-		return nil, err
-	}
-	raw, ok := res["tools"].([]any)
-	if !ok {
-		return nil, fmt.Errorf("mcp: unexpected tools/list result")
-	}
-	tools := make([]MCPTool, 0, len(raw))
-	for _, item := range raw {
-		obj, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		tools = append(tools, mcpToolFromProtocolObject(obj))
-	}
-	return tools, nil
+	return listToolPages(ctx, func(ctx context.Context, params map[string]any) (map[string]any, error) {
+		return a.request(ctx, "tools/list", params)
+	})
 }
 
 // CallTool invokes the named tool via the tools/call JSON-RPC method.
