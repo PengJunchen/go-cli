@@ -25,8 +25,11 @@ type InteractiveRequest struct {
 	ResponseCh  chan InteractiveResponse
 }
 
-// InteractiveResponse returns the user's verdict and optional remembered pattern.
+// InteractiveResponse returns the verdict and optional remembered pattern.
 type InteractiveResponse struct {
 	Decision InteractiveDecision
-	Pattern  string
+	// DecisionSource is "user" for an explicit approval input and "canceled"
+	// for request cleanup. Unknown values remain callback-controlled.
+	DecisionSource string
+	Pattern        string
 }
