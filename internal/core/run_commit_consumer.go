@@ -20,6 +20,10 @@ var (
 	ErrRunCommitSinkPanicked                    = errors.New("core: run commit sink panicked")
 )
 
+// ErrRunCommitCompletionUnsupported rejects a tool before any durable dispatch
+// reservation when its captured executor has no reviewed completion contract.
+var ErrRunCommitCompletionUnsupported = errors.New("core: tool is unavailable in durable sessions because its completion cannot be verified (tool_not_executed=true)")
+
 type runCommitSinkPanicError struct{ operation string }
 
 func (err runCommitSinkPanicError) Error() string {
@@ -580,6 +584,9 @@ func (consumer *runCommitConsumer) prepareInvocation(ctx context.Context, regist
 				if invocation == nil {
 					return nil, nil, ErrRunCommitPreparedInvocationUnavailable
 				}
+				if err := preflightDurableCompletion(ctx, invocation, streamSink); err != nil {
+					return nil, nil, err
+				}
 				return invocation, streamSink, nil
 			}
 		}
@@ -602,7 +609,27 @@ func (consumer *runCommitConsumer) prepareInvocation(ctx context.Context, regist
 			return nil, nil, ErrRunCommitStreamingUnsupported
 		}
 	}
+	if err := preflightDurableCompletion(ctx, invocation, nil); err != nil {
+		return nil, nil, err
+	}
 	return invocation, nil, nil
+}
+
+func preflightDurableCompletion(ctx context.Context, invocation tools.PreparedInvocation, streamSink tools.SynchronousStreamSink) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := CheckRunGeneration(ctx); err != nil {
+		return err
+	}
+	supported, err := tools.PreparedCompletionSupported(ctx, invocation, streamSink)
+	if err != nil {
+		return err
+	}
+	if !supported {
+		return ErrRunCommitCompletionUnsupported
+	}
+	return nil
 }
 
 func (consumer *runCommitConsumer) executeSequentialCall(

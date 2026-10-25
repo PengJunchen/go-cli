@@ -307,55 +307,6 @@ func (registry *panicPreparedRegistry) PrepareToolCall(ctx context.Context, call
 
 var _ tools.ToolCallPreparer = (*panicPreparedRegistry)(nil)
 
-type gatedPreparedInvocation struct {
-	tools.PreparedInvocation
-	dispatchStarted chan struct{}
-	releaseDispatch <-chan struct{}
-	commitRead      chan struct{}
-	allowCommitRead <-chan struct{}
-	commitReadOnce  sync.Once
-}
-
-func (invocation *gatedPreparedInvocation) Dispatch(context.Context) (*tools.ToolResult, error) {
-	close(invocation.dispatchStarted)
-	<-invocation.releaseDispatch // intentionally ignores the canceled dispatch context
-	return &tools.ToolResult{Output: "late result"}, nil
-}
-
-func (invocation *gatedPreparedInvocation) DispatchCommitted() bool {
-	invocation.commitReadOnce.Do(func() { close(invocation.commitRead) })
-	<-invocation.allowCommitRead
-	return true
-}
-
-type gatedPreparedRegistry struct {
-	tools.ToolRegistry
-	tools.ToolCallPreparer
-	dispatchStarted chan struct{}
-	releaseDispatch <-chan struct{}
-	commitRead      chan struct{}
-	allowCommitRead <-chan struct{}
-}
-
-func (registry *gatedPreparedRegistry) PrepareToolCall(ctx context.Context, call tools.ToolCall) (tools.PreparedInvocation, error) {
-	invocation, err := registry.ToolCallPreparer.PrepareToolCall(ctx, call)
-	if err != nil {
-		return nil, err
-	}
-	if call.ID != "read-gated" {
-		return invocation, nil
-	}
-	return &gatedPreparedInvocation{
-		PreparedInvocation: invocation,
-		dispatchStarted:    registry.dispatchStarted,
-		releaseDispatch:    registry.releaseDispatch,
-		commitRead:         registry.commitRead,
-		allowCommitRead:    registry.allowCommitRead,
-	}, nil
-}
-
-var _ tools.ToolCallPreparer = (*gatedPreparedRegistry)(nil)
-
 func TestRunCommitConsumerWritesSequentialFactsBeforeAcknowledging(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "input.txt")
@@ -650,7 +601,7 @@ func TestRunCommitConsumerBuffersParallelReceiptsInCanonicalOrder(t *testing.T) 
 	require.Equal(t, 2, model.idx, "the next provider request follows the canonical receipt and resolution sequence")
 }
 
-func TestRunCommitConsumerStopsAfterPreparedActionWithoutCompletionProof(t *testing.T) {
+func TestRunCommitConsumerRejectsPreparedActionWithoutCompletionSupport(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(root, "match.txt"), []byte("needle\n"), 0o600))
 	sink := &consumerTestSink{}
@@ -658,7 +609,7 @@ func TestRunCommitConsumerStopsAfterPreparedActionWithoutCompletionProof(t *test
 		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{
 			ID: "grep-1", Name: "grep", Args: map[string]any{"pattern": "needle", "path": root},
 		}}},
-		{Role: llm.RoleAssistant, Content: "must not be requested"},
+		{Role: llm.RoleAssistant, Content: "completed after unsupported tool rejection"},
 	}}
 	agent := NewAgentImpl("durable-proofless", NewLoopAgent(
 		WithLLM(model),
@@ -670,15 +621,20 @@ func TestRunCommitConsumerStopsAfterPreparedActionWithoutCompletionProof(t *test
 	_, runErr := owner.run(time.Second, func(ctx context.Context) (Result, error) {
 		return agent.Run(ctx, Submission{Type: SubmissionUserMessage, Content: "find needle"})
 	})
-	require.ErrorIs(t, runErr, ErrRunCommitQuiescenceUnproven)
+	require.NoError(t, runErr)
 	steps, batches, receipts, terminal := sink.snapshot()
-	require.Equal(t, []string{"input", "begin", "execution", "receipt", "terminal"}, steps)
+	require.Equal(t, []string{"input", "begin", "receipt", "terminal"}, steps)
 	require.Len(t, batches, 1)
+	require.Empty(t, batches[0].Intents, "an unsupported action must not reserve dispatch authority")
 	require.Len(t, receipts, 1)
-	require.Equal(t, ReceiptOutcomeSuccess, receipts[0].ReceiptOutcome, "the tool result is known independently from local quiescence")
+	require.Equal(t, ReceiptOutcomeError, receipts[0].ReceiptOutcome)
+	require.Equal(t, DispatchStateNotDispatched, receipts[0].DispatchState)
+	require.Empty(t, receipts[0].ActionID)
+	require.Contains(t, receipts[0].Message.Content, ErrRunCommitCompletionUnsupported.Error())
+	require.Empty(t, sink.executionSnapshot())
 	require.NotNil(t, terminal)
-	require.Equal(t, RunOutcomeUnknown, terminal.Outcome)
-	require.Equal(t, 1, model.idx, "a nil completion proof keeps the dispatch marker unresolved and stops the provider")
+	require.Equal(t, RunOutcomeSuccess, terminal.Outcome)
+	require.Equal(t, 2, model.idx, "the known pre-dispatch rejection permits a later provider response")
 }
 
 func TestRunCommitConsumerResolvesSearchAfterCompletionProof(t *testing.T) {
@@ -872,7 +828,14 @@ func TestRunCommitConsumerTreatsDispatchPanicAsPossiblyDispatched(t *testing.T) 
 	require.NoError(t, os.WriteFile(path, []byte("durable read"), 0o600))
 	sink := &consumerTestSink{}
 	base := newPreparedConsumerReadRegistry(t)
-	registry := &panicPreparedRegistry{ToolRegistry: base, ToolCallPreparer: base}
+	panicWrapper := tools.ToolExecutorWrapper(func(next func(context.Context, tools.ToolCall) (*tools.ToolResult, error)) func(context.Context, tools.ToolCall) (*tools.ToolResult, error) {
+		return func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+			_, _ = next(ctx, call)
+			panic("prepared dispatch panic")
+		}
+	})
+	require.NoError(t, base.SetPreparedToolStages(tools.PreparedToolStages{ExecutionWrappers: []tools.ToolExecutorWrapper{panicWrapper}, SynchronousExecutionWrappers: true}))
+	registry := base
 	model := &scriptedChatModel{seq: []*llm.Message{
 		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "read-panic", Name: "read", Args: map[string]any{"path": path}}}},
 		{Role: llm.RoleAssistant, Content: "must not be requested"},
@@ -930,14 +893,23 @@ func TestRunCommitConsumerParallelCancellationDoesNotReadOrCopyLiveWorkerResult(
 		allowCommitOnce.Do(func() { close(allowCommitRead) })
 	}
 	base := newPreparedConsumerReadRegistry(t)
-	registry := &gatedPreparedRegistry{
-		ToolRegistry:     base,
-		ToolCallPreparer: base,
-		dispatchStarted:  dispatchStarted,
-		releaseDispatch:  releaseDispatch,
-		commitRead:       commitRead,
-		allowCommitRead:  allowCommitRead,
-	}
+	gateWrapper := tools.ToolExecutorWrapper(func(next func(context.Context, tools.ToolCall) (*tools.ToolResult, error)) func(context.Context, tools.ToolCall) (*tools.ToolResult, error) {
+		return func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+			result, err := next(ctx, call)
+			close(dispatchStarted)
+			<-releaseDispatch // Keep the actual sealed pipeline running after cancellation.
+			return result, err
+		}
+	})
+	require.NoError(t, base.SetPreparedToolStages(tools.PreparedToolStages{ExecutionWrappers: []tools.ToolExecutorWrapper{gateWrapper}, SynchronousExecutionWrappers: true}))
+	require.NoError(t, base.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations, TerminalObserver: func(tools.PreparedTerminalOutcome) error {
+			close(commitRead)
+			<-allowCommitRead // Release the worker's result assignment after the cancellation snapshot.
+			return nil
+		}}, nil
+	}))
+	registry := base
 	calls := make([]llm.ToolCall, 128)
 	calls[0] = llm.ToolCall{ID: "read-gated", Name: "read", Args: map[string]any{"path": path}}
 	canceled := make(map[string]string, len(calls)-1)

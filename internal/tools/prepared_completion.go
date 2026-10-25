@@ -10,6 +10,69 @@ import (
 // after its signal's Done channel closes.
 type PreparedCompletionProof string
 
+// PreparedCompletionSupported checks the captured completion contract of an
+// exact sealed invocation without consuming its permit, acquiring a dispatch
+// lease, enqueueing work, or executing a tool. A non-nil streamSink selects
+// DispatchStreaming and must be the exact host-attested sink captured during
+// preparation. Current cancellation, project trust and dispatch fence errors
+// take precedence over an unsupported contract. Support is not completion
+// evidence and never replaces dispatch's final authority checks or actual join.
+func PreparedCompletionSupported(ctx context.Context, invocation PreparedInvocation, streamSink SynchronousStreamSink) (bool, error) {
+	if err := validatePreparedContext(ctx); err != nil {
+		return false, err
+	}
+	var prepared *preparedInvocation
+	var streaming *preparedStreamingInvocation
+	switch current := invocation.(type) {
+	case *preparedInvocation:
+		prepared = current
+	case *preparedStreamingInvocation:
+		streaming = current
+		if current != nil {
+			prepared = current.preparedInvocation
+		}
+	default:
+		return false, nil
+	}
+	if prepared == nil {
+		return false, nil
+	}
+	if prepared.consumed.Load() {
+		return false, ErrPreparedInvocationConsumed
+	}
+	checkCurrent := func() error {
+		return prepared.fence.WithSnapshot(func(current DispatchFenceSnapshot) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if current != prepared.generations {
+				return ErrDispatchFenceChanged
+			}
+			return nil
+		})
+	}
+	var err error
+	if prepared.projectTrustBinding != nil {
+		err = prepared.projectTrustBinding.CommitIfCurrent(ctx, checkCurrent)
+	} else {
+		err = checkCurrent()
+	}
+	if err != nil {
+		return false, err
+	}
+	if prepared.execute == nil || prepared.completion == nil {
+		return false, nil
+	}
+	if streamSink != nil && (streaming == nil || streaming.executeStreaming == nil || !isCapturedSynchronousStreamSink(streaming.streamingSink, streamSink)) {
+		return false, nil
+	}
+	proof := prepared.completionProof
+	if proof == CompletionQueuedJobJoined && (prepared.schedule == nil || streamSink != nil) {
+		return false, nil
+	}
+	return validPreparedCompletionProof(proof) || proof == completionScopedSearchJoined || proof == completionLocalProcessOrPrestartNoProcessJoined, nil
+}
+
 const (
 	// CompletionInlinePipelineJoined means the complete synchronous prepared
 	// executor pipeline returned.

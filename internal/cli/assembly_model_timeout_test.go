@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -50,29 +51,48 @@ func TestResolveModelTimeoutsKeepsDefaultsAndAppliesPartialOverrides(t *testing.
 }
 
 func TestAssembledConfiguredModelTimeoutAppliesToPrimaryAndSmallModel(t *testing.T) {
+	const (
+		configuredTotal = 2 * time.Second
+		configuredIdle  = 500 * time.Millisecond
+		maxCallElapsed  = 4 * time.Second
+	)
+	type requestObservation struct {
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
+	}
 	var requests atomic.Int32
+	entered := make(chan requestObservation, 2)
+	canceled := make(chan requestObservation, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		var request struct {
-			Stream bool `json:"stream"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&request)
-		if request.Stream {
-			writeAssemblyStreamHeaders(w)
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
-			}
-			select {
-			case <-r.Context().Done():
-				return
-			case <-time.After(150 * time.Millisecond):
-			}
-			writeAssemblyTextResponse(w, []string{"ok"}, "stop")
+		var request requestObservation
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode configured-timeout request: %v", err)
+			http.Error(w, "invalid fixture request", http.StatusBadRequest)
 			return
 		}
-		time.Sleep(150 * time.Millisecond)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+		select {
+		case entered <- request:
+		default:
+			t.Error("unexpected extra configured-timeout request")
+			http.Error(w, "unexpected extra request", http.StatusBadRequest)
+			return
+		}
+		if request.Stream {
+			writeAssemblyStreamHeaders(w)
+			// Let the concrete provider finish synchronous stream setup before
+			// withholding later chunks to exercise the configured idle deadline.
+			writeAssemblyChunk(w, map[string]any{"role": "assistant", "content": "probe"}, nil)
+		}
+		// Withhold all model output until the actual client request is canceled.
+		// This observes configured cancellation after HTTP dispatch rather than
+		// racing a millisecond budget against the scheduler before handler entry.
+		<-r.Context().Done()
+		select {
+		case canceled <- request:
+		default:
+			t.Error("unexpected extra configured-timeout cancellation")
+		}
 	}))
 	t.Cleanup(server.Close)
 
@@ -84,28 +104,59 @@ func TestAssembledConfiguredModelTimeoutAppliesToPrimaryAndSmallModel(t *testing
 			Model: "small-model",
 		},
 		Production: config.ProductionConfig{ModelTimeout: config.ModelTimeoutConfig{
-			Total:      "25ms",
-			StreamIdle: "15ms",
+			Total:      configuredTotal.String(),
+			StreamIdle: configuredIdle.String(),
 		}},
 	}
 	assembly, err := AssembleAgent(context.Background(), rc, providerName, rc.Model.Name, io.Discard)
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	t.Cleanup(cancel)
+	observe := func(observations <-chan requestObservation) requestObservation {
+		t.Helper()
+		select {
+		case request := <-observations:
+			return request
+		case <-ctx.Done():
+			t.Fatal("configured-timeout request observation did not arrive before the outer guard")
+			return requestObservation{}
+		}
+	}
+	primaryStart := time.Now()
 	stream, err := assembly.Harness.Submit(ctx, "timeout probe")
 	require.NoError(t, err)
+	primaryRequest := observe(entered)
+	require.Equal(t, requestObservation{Model: "primary-model", Stream: true}, primaryRequest)
 	for range stream.Events() {
 	}
 	_, primaryErr := stream.Result()
+	primaryElapsed := time.Since(primaryStart)
 	require.Error(t, primaryErr)
 	assert.ErrorIs(t, primaryErr, context.DeadlineExceeded)
+	var primaryAbort *llm.LocalStreamAbortCause
+	idleCause := primaryErr
+	if errors.As(primaryErr, &primaryAbort) {
+		idleCause = primaryAbort.Unwrap()
+	}
+	assert.Contains(t, idleCause.Error(), "stream idle exceeded "+configuredIdle.String())
+	assert.GreaterOrEqual(t, primaryElapsed, configuredIdle)
+	assert.Less(t, primaryElapsed, maxCallElapsed, "the configured idle timeout must precede the outer guard and default budgets")
+	assert.Equal(t, primaryRequest, observe(canceled), "the primary HTTP request actually observes cancellation")
 
 	small := assembly.ModelConfig.ModelSelector.SmallModel()
 	require.NotNil(t, small)
-	_, smallErr := small.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "timeout probe"}})
+	smallStart := time.Now()
+	_, smallErr := small.Generate(withCLITestOperation(ctx), []llm.Message{{Role: llm.RoleUser, Content: "timeout probe"}})
+	smallElapsed := time.Since(smallStart)
+	smallRequest := observe(entered)
+	require.Equal(t, requestObservation{Model: "small-model", Stream: false}, smallRequest)
 	require.Error(t, smallErr)
 	assert.ErrorIs(t, smallErr, context.DeadlineExceeded)
+	assert.Contains(t, smallErr.Error(), "generate exceeded "+configuredTotal.String())
+	assert.GreaterOrEqual(t, smallElapsed, configuredTotal)
+	assert.Less(t, smallElapsed, maxCallElapsed, "the small-model total timeout must precede the outer guard and default budgets")
+	assert.Equal(t, smallRequest, observe(canceled), "the small-model HTTP request actually observes cancellation")
 	assert.EqualValues(t, 2, requests.Load())
 }

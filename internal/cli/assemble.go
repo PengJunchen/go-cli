@@ -1366,13 +1366,14 @@ func (s *assembleState) assembleApproval() error {
 		return fmt.Errorf("assemble: get prepared-dispatch fence: %w", err)
 	}
 	s.planCtrl = core.NewDefaultPlanModeController(fence)
+	s.modeResolver = approval.NewDefaultPermissionModeResolver()
 
 	var classifier approval.ApprovalClassifier
 	var approvalCallback approval.ApprovalCallback
 	var autoApprove bool
 
 	if s.ac.approvalCh != nil {
-		classifier = approval.NewSafetyPolicyClassifier([]string{"bash"})
+		classifier = s.modeResolver.Resolve(approval.PermissionDefault)
 		approvalCallback = approval.NewTeaApprovalCallback(s.ac.approvalCh,
 			approval.WithDiffPreviewFunc(buildDiffPreviewFn(s.diffGen)),
 		)
@@ -1388,7 +1389,7 @@ func (s *assembleState) assembleApproval() error {
 			approvalCallback = nil
 			autoApprove = false
 		default:
-			classifier = approval.NewSafetyPolicyClassifier([]string{"bash"})
+			classifier = s.modeResolver.Resolve(approval.PermissionDefault)
 			approvalCallback = approval.NewInteractiveApprovalCallback(os.Stdin, os.Stderr)
 			autoApprove = false
 		}
@@ -1415,19 +1416,18 @@ func (s *assembleState) assembleApproval() error {
 
 	approvalStore := approval.NewInMemoryApprovalStore()
 	approvalCache := approval.NewApprovalCache("")
-	s.modeResolver = approval.NewDefaultPermissionModeResolver()
 
 	var mwOpts []approval.Option
 	mwOpts = append(mwOpts,
 		approval.WithAutoApprove(autoApprove),
 		approval.WithCache(approvalCache),
 	)
-	if s.ac.approvalCh != nil {
+	if s.ac.approveMode == ApproveAsk {
 		// Wrap the resolver with an AuditResolver so that classifiers produced
 		// by Resolve are also audit-recording. Without this the middleware's
 		// effectiveClassifier path would bypass the AuditClassifier wrapper and
-		// TUI interactive mode (the primary approval scenario) would not write
-		// audit records.
+		// interactive decisions would not write audit records. The resolver is
+		// shared by both displays; channel presence selects only the callback.
 		auditResolver := approval.NewAuditResolver(s.modeResolver, auditTrail, s.sessionID)
 		mwOpts = append(mwOpts, approval.WithPermissionModeResolver(auditResolver))
 	}

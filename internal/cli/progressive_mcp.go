@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"sort"
 	"strings"
@@ -12,10 +13,10 @@ import (
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/capability"
-	"github.com/pengjunchen/go-cli/internal/mcp"
-
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/mcp"
 	"github.com/pengjunchen/go-cli/internal/tools"
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // progressiveMCP owns lazy disclosure for a fixed source configuration. New
@@ -72,6 +73,9 @@ func (s *assembleState) registerConfiguredMCP(dtr *tools.DeferredToolRegistryAda
 	p := &progressiveMCP{ctx: s.lifetimeCtx, stale: map[string]bool{}, watchers: map[string]context.CancelFunc{}, source: source, servers: cloneMCPServerConfigs(servers), registry: dtr, owner: s.mcpResources, limit: limit, loaded: map[string]bool{}, diagnostics: map[string]string{}}
 	s.progressiveMCP = p
 	s.cleanupList = append(s.cleanupList, p.stopWatchers)
+	if err := dtr.RegisterTrustedInlineControl(s.ctx, &mcpListTool{owner: p}); err != nil {
+		return err
+	}
 	return dtr.Register(s.ctx, &mcpDiscoveryTool{owner: p})
 }
 
@@ -219,11 +223,59 @@ func (p *progressiveMCP) projectDefinitions(ctx context.Context, sourceID string
 	return definitions, nil
 }
 
+// mcpListTool exposes only synchronous local metadata. Activation and remote
+// execution remain on their own ordinary registrations and completion paths.
+type mcpListTool struct{ owner *progressiveMCP }
+
+var _ tools.ToolDefinition = (*mcpListTool)(nil)
+var _ tools.Parameterized = (*mcpListTool)(nil)
+
+func (*mcpListTool) Name() string { return "mcp_list" }
+func (*mcpListTool) Description() string {
+	return "List configured MCP server names and disclosure states from local metadata without connecting or activating tools. Filter names with query. Use mcp_discover with server to activate a server; remote calls require normal approval."
+}
+func (*mcpListTool) Parameters() any {
+	return map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}, "additionalProperties": false}
+}
+func (t *mcpListTool) Execute(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+	span, spanCtx := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
+	defer span.End()
+	span.SetAttributes(tracing.Attribute{Key: "tool_name", Value: "mcp_list"}, tracing.Attribute{Key: "success", Value: false})
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if t == nil || t.owner == nil {
+		return nil, errors.New("cli: MCP server listing is unavailable")
+	}
+	query, _ := call.Args["query"].(string)
+	statuses := t.owner.List(query)
+	// Select fields explicitly so diagnostic strings and any future controller
+	// metadata cannot enter the model-facing projection.
+	type listedServer struct {
+		Name  string `json:"name"`
+		State string `json:"state"`
+	}
+	listing := make([]listedServer, 0, len(statuses))
+	for _, status := range statuses {
+		listing = append(listing, listedServer{Name: status.Name, State: status.State})
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(listing)
+	if err != nil {
+		return nil, err
+	}
+	span.SetAttributes(tracing.Attribute{Key: "success", Value: true}, tracing.Attribute{Key: "result_count", Value: len(listing)})
+	tracing.NewTraceLogger(span, slog.Default()).InfoContext(spanCtx, "mcp.list", "tool_name", "mcp_list", "success", true, "result_count", len(listing))
+	return &tools.ToolResult{Output: string(data), ToolCallID: call.ID}, nil
+}
+
 type mcpDiscoveryTool struct{ owner *progressiveMCP }
 
 func (t *mcpDiscoveryTool) Name() string { return "mcp_discover" }
 func (t *mcpDiscoveryTool) Description() string {
-	return "List configured MCP server names without connecting. Set server to connect only that server and activate its tool schemas for the next model request. Calls to discovered tools still require normal approval."
+	return "Activate one configured MCP server by setting server, exposing its tool schemas for the next model request. Use mcp_list for local metadata without connecting. Calls to discovered tools still require normal approval."
 }
 func (t *mcpDiscoveryTool) Parameters() any {
 	return map[string]any{"type": "object", "properties": map[string]any{"server": map[string]any{"type": "string"}, "query": map[string]any{"type": "string"}}, "additionalProperties": false}
