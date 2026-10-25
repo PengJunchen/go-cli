@@ -1,0 +1,129 @@
+{
+  "collectorSourceSha256": "b21c2c0e049915ea4c4eba791a5ce641972dbd0b63f812f93656ad3ced67b7ba",
+  "providerSequenceBaseline": 27,
+  "inputEvidenceBounds": {
+    "source": "artifacts/dynamic-interactive-1eae389f.input-metadata.json",
+    "baselineEvents": 34,
+    "capturedEvents": 35,
+    "suffixSha256": "2bf6a2bd912c1ed82ac4f2192d0ba82575c9fae0eb0aa4a0011b87e80057445c"
+  },
+  "baselineManifestSha256": "b9004ca3439beffb5de6b88e2e54224182c8541222050e7ed724404052a986cb",
+  "sessionEvidenceBounds": [
+    {
+      "source": "artifacts/stores/dynamic/sessions/sessions/s_c6a602bb2b922b88c390db78dd50e9af.jsonl",
+      "baselineBytes": 116131,
+      "capturedBytes": 116131,
+      "suffixSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "approvalAuditEvidenceBounds": [
+    {
+      "source": "workspaces/dynamic/.go-cli/audit/2026-10-25.jsonl",
+      "baselineBytes": 19371,
+      "capturedBytes": 19371,
+      "suffixSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "approvalAuditEntries": [],
+  "selectedPhysicalSessionID": "s_c6a602bb2b922b88c390db78dd50e9af",
+  "roleAuditHistoryMayBeCumulative": true,
+  "phase": "mcp-idle-activation",
+  "recordedAtEpoch": 1792915821.332992,
+  "role": "dynamic",
+  "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+  "ptyID": "dynamic-interactive-1eae389f",
+  "pid": 57936,
+  "sessionIDs": [],
+  "requests": [],
+  "durableEntries": [],
+  "effects": [
+    {
+      "name": "input.txt",
+      "exists": true,
+      "bytes": 30,
+      "sha256": "f1fbad8cb2122f11a4e3011e5c1b0ddec325ce021863a0bfc9d3c02847e0c842"
+    },
+    {
+      "name": "search.txt",
+      "exists": true,
+      "bytes": 30,
+      "sha256": "e12f5aee529272f1a9679b03818ff97d2ed6e81d8dfe867185c233eb5ab55bfa"
+    },
+    {
+      "name": "ask-approved.txt",
+      "exists": false
+    },
+    {
+      "name": "ask-denied.txt",
+      "exists": false
+    },
+    {
+      "name": "ask-escaped.txt",
+      "exists": false
+    },
+    {
+      "name": "auto-created.txt",
+      "exists": false
+    },
+    {
+      "name": "deny-policy.txt",
+      "exists": false
+    },
+    {
+      "name": "cancel-late-marker.txt",
+      "exists": false
+    },
+    {
+      "name": "hook-events.jsonl",
+      "exists": true,
+      "bytes": 152,
+      "sha256": "779594c28e94a38de8ad7887508a743d48152efb2b21e3e69baede77d48c62eb",
+      "markerCounts": {
+        "HOOK_V1": 6,
+        "HOOK_V2": 10,
+        "HOOK_V3": 3
+      }
+    }
+  ],
+  "mcpStartMarkerExists": true,
+  "mcpRPCMethodCounts": {
+    "initialize": 1,
+    "notifications/initialized": 1,
+    "tools/list": 1
+  },
+  "rawEvidenceRemainsPrivate": true,
+  "rawCutManifestSha256": "30a3e28d8513c1f10a178271489d47f1a431f11f130e1adf943c7f97541811b7",
+  "inputMetadata": {
+    "sourceSha256": "f86e57b41c74476bae7b5d06d72cf997c266bc765e1c0a76be4eb4577c331a95",
+    "events": [
+      {
+        "at": 1792915654.3843782,
+        "kind": "text+enter",
+        "bytes": 35,
+        "sha256": "2bea2d23b88d95fe0e1b9b1413510cf63b324b7ce4e8cad8c8465133582396a5"
+      }
+    ]
+  },
+  "images": {
+    "phaseCut": "mcp-idle-activation",
+    "phaseCutManifestSha256": "30a3e28d8513c1f10a178271489d47f1a431f11f130e1adf943c7f97541811b7",
+    "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+    "pid": 57936,
+    "sessionIDs": [],
+    "selectedPhysicalSessionID": "s_c6a602bb2b922b88c390db78dd50e9af",
+    "images": [
+      {
+        "file": "50-mcp-explicit-loaded-iab.jpg",
+        "bytes": 89546,
+        "sha256": "4c134550c4cc532b060ec36146572dcaf11ea239a00951d77c99ebfb394b6e2e",
+        "format": "jpeg",
+        "mime": "image/jpeg",
+        "width": 826,
+        "height": 862,
+        "sourceRelativeToRoleRoot": "artifacts/screenshots/50-mcp-explicit-loaded-iab.jpg"
+      }
+    ],
+    "capture": "CUA IAB tab viewport, actual Go PTY xterm; no pixel edits or encoding changes"
+  },
+  "acceptanceStatus": "Explicit idle activation/initialize/list supported; no model turn in this cut"
+}

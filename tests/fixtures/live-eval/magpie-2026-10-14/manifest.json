@@ -7,8 +7,14 @@
   },
   "create_live_deck.go": {
     "source_run": "20261014-193912-aafaafae",
-    "bytes": 10768,
-    "sha256": "4a5fe7aaf9e7a458916c746caba7a2c4a32a5ae59ad32b6fa601d2bca73e61e0",
-    "classification": "generated Go source used as live CLI task input"
+    "bytes": 11471,
+    "sha256": "3244a6c1b0ba7a336ef8c4e1efb71a7606cc5f90d85a09eb58166a18ff2d79f4",
+    "classification": "generated Go source used as live CLI task input",
+    "annotation": "2026-10-25: only a package documentation comment was added relative to the repository baseline for the existing revive rule. The historical source-run checksum already differed from the repository copy before annotation and is preserved as a recorded historical value.",
+    "pre_annotation_repository_bytes": 11385,
+    "pre_annotation_repository_sha256": "9f25426de6d70d73111fc053bb8bc14460e87dff0950732fa80e7e03512b0967",
+    "historical_recorded_bytes": 10768,
+    "historical_recorded_sha256": "4a5fe7aaf9e7a458916c746caba7a2c4a32a5ae59ad32b6fa601d2bca73e61e0",
+    "historical_recorded_verification": "not verified against the retained pre-annotation repository copy"
   }
 }

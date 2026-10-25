@@ -136,14 +136,23 @@ type r6RunCommitBlockingProjectTool struct {
 	calls   atomic.Int32
 	entered chan<- struct{}
 	release <-chan struct{}
+	binding tools.ProjectTrustBinding
 }
 
 func (*r6RunCommitBlockingProjectTool) Name() string { return "project_commit_win" }
 func (*r6RunCommitBlockingProjectTool) Description() string {
-	return "R6 committed action survives a later project trust revoke"
+	return "R6 host-reviewed synchronous action survives a later project trust revoke"
 }
 func (tool *r6RunCommitBlockingProjectTool) Execute(ctx context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
-	tool.calls.Add(1)
+	// This host controller has a reviewed synchronous lifetime, like the Skill
+	// controls. Project admission marks its exact action in a short transaction;
+	// waiting and all external work remain outside the trust-store lock.
+	if err := tool.binding.CommitIfCurrent(ctx, func() error {
+		tool.calls.Add(1)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	select {
 	case tool.entered <- struct{}{}:
 	case <-ctx.Done():
@@ -156,6 +165,30 @@ func (tool *r6RunCommitBlockingProjectTool) Execute(ctx context.Context, _ tools
 		return nil, ctx.Err()
 	}
 }
+
+// r6CurrentProjectGuard fences later model work after revocation. Its callback
+// completion preserves an already-admitted action's immutable result; Check
+// never turns that result into authority for a later provider request.
+type r6CurrentProjectGuard struct{ binding tools.ProjectTrustBinding }
+
+func (guard r6CurrentProjectGuard) Check() error {
+	return guard.CheckContext(context.Background())
+}
+func (guard r6CurrentProjectGuard) CheckContext(ctx context.Context) error {
+	return guard.binding.CommitIfCurrent(ctx, func() error { return nil })
+}
+func (guard r6CurrentProjectGuard) BeginCall(ctx context.Context, _ string) (core.RunCapabilityInvocation, error) {
+	if err := guard.CheckContext(ctx); err != nil {
+		return nil, err
+	}
+	return r6AdmittedProjectInvocation{ctx: ctx}, nil
+}
+
+type r6AdmittedProjectInvocation struct{ ctx context.Context }
+
+func (invocation r6AdmittedProjectInvocation) Context() context.Context { return invocation.ctx }
+func (r6AdmittedProjectInvocation) Complete() error                     { return nil }
+func (r6AdmittedProjectInvocation) Release()                            {}
 
 func newRunCommitStreamingRegistry(ctx context.Context, t *testing.T, policyCalls *atomic.Int32) *tools.MiddlewareToolRegistry {
 	t.Helper()
@@ -362,12 +395,12 @@ func TestRunCommitProjectRevocationDuringAskWritesOneNotDispatchedReceipt(t *tes
 			receipts = append(receipts, row)
 		}
 	}
-	require.Len(t, intents, 1, "the ActionID is reserved once before final dispatch")
+	require.Empty(t, intents, "preflight detects the revoked authority before reserving dispatch")
 	require.Len(t, receipts, 1, "exactly one terminal receipt is persisted")
-	require.Equal(t, intents[0].ActionID, receipts[0].ActionID)
-	require.NotEmpty(t, receipts[0].ActionID)
+	require.Empty(t, receipts[0].ActionID)
 	require.Equal(t, core.DispatchStateNotDispatched, receipts[0].DispatchState)
 	require.Equal(t, core.ReceiptOutcomeError, receipts[0].ReceiptOutcome)
+	require.Contains(t, receipts[0].Content, approval.ErrProjectSourceTrustStale.Error(), "revocation takes precedence over missing completion support")
 }
 
 func TestRunCommitProjectRevocationAfterDispatchKeepsCommittedReceipt(t *testing.T) {
@@ -408,9 +441,12 @@ func TestRunCommitProjectRevocationAfterDispatchKeepsCommittedReceipt(t *testing
 	var releaseOnce sync.Once
 	releaseExecutor := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(releaseExecutor)
-	target := &r6RunCommitBlockingProjectTool{entered: entered, release: release}
+	target := &r6RunCommitBlockingProjectTool{entered: entered, release: release, binding: binding}
 	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
-	require.NoError(t, base.RegisterProjectSourced(ctx, target, binding))
+	// An ordinary project extension intentionally has no completion support and
+	// is now rejected before dispatch. Use an explicitly reviewed synchronous
+	// host controller to retain this real post-dispatch revocation scenario.
+	require.NoError(t, base.RegisterTrustedInlineControl(ctx, target))
 	fence := base.DispatchFence()
 	middleware := approval.NewApprovalMiddleware(approval.AllowAllClassifier{}, approval.NewInMemoryApprovalStore(),
 		approval.WithAutoApprove(true),
@@ -437,7 +473,8 @@ func TestRunCommitProjectRevocationAfterDispatchKeepsCommittedReceipt(t *testing
 	))
 	agent := core.NewAgentImpl("r6-committed-late-revoke", core.NewLoopAgent(core.WithLLM(model), core.WithTools(registry)))
 	harness := core.NewHarnessImpl(agent, core.WithHarnessEventBus(core.NewMemoryEventBus()))
-	stream, err := harness.Submit(core.WithRunCommit(ctx, sink, core.RunCommitBinding{
+	guardedCtx := core.WithRunCapabilityGuard(ctx, r6CurrentProjectGuard{binding: binding})
+	stream, err := harness.Submit(core.WithRunCommit(guardedCtx, sink, core.RunCommitBinding{
 		SessionID: sessionID, WorkspaceID: workspaceID,
 	}), "call the project tool")
 	require.NoError(t, err)
@@ -475,19 +512,20 @@ func TestRunCommitProjectRevocationAfterDispatchKeepsCommittedReceipt(t *testing
 	releaseExecutor()
 	<-eventsDone
 	_, runErr := stream.Result()
-	require.ErrorIs(t, runErr, core.ErrRunCommitQuiescenceUnproven, "an extension-style prepared tool has no R1 completion proof")
+	require.ErrorIs(t, runErr, approval.ErrProjectSourceTrustStale, "a completed action cannot authorize another request after revocation")
 	require.EqualValues(t, 1, target.calls.Load(), "revocation after dispatch cannot undo the committed tool action")
-	require.Equal(t, 1, model.CallCount(), "without an R1 completion proof, the durable run cannot request another model turn")
+	require.Equal(t, 1, model.CallCount(), "the old project grant cannot authorize another provider request")
 
 	require.NoError(t, prepared.Close())
 	preparedOpen = false
 	reopened, err := session.NewDurableJSONLSessionPreparer(filepath.Join(root, "durable"), index).PrepareResume(ctx, sessionID)
-	require.NoError(t, err, "the committed receipt must survive closing and reopening the physical session")
+	require.NoError(t, err, "reopening verifies immutable committed facts and local join; it does not restore project authorization")
 	t.Cleanup(func() { _ = reopened.Close() })
 	state, err := reopened.Snapshot()
 	require.NoError(t, err)
 	var intents []session.SessionEntry
 	var receipts []session.SessionEntry
+	var proofs []session.SessionEntry
 	for _, row := range state.DurableEntries {
 		if row.Type != session.EntryTypeTool || row.ToolCallID != "project-commit-win-1" {
 			continue
@@ -498,14 +536,22 @@ func TestRunCommitProjectRevocationAfterDispatchKeepsCommittedReceipt(t *testing
 		if row.ReceiptOutcome != "" {
 			receipts = append(receipts, row)
 		}
+		if row.ActionState == session.ActionStateExecution && row.CompletionProof != "" {
+			proofs = append(proofs, row)
+		}
 	}
 	require.Len(t, intents, 1, "the ActionID must be reserved once before dispatch")
 	require.Len(t, receipts, 1, "exactly one committed terminal receipt must be persisted")
 	require.NotEmpty(t, intents[0].ActionID)
+	require.NotNil(t, intents[0].ToolIdentity)
+	require.Equal(t, tools.RegistrationSourceTrustedControl, intents[0].ToolIdentity.RegistrationSource)
 	require.Equal(t, intents[0].ActionID, receipts[0].ActionID)
 	require.Equal(t, core.DispatchStateDispatched, receipts[0].DispatchState)
 	require.Equal(t, core.ReceiptOutcomeSuccess, receipts[0].ReceiptOutcome)
 	require.Equal(t, "committed project action finished", receipts[0].Content)
+	require.Len(t, proofs, 1)
+	require.Equal(t, intents[0].ActionID, proofs[0].ActionID)
+	require.Equal(t, tools.CompletionInlinePipelineJoined, proofs[0].CompletionProof)
 }
 
 func TestRunCommitLoopStreamsPreparedBashAndReopensWithSessionSink(t *testing.T) {

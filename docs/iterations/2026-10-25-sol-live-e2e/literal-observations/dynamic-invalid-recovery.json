@@ -1,0 +1,45 @@
+{
+  "phase": "dynamic-invalid-recovery",
+  "sourceCutManifestSha256": "32018e16cf0ff6f9d7a8250c5fb26b8d88ab0452916f7efea7bc2d134cbdfb46",
+  "sourceBridgeMetadataSha256": "712fe75f919dd862650260607bacc342afa956b60de117d91155667271b24552",
+  "sourceKind": "Exact projection of previously recorded bridge flags, not a new scan",
+  "selectedLabels": [
+    "mcp-private-command",
+    "mcp-private-env"
+  ],
+  "records": [
+    {
+      "sequence": 13,
+      "requestSha256": "c88f8e8921d3450baae09551eae2294a2c75c3ad7a5ae55afc00da26eaf11a57",
+      "responseSha256": "4f59e47653e4bac8b09ab332ecaebcbca95d1a72f9ace111c2a5af64af947f8f",
+      "responseId": "chatcmpl-resp_088f356e210e1363016addb52de068819893b77b59ef27bd89",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": []
+    },
+    {
+      "sequence": 14,
+      "requestSha256": "e5578fa7f94589fb4cd03f80b49f4d804fbb702b73430d6518d7a2c6e022d56e",
+      "responseSha256": "7db1985a188e656f86d2b74f624ac4427a8592e71825170c7ad1dd407b639c5f",
+      "responseId": "chatcmpl-resp_019898dca0bd721d016addb5408cb8819a8e37798abad4ed11",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": []
+    },
+    {
+      "sequence": 15,
+      "requestSha256": "1c4ab92ab30bf554d592842dd9ed9868701ae3e024ec16c725465fc0c49c3e1d",
+      "responseSha256": "91165b534edc5535ca7815c86f570a9fc1217224d6045100d86f484e425418d5",
+      "responseId": "chatcmpl-resp_011f15d88818d1ac016addb5535504819bbb0fb04b7e5a2127",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": []
+    },
+    {
+      "sequence": 16,
+      "requestSha256": "b06667d0c51889e9e7eee6f3e6eb7c69b55b494d2c43fc572ced2cf4d3688dfe",
+      "responseSha256": "681c25fbbebbce2771101ba5e636e368df47a50fdb602d85b4d2a281f4e8b863",
+      "responseId": "chatcmpl-resp_00ddc1ef892dbab8016addb5569db0819a8e21bb9062c0ddf3",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": []
+    }
+  ],
+  "scope": "Selected decoded-JSON visible literal flags only; original upstream JSON was not retained and is not independently rescanned; no encoded/general information-flow claim"
+}

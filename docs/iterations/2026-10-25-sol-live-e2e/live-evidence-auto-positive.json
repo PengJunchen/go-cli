@@ -1,0 +1,1755 @@
+{
+  "collectorSourceSha256": "b21c2c0e049915ea4c4eba791a5ce641972dbd0b63f812f93656ad3ced67b7ba",
+  "providerSequenceBaseline": 0,
+  "inputEvidenceBounds": {
+    "source": "artifacts/auto-interactive-bddebb1e.input-metadata.json",
+    "baselineEvents": 0,
+    "capturedEvents": 4,
+    "suffixSha256": "1a9f165637ae5a148c18e1b29be6618b357677f38778a489133213811b4c3db2"
+  },
+  "baselineManifestSha256": "8189e03d43730455877196caf0bd80feb9c74a4a1c2b6fa5b316f77119a8d7d1",
+  "sessionEvidenceBounds": [
+    {
+      "source": "artifacts/stores/auto/sessions/sessions/s_62a6766468ca6552641d219a25142948.jsonl",
+      "baselineBytes": 0,
+      "capturedBytes": 24405,
+      "suffixSha256": "691623cc6220dd8518b497fe081a5821c622cdf7e6fcdb3e570f648a1d83570b"
+    }
+  ],
+  "approvalAuditEvidenceBounds": [
+    {
+      "source": "workspaces/auto/.go-cli/audit/2026-10-25.jsonl",
+      "baselineBytes": 0,
+      "capturedBytes": 5074,
+      "suffixSha256": "beaee195f858f4b75eb9a964895869a59d0af8b6eb63d301c4c85a531aadce59"
+    }
+  ],
+  "approvalAuditEntries": [
+    {
+      "timestamp": "2026-10-25T06:35:24.878757Z",
+      "tool": "write",
+      "classifier": "allow_all",
+      "permission_mode": "auto_full",
+      "session_id": "interactive",
+      "stage": "classifier_proposal",
+      "decision": "allow"
+    },
+    {
+      "timestamp": "2026-10-25T06:35:24.888183Z",
+      "tool": "write",
+      "classifier": "allow_all",
+      "permission_mode": "auto_full",
+      "session_id": "interactive",
+      "stage": "approval_resolution",
+      "resolution": "auto_approve",
+      "decision": "allow"
+    },
+    {
+      "timestamp": "2026-10-25T06:35:24.949347Z",
+      "tool": "write",
+      "classifier": "allow_all",
+      "permission_mode": "auto_full",
+      "session_id": "interactive",
+      "stage": "tool_outcome",
+      "resolution": "auto_approve",
+      "decision": "allow",
+      "tool_outcome": "success",
+      "tool_call_id": "sha256:257dfbfc77158c9212728e40736424b53daca62a26d4ba9d59a4fe9f7fd0acb8",
+      "dispatch_committed": true,
+      "result_present": true
+    },
+    {
+      "timestamp": "2026-10-25T06:35:29.82662Z",
+      "tool": "edit",
+      "classifier": "allow_all",
+      "permission_mode": "auto_full",
+      "session_id": "interactive",
+      "stage": "classifier_proposal",
+      "decision": "allow"
+    },
+    {
+      "timestamp": "2026-10-25T06:35:29.834269Z",
+      "tool": "edit",
+      "classifier": "allow_all",
+      "permission_mode": "auto_full",
+      "session_id": "interactive",
+      "stage": "approval_resolution",
+      "resolution": "auto_approve",
+      "decision": "allow"
+    },
+    {
+      "timestamp": "2026-10-25T06:35:29.87141Z",
+      "tool": "edit",
+      "classifier": "allow_all",
+      "permission_mode": "auto_full",
+      "session_id": "interactive",
+      "stage": "tool_outcome",
+      "resolution": "auto_approve",
+      "decision": "allow",
+      "tool_outcome": "success",
+      "tool_call_id": "sha256:2e4f3910e43ba318eeff104732bffd2cdcab7c41dec4aad22ccf2ac0fc5534fc",
+      "dispatch_committed": true,
+      "result_present": true
+    },
+    {
+      "timestamp": "2026-10-25T06:35:35.069842Z",
+      "tool": "read",
+      "classifier": "allow_all",
+      "permission_mode": "auto_full",
+      "session_id": "interactive",
+      "stage": "classifier_proposal",
+      "decision": "allow"
+    },
+    {
+      "timestamp": "2026-10-25T06:35:35.077743Z",
+      "tool": "read",
+      "classifier": "allow_all",
+      "permission_mode": "auto_full",
+      "session_id": "interactive",
+      "stage": "approval_resolution",
+      "resolution": "classifier",
+      "decision": "allow"
+    },
+    {
+      "timestamp": "2026-10-25T06:35:35.100437Z",
+      "tool": "read",
+      "classifier": "allow_all",
+      "permission_mode": "auto_full",
+      "session_id": "interactive",
+      "stage": "tool_outcome",
+      "resolution": "classifier",
+      "decision": "allow",
+      "tool_outcome": "success",
+      "tool_call_id": "sha256:6cbbf026ef8787212882b769c40e9f983d9e86b1c6861422139e341902912277",
+      "dispatch_committed": true,
+      "result_present": true
+    },
+    {
+      "timestamp": "2026-10-25T06:35:41.266576Z",
+      "tool": "bash",
+      "classifier": "allow_all",
+      "permission_mode": "auto_full",
+      "session_id": "interactive",
+      "stage": "classifier_proposal",
+      "decision": "allow"
+    },
+    {
+      "timestamp": "2026-10-25T06:35:41.272511Z",
+      "tool": "bash",
+      "classifier": "allow_all",
+      "permission_mode": "auto_full",
+      "session_id": "interactive",
+      "stage": "approval_resolution",
+      "resolution": "auto_approve",
+      "decision": "allow"
+    },
+    {
+      "timestamp": "2026-10-25T06:35:41.321622Z",
+      "tool": "bash",
+      "classifier": "allow_all",
+      "permission_mode": "auto_full",
+      "session_id": "interactive",
+      "stage": "tool_outcome",
+      "resolution": "auto_approve",
+      "decision": "allow",
+      "tool_outcome": "success",
+      "tool_call_id": "sha256:0d6f44153532f3e34864158d4178a247f909a87ac37105626cc64bebedb0393f",
+      "dispatch_committed": true,
+      "result_present": true
+    }
+  ],
+  "selectedPhysicalSessionID": "s_62a6766468ca6552641d219a25142948",
+  "roleAuditHistoryMayBeCumulative": true,
+  "phase": "auto-positive",
+  "recordedAtEpoch": 1792910237.9977841,
+  "role": "auto",
+  "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+  "ptyID": "auto-interactive-bddebb1e",
+  "pid": 54709,
+  "sessionIDs": [
+    "s_62a6766468ca6552641d219a25142948"
+  ],
+  "requests": [
+    {
+      "sequence": 1,
+      "turn": "LIVE_AUTO_4FED212F83B0",
+      "requestKind": "interactive-user-turn",
+      "askedModel": "codex/gpt-6.1-sol",
+      "servedModel": "codex/gpt-6.1-sol",
+      "provider": "codex",
+      "status": 200,
+      "responseId": "chatcmpl-resp_0702241e15e86d76016adda32aeb58819b843f6dbd3940635f",
+      "requestId": null,
+      "routeIdentity": {
+        "status": "matched",
+        "routeId": 1792904580222,
+        "sessionMatches": true,
+        "captureAssociation": "matched",
+        "captureBridgeSequence": 1
+      },
+      "usageIdentity": {
+        "status": "matched",
+        "matchedFields": [
+          "response_id",
+          "route_id",
+          "session"
+        ],
+        "mismatchedFields": []
+      },
+      "gatewayUsage": {
+        "t": "2026-10-25T14:35:20.285351+08:00",
+        "agent": "other",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_0702241e15e86d76016adda32aeb58819b843f6dbd3940635f",
+        "route_id": 1792904580222,
+        "in": 7169,
+        "out": 64,
+        "cache_read": 0,
+        "cache_write": 0,
+        "ms": 4588,
+        "session": "go-cli-live-dynamic-auto-interactive-bddebb1e"
+      },
+      "usageReconciliation": {
+        "status": "matched",
+        "upstreamInputTokens": 7169,
+        "magpieUncachedInputTokens": 7169,
+        "magpieCachedInputTokens": 0,
+        "upstreamOutputTokens": 64,
+        "magpieOutputTokens": 64,
+        "inputMatches": true,
+        "outputMatches": true
+      },
+      "advertisedTools": [
+        {
+          "name": "bash",
+          "schemaSha256": "efcd767e81a864d776ee5d1d5757f469a0a9719f26d1cc0b3bae611597585186"
+        },
+        {
+          "name": "edit",
+          "schemaSha256": "04dba4135c69ceccca3a10122dd302a9a70feeb73cac315ea0ca24d27800c51a"
+        },
+        {
+          "name": "read",
+          "schemaSha256": "39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194"
+        },
+        {
+          "name": "write",
+          "schemaSha256": "2722054af68ae084dc41c5ce5e3c503659363e250d6efa63a8871f1d102feef7"
+        },
+        {
+          "name": "todo_write",
+          "schemaSha256": "5c9b0b178abaf832d68c10b6ff93bd88d1de70d1624d868e9c1b839c2bdb0608"
+        },
+        {
+          "name": "dispatch_subagent",
+          "schemaSha256": "cb5da5707a26cc06b6bcc8803cbe5cce556ce887f0e6fca608e341157c7ea557"
+        },
+        {
+          "name": "git_push",
+          "schemaSha256": "b5e26250c6d1ed592abca7be5bb87dc0968200cb11ff23cbe54a0ffff22a46ea"
+        },
+        {
+          "name": "ask_user",
+          "schemaSha256": "3a6ac2076cd5bbe29ecbcc1c68dc67b1234e4dbce471b109aa7d87446a46edca"
+        },
+        {
+          "name": "find",
+          "schemaSha256": "8b26e67f119f27a2923c71bcce17547d8c5dcbf6e8f7237cfd633fc926931c09"
+        },
+        {
+          "name": "git_blame",
+          "schemaSha256": "589d5651cc72a44ff98687e236bf6fc8cd4f9271da1272b3b81b0e25a20966f1"
+        },
+        {
+          "name": "git_branch",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_checkout",
+          "schemaSha256": "b145b98efda2b1a53830874a0c6115d9b45bdf1a5cbad13095c3141aef9521a4"
+        },
+        {
+          "name": "git_commit",
+          "schemaSha256": "758018d243c68aaf3fbab2a1612b32472375e0d2820e78a6c69a9ebf889c80c2"
+        },
+        {
+          "name": "git_create_branch",
+          "schemaSha256": "ce7257358c3224ab6d1ab83be200b5a15731d2dd7dba8d8ad90e82b8a661cb1a"
+        },
+        {
+          "name": "git_diff",
+          "schemaSha256": "f266fd76bdbe5e68b59514e339ef5ece9744c1d790afebebbaf9a02d10bbbfb8"
+        },
+        {
+          "name": "git_fetch",
+          "schemaSha256": "f31191d1cec73e5051671ac8f5f551ba50e43704e72700399ed7e5c667b63448"
+        },
+        {
+          "name": "git_log",
+          "schemaSha256": "da7043a670d966854e4805d6b9d8912ced1d9c860639ee869515b151bfb70f0c"
+        },
+        {
+          "name": "git_merge",
+          "schemaSha256": "7d8e6f3b6cb48aef4f0d37bd36ea59b768686d2b15ffe7e8489c6f501b31d47a"
+        },
+        {
+          "name": "git_pr_create",
+          "schemaSha256": "96cd7b46e6bec87e36dfaefed59daf61790f4ad36810878c0d7f4290f9f9ffe5"
+        },
+        {
+          "name": "git_pull",
+          "schemaSha256": "3344da8f3dbd05445b42855e12e3cbea0b182a2c9a16e26c188064eb9c951484"
+        },
+        {
+          "name": "git_remote",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_reset",
+          "schemaSha256": "14132acf08efc074ba3f016470c203e5cb75bcc1502b03ca66308f9a1d205e82"
+        },
+        {
+          "name": "git_revert",
+          "schemaSha256": "f3832baf09f5d0cca643fd82167a0c8a52bfc8c29cdbaffcf8485c3c93c12ef8"
+        },
+        {
+          "name": "git_stash",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_stash_pop",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_status",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "goal_create",
+          "schemaSha256": "e0deb4f487fed3ae00d9b1a99dbfd030dfb85a2ca5cec432460d9dbe1cd491ae"
+        },
+        {
+          "name": "goal_get",
+          "schemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d"
+        },
+        {
+          "name": "goal_list",
+          "schemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f"
+        },
+        {
+          "name": "goal_update",
+          "schemaSha256": "99412b3b9417fe1801332f0442d902709212ea27453ac86526b206664816e771"
+        }
+      ],
+      "advertisedToolsSha256": "c2c5c11a676a082f655270775b9eb8f7f301f700f732523a8ce9da37c3133f13",
+      "fixtureFactsChecked": false,
+      "fixtureFactsPresent": [],
+      "finishReasons": [
+        "tool_calls"
+      ],
+      "terminalStreamMarker": true,
+      "route": {
+        "id": 1792904580222,
+        "time": "2026-10-25T14:35:20.285351+08:00",
+        "ms": 4588,
+        "asked": "codex/gpt-6.1-sol",
+        "model": "codex/gpt-6.1-sol",
+        "served": "gpt-6.1-sol",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6.1-sol",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 4520
+          }
+        ],
+        "captureBridgeSequence": 1,
+        "session": "go-cli-live-dynamic-auto-interactive-bddebb1e",
+        "routeStateSequence": 275
+      },
+      "toolCalls": [
+        {
+          "id": "call_55d58e1f6cee4253ada3702d08f88bee",
+          "name": "write",
+          "argumentsSha256": "9fb24801834d4216625f2c7033fd6628aa56d3fcfef5ffdae12b98b4016b0ffc"
+        }
+      ],
+      "strictModelIdentityMatched": true
+    },
+    {
+      "sequence": 2,
+      "turn": "LIVE_AUTO_4FED212F83B0",
+      "requestKind": "interactive-user-turn",
+      "askedModel": "codex/gpt-6.1-sol",
+      "servedModel": "codex/gpt-6.1-sol",
+      "provider": "codex",
+      "status": 200,
+      "responseId": "chatcmpl-resp_0090e02315947a1a016adda3305524819ba0f150329280a370",
+      "requestId": null,
+      "routeIdentity": {
+        "status": "matched",
+        "routeId": 1792904580223,
+        "sessionMatches": true,
+        "captureAssociation": "matched",
+        "captureBridgeSequence": 2
+      },
+      "usageIdentity": {
+        "status": "matched",
+        "matchedFields": [
+          "response_id",
+          "route_id",
+          "session"
+        ],
+        "mismatchedFields": []
+      },
+      "gatewayUsage": {
+        "t": "2026-10-25T14:35:24.976274+08:00",
+        "agent": "other",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_0090e02315947a1a016adda3305524819ba0f150329280a370",
+        "route_id": 1792904580223,
+        "in": 255,
+        "out": 34,
+        "cache_read": 7040,
+        "cache_write": 0,
+        "ms": 4846,
+        "session": "go-cli-live-dynamic-auto-interactive-bddebb1e"
+      },
+      "usageReconciliation": {
+        "status": "matched",
+        "upstreamInputTokens": 7295,
+        "magpieUncachedInputTokens": 255,
+        "magpieCachedInputTokens": 7040,
+        "upstreamOutputTokens": 34,
+        "magpieOutputTokens": 34,
+        "inputMatches": true,
+        "outputMatches": true
+      },
+      "advertisedTools": [
+        {
+          "name": "bash",
+          "schemaSha256": "efcd767e81a864d776ee5d1d5757f469a0a9719f26d1cc0b3bae611597585186"
+        },
+        {
+          "name": "edit",
+          "schemaSha256": "04dba4135c69ceccca3a10122dd302a9a70feeb73cac315ea0ca24d27800c51a"
+        },
+        {
+          "name": "read",
+          "schemaSha256": "39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194"
+        },
+        {
+          "name": "write",
+          "schemaSha256": "2722054af68ae084dc41c5ce5e3c503659363e250d6efa63a8871f1d102feef7"
+        },
+        {
+          "name": "todo_write",
+          "schemaSha256": "5c9b0b178abaf832d68c10b6ff93bd88d1de70d1624d868e9c1b839c2bdb0608"
+        },
+        {
+          "name": "dispatch_subagent",
+          "schemaSha256": "cb5da5707a26cc06b6bcc8803cbe5cce556ce887f0e6fca608e341157c7ea557"
+        },
+        {
+          "name": "git_push",
+          "schemaSha256": "b5e26250c6d1ed592abca7be5bb87dc0968200cb11ff23cbe54a0ffff22a46ea"
+        },
+        {
+          "name": "ask_user",
+          "schemaSha256": "3a6ac2076cd5bbe29ecbcc1c68dc67b1234e4dbce471b109aa7d87446a46edca"
+        },
+        {
+          "name": "find",
+          "schemaSha256": "8b26e67f119f27a2923c71bcce17547d8c5dcbf6e8f7237cfd633fc926931c09"
+        },
+        {
+          "name": "git_blame",
+          "schemaSha256": "589d5651cc72a44ff98687e236bf6fc8cd4f9271da1272b3b81b0e25a20966f1"
+        },
+        {
+          "name": "git_branch",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_checkout",
+          "schemaSha256": "b145b98efda2b1a53830874a0c6115d9b45bdf1a5cbad13095c3141aef9521a4"
+        },
+        {
+          "name": "git_commit",
+          "schemaSha256": "758018d243c68aaf3fbab2a1612b32472375e0d2820e78a6c69a9ebf889c80c2"
+        },
+        {
+          "name": "git_create_branch",
+          "schemaSha256": "ce7257358c3224ab6d1ab83be200b5a15731d2dd7dba8d8ad90e82b8a661cb1a"
+        },
+        {
+          "name": "git_diff",
+          "schemaSha256": "f266fd76bdbe5e68b59514e339ef5ece9744c1d790afebebbaf9a02d10bbbfb8"
+        },
+        {
+          "name": "git_fetch",
+          "schemaSha256": "f31191d1cec73e5051671ac8f5f551ba50e43704e72700399ed7e5c667b63448"
+        },
+        {
+          "name": "git_log",
+          "schemaSha256": "da7043a670d966854e4805d6b9d8912ced1d9c860639ee869515b151bfb70f0c"
+        },
+        {
+          "name": "git_merge",
+          "schemaSha256": "7d8e6f3b6cb48aef4f0d37bd36ea59b768686d2b15ffe7e8489c6f501b31d47a"
+        },
+        {
+          "name": "git_pr_create",
+          "schemaSha256": "96cd7b46e6bec87e36dfaefed59daf61790f4ad36810878c0d7f4290f9f9ffe5"
+        },
+        {
+          "name": "git_pull",
+          "schemaSha256": "3344da8f3dbd05445b42855e12e3cbea0b182a2c9a16e26c188064eb9c951484"
+        },
+        {
+          "name": "git_remote",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_reset",
+          "schemaSha256": "14132acf08efc074ba3f016470c203e5cb75bcc1502b03ca66308f9a1d205e82"
+        },
+        {
+          "name": "git_revert",
+          "schemaSha256": "f3832baf09f5d0cca643fd82167a0c8a52bfc8c29cdbaffcf8485c3c93c12ef8"
+        },
+        {
+          "name": "git_stash",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_stash_pop",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_status",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "goal_create",
+          "schemaSha256": "e0deb4f487fed3ae00d9b1a99dbfd030dfb85a2ca5cec432460d9dbe1cd491ae"
+        },
+        {
+          "name": "goal_get",
+          "schemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d"
+        },
+        {
+          "name": "goal_list",
+          "schemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f"
+        },
+        {
+          "name": "goal_update",
+          "schemaSha256": "99412b3b9417fe1801332f0442d902709212ea27453ac86526b206664816e771"
+        }
+      ],
+      "advertisedToolsSha256": "c2c5c11a676a082f655270775b9eb8f7f301f700f732523a8ce9da37c3133f13",
+      "fixtureFactsChecked": false,
+      "fixtureFactsPresent": [],
+      "finishReasons": [
+        "tool_calls"
+      ],
+      "terminalStreamMarker": true,
+      "route": {
+        "id": 1792904580223,
+        "time": "2026-10-25T14:35:24.976274+08:00",
+        "ms": 4846,
+        "asked": "codex/gpt-6.1-sol",
+        "model": "codex/gpt-6.1-sol",
+        "served": "gpt-6.1-sol",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6.1-sol",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 4840
+          }
+        ],
+        "captureBridgeSequence": 2,
+        "session": "go-cli-live-dynamic-auto-interactive-bddebb1e",
+        "routeStateSequence": 280
+      },
+      "toolCalls": [
+        {
+          "id": "call_46cbfcf2441f445e9c5d3dd81b70491e",
+          "name": "edit",
+          "argumentsSha256": "632987c275dee69cbd6cabc33db98e7508dadd33873388c9e2b40e4e9d8446ee"
+        }
+      ],
+      "strictModelIdentityMatched": true
+    },
+    {
+      "sequence": 3,
+      "turn": "LIVE_AUTO_4FED212F83B0",
+      "requestKind": "interactive-user-turn",
+      "askedModel": "codex/gpt-6.1-sol",
+      "servedModel": "codex/gpt-6.1-sol",
+      "provider": "codex",
+      "status": 200,
+      "responseId": "chatcmpl-resp_05c7fe4f080240e1016adda3355e00819890f36ee5f5ceea03",
+      "requestId": null,
+      "routeIdentity": {
+        "status": "matched",
+        "routeId": 1792904580224,
+        "sessionMatches": true,
+        "captureAssociation": "matched",
+        "captureBridgeSequence": 3
+      },
+      "usageIdentity": {
+        "status": "matched",
+        "matchedFields": [
+          "response_id",
+          "route_id",
+          "session"
+        ],
+        "mismatchedFields": []
+      },
+      "gatewayUsage": {
+        "t": "2026-10-25T14:35:29.911633+08:00",
+        "agent": "other",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_05c7fe4f080240e1016adda3355e00819890f36ee5f5ceea03",
+        "route_id": 1792904580224,
+        "in": 229,
+        "out": 19,
+        "cache_read": 7168,
+        "cache_write": 0,
+        "ms": 5154,
+        "session": "go-cli-live-dynamic-auto-interactive-bddebb1e"
+      },
+      "usageReconciliation": {
+        "status": "matched",
+        "upstreamInputTokens": 7397,
+        "magpieUncachedInputTokens": 229,
+        "magpieCachedInputTokens": 7168,
+        "upstreamOutputTokens": 19,
+        "magpieOutputTokens": 19,
+        "inputMatches": true,
+        "outputMatches": true
+      },
+      "advertisedTools": [
+        {
+          "name": "bash",
+          "schemaSha256": "efcd767e81a864d776ee5d1d5757f469a0a9719f26d1cc0b3bae611597585186"
+        },
+        {
+          "name": "edit",
+          "schemaSha256": "04dba4135c69ceccca3a10122dd302a9a70feeb73cac315ea0ca24d27800c51a"
+        },
+        {
+          "name": "read",
+          "schemaSha256": "39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194"
+        },
+        {
+          "name": "write",
+          "schemaSha256": "2722054af68ae084dc41c5ce5e3c503659363e250d6efa63a8871f1d102feef7"
+        },
+        {
+          "name": "todo_write",
+          "schemaSha256": "5c9b0b178abaf832d68c10b6ff93bd88d1de70d1624d868e9c1b839c2bdb0608"
+        },
+        {
+          "name": "dispatch_subagent",
+          "schemaSha256": "cb5da5707a26cc06b6bcc8803cbe5cce556ce887f0e6fca608e341157c7ea557"
+        },
+        {
+          "name": "git_push",
+          "schemaSha256": "b5e26250c6d1ed592abca7be5bb87dc0968200cb11ff23cbe54a0ffff22a46ea"
+        },
+        {
+          "name": "ask_user",
+          "schemaSha256": "3a6ac2076cd5bbe29ecbcc1c68dc67b1234e4dbce471b109aa7d87446a46edca"
+        },
+        {
+          "name": "find",
+          "schemaSha256": "8b26e67f119f27a2923c71bcce17547d8c5dcbf6e8f7237cfd633fc926931c09"
+        },
+        {
+          "name": "git_blame",
+          "schemaSha256": "589d5651cc72a44ff98687e236bf6fc8cd4f9271da1272b3b81b0e25a20966f1"
+        },
+        {
+          "name": "git_branch",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_checkout",
+          "schemaSha256": "b145b98efda2b1a53830874a0c6115d9b45bdf1a5cbad13095c3141aef9521a4"
+        },
+        {
+          "name": "git_commit",
+          "schemaSha256": "758018d243c68aaf3fbab2a1612b32472375e0d2820e78a6c69a9ebf889c80c2"
+        },
+        {
+          "name": "git_create_branch",
+          "schemaSha256": "ce7257358c3224ab6d1ab83be200b5a15731d2dd7dba8d8ad90e82b8a661cb1a"
+        },
+        {
+          "name": "git_diff",
+          "schemaSha256": "f266fd76bdbe5e68b59514e339ef5ece9744c1d790afebebbaf9a02d10bbbfb8"
+        },
+        {
+          "name": "git_fetch",
+          "schemaSha256": "f31191d1cec73e5051671ac8f5f551ba50e43704e72700399ed7e5c667b63448"
+        },
+        {
+          "name": "git_log",
+          "schemaSha256": "da7043a670d966854e4805d6b9d8912ced1d9c860639ee869515b151bfb70f0c"
+        },
+        {
+          "name": "git_merge",
+          "schemaSha256": "7d8e6f3b6cb48aef4f0d37bd36ea59b768686d2b15ffe7e8489c6f501b31d47a"
+        },
+        {
+          "name": "git_pr_create",
+          "schemaSha256": "96cd7b46e6bec87e36dfaefed59daf61790f4ad36810878c0d7f4290f9f9ffe5"
+        },
+        {
+          "name": "git_pull",
+          "schemaSha256": "3344da8f3dbd05445b42855e12e3cbea0b182a2c9a16e26c188064eb9c951484"
+        },
+        {
+          "name": "git_remote",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_reset",
+          "schemaSha256": "14132acf08efc074ba3f016470c203e5cb75bcc1502b03ca66308f9a1d205e82"
+        },
+        {
+          "name": "git_revert",
+          "schemaSha256": "f3832baf09f5d0cca643fd82167a0c8a52bfc8c29cdbaffcf8485c3c93c12ef8"
+        },
+        {
+          "name": "git_stash",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_stash_pop",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_status",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "goal_create",
+          "schemaSha256": "e0deb4f487fed3ae00d9b1a99dbfd030dfb85a2ca5cec432460d9dbe1cd491ae"
+        },
+        {
+          "name": "goal_get",
+          "schemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d"
+        },
+        {
+          "name": "goal_list",
+          "schemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f"
+        },
+        {
+          "name": "goal_update",
+          "schemaSha256": "99412b3b9417fe1801332f0442d902709212ea27453ac86526b206664816e771"
+        }
+      ],
+      "advertisedToolsSha256": "c2c5c11a676a082f655270775b9eb8f7f301f700f732523a8ce9da37c3133f13",
+      "fixtureFactsChecked": false,
+      "fixtureFactsPresent": [],
+      "finishReasons": [
+        "tool_calls"
+      ],
+      "terminalStreamMarker": true,
+      "route": {
+        "id": 1792904580224,
+        "time": "2026-10-25T14:35:29.911633+08:00",
+        "ms": 5154,
+        "asked": "codex/gpt-6.1-sol",
+        "model": "codex/gpt-6.1-sol",
+        "served": "gpt-6.1-sol",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6.1-sol",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 5146
+          }
+        ],
+        "captureBridgeSequence": 3,
+        "session": "go-cli-live-dynamic-auto-interactive-bddebb1e",
+        "routeStateSequence": 285
+      },
+      "toolCalls": [
+        {
+          "id": "call_ff460e94fc8c44799b26f246bb10912b",
+          "name": "read",
+          "argumentsSha256": "fa07a2454249dd57a23ea856ccb73c4e78b55b2114da79ae5b45dca81644fb50"
+        }
+      ],
+      "strictModelIdentityMatched": true
+    },
+    {
+      "sequence": 4,
+      "turn": "LIVE_AUTO_4FED212F83B0",
+      "requestKind": "interactive-user-turn",
+      "askedModel": "codex/gpt-6.1-sol",
+      "servedModel": "codex/gpt-6.1-sol",
+      "provider": "codex",
+      "status": 200,
+      "responseId": "chatcmpl-resp_0f163da0bdc525f8016adda33afc08819aa339668d9f1895eb",
+      "requestId": null,
+      "routeIdentity": {
+        "status": "matched",
+        "routeId": 1792904580225,
+        "sessionMatches": true,
+        "captureAssociation": "matched",
+        "captureBridgeSequence": 4
+      },
+      "usageIdentity": {
+        "status": "matched",
+        "matchedFields": [
+          "response_id",
+          "route_id",
+          "session"
+        ],
+        "mismatchedFields": []
+      },
+      "gatewayUsage": {
+        "t": "2026-10-25T14:35:35.135815+08:00",
+        "agent": "other",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_0f163da0bdc525f8016adda33afc08819aa339668d9f1895eb",
+        "route_id": 1792904580225,
+        "in": 133,
+        "out": 22,
+        "cache_read": 7296,
+        "cache_write": 0,
+        "ms": 6128,
+        "session": "go-cli-live-dynamic-auto-interactive-bddebb1e"
+      },
+      "usageReconciliation": {
+        "status": "matched",
+        "upstreamInputTokens": 7429,
+        "magpieUncachedInputTokens": 133,
+        "magpieCachedInputTokens": 7296,
+        "upstreamOutputTokens": 22,
+        "magpieOutputTokens": 22,
+        "inputMatches": true,
+        "outputMatches": true
+      },
+      "advertisedTools": [
+        {
+          "name": "bash",
+          "schemaSha256": "efcd767e81a864d776ee5d1d5757f469a0a9719f26d1cc0b3bae611597585186"
+        },
+        {
+          "name": "edit",
+          "schemaSha256": "04dba4135c69ceccca3a10122dd302a9a70feeb73cac315ea0ca24d27800c51a"
+        },
+        {
+          "name": "read",
+          "schemaSha256": "39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194"
+        },
+        {
+          "name": "write",
+          "schemaSha256": "2722054af68ae084dc41c5ce5e3c503659363e250d6efa63a8871f1d102feef7"
+        },
+        {
+          "name": "todo_write",
+          "schemaSha256": "5c9b0b178abaf832d68c10b6ff93bd88d1de70d1624d868e9c1b839c2bdb0608"
+        },
+        {
+          "name": "dispatch_subagent",
+          "schemaSha256": "cb5da5707a26cc06b6bcc8803cbe5cce556ce887f0e6fca608e341157c7ea557"
+        },
+        {
+          "name": "git_push",
+          "schemaSha256": "b5e26250c6d1ed592abca7be5bb87dc0968200cb11ff23cbe54a0ffff22a46ea"
+        },
+        {
+          "name": "ask_user",
+          "schemaSha256": "3a6ac2076cd5bbe29ecbcc1c68dc67b1234e4dbce471b109aa7d87446a46edca"
+        },
+        {
+          "name": "find",
+          "schemaSha256": "8b26e67f119f27a2923c71bcce17547d8c5dcbf6e8f7237cfd633fc926931c09"
+        },
+        {
+          "name": "git_blame",
+          "schemaSha256": "589d5651cc72a44ff98687e236bf6fc8cd4f9271da1272b3b81b0e25a20966f1"
+        },
+        {
+          "name": "git_branch",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_checkout",
+          "schemaSha256": "b145b98efda2b1a53830874a0c6115d9b45bdf1a5cbad13095c3141aef9521a4"
+        },
+        {
+          "name": "git_commit",
+          "schemaSha256": "758018d243c68aaf3fbab2a1612b32472375e0d2820e78a6c69a9ebf889c80c2"
+        },
+        {
+          "name": "git_create_branch",
+          "schemaSha256": "ce7257358c3224ab6d1ab83be200b5a15731d2dd7dba8d8ad90e82b8a661cb1a"
+        },
+        {
+          "name": "git_diff",
+          "schemaSha256": "f266fd76bdbe5e68b59514e339ef5ece9744c1d790afebebbaf9a02d10bbbfb8"
+        },
+        {
+          "name": "git_fetch",
+          "schemaSha256": "f31191d1cec73e5051671ac8f5f551ba50e43704e72700399ed7e5c667b63448"
+        },
+        {
+          "name": "git_log",
+          "schemaSha256": "da7043a670d966854e4805d6b9d8912ced1d9c860639ee869515b151bfb70f0c"
+        },
+        {
+          "name": "git_merge",
+          "schemaSha256": "7d8e6f3b6cb48aef4f0d37bd36ea59b768686d2b15ffe7e8489c6f501b31d47a"
+        },
+        {
+          "name": "git_pr_create",
+          "schemaSha256": "96cd7b46e6bec87e36dfaefed59daf61790f4ad36810878c0d7f4290f9f9ffe5"
+        },
+        {
+          "name": "git_pull",
+          "schemaSha256": "3344da8f3dbd05445b42855e12e3cbea0b182a2c9a16e26c188064eb9c951484"
+        },
+        {
+          "name": "git_remote",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_reset",
+          "schemaSha256": "14132acf08efc074ba3f016470c203e5cb75bcc1502b03ca66308f9a1d205e82"
+        },
+        {
+          "name": "git_revert",
+          "schemaSha256": "f3832baf09f5d0cca643fd82167a0c8a52bfc8c29cdbaffcf8485c3c93c12ef8"
+        },
+        {
+          "name": "git_stash",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_stash_pop",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_status",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "goal_create",
+          "schemaSha256": "e0deb4f487fed3ae00d9b1a99dbfd030dfb85a2ca5cec432460d9dbe1cd491ae"
+        },
+        {
+          "name": "goal_get",
+          "schemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d"
+        },
+        {
+          "name": "goal_list",
+          "schemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f"
+        },
+        {
+          "name": "goal_update",
+          "schemaSha256": "99412b3b9417fe1801332f0442d902709212ea27453ac86526b206664816e771"
+        }
+      ],
+      "advertisedToolsSha256": "c2c5c11a676a082f655270775b9eb8f7f301f700f732523a8ce9da37c3133f13",
+      "fixtureFactsChecked": false,
+      "fixtureFactsPresent": [],
+      "finishReasons": [
+        "tool_calls"
+      ],
+      "terminalStreamMarker": true,
+      "route": {
+        "id": 1792904580225,
+        "time": "2026-10-25T14:35:35.135815+08:00",
+        "ms": 6128,
+        "asked": "codex/gpt-6.1-sol",
+        "model": "codex/gpt-6.1-sol",
+        "served": "gpt-6.1-sol",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6.1-sol",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 6019
+          }
+        ],
+        "captureBridgeSequence": 4,
+        "session": "go-cli-live-dynamic-auto-interactive-bddebb1e",
+        "routeStateSequence": 290
+      },
+      "toolCalls": [
+        {
+          "id": "call_732430b2df9447f1987aa520c6132f46",
+          "name": "bash",
+          "argumentsSha256": "441793eaf756eff8c5977222fcb402eb15fcd9b228286339a4a705fdbb4b5fc1"
+        }
+      ],
+      "strictModelIdentityMatched": true
+    },
+    {
+      "sequence": 5,
+      "turn": "LIVE_AUTO_4FED212F83B0",
+      "requestKind": "interactive-user-turn",
+      "askedModel": "codex/gpt-6.1-sol",
+      "servedModel": "codex/gpt-6.1-sol",
+      "provider": "codex",
+      "status": 200,
+      "responseId": "chatcmpl-resp_002d91035d3f5b80016adda340e5a0819bbb52637d0f8b890d",
+      "requestId": null,
+      "routeIdentity": {
+        "status": "matched",
+        "routeId": 1792904580226,
+        "sessionMatches": true,
+        "captureAssociation": "matched",
+        "captureBridgeSequence": 5
+      },
+      "usageIdentity": {
+        "status": "matched",
+        "matchedFields": [
+          "response_id",
+          "route_id",
+          "session"
+        ],
+        "mismatchedFields": []
+      },
+      "gatewayUsage": {
+        "t": "2026-10-25T14:35:41.352109+08:00",
+        "agent": "other",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_002d91035d3f5b80016adda340e5a0819bbb52637d0f8b890d",
+        "route_id": 1792904580226,
+        "in": 170,
+        "out": 91,
+        "cache_read": 7296,
+        "cache_write": 0,
+        "ms": 5896,
+        "session": "go-cli-live-dynamic-auto-interactive-bddebb1e"
+      },
+      "usageReconciliation": {
+        "status": "matched",
+        "upstreamInputTokens": 7466,
+        "magpieUncachedInputTokens": 170,
+        "magpieCachedInputTokens": 7296,
+        "upstreamOutputTokens": 91,
+        "magpieOutputTokens": 91,
+        "inputMatches": true,
+        "outputMatches": true
+      },
+      "advertisedTools": [
+        {
+          "name": "bash",
+          "schemaSha256": "efcd767e81a864d776ee5d1d5757f469a0a9719f26d1cc0b3bae611597585186"
+        },
+        {
+          "name": "edit",
+          "schemaSha256": "04dba4135c69ceccca3a10122dd302a9a70feeb73cac315ea0ca24d27800c51a"
+        },
+        {
+          "name": "read",
+          "schemaSha256": "39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194"
+        },
+        {
+          "name": "write",
+          "schemaSha256": "2722054af68ae084dc41c5ce5e3c503659363e250d6efa63a8871f1d102feef7"
+        },
+        {
+          "name": "todo_write",
+          "schemaSha256": "5c9b0b178abaf832d68c10b6ff93bd88d1de70d1624d868e9c1b839c2bdb0608"
+        },
+        {
+          "name": "dispatch_subagent",
+          "schemaSha256": "cb5da5707a26cc06b6bcc8803cbe5cce556ce887f0e6fca608e341157c7ea557"
+        },
+        {
+          "name": "git_push",
+          "schemaSha256": "b5e26250c6d1ed592abca7be5bb87dc0968200cb11ff23cbe54a0ffff22a46ea"
+        },
+        {
+          "name": "ask_user",
+          "schemaSha256": "3a6ac2076cd5bbe29ecbcc1c68dc67b1234e4dbce471b109aa7d87446a46edca"
+        },
+        {
+          "name": "find",
+          "schemaSha256": "8b26e67f119f27a2923c71bcce17547d8c5dcbf6e8f7237cfd633fc926931c09"
+        },
+        {
+          "name": "git_blame",
+          "schemaSha256": "589d5651cc72a44ff98687e236bf6fc8cd4f9271da1272b3b81b0e25a20966f1"
+        },
+        {
+          "name": "git_branch",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_checkout",
+          "schemaSha256": "b145b98efda2b1a53830874a0c6115d9b45bdf1a5cbad13095c3141aef9521a4"
+        },
+        {
+          "name": "git_commit",
+          "schemaSha256": "758018d243c68aaf3fbab2a1612b32472375e0d2820e78a6c69a9ebf889c80c2"
+        },
+        {
+          "name": "git_create_branch",
+          "schemaSha256": "ce7257358c3224ab6d1ab83be200b5a15731d2dd7dba8d8ad90e82b8a661cb1a"
+        },
+        {
+          "name": "git_diff",
+          "schemaSha256": "f266fd76bdbe5e68b59514e339ef5ece9744c1d790afebebbaf9a02d10bbbfb8"
+        },
+        {
+          "name": "git_fetch",
+          "schemaSha256": "f31191d1cec73e5051671ac8f5f551ba50e43704e72700399ed7e5c667b63448"
+        },
+        {
+          "name": "git_log",
+          "schemaSha256": "da7043a670d966854e4805d6b9d8912ced1d9c860639ee869515b151bfb70f0c"
+        },
+        {
+          "name": "git_merge",
+          "schemaSha256": "7d8e6f3b6cb48aef4f0d37bd36ea59b768686d2b15ffe7e8489c6f501b31d47a"
+        },
+        {
+          "name": "git_pr_create",
+          "schemaSha256": "96cd7b46e6bec87e36dfaefed59daf61790f4ad36810878c0d7f4290f9f9ffe5"
+        },
+        {
+          "name": "git_pull",
+          "schemaSha256": "3344da8f3dbd05445b42855e12e3cbea0b182a2c9a16e26c188064eb9c951484"
+        },
+        {
+          "name": "git_remote",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_reset",
+          "schemaSha256": "14132acf08efc074ba3f016470c203e5cb75bcc1502b03ca66308f9a1d205e82"
+        },
+        {
+          "name": "git_revert",
+          "schemaSha256": "f3832baf09f5d0cca643fd82167a0c8a52bfc8c29cdbaffcf8485c3c93c12ef8"
+        },
+        {
+          "name": "git_stash",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_stash_pop",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_status",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "goal_create",
+          "schemaSha256": "e0deb4f487fed3ae00d9b1a99dbfd030dfb85a2ca5cec432460d9dbe1cd491ae"
+        },
+        {
+          "name": "goal_get",
+          "schemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d"
+        },
+        {
+          "name": "goal_list",
+          "schemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f"
+        },
+        {
+          "name": "goal_update",
+          "schemaSha256": "99412b3b9417fe1801332f0442d902709212ea27453ac86526b206664816e771"
+        }
+      ],
+      "advertisedToolsSha256": "c2c5c11a676a082f655270775b9eb8f7f301f700f732523a8ce9da37c3133f13",
+      "fixtureFactsChecked": false,
+      "fixtureFactsPresent": [],
+      "finishReasons": [
+        "stop"
+      ],
+      "terminalStreamMarker": true,
+      "route": {
+        "id": 1792904580226,
+        "time": "2026-10-25T14:35:41.352109+08:00",
+        "ms": 5896,
+        "asked": "codex/gpt-6.1-sol",
+        "model": "codex/gpt-6.1-sol",
+        "served": "gpt-6.1-sol",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6.1-sol",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 5888
+          }
+        ],
+        "captureBridgeSequence": 5,
+        "session": "go-cli-live-dynamic-auto-interactive-bddebb1e",
+        "routeStateSequence": 295
+      },
+      "toolCalls": [],
+      "strictModelIdentityMatched": true
+    }
+  ],
+  "durableEntries": [
+    {
+      "id": "runcommit_1a663683669ceec2a322ec769e4007129dd5baa41c1460d3a22d9d6353d1185b",
+      "seq": 1,
+      "type": "user",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "contentBytes": 196,
+      "contentSha256": "1a26b5ba9f29f6af2b105a6dd5453623da1b4d02406cd855b0eaca6bca1927ea",
+      "matchedPromptIDs": [
+        "U01"
+      ],
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_38d25fa600c9e02a2a74e7cd381a0cd7ab9e835fdcac780e7aff23b9b2e11571",
+      "seq": 2,
+      "type": "assistant",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "contentBytes": 123,
+      "contentSha256": "e1ed336ac61edfbaffaef7cb14df6ae784530408919d0404dbbf5d910506a446",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_c7700ffadf56ddcfbca1a7c223f30fbec0cf946a11f2ada2becd317c36c7de21",
+      "seq": 3,
+      "type": "tool",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "write",
+      "tool_call_id": "call_55d58e1f6cee4253ada3702d08f88bee",
+      "action_state": "intent",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-1ccbf1a054a4bf2d",
+      "action_id": "action-812afda6f9d173b7",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "schema_digest": "2722054af68ae084dc41c5ce5e3c503659363e250d6efa63a8871f1d102feef7",
+      "argument_digest": "6a466909a57afdf4cdcbbbdae4341fe10a9b70d2a1ab77ef93fe9dea4d4b7f9e",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_ac211dffdd4d22319d4e7c6ecd7869ab91495accd2f546d98a9c7ee316e5de55",
+      "seq": 4,
+      "type": "tool",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "write",
+      "tool_call_id": "call_55d58e1f6cee4253ada3702d08f88bee",
+      "action_state": "execution",
+      "dispatch_state": "dispatched",
+      "resource_state": "quiescent",
+      "completion_proof": "queued_job_joined",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-1ccbf1a054a4bf2d",
+      "action_id": "action-812afda6f9d173b7",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_9ca9a4b8ffae685292c82ad1ed89a795549fbb20be4a6f904368a9637cddf46d",
+      "seq": 5,
+      "type": "tool",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "write",
+      "tool_call_id": "call_55d58e1f6cee4253ada3702d08f88bee",
+      "dispatch_state": "dispatched",
+      "receipt_outcome": "success",
+      "contentBytes": 135,
+      "contentSha256": "f86d7f1b2b94733f1ad09b34f7170d66e12591f52ef8d49a6da4381b42216060",
+      "action_batch_id": "batch-1ccbf1a054a4bf2d",
+      "action_id": "action-812afda6f9d173b7",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_9935b4fcb4137fe6deba8b0e7ba6e8ec8f251adf85f9ebc0628acc9fb2fde6c5",
+      "seq": 6,
+      "type": "checkpoint",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "write",
+      "tool_call_id": "call_55d58e1f6cee4253ada3702d08f88bee",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-1ccbf1a054a4bf2d",
+      "action_id": "action-812afda6f9d173b7",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "checkpoint_kind": "execution_resolution",
+      "execution_resolution": {
+        "run_id": "455ab8272826ecf8",
+        "action_id": "action-812afda6f9d173b7",
+        "evidence": "local_resources_quiescent",
+        "evidence_ref": "runcommit_ac211dffdd4d22319d4e7c6ecd7869ab91495accd2f546d98a9c7ee316e5de55"
+      },
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_9352d766b76fa95250f9f32e23d6e9bf01e39000e21af6144d67fb85d572908b",
+      "seq": 7,
+      "type": "assistant",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_e0f562796885270d3d08178e763ca889dda248f7ddfafd18f56114d57f1c37d8",
+      "seq": 8,
+      "type": "tool",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "edit",
+      "tool_call_id": "call_46cbfcf2441f445e9c5d3dd81b70491e",
+      "action_state": "intent",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-e40838b9e5443a4c",
+      "action_id": "action-c97cf1085fdda4b4",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "schema_digest": "04dba4135c69ceccca3a10122dd302a9a70feeb73cac315ea0ca24d27800c51a",
+      "argument_digest": "52ae7d1351a3621ec5ec79e7d94707c8130c251b4380d3f0a00887d1bda5e1d6",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_8d5c360c69fb105800e464967283ae0198bcce79a0aaf0fafbe53a22f214d685",
+      "seq": 9,
+      "type": "tool",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "edit",
+      "tool_call_id": "call_46cbfcf2441f445e9c5d3dd81b70491e",
+      "action_state": "execution",
+      "dispatch_state": "dispatched",
+      "resource_state": "quiescent",
+      "completion_proof": "queued_job_joined",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-e40838b9e5443a4c",
+      "action_id": "action-c97cf1085fdda4b4",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_f4a55798ed11cd5a8a94bbc29a8f911a0ad8d0237c164e647c51eae7b674be61",
+      "seq": 10,
+      "type": "tool",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "edit",
+      "tool_call_id": "call_46cbfcf2441f445e9c5d3dd81b70491e",
+      "dispatch_state": "dispatched",
+      "receipt_outcome": "success",
+      "contentBytes": 161,
+      "contentSha256": "8924b72a0cdd5aa15eaf4c404d3df8eed805c1f74522359dfcd178fb029976bc",
+      "action_batch_id": "batch-e40838b9e5443a4c",
+      "action_id": "action-c97cf1085fdda4b4",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_c60ffddf8960c36645e6afe5cef740577beb603d2e78d94d114c5537d7801bd1",
+      "seq": 11,
+      "type": "checkpoint",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "edit",
+      "tool_call_id": "call_46cbfcf2441f445e9c5d3dd81b70491e",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-e40838b9e5443a4c",
+      "action_id": "action-c97cf1085fdda4b4",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "checkpoint_kind": "execution_resolution",
+      "execution_resolution": {
+        "run_id": "455ab8272826ecf8",
+        "action_id": "action-c97cf1085fdda4b4",
+        "evidence": "local_resources_quiescent",
+        "evidence_ref": "runcommit_8d5c360c69fb105800e464967283ae0198bcce79a0aaf0fafbe53a22f214d685"
+      },
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_ff57a1a32ab87fab9f62d76f849c8a05484a98fcf49d71d055f78eafaa31bb5c",
+      "seq": 12,
+      "type": "assistant",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_76adcf34ecd9df430ea9a9adf9283c72fb9315c1774a9ba8a83ae83f04cff145",
+      "seq": 13,
+      "type": "tool",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "read",
+      "tool_call_id": "call_ff460e94fc8c44799b26f246bb10912b",
+      "action_state": "intent",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-7243472a19d21138",
+      "action_id": "action-a576e73feb946252",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "schema_digest": "39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194",
+      "argument_digest": "f167649f37fb36594fd7ef2c689ddc2904602786d6e25bfde58f53bd10ae035d",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_f1419b88e1589bc5f1cb9ce0e30e7beeb07a846421c8681c77e6ca3c9e1d21c6",
+      "seq": 14,
+      "type": "tool",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "read",
+      "tool_call_id": "call_ff460e94fc8c44799b26f246bb10912b",
+      "action_state": "execution",
+      "dispatch_state": "dispatched",
+      "resource_state": "quiescent",
+      "completion_proof": "inline_pipeline_joined",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-7243472a19d21138",
+      "action_id": "action-a576e73feb946252",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_a2ccc7bd72af21081b2200bb2b6fdbd0beb70c4a43270c08185a83dad0036d70",
+      "seq": 15,
+      "type": "tool",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "read",
+      "tool_call_id": "call_ff460e94fc8c44799b26f246bb10912b",
+      "dispatch_state": "dispatched",
+      "receipt_outcome": "success",
+      "contentBytes": 8,
+      "contentSha256": "00579b77b8f4621d5dbd4219bffb26af89e7e3770f978e7cc710ed2ece8c8b10",
+      "action_batch_id": "batch-7243472a19d21138",
+      "action_id": "action-a576e73feb946252",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_26f43cf233d59800ec3a16850cbf720ab6cfe621cb4bbde1be141b743ef10347",
+      "seq": 16,
+      "type": "checkpoint",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "read",
+      "tool_call_id": "call_ff460e94fc8c44799b26f246bb10912b",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-7243472a19d21138",
+      "action_id": "action-a576e73feb946252",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "checkpoint_kind": "execution_resolution",
+      "execution_resolution": {
+        "run_id": "455ab8272826ecf8",
+        "action_id": "action-a576e73feb946252",
+        "evidence": "local_resources_quiescent",
+        "evidence_ref": "runcommit_f1419b88e1589bc5f1cb9ce0e30e7beeb07a846421c8681c77e6ca3c9e1d21c6"
+      },
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_fa21356bbf551318ee42ffa1211ffd22a21dc1fef94b4dffa60ae665e2dee4d4",
+      "seq": 17,
+      "type": "assistant",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_d1828f077426adc6e6e3bdd6096982c015990958cabf70723cc437d6cf553f0b",
+      "seq": 18,
+      "type": "tool",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "bash",
+      "tool_call_id": "call_732430b2df9447f1987aa520c6132f46",
+      "action_state": "intent",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-9ee03efa42e1c463",
+      "action_id": "action-26d2d58044fda8c2",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "schema_digest": "efcd767e81a864d776ee5d1d5757f469a0a9719f26d1cc0b3bae611597585186",
+      "argument_digest": "441793eaf756eff8c5977222fcb402eb15fcd9b228286339a4a705fdbb4b5fc1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_02064537a9b5d3221ccc221a923bb8a123ef81fe0e80bca32586286e345ce3a8",
+      "seq": 19,
+      "type": "tool",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "bash",
+      "tool_call_id": "call_732430b2df9447f1987aa520c6132f46",
+      "action_state": "execution",
+      "dispatch_state": "dispatched",
+      "resource_state": "cleanup_pending",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-9ee03efa42e1c463",
+      "action_id": "action-26d2d58044fda8c2",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_bb5089c1556ca1da76c478a620e830dd1b444830a27a5408a31fb9ce6b1e71a9",
+      "seq": 20,
+      "type": "tool",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "bash",
+      "tool_call_id": "call_732430b2df9447f1987aa520c6132f46",
+      "action_state": "execution",
+      "dispatch_state": "dispatched",
+      "resource_state": "quiescent",
+      "completion_proof": "owned_process_group_joined",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-9ee03efa42e1c463",
+      "action_id": "action-26d2d58044fda8c2",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_0a806d0c8e550a5fc1380fc3bcf20cba3a0bff077a120e73de0cb348df8642ce",
+      "seq": 21,
+      "type": "tool",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "bash",
+      "tool_call_id": "call_732430b2df9447f1987aa520c6132f46",
+      "dispatch_state": "dispatched",
+      "receipt_outcome": "success",
+      "contentBytes": 12,
+      "contentSha256": "9a81c0af1183f3c42efa6eed0ea307d3eb80b02a9c68340d6bafac77d7c46804",
+      "action_batch_id": "batch-9ee03efa42e1c463",
+      "action_id": "action-26d2d58044fda8c2",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_b3ed8014009c22a99277665dda47f0a05fbdcd0304c073f903b142a0f59d6d61",
+      "seq": 22,
+      "type": "checkpoint",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "tool_name": "bash",
+      "tool_call_id": "call_732430b2df9447f1987aa520c6132f46",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-9ee03efa42e1c463",
+      "action_id": "action-26d2d58044fda8c2",
+      "owner_generation": "owner-7b44c586c98e641d",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "checkpoint_kind": "execution_resolution",
+      "execution_resolution": {
+        "run_id": "455ab8272826ecf8",
+        "action_id": "action-26d2d58044fda8c2",
+        "evidence": "local_resources_quiescent",
+        "evidence_ref": "runcommit_bb5089c1556ca1da76c478a620e830dd1b444830a27a5408a31fb9ce6b1e71a9"
+      },
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_001122bdc13bb509951515b51efad297c2d0171bf85f28fc56f434574a94618e",
+      "seq": 23,
+      "type": "assistant",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "contentBytes": 266,
+      "contentSha256": "d7cba2b11538bb39e488d84d3828f1382392a20306f51e6da0206f44e1308529",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "record_version": 1
+    },
+    {
+      "id": "terminal-1c4eda4495d2f2c5",
+      "seq": 24,
+      "type": "checkpoint",
+      "session_id": "s_62a6766468ca6552641d219a25142948",
+      "run_id": "455ab8272826ecf8",
+      "run_outcome": "success",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "workspace_id": "workspace-v1-a6a5e5a5a4ada00cb49364cb4fae27eaa220fee5ee2485c9e46f56d34adbb3e1",
+      "checkpoint_kind": "run_terminal",
+      "record_version": 1
+    }
+  ],
+  "effects": [
+    {
+      "name": "input.txt",
+      "exists": true,
+      "bytes": 30,
+      "sha256": "f1fbad8cb2122f11a4e3011e5c1b0ddec325ce021863a0bfc9d3c02847e0c842"
+    },
+    {
+      "name": "search.txt",
+      "exists": true,
+      "bytes": 30,
+      "sha256": "e12f5aee529272f1a9679b03818ff97d2ed6e81d8dfe867185c233eb5ab55bfa"
+    },
+    {
+      "name": "ask-approved.txt",
+      "exists": false
+    },
+    {
+      "name": "ask-denied.txt",
+      "exists": false
+    },
+    {
+      "name": "ask-escaped.txt",
+      "exists": false
+    },
+    {
+      "name": "auto-created.txt",
+      "exists": true,
+      "bytes": 8,
+      "sha256": "00579b77b8f4621d5dbd4219bffb26af89e7e3770f978e7cc710ed2ece8c8b10"
+    },
+    {
+      "name": "deny-policy.txt",
+      "exists": false
+    },
+    {
+      "name": "cancel-late-marker.txt",
+      "exists": false
+    },
+    {
+      "name": "hook-events.jsonl",
+      "exists": false
+    }
+  ],
+  "mcpStartMarkerExists": false,
+  "mcpRPCMethodCounts": {},
+  "rawEvidenceRemainsPrivate": true,
+  "rawCutManifestSha256": "c5620b564bdd190105588ce8e18e98c1cbbd5ced438a6dee91b8fe310db390cd",
+  "inputMetadata": {
+    "sourceSha256": "5bf9ec14019c05de4bdd130f4c1f2d48434a916292f3715a9eb002664328fe57",
+    "events": [
+      {
+        "at": 1792910056.400374,
+        "kind": "xterm-input",
+        "bytes": 25,
+        "sha256": "e31c28dd64096702950d8338f2b952e23abc4a451e9e6d366ef6362cc8c96a53"
+      },
+      {
+        "at": 1792910056.404657,
+        "kind": "xterm-input",
+        "bytes": 6,
+        "sha256": "3eb1de54b17b959c79d410fccc9940cc1e6602bca3a21550e1d9bff3d40564c1"
+      },
+      {
+        "at": 1792910117.337562,
+        "kind": "xterm-input",
+        "bytes": 1,
+        "sha256": "2f0fd1e89b8de1d57292742ec380ea47066e307ad645f5bc3adad8a06ff58608"
+      },
+      {
+        "at": 1792910120.245831,
+        "kind": "text+enter",
+        "bytes": 209,
+        "sha256": "b710216a1779d97467087e03a2177406482dc0114475b88fbef17d2ea45d8110"
+      }
+    ]
+  },
+  "images": {
+    "phaseCut": "auto-positive",
+    "phaseCutManifestSha256": "c5620b564bdd190105588ce8e18e98c1cbbd5ced438a6dee91b8fe310db390cd",
+    "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+    "pid": 54709,
+    "sessionIDs": [
+      "s_62a6766468ca6552641d219a25142948"
+    ],
+    "images": [
+      {
+        "file": "31-auto-normal-chain.jpg",
+        "bytes": 705673,
+        "sha256": "b73e98dd4e7145d4315a653ce4c2bd5ea8ca5ee9f022ab6844f907a6f9041c7b",
+        "format": "jpeg",
+        "mime": "image/jpeg",
+        "width": 2780,
+        "height": 1878,
+        "sourceRelativeToRoleRoot": "artifacts/screenshots/31-auto-normal-chain.jpg"
+      }
+    ],
+    "capture": "CUA native Chrome window with browser chrome, actual Go PTY xterm; no pixel edits or encoding changes"
+  }
+}

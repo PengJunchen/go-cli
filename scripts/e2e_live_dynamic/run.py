@@ -114,6 +114,17 @@ def own_trust_entry(workspace: Path) -> dict:
             "entry_sha256": digest(json.dumps(entry, sort_keys=True).encode())}
 
 
+def private_fixture_facts(scenario: dict) -> dict[str, str]:
+    facts = scenario.get("private_fixture_facts", {})
+    if not isinstance(facts, dict) or len(facts) > 32 or any(
+        not isinstance(label, str) or not label or len(label) > 80 or
+        not isinstance(value, str) or not value or len(value) > 4096
+        for label, value in facts.items()
+    ):
+        raise ValueError("private_fixture_facts must contain bounded text labels and values")
+    return dict(facts)
+
+
 class Session:
     def __init__(self, app, role: str, action: str, cols: int, rows: int):
         self.app, self.role, self.action = app, role, action
@@ -133,7 +144,8 @@ class Session:
             if not entry.get("present") or entry.get("revoked") or not entry.get("manifest_version"):
                 raise ValueError("grant this workspace with the real trust terminal before interactive start")
             session_id = f"go-cli-live-dynamic-{self.id}"
-            self.bridge = app.legacy.LiveForwarder(app.gateway, session_id)
+            self.bridge = app.legacy.LiveForwarder(app.gateway, session_id,
+                                                   expected_fixture_facts=private_fixture_facts(app.scenarios[role]))
             self.bridge.owned_upstreams = set()
             self.bridge.RequestHandlerClass = app.bridge_handler
             self.bridge_thread = threading.Thread(target=self.bridge.serve_forever, daemon=True)
@@ -372,6 +384,7 @@ class App:
             scenario["workspace"].mkdir(parents=True, exist_ok=True, mode=0o700)
             if not isinstance(scenario.get("args", []), list) or not all(isinstance(x, str) for x in scenario.get("args", [])):
                 raise ValueError("scenario args must be a string array")
+            scenario["private_fixture_facts"] = private_fixture_facts(scenario)
             self.scenarios[role] = scenario
         if args.prepare_workspaces:
             self.prepare()
@@ -404,6 +417,11 @@ class App:
             if audit.get("enabled") is None:
                 audit["enabled"] = True
             audit["path"] = str(storage / "tool-audit.jsonl")
+            registry = config.setdefault("model_registry", {})
+            registry["enabled"] = False
+            # A false scalar may retain an inherited true config value; the
+            # explicit task cache also isolates that effective enabled case.
+            registry["cache_path"] = str(self.root / "cache" / "models.dev.json")
             write_json(path, config)
 
     def check_storage(self, role):
@@ -416,6 +434,10 @@ class App:
             if not value or not Path(value).is_absolute():
                 raise ValueError(f"explicit {section}.{key} is required")
             inside(Path(value), self.root)
+        registry_cache = config.get("model_registry", {}).get("cache_path")
+        if not registry_cache or not Path(registry_cache).is_absolute():
+            raise ValueError("explicit model_registry.cache_path is required")
+        inside(Path(registry_cache), self.root)
         session = Path(config["session"]["store_path"])
         if session.exists() and not session.is_dir():
             raise ValueError("session.store_path must be a directory")

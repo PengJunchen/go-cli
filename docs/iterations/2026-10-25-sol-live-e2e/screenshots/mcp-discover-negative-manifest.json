@@ -1,0 +1,23 @@
+{
+  "phaseCut": "mcp-discover-negative",
+  "phaseCutManifestSha256": "c16eb00349d12b54d33a223bbbabb5091b2e27883146e884501f13cd0794b6d0",
+  "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+  "pid": 57936,
+  "sessionIDs": [
+    "s_c6a602bb2b922b88c390db78dd50e9af"
+  ],
+  "selectedPhysicalSessionID": "s_c6a602bb2b922b88c390db78dd50e9af",
+  "images": [
+    {
+      "file": "49-mcp-discover-preflight-read-iab.jpg",
+      "bytes": 96565,
+      "sha256": "3e21f5d87dea13c2439eb9070aeb9bdeaff015597b3c48637346c690cfece163",
+      "format": "jpeg",
+      "mime": "image/jpeg",
+      "width": 826,
+      "height": 862,
+      "sourceRelativeToRoleRoot": "artifacts/screenshots/49-mcp-discover-preflight-read-iab.jpg"
+    }
+  ],
+  "capture": "CUA IAB tab viewport, actual Go PTY xterm; no pixel edits or encoding changes"
+}

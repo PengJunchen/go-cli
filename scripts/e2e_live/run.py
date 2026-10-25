@@ -150,6 +150,10 @@ class LiveForwarder(ThreadingHTTPServer):
                 "requestBytes": len(body),
                 "requestSha256": sha256(body) if body else None,
                 "askedModel": metadata.get("model"),
+                "advertisedTools": metadata.get("advertisedTools", []),
+                "advertisedToolsSha256": metadata.get("advertisedToolsSha256"),
+                "fixtureFactsChecked": metadata.get("fixtureFactsChecked", False),
+                "fixtureFactsPresent": metadata.get("fixtureFactsPresent", []),
                 "stream": metadata.get("stream"),
                 "toolReceipts": metadata.get("toolReceipts", []),
                 "userMarkers": metadata.get("userMarkers", []),
@@ -400,8 +404,39 @@ def request_metadata(body: bytes, memory_canary: str = "", expected_fixture_fact
             for marker in re.findall(r"\b(?:LIVE_[A-Z0-9_]+|FOLLOWUP_[A-Z0-9_]+)\b", content):
                 markers.append(marker)
     joined = "\n".join(as_text(message.get("content")) for message in messages)
+    # Check selected task literals in decoded JSON strings only. Do not retain
+    # their values, request bodies, or a broader information-flow claim.
+    def visible_strings(value):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                yield str(key)
+                yield from visible_strings(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from visible_strings(item)
+
+    selected_facts = {label: fact for label, fact in (expected_fixture_facts or {}).items()
+                      if isinstance(label, str) and isinstance(fact, str) and fact}
+    visible = tuple(visible_strings(data))
+    present_facts = sorted(label for label, fact in selected_facts.items() if any(fact in value for value in visible))
+    advertised = []
+    tool_schemas = data.get("tools") or []
+    for tool in tool_schemas:
+        if not isinstance(tool, dict) or not isinstance(tool.get("function"), dict):
+            continue
+        function = tool["function"]
+        name = function.get("name")
+        if isinstance(name, str):
+            schema = json.dumps(function.get("parameters"), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            advertised.append({"name": name, "schemaSha256": sha256(schema.encode("utf-8"))})
     return {
         "model": data.get("model"),
+        "advertisedTools": advertised,
+        "advertisedToolsSha256": sha256(json.dumps(tool_schemas, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")),
+        "fixtureFactsChecked": bool(selected_facts),
+        "fixtureFactsPresent": present_facts,
         "stream": data.get("stream"),
         "toolReceipts": receipts,
         "priorToolCalls": prior_calls,
@@ -1535,6 +1570,10 @@ def correlate_provider_evidence(snapshot: dict[str, Any], audit: dict[str, Any])
             "expectedInputMarkers": request.get("expectedInputMarkers", []),
             "inputMarkerMatches": request.get("inputMarkerMatches", []),
             "askedModel": request.get("askedModel"),
+            "advertisedTools": request.get("advertisedTools", []),
+            "advertisedToolsSha256": request.get("advertisedToolsSha256"),
+            "fixtureFactsChecked": request.get("fixtureFactsChecked", False),
+            "fixtureFactsPresent": request.get("fixtureFactsPresent", []),
             "responseId": request.get("responseId"),
             "requestId": request.get("requestId"),
             "status": request.get("status"),
@@ -1550,7 +1589,7 @@ def correlate_provider_evidence(snapshot: dict[str, Any], audit: dict[str, Any])
             "finishReasons": request.get("finishReasons", []),
             "terminalStreamMarker": request.get("terminalStreamMarker"),
             "toolCalls": [{key: call.get(key) for key in ("id", "name", "argumentsSha256", "safeArguments")} for call in request.get("toolCalls", [])],
-            "toolReceipts": [{key: receipt.get(key) for key in ("toolCallId", "tool", "bytes", "sha256", "mentionsDenied", "mentionsError", "mentionsPolicyBlocked")} for receipt in request.get("toolReceipts", [])],
+            "toolReceipts": [{key: receipt.get(key) for key in ("toolCallId", "tool", "bytes", "sha256", "mentionsDenied", "mentionsError", "mentionsPolicyBlocked", "decisionSource", "decisionChoice")} for receipt in request.get("toolReceipts", [])],
             "route": route,
             "routeJoin": "per-request-session-route-snapshot" if route_identity["status"] == "matched" else None,
             "routeIdentity": route_identity,

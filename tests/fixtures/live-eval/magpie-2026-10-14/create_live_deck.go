@@ -1,3 +1,4 @@
+// Package main creates, updates, and verifies the synthetic four-slide live QA deck.
 package main
 
 import (

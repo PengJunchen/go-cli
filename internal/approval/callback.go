@@ -45,6 +45,7 @@ const (
 // ApprovalCallback handles interactive approval requests. When the classifier
 // returns Ask and a callback is wired into the middleware, the callback is
 // consulted to resolve the decision via interactive y/n/a confirmation.
+// Implementations must respect ctx before accepting input or granting approval.
 type ApprovalCallback interface {
 	RequestApproval(ctx context.Context, toolName string, args map[string]any) (ApprovalResult, error)
 }
@@ -53,6 +54,8 @@ type ApprovalCallback interface {
 // stdout and reads a single line from stdin: "y" allows once, "n" denies, and
 // "a" allows and persists the decision. When stdin is not a terminal the call
 // is denied without blocking so piped input never stalls the middleware.
+// A blocking read must be released by its input owner; cancellation is checked
+// before reading and after each read, before accepting the returned choice.
 type InteractiveApprovalCallback struct {
 	stdin  io.Reader
 	stdout io.Writer
@@ -74,7 +77,10 @@ func (c *InteractiveApprovalCallback) RequestApproval(ctx context.Context, toolN
 	return result, err
 }
 
-func (c *InteractiveApprovalCallback) requestApprovalWithChoice(_ context.Context, toolName string, _ map[string]any) (ApprovalResult, string, string, error) {
+func (c *InteractiveApprovalCallback) requestApprovalWithChoice(ctx context.Context, toolName string, _ map[string]any) (ApprovalResult, string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return ApprovalDeny, "", "canceled", err
+	}
 	if !isTerminalReader(c.stdin) {
 		return ApprovalDeny, "", "non_tty_deny", nil
 	}
@@ -84,6 +90,9 @@ func (c *InteractiveApprovalCallback) requestApprovalWithChoice(_ context.Contex
 	reader := bufio.NewReader(c.stdin)
 	for {
 		line, err := reader.ReadString('\n')
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ApprovalDeny, "", "canceled", ctxErr
+		}
 		if err != nil && err != io.EOF {
 			return ApprovalDeny, "", "callback_error", fmt.Errorf("read approval input: %w", err)
 		}

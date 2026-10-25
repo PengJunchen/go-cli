@@ -1,0 +1,117 @@
+"""Freeze exact owned evidence files and emit a body-free ledger. No UI/network."""
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+import time
+from evidence_session_selection import select_session_files, appended_rows
+
+root = Path(__file__).resolve().parent.parent
+role, phase = sys.argv[1:3]
+observed_sid = sys.argv[3] if len(sys.argv) >= 4 else None
+baseline_path = Path(sys.argv[4]).resolve() if len(sys.argv) == 5 else None
+baseline = json.loads(baseline_path.read_text()) if baseline_path else None
+if baseline:
+    assert baseline["root"] == str(root) and baseline["role"] == role, "baseline scope mismatch"
+baseline_files = baseline["files"] if baseline else {}
+owned = json.loads((root / "artifacts/owned-resources.json").read_text())
+session = next(row for row in reversed(owned["sessions"]) if row["role"] == role and row["action"] == "interactive")
+prefix = session["id"]
+provider = root / "artifacts" / (prefix + ".provider-evidence.json")
+data = json.loads(provider.read_text())
+assert session.get("inflight") == 0, "owned provider requests still in flight"
+assert all(row.get("completedAt") for row in data["snapshot"]["requests"]), "provider request lacks completion snapshot"
+process_baseline = baseline.get("process") if baseline else None
+same_process = bool(process_baseline and process_baseline["ptyID"] == prefix)
+provider_start = process_baseline["providerSequence"] if same_process else 0
+input_events = json.loads((root / "artifacts" / (prefix + ".input-metadata.json")).read_text())
+input_start = process_baseline["inputEventCount"] if same_process else 0
+if same_process:
+    assert len(input_events) >= input_start, "input metadata was truncated"
+    assert hashlib.sha256(json.dumps(input_events[:input_start], sort_keys=True, separators=(",", ":")).encode()).hexdigest() == process_baseline["inputEventPrefixSha256"], "input metadata prefix was rewritten"
+input_bounds = {"source": "artifacts/" + prefix + ".input-metadata.json", "baselineEvents": input_start, "capturedEvents": len(input_events), "suffixSha256": hashlib.sha256(json.dumps(input_events[input_start:], sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+store = root / "artifacts/stores" / role
+session_files = select_session_files((store / "sessions").rglob("*.jsonl"), observed_sid)
+observed_sid = session_files[0].stem
+cut = root / "artifacts/cuts" / phase
+cut.mkdir(parents=True, mode=0o700, exist_ok=False)
+sources = [p for p in (root / "artifacts").glob(prefix + ".*") if p.is_file()]
+sources += [p for p in store.rglob("*") if p.is_file() and (not p.is_relative_to(store / "sessions") or p in session_files)]
+sources += [p for p in (root / "workspaces" / role / ".go-cli/audit").glob("*.jsonl") if p.is_file()]
+sources += [p for p in (root / "artifacts/mcp-connected.marker", root / "artifacts/mcp-rpc-metadata.jsonl") if p.is_file()]
+copied = []
+for source in sorted(sources):
+    relative = source.relative_to(root)
+    target = cut / "raw" / relative
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    content = source.read_bytes()
+    with target.open("xb") as output:
+        output.write(content)
+    target.chmod(0o600)
+    copied.append({"source": str(source), "copy": str(target), "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()})
+prompts = json.loads((root / "artifacts/live-prompts.json").read_text())
+expected = {}
+for prompt in prompts:
+    expected.setdefault(prompt["prompt"], []).append(prompt["id"])
+entries = []
+session_bounds = []
+for path in (cut / "raw/artifacts/stores" / role / "sessions").rglob("*.jsonl"):
+    source_relative = str(path.relative_to(cut / "raw"))
+    content = path.read_bytes()
+    prefix = baseline_files.get(source_relative)
+    offset = prefix["bytes"] if prefix else 0
+    session_bounds.append({"source": source_relative, "baselineBytes": offset, "capturedBytes": len(content), "suffixSha256": hashlib.sha256(content[offset:]).hexdigest()})
+    for row in appended_rows(content, prefix):
+        assert row.get("session_id", observed_sid) == observed_sid, "durable row session mismatch"
+        entry = {k: row[k] for k in ("id", "seq", "type", "session_id", "run_id", "run_outcome", "tool_name", "tool_call_id", "action_state", "dispatch_state", "receipt_outcome", "resource_state", "completion_proof", "config_generation", "catalog_revision", "materialized_artifact_digest") if k in row}
+        content = row.get("content")
+        if isinstance(content, str):
+            entry.update(contentBytes=len(content.encode()), contentSha256=hashlib.sha256(content.encode()).hexdigest())
+            if row.get("type") == "user":
+                entry["matchedPromptIDs"] = expected.get(content, [])
+            if row.get("receipt_outcome"):
+                for key, pattern in (("decisionSource", r"\bdecision_source=(user|callback|canceled|non_tty_deny|input_ended|invalid_response)(?=[; )]|$)"), ("decisionChoice", r"\bchoice=(deny|none|allow_once|allow_always)(?=[; )]|$)")):
+                    match = re.search(pattern, content)
+                    if match:
+                        entry[key] = match.group(1)
+        entries.append(entry)
+approval_entries = []
+audit_bounds = []
+audit_keys = ("timestamp", "tool", "classifier", "permission_mode", "session_id", "stage", "resolution", "decision", "user_choice", "tool_outcome", "tool_call_id", "dispatch_committed", "result_present")
+for path in (cut / "raw/workspaces" / role / ".go-cli/audit").glob("*.jsonl"):
+    relative = str(path.relative_to(cut / "raw"))
+    content = path.read_bytes()
+    prefix = baseline_files.get(relative)
+    offset = prefix["bytes"] if prefix else 0
+    audit_bounds.append({"source": relative, "baselineBytes": offset, "capturedBytes": len(content), "suffixSha256": hashlib.sha256(content[offset:]).hexdigest()})
+    approval_entries.extend({k: row[k] for k in audit_keys if k in row} for row in appended_rows(content, prefix))
+requests = []
+for row in data["evidence"]["inference"]:
+    if row["sequence"] <= provider_start:
+        continue
+    record = {k: row.get(k) for k in ("sequence", "turn", "requestKind", "askedModel", "servedModel", "provider", "status", "responseId", "requestId", "routeIdentity", "usageIdentity", "gatewayUsage", "usageReconciliation", "advertisedTools", "advertisedToolsSha256", "fixtureFactsChecked", "fixtureFactsPresent", "finishReasons", "terminalStreamMarker")}
+    record["route"] = row.get("route")
+    record["toolCalls"] = [{k: call.get(k) for k in ("id", "name", "argumentsSha256")} for call in row.get("toolCalls", [])]
+    record["strictModelIdentityMatched"] = row.get("provider") == "codex" and row.get("askedModel") == row.get("servedModel") == "codex/gpt-6.1-sol" and row.get("routeIdentity", {}).get("status") == "matched" and row.get("routeIdentity", {}).get("captureAssociation") == "matched" and row.get("usageIdentity", {}).get("status") == "matched" and {"response_id", "route_id", "session"} <= set(row.get("usageIdentity", {}).get("matchedFields", []))
+    requests.append(record)
+effects = []
+for name in ("input.txt", "search.txt", "ask-approved.txt", "ask-denied.txt", "ask-escaped.txt", "auto-created.txt", "deny-policy.txt", "cancel-late-marker.txt", "hook-events.jsonl"):
+    path = root / "workspaces" / role / name
+    effect = {"name": name, "exists": path.exists()}
+    if path.is_file():
+        content = path.read_bytes()
+        effect.update(bytes=len(content), sha256=hashlib.sha256(content).hexdigest())
+        if name == "hook-events.jsonl":
+            effect["markerCounts"] = {tag: content.count(tag.encode()) for tag in ("HOOK_V1", "HOOK_V2", "HOOK_V3")}
+    effects.append(effect)
+rpc = root / "artifacts/mcp-rpc-metadata.jsonl"
+methods = []
+if rpc.exists():
+    methods = [json.loads(line).get("method") for line in rpc.read_text().splitlines()]
+ledger = {"providerSequenceBaseline": provider_start, "inputEvidenceBounds": input_bounds, "baselineManifestSha256": hashlib.sha256(baseline_path.read_bytes()).hexdigest() if baseline_path else None, "sessionEvidenceBounds": session_bounds, "approvalAuditEvidenceBounds": audit_bounds, "approvalAuditEntries": approval_entries, "selectedPhysicalSessionID": observed_sid, "roleAuditHistoryMayBeCumulative": True, "phase": phase, "recordedAtEpoch": time.time(), "role": role, "binarySha256": json.loads((root / "artifacts/live-release-observed.json").read_text())["binarySha256"], "ptyID": prefix, "pid": session["pid"], "sessionIDs": sorted({row["session_id"] for row in entries if row.get("session_id")}), "requests": requests, "durableEntries": entries, "effects": effects, "mcpStartMarkerExists": (root / "artifacts/mcp-connected.marker").exists(), "mcpRPCMethodCounts": {method: methods.count(method) for method in sorted(set(methods))}, "copiedSourceFiles": copied, "rawEvidenceRemainsPrivate": True}
+target = cut / "safe-ledger.json"
+target.write_text(json.dumps(ledger, indent=2, ensure_ascii=False) + "\n")
+target.chmod(0o600)
+(cut / "manifest.json").write_text(json.dumps({"phase": phase, "sources": copied, "safeLedgerSha256": hashlib.sha256(target.read_bytes()).hexdigest()}, indent=2) + "\n")
+print(json.dumps({"phase": phase, "role": role, "cut": str(cut), "requests": len(requests), "allStrictIdentityMatched": bool(requests) and all(r["strictModelIdentityMatched"] for r in requests), "sessionIDs": ledger["sessionIDs"], "unmatchedUserRows": sum(row.get("type") == "user" and not row.get("matchedPromptIDs") for row in entries)}))

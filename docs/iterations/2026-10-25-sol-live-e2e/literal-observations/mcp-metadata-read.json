@@ -1,0 +1,37 @@
+{
+  "phase": "mcp-metadata-read",
+  "sourceCutManifestSha256": "13181851dffbbce1645359e3c441a8115af9a465e191b9ff53a66dbb3795a31b",
+  "sourceBridgeMetadataSha256": "86cc1c4a9043c7fa1520ffaae57e4c23617f000d2353b3f1b02bd549746e3cf1",
+  "sourceKind": "Exact projection of previously recorded bridge flags, not a new scan",
+  "selectedLabels": [
+    "mcp-private-command",
+    "mcp-private-env"
+  ],
+  "records": [
+    {
+      "sequence": 21,
+      "requestSha256": "22325696ebf57daeb6a02df21bfbf087c94ad790dc905c4e3bb2fb49c8241b16",
+      "responseSha256": "165df7a94d4fd316f858e716b0abc8d53e309163601b1525b2cd9c0312863f4c",
+      "responseId": "chatcmpl-resp_0d881856935d4ae0016addb72cda4881999af88903f1b3e788",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": []
+    },
+    {
+      "sequence": 22,
+      "requestSha256": "1a95b67d686f78c71b9f37ea71358007016da4741e1e6842939b6c2c5ba5d1cd",
+      "responseSha256": "126f2df5dc932c92a6d1f20eebaf22cf54dc793da80ae47cbe29764cba589c2e",
+      "responseId": "chatcmpl-resp_0bfc9193f73991e6016addb74789088199a8d369d9ae199721",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": []
+    },
+    {
+      "sequence": 23,
+      "requestSha256": "13b5b4d84599b2a5521425487f9f340f9ca28fba88359719a10965b580c076f8",
+      "responseSha256": "187eb6900c63f81fc45cc7d0ab6132757f63f2432a4b9d35c6152f3fd628627e",
+      "responseId": "chatcmpl-resp_00cd7dd54101bfb4016addb74c3a98819b9669ae62714406d2",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": []
+    }
+  ],
+  "scope": "Selected decoded-JSON visible literal flags only; original upstream JSON was not retained and is not independently rescanned; no encoded/general information-flow claim"
+}

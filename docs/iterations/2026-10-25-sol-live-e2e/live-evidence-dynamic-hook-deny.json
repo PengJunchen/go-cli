@@ -1,0 +1,1553 @@
+{
+  "collectorSourceSha256": "b21c2c0e049915ea4c4eba791a5ce641972dbd0b63f812f93656ad3ced67b7ba",
+  "providerSequenceBaseline": 16,
+  "inputEvidenceBounds": {
+    "source": "artifacts/dynamic-interactive-1eae389f.input-metadata.json",
+    "baselineEvents": 24,
+    "capturedEvents": 28,
+    "suffixSha256": "0bb36a468fee79061bb2bfcdfda8d64776d4748ba3ecf4e5798d1aa85e1caa90"
+  },
+  "baselineManifestSha256": "51d8bc2db1f9c579000146f84448fbe4d899867b9ebcf9c2f476f0858147f670",
+  "sessionEvidenceBounds": [
+    {
+      "source": "artifacts/stores/dynamic/sessions/sessions/s_c6a602bb2b922b88c390db78dd50e9af.jsonl",
+      "baselineBytes": 74769,
+      "capturedBytes": 89976,
+      "suffixSha256": "5bfaa05459c9668e435060afc94612240e2d96a6fbbcd5beab820cd608bfd7d2"
+    }
+  ],
+  "approvalAuditEvidenceBounds": [
+    {
+      "source": "workspaces/dynamic/.go-cli/audit/2026-10-25.jsonl",
+      "baselineBytes": 13520,
+      "capturedBytes": 16215,
+      "suffixSha256": "812ab93e1160a0dcb8623b80d591ff56993ec1bbebba352875109b467a4eae0f"
+    }
+  ],
+  "approvalAuditEntries": [
+    {
+      "timestamp": "2026-10-25T07:55:55.312869Z",
+      "tool": "skill_search",
+      "classifier": "safety_policy",
+      "permission_mode": "default",
+      "session_id": "interactive",
+      "stage": "classifier_proposal",
+      "decision": "ask"
+    },
+    {
+      "timestamp": "2026-10-25T07:56:17.790934Z",
+      "tool": "skill_search",
+      "classifier": "safety_policy",
+      "permission_mode": "default",
+      "session_id": "interactive",
+      "stage": "approval_resolution",
+      "resolution": "user",
+      "decision": "ask",
+      "user_choice": "allow_once"
+    },
+    {
+      "timestamp": "2026-10-25T07:56:17.825713Z",
+      "tool": "skill_search",
+      "classifier": "safety_policy",
+      "permission_mode": "default",
+      "session_id": "interactive",
+      "stage": "tool_outcome",
+      "resolution": "user",
+      "decision": "ask",
+      "user_choice": "allow_once",
+      "tool_outcome": "success",
+      "tool_call_id": "sha256:5e0f5d90159112e7238599d916742678f576ba5c3b4b63fb08a40077eec3c9d3",
+      "dispatch_committed": true,
+      "result_present": true
+    },
+    {
+      "timestamp": "2026-10-25T07:56:21.07143Z",
+      "tool": "skill_load",
+      "classifier": "safety_policy",
+      "permission_mode": "default",
+      "session_id": "interactive",
+      "stage": "classifier_proposal",
+      "decision": "ask"
+    },
+    {
+      "timestamp": "2026-10-25T07:56:39.778479Z",
+      "tool": "skill_load",
+      "classifier": "safety_policy",
+      "permission_mode": "default",
+      "session_id": "interactive",
+      "stage": "approval_resolution",
+      "resolution": "user",
+      "decision": "ask",
+      "user_choice": "allow_once"
+    },
+    {
+      "timestamp": "2026-10-25T07:56:39.809332Z",
+      "tool": "skill_load",
+      "classifier": "safety_policy",
+      "permission_mode": "default",
+      "session_id": "interactive",
+      "stage": "tool_outcome",
+      "resolution": "user",
+      "decision": "ask",
+      "user_choice": "allow_once",
+      "tool_outcome": "success",
+      "tool_call_id": "sha256:5a0abb72ce16bfb6bc757bd6f0808de6ced8edb4b3e389df65ba02da9552379f",
+      "dispatch_committed": true,
+      "result_present": true
+    }
+  ],
+  "selectedPhysicalSessionID": "s_c6a602bb2b922b88c390db78dd50e9af",
+  "roleAuditHistoryMayBeCumulative": true,
+  "phase": "dynamic-hook-deny",
+  "recordedAtEpoch": 1792915144.4546938,
+  "role": "dynamic",
+  "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+  "ptyID": "dynamic-interactive-1eae389f",
+  "pid": 57936,
+  "sessionIDs": [
+    "s_c6a602bb2b922b88c390db78dd50e9af"
+  ],
+  "requests": [
+    {
+      "sequence": 17,
+      "turn": "LIVE_HOOK_BLOCK_4FED212F83B0",
+      "requestKind": "interactive-user-turn",
+      "askedModel": "codex/gpt-6.1-sol",
+      "servedModel": "codex/gpt-6.1-sol",
+      "provider": "codex",
+      "status": 200,
+      "responseId": "chatcmpl-resp_09a767400760e6d2016addb6095a88819b8d3119ac35ab7dcb",
+      "requestId": null,
+      "routeIdentity": {
+        "status": "matched",
+        "routeId": 1792904580248,
+        "sessionMatches": true,
+        "captureAssociation": "matched",
+        "captureBridgeSequence": 17
+      },
+      "usageIdentity": {
+        "status": "matched",
+        "matchedFields": [
+          "response_id",
+          "route_id",
+          "session"
+        ],
+        "mismatchedFields": []
+      },
+      "gatewayUsage": {
+        "t": "2026-10-25T15:55:50.389664+08:00",
+        "agent": "other",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_09a767400760e6d2016addb6095a88819b8d3119ac35ab7dcb",
+        "route_id": 1792904580248,
+        "in": 238,
+        "out": 46,
+        "cache_read": 9088,
+        "cache_write": 0,
+        "ms": 4888,
+        "session": "go-cli-live-dynamic-dynamic-interactive-1eae389f"
+      },
+      "usageReconciliation": {
+        "status": "matched",
+        "upstreamInputTokens": 9326,
+        "magpieUncachedInputTokens": 238,
+        "magpieCachedInputTokens": 9088,
+        "upstreamOutputTokens": 46,
+        "magpieOutputTokens": 46,
+        "inputMatches": true,
+        "outputMatches": true
+      },
+      "advertisedTools": [
+        {
+          "name": "read",
+          "schemaSha256": "39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194"
+        },
+        {
+          "name": "bash",
+          "schemaSha256": "efcd767e81a864d776ee5d1d5757f469a0a9719f26d1cc0b3bae611597585186"
+        },
+        {
+          "name": "write",
+          "schemaSha256": "2722054af68ae084dc41c5ce5e3c503659363e250d6efa63a8871f1d102feef7"
+        },
+        {
+          "name": "edit",
+          "schemaSha256": "04dba4135c69ceccca3a10122dd302a9a70feeb73cac315ea0ca24d27800c51a"
+        },
+        {
+          "name": "grep",
+          "schemaSha256": "1a3bd71cd9ec79622205bac996733641180dae25cdeadac1cd3e4890e3710550"
+        },
+        {
+          "name": "find",
+          "schemaSha256": "8b26e67f119f27a2923c71bcce17547d8c5dcbf6e8f7237cfd633fc926931c09"
+        },
+        {
+          "name": "ls",
+          "schemaSha256": "6e839a041ec51e9b16bb72291f91132707e05022cabe7fe316d23b794624977a"
+        },
+        {
+          "name": "git_diff",
+          "schemaSha256": "f266fd76bdbe5e68b59514e339ef5ece9744c1d790afebebbaf9a02d10bbbfb8"
+        },
+        {
+          "name": "git_status",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_commit",
+          "schemaSha256": "758018d243c68aaf3fbab2a1612b32472375e0d2820e78a6c69a9ebf889c80c2"
+        },
+        {
+          "name": "git_log",
+          "schemaSha256": "da7043a670d966854e4805d6b9d8912ced1d9c860639ee869515b151bfb70f0c"
+        },
+        {
+          "name": "git_branch",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_checkout",
+          "schemaSha256": "b145b98efda2b1a53830874a0c6115d9b45bdf1a5cbad13095c3141aef9521a4"
+        },
+        {
+          "name": "git_blame",
+          "schemaSha256": "589d5651cc72a44ff98687e236bf6fc8cd4f9271da1272b3b81b0e25a20966f1"
+        },
+        {
+          "name": "git_push",
+          "schemaSha256": "b5e26250c6d1ed592abca7be5bb87dc0968200cb11ff23cbe54a0ffff22a46ea"
+        },
+        {
+          "name": "git_create_branch",
+          "schemaSha256": "ce7257358c3224ab6d1ab83be200b5a15731d2dd7dba8d8ad90e82b8a661cb1a"
+        },
+        {
+          "name": "git_merge",
+          "schemaSha256": "7d8e6f3b6cb48aef4f0d37bd36ea59b768686d2b15ffe7e8489c6f501b31d47a"
+        },
+        {
+          "name": "git_stash",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_stash_pop",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_reset",
+          "schemaSha256": "14132acf08efc074ba3f016470c203e5cb75bcc1502b03ca66308f9a1d205e82"
+        },
+        {
+          "name": "git_revert",
+          "schemaSha256": "f3832baf09f5d0cca643fd82167a0c8a52bfc8c29cdbaffcf8485c3c93c12ef8"
+        },
+        {
+          "name": "git_fetch",
+          "schemaSha256": "f31191d1cec73e5051671ac8f5f551ba50e43704e72700399ed7e5c667b63448"
+        },
+        {
+          "name": "git_pull",
+          "schemaSha256": "3344da8f3dbd05445b42855e12e3cbea0b182a2c9a16e26c188064eb9c951484"
+        },
+        {
+          "name": "git_remote",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "mcp_list",
+          "schemaSha256": "92b59a78159424c28d0137811c5425dca6a864b512ff30be9b90f952a0679c00"
+        },
+        {
+          "name": "mcp_discover",
+          "schemaSha256": "fc15014fa5b55292c7b41c82be676ed985b9457dd9842fbf0f8ec5eabb16f692"
+        },
+        {
+          "name": "skill_search",
+          "schemaSha256": "95a1330f6ed50b67f3698e70536b1b1b309953eadd81aee157369c9133f5097d"
+        },
+        {
+          "name": "skill_load",
+          "schemaSha256": "95a1330f6ed50b67f3698e70536b1b1b309953eadd81aee157369c9133f5097d"
+        },
+        {
+          "name": "todo_write",
+          "schemaSha256": "5c9b0b178abaf832d68c10b6ff93bd88d1de70d1624d868e9c1b839c2bdb0608"
+        },
+        {
+          "name": "task_create",
+          "schemaSha256": "218fda51440f7eca5a0ef2dc067cf8ab61314ec2d3c0164ba17ddecd9423890e"
+        },
+        {
+          "name": "task_update",
+          "schemaSha256": "7ea9d060129b409a75a16f33e9dbd157a82ec1050cf80bb4585c57af53599a89"
+        },
+        {
+          "name": "goal_create",
+          "schemaSha256": "e0deb4f487fed3ae00d9b1a99dbfd030dfb85a2ca5cec432460d9dbe1cd491ae"
+        },
+        {
+          "name": "goal_update",
+          "schemaSha256": "99412b3b9417fe1801332f0442d902709212ea27453ac86526b206664816e771"
+        },
+        {
+          "name": "git_pr_create",
+          "schemaSha256": "96cd7b46e6bec87e36dfaefed59daf61790f4ad36810878c0d7f4290f9f9ffe5"
+        },
+        {
+          "name": "task_get",
+          "schemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d"
+        },
+        {
+          "name": "task_list",
+          "schemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f"
+        },
+        {
+          "name": "goal_list",
+          "schemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f"
+        },
+        {
+          "name": "goal_get",
+          "schemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d"
+        },
+        {
+          "name": "ask_user",
+          "schemaSha256": "3a6ac2076cd5bbe29ecbcc1c68dc67b1234e4dbce471b109aa7d87446a46edca"
+        },
+        {
+          "name": "tool_search",
+          "schemaSha256": "4e435746a671ee12aab22ded46e8149c005ac745ccffeb49d358a674af851275"
+        },
+        {
+          "name": "web_fetch",
+          "schemaSha256": "70a0ee4ad267a54f0f15e23c0f816a1f1920eacbeb10283a06dca6c593c3ca2d"
+        },
+        {
+          "name": "dispatch_subagent",
+          "schemaSha256": "cb5da5707a26cc06b6bcc8803cbe5cce556ce887f0e6fca608e341157c7ea557"
+        }
+      ],
+      "advertisedToolsSha256": "9f59fd09bf92d099026db0c75673b2658813402f98b717e798df57d7a5dd06cf",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": [],
+      "finishReasons": [
+        "tool_calls"
+      ],
+      "terminalStreamMarker": true,
+      "route": {
+        "id": 1792904580248,
+        "time": "2026-10-25T15:55:50.389664+08:00",
+        "ms": 4888,
+        "asked": "codex/gpt-6.1-sol",
+        "model": "codex/gpt-6.1-sol",
+        "served": "gpt-6.1-sol",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6.1-sol",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 4818
+          }
+        ],
+        "captureBridgeSequence": 17,
+        "session": "go-cli-live-dynamic-dynamic-interactive-1eae389f",
+        "routeStateSequence": 405
+      },
+      "toolCalls": [
+        {
+          "id": "call_8526066ad663404c9d16c2d7a4f781d2",
+          "name": "skill_search",
+          "argumentsSha256": "e9fbc4cd6c1efcc5262002360072280f21ebe171c77bc35ab046ee5ea8f53b58"
+        }
+      ],
+      "strictModelIdentityMatched": true
+    },
+    {
+      "sequence": 18,
+      "turn": "LIVE_HOOK_BLOCK_4FED212F83B0",
+      "requestKind": "interactive-user-turn",
+      "askedModel": "codex/gpt-6.1-sol",
+      "servedModel": "codex/gpt-6.1-sol",
+      "provider": "codex",
+      "status": 200,
+      "responseId": "chatcmpl-resp_0988e1982bc34d81016addb622c358819b95184ac9dbfd09c6",
+      "requestId": null,
+      "routeIdentity": {
+        "status": "matched",
+        "routeId": 1792904580249,
+        "sessionMatches": true,
+        "captureAssociation": "matched",
+        "captureBridgeSequence": 18
+      },
+      "usageIdentity": {
+        "status": "matched",
+        "matchedFields": [
+          "response_id",
+          "route_id",
+          "session"
+        ],
+        "mismatchedFields": []
+      },
+      "gatewayUsage": {
+        "t": "2026-10-25T15:56:17.859981+08:00",
+        "agent": "other",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_0988e1982bc34d81016addb622c358819b95184ac9dbfd09c6",
+        "route_id": 1792904580249,
+        "in": 234,
+        "out": 19,
+        "cache_read": 9216,
+        "cache_write": 0,
+        "ms": 3178,
+        "session": "go-cli-live-dynamic-dynamic-interactive-1eae389f"
+      },
+      "usageReconciliation": {
+        "status": "matched",
+        "upstreamInputTokens": 9450,
+        "magpieUncachedInputTokens": 234,
+        "magpieCachedInputTokens": 9216,
+        "upstreamOutputTokens": 19,
+        "magpieOutputTokens": 19,
+        "inputMatches": true,
+        "outputMatches": true
+      },
+      "advertisedTools": [
+        {
+          "name": "read",
+          "schemaSha256": "39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194"
+        },
+        {
+          "name": "bash",
+          "schemaSha256": "efcd767e81a864d776ee5d1d5757f469a0a9719f26d1cc0b3bae611597585186"
+        },
+        {
+          "name": "write",
+          "schemaSha256": "2722054af68ae084dc41c5ce5e3c503659363e250d6efa63a8871f1d102feef7"
+        },
+        {
+          "name": "edit",
+          "schemaSha256": "04dba4135c69ceccca3a10122dd302a9a70feeb73cac315ea0ca24d27800c51a"
+        },
+        {
+          "name": "grep",
+          "schemaSha256": "1a3bd71cd9ec79622205bac996733641180dae25cdeadac1cd3e4890e3710550"
+        },
+        {
+          "name": "find",
+          "schemaSha256": "8b26e67f119f27a2923c71bcce17547d8c5dcbf6e8f7237cfd633fc926931c09"
+        },
+        {
+          "name": "ls",
+          "schemaSha256": "6e839a041ec51e9b16bb72291f91132707e05022cabe7fe316d23b794624977a"
+        },
+        {
+          "name": "git_diff",
+          "schemaSha256": "f266fd76bdbe5e68b59514e339ef5ece9744c1d790afebebbaf9a02d10bbbfb8"
+        },
+        {
+          "name": "git_status",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_commit",
+          "schemaSha256": "758018d243c68aaf3fbab2a1612b32472375e0d2820e78a6c69a9ebf889c80c2"
+        },
+        {
+          "name": "git_log",
+          "schemaSha256": "da7043a670d966854e4805d6b9d8912ced1d9c860639ee869515b151bfb70f0c"
+        },
+        {
+          "name": "git_branch",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_checkout",
+          "schemaSha256": "b145b98efda2b1a53830874a0c6115d9b45bdf1a5cbad13095c3141aef9521a4"
+        },
+        {
+          "name": "git_blame",
+          "schemaSha256": "589d5651cc72a44ff98687e236bf6fc8cd4f9271da1272b3b81b0e25a20966f1"
+        },
+        {
+          "name": "git_push",
+          "schemaSha256": "b5e26250c6d1ed592abca7be5bb87dc0968200cb11ff23cbe54a0ffff22a46ea"
+        },
+        {
+          "name": "git_create_branch",
+          "schemaSha256": "ce7257358c3224ab6d1ab83be200b5a15731d2dd7dba8d8ad90e82b8a661cb1a"
+        },
+        {
+          "name": "git_merge",
+          "schemaSha256": "7d8e6f3b6cb48aef4f0d37bd36ea59b768686d2b15ffe7e8489c6f501b31d47a"
+        },
+        {
+          "name": "git_stash",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_stash_pop",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_reset",
+          "schemaSha256": "14132acf08efc074ba3f016470c203e5cb75bcc1502b03ca66308f9a1d205e82"
+        },
+        {
+          "name": "git_revert",
+          "schemaSha256": "f3832baf09f5d0cca643fd82167a0c8a52bfc8c29cdbaffcf8485c3c93c12ef8"
+        },
+        {
+          "name": "git_fetch",
+          "schemaSha256": "f31191d1cec73e5051671ac8f5f551ba50e43704e72700399ed7e5c667b63448"
+        },
+        {
+          "name": "git_pull",
+          "schemaSha256": "3344da8f3dbd05445b42855e12e3cbea0b182a2c9a16e26c188064eb9c951484"
+        },
+        {
+          "name": "git_remote",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "mcp_list",
+          "schemaSha256": "92b59a78159424c28d0137811c5425dca6a864b512ff30be9b90f952a0679c00"
+        },
+        {
+          "name": "mcp_discover",
+          "schemaSha256": "fc15014fa5b55292c7b41c82be676ed985b9457dd9842fbf0f8ec5eabb16f692"
+        },
+        {
+          "name": "skill_search",
+          "schemaSha256": "95a1330f6ed50b67f3698e70536b1b1b309953eadd81aee157369c9133f5097d"
+        },
+        {
+          "name": "skill_load",
+          "schemaSha256": "95a1330f6ed50b67f3698e70536b1b1b309953eadd81aee157369c9133f5097d"
+        },
+        {
+          "name": "todo_write",
+          "schemaSha256": "5c9b0b178abaf832d68c10b6ff93bd88d1de70d1624d868e9c1b839c2bdb0608"
+        },
+        {
+          "name": "task_create",
+          "schemaSha256": "218fda51440f7eca5a0ef2dc067cf8ab61314ec2d3c0164ba17ddecd9423890e"
+        },
+        {
+          "name": "task_update",
+          "schemaSha256": "7ea9d060129b409a75a16f33e9dbd157a82ec1050cf80bb4585c57af53599a89"
+        },
+        {
+          "name": "goal_create",
+          "schemaSha256": "e0deb4f487fed3ae00d9b1a99dbfd030dfb85a2ca5cec432460d9dbe1cd491ae"
+        },
+        {
+          "name": "goal_update",
+          "schemaSha256": "99412b3b9417fe1801332f0442d902709212ea27453ac86526b206664816e771"
+        },
+        {
+          "name": "git_pr_create",
+          "schemaSha256": "96cd7b46e6bec87e36dfaefed59daf61790f4ad36810878c0d7f4290f9f9ffe5"
+        },
+        {
+          "name": "task_get",
+          "schemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d"
+        },
+        {
+          "name": "task_list",
+          "schemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f"
+        },
+        {
+          "name": "goal_list",
+          "schemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f"
+        },
+        {
+          "name": "goal_get",
+          "schemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d"
+        },
+        {
+          "name": "ask_user",
+          "schemaSha256": "3a6ac2076cd5bbe29ecbcc1c68dc67b1234e4dbce471b109aa7d87446a46edca"
+        },
+        {
+          "name": "tool_search",
+          "schemaSha256": "4e435746a671ee12aab22ded46e8149c005ac745ccffeb49d358a674af851275"
+        },
+        {
+          "name": "web_fetch",
+          "schemaSha256": "70a0ee4ad267a54f0f15e23c0f816a1f1920eacbeb10283a06dca6c593c3ca2d"
+        },
+        {
+          "name": "dispatch_subagent",
+          "schemaSha256": "cb5da5707a26cc06b6bcc8803cbe5cce556ce887f0e6fca608e341157c7ea557"
+        }
+      ],
+      "advertisedToolsSha256": "9f59fd09bf92d099026db0c75673b2658813402f98b717e798df57d7a5dd06cf",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": [],
+      "finishReasons": [
+        "tool_calls"
+      ],
+      "terminalStreamMarker": true,
+      "route": {
+        "id": 1792904580249,
+        "time": "2026-10-25T15:56:17.859981+08:00",
+        "ms": 3178,
+        "asked": "codex/gpt-6.1-sol",
+        "model": "codex/gpt-6.1-sol",
+        "served": "gpt-6.1-sol",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6.1-sol",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 3119
+          }
+        ],
+        "captureBridgeSequence": 18,
+        "session": "go-cli-live-dynamic-dynamic-interactive-1eae389f",
+        "routeStateSequence": 410
+      },
+      "toolCalls": [
+        {
+          "id": "call_c9512b6f042a400eb259957f2cf1c65b",
+          "name": "skill_load",
+          "argumentsSha256": "e9fbc4cd6c1efcc5262002360072280f21ebe171c77bc35ab046ee5ea8f53b58"
+        }
+      ],
+      "strictModelIdentityMatched": true
+    },
+    {
+      "sequence": 19,
+      "turn": "LIVE_HOOK_BLOCK_4FED212F83B0",
+      "requestKind": "interactive-user-turn",
+      "askedModel": "codex/gpt-6.1-sol",
+      "servedModel": "codex/gpt-6.1-sol",
+      "provider": "codex",
+      "status": 200,
+      "responseId": "chatcmpl-resp_007691e28ece8ca5016addb63963bc8199b02e16879184df2d",
+      "requestId": null,
+      "routeIdentity": {
+        "status": "matched",
+        "routeId": 1792904580250,
+        "sessionMatches": true,
+        "captureAssociation": "matched",
+        "captureBridgeSequence": 19
+      },
+      "usageIdentity": {
+        "status": "matched",
+        "matchedFields": [
+          "response_id",
+          "route_id",
+          "session"
+        ],
+        "mismatchedFields": []
+      },
+      "gatewayUsage": {
+        "t": "2026-10-25T15:56:39.847535+08:00",
+        "agent": "other",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_007691e28ece8ca5016addb63963bc8199b02e16879184df2d",
+        "route_id": 1792904580250,
+        "in": 516,
+        "out": 18,
+        "cache_read": 9088,
+        "cache_write": 0,
+        "ms": 3536,
+        "session": "go-cli-live-dynamic-dynamic-interactive-1eae389f"
+      },
+      "usageReconciliation": {
+        "status": "matched",
+        "upstreamInputTokens": 9604,
+        "magpieUncachedInputTokens": 516,
+        "magpieCachedInputTokens": 9088,
+        "upstreamOutputTokens": 18,
+        "magpieOutputTokens": 18,
+        "inputMatches": true,
+        "outputMatches": true
+      },
+      "advertisedTools": [
+        {
+          "name": "read",
+          "schemaSha256": "39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194"
+        },
+        {
+          "name": "bash",
+          "schemaSha256": "efcd767e81a864d776ee5d1d5757f469a0a9719f26d1cc0b3bae611597585186"
+        },
+        {
+          "name": "write",
+          "schemaSha256": "2722054af68ae084dc41c5ce5e3c503659363e250d6efa63a8871f1d102feef7"
+        },
+        {
+          "name": "edit",
+          "schemaSha256": "04dba4135c69ceccca3a10122dd302a9a70feeb73cac315ea0ca24d27800c51a"
+        },
+        {
+          "name": "grep",
+          "schemaSha256": "1a3bd71cd9ec79622205bac996733641180dae25cdeadac1cd3e4890e3710550"
+        },
+        {
+          "name": "find",
+          "schemaSha256": "8b26e67f119f27a2923c71bcce17547d8c5dcbf6e8f7237cfd633fc926931c09"
+        },
+        {
+          "name": "ls",
+          "schemaSha256": "6e839a041ec51e9b16bb72291f91132707e05022cabe7fe316d23b794624977a"
+        },
+        {
+          "name": "git_diff",
+          "schemaSha256": "f266fd76bdbe5e68b59514e339ef5ece9744c1d790afebebbaf9a02d10bbbfb8"
+        },
+        {
+          "name": "git_status",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_commit",
+          "schemaSha256": "758018d243c68aaf3fbab2a1612b32472375e0d2820e78a6c69a9ebf889c80c2"
+        },
+        {
+          "name": "git_log",
+          "schemaSha256": "da7043a670d966854e4805d6b9d8912ced1d9c860639ee869515b151bfb70f0c"
+        },
+        {
+          "name": "git_branch",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_checkout",
+          "schemaSha256": "b145b98efda2b1a53830874a0c6115d9b45bdf1a5cbad13095c3141aef9521a4"
+        },
+        {
+          "name": "git_blame",
+          "schemaSha256": "589d5651cc72a44ff98687e236bf6fc8cd4f9271da1272b3b81b0e25a20966f1"
+        },
+        {
+          "name": "git_push",
+          "schemaSha256": "b5e26250c6d1ed592abca7be5bb87dc0968200cb11ff23cbe54a0ffff22a46ea"
+        },
+        {
+          "name": "git_create_branch",
+          "schemaSha256": "ce7257358c3224ab6d1ab83be200b5a15731d2dd7dba8d8ad90e82b8a661cb1a"
+        },
+        {
+          "name": "git_merge",
+          "schemaSha256": "7d8e6f3b6cb48aef4f0d37bd36ea59b768686d2b15ffe7e8489c6f501b31d47a"
+        },
+        {
+          "name": "git_stash",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_stash_pop",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_reset",
+          "schemaSha256": "14132acf08efc074ba3f016470c203e5cb75bcc1502b03ca66308f9a1d205e82"
+        },
+        {
+          "name": "git_revert",
+          "schemaSha256": "f3832baf09f5d0cca643fd82167a0c8a52bfc8c29cdbaffcf8485c3c93c12ef8"
+        },
+        {
+          "name": "git_fetch",
+          "schemaSha256": "f31191d1cec73e5051671ac8f5f551ba50e43704e72700399ed7e5c667b63448"
+        },
+        {
+          "name": "git_pull",
+          "schemaSha256": "3344da8f3dbd05445b42855e12e3cbea0b182a2c9a16e26c188064eb9c951484"
+        },
+        {
+          "name": "git_remote",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "mcp_list",
+          "schemaSha256": "92b59a78159424c28d0137811c5425dca6a864b512ff30be9b90f952a0679c00"
+        },
+        {
+          "name": "mcp_discover",
+          "schemaSha256": "fc15014fa5b55292c7b41c82be676ed985b9457dd9842fbf0f8ec5eabb16f692"
+        },
+        {
+          "name": "skill_search",
+          "schemaSha256": "95a1330f6ed50b67f3698e70536b1b1b309953eadd81aee157369c9133f5097d"
+        },
+        {
+          "name": "skill_load",
+          "schemaSha256": "95a1330f6ed50b67f3698e70536b1b1b309953eadd81aee157369c9133f5097d"
+        },
+        {
+          "name": "todo_write",
+          "schemaSha256": "5c9b0b178abaf832d68c10b6ff93bd88d1de70d1624d868e9c1b839c2bdb0608"
+        },
+        {
+          "name": "task_create",
+          "schemaSha256": "218fda51440f7eca5a0ef2dc067cf8ab61314ec2d3c0164ba17ddecd9423890e"
+        },
+        {
+          "name": "task_update",
+          "schemaSha256": "7ea9d060129b409a75a16f33e9dbd157a82ec1050cf80bb4585c57af53599a89"
+        },
+        {
+          "name": "goal_create",
+          "schemaSha256": "e0deb4f487fed3ae00d9b1a99dbfd030dfb85a2ca5cec432460d9dbe1cd491ae"
+        },
+        {
+          "name": "goal_update",
+          "schemaSha256": "99412b3b9417fe1801332f0442d902709212ea27453ac86526b206664816e771"
+        },
+        {
+          "name": "git_pr_create",
+          "schemaSha256": "96cd7b46e6bec87e36dfaefed59daf61790f4ad36810878c0d7f4290f9f9ffe5"
+        },
+        {
+          "name": "task_get",
+          "schemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d"
+        },
+        {
+          "name": "task_list",
+          "schemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f"
+        },
+        {
+          "name": "goal_list",
+          "schemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f"
+        },
+        {
+          "name": "goal_get",
+          "schemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d"
+        },
+        {
+          "name": "ask_user",
+          "schemaSha256": "3a6ac2076cd5bbe29ecbcc1c68dc67b1234e4dbce471b109aa7d87446a46edca"
+        },
+        {
+          "name": "tool_search",
+          "schemaSha256": "4e435746a671ee12aab22ded46e8149c005ac745ccffeb49d358a674af851275"
+        },
+        {
+          "name": "web_fetch",
+          "schemaSha256": "70a0ee4ad267a54f0f15e23c0f816a1f1920eacbeb10283a06dca6c593c3ca2d"
+        },
+        {
+          "name": "dispatch_subagent",
+          "schemaSha256": "cb5da5707a26cc06b6bcc8803cbe5cce556ce887f0e6fca608e341157c7ea557"
+        }
+      ],
+      "advertisedToolsSha256": "9f59fd09bf92d099026db0c75673b2658813402f98b717e798df57d7a5dd06cf",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": [],
+      "finishReasons": [
+        "tool_calls"
+      ],
+      "terminalStreamMarker": true,
+      "route": {
+        "id": 1792904580250,
+        "time": "2026-10-25T15:56:39.847535+08:00",
+        "ms": 3536,
+        "asked": "codex/gpt-6.1-sol",
+        "model": "codex/gpt-6.1-sol",
+        "served": "gpt-6.1-sol",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6.1-sol",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 3525
+          }
+        ],
+        "captureBridgeSequence": 19,
+        "session": "go-cli-live-dynamic-dynamic-interactive-1eae389f",
+        "routeStateSequence": 415
+      },
+      "toolCalls": [
+        {
+          "id": "call_fdf294eacefa40658e288c4e4a0f9d34",
+          "name": "read",
+          "argumentsSha256": "82f9054a785d7a1a04e1eae2bbbf9dc46f46f76bbc0243ea2350a65795cf40de"
+        }
+      ],
+      "strictModelIdentityMatched": true
+    },
+    {
+      "sequence": 20,
+      "turn": "LIVE_HOOK_BLOCK_4FED212F83B0",
+      "requestKind": "interactive-user-turn",
+      "askedModel": "codex/gpt-6.1-sol",
+      "servedModel": "codex/gpt-6.1-sol",
+      "provider": "codex",
+      "status": 200,
+      "responseId": "chatcmpl-resp_0023f0f1eac8c991016addb63d4254819bb92043eb17c63833",
+      "requestId": null,
+      "routeIdentity": {
+        "status": "matched",
+        "routeId": 1792904580251,
+        "sessionMatches": true,
+        "captureAssociation": "matched",
+        "captureBridgeSequence": 20
+      },
+      "usageIdentity": {
+        "status": "matched",
+        "matchedFields": [
+          "response_id",
+          "route_id",
+          "session"
+        ],
+        "mismatchedFields": []
+      },
+      "gatewayUsage": {
+        "t": "2026-10-25T15:56:43.441415+08:00",
+        "agent": "other",
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "status": 200,
+        "req": "codex/gpt-6.1-sol",
+        "response_id": "chatcmpl-resp_0023f0f1eac8c991016addb63d4254819bb92043eb17c63833",
+        "route_id": 1792904580251,
+        "in": 293,
+        "out": 7,
+        "cache_read": 9344,
+        "cache_write": 0,
+        "ms": 3456,
+        "session": "go-cli-live-dynamic-dynamic-interactive-1eae389f"
+      },
+      "usageReconciliation": {
+        "status": "matched",
+        "upstreamInputTokens": 9637,
+        "magpieUncachedInputTokens": 293,
+        "magpieCachedInputTokens": 9344,
+        "upstreamOutputTokens": 7,
+        "magpieOutputTokens": 7,
+        "inputMatches": true,
+        "outputMatches": true
+      },
+      "advertisedTools": [
+        {
+          "name": "read",
+          "schemaSha256": "39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194"
+        },
+        {
+          "name": "bash",
+          "schemaSha256": "efcd767e81a864d776ee5d1d5757f469a0a9719f26d1cc0b3bae611597585186"
+        },
+        {
+          "name": "write",
+          "schemaSha256": "2722054af68ae084dc41c5ce5e3c503659363e250d6efa63a8871f1d102feef7"
+        },
+        {
+          "name": "edit",
+          "schemaSha256": "04dba4135c69ceccca3a10122dd302a9a70feeb73cac315ea0ca24d27800c51a"
+        },
+        {
+          "name": "grep",
+          "schemaSha256": "1a3bd71cd9ec79622205bac996733641180dae25cdeadac1cd3e4890e3710550"
+        },
+        {
+          "name": "find",
+          "schemaSha256": "8b26e67f119f27a2923c71bcce17547d8c5dcbf6e8f7237cfd633fc926931c09"
+        },
+        {
+          "name": "ls",
+          "schemaSha256": "6e839a041ec51e9b16bb72291f91132707e05022cabe7fe316d23b794624977a"
+        },
+        {
+          "name": "git_diff",
+          "schemaSha256": "f266fd76bdbe5e68b59514e339ef5ece9744c1d790afebebbaf9a02d10bbbfb8"
+        },
+        {
+          "name": "git_status",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_commit",
+          "schemaSha256": "758018d243c68aaf3fbab2a1612b32472375e0d2820e78a6c69a9ebf889c80c2"
+        },
+        {
+          "name": "git_log",
+          "schemaSha256": "da7043a670d966854e4805d6b9d8912ced1d9c860639ee869515b151bfb70f0c"
+        },
+        {
+          "name": "git_branch",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_checkout",
+          "schemaSha256": "b145b98efda2b1a53830874a0c6115d9b45bdf1a5cbad13095c3141aef9521a4"
+        },
+        {
+          "name": "git_blame",
+          "schemaSha256": "589d5651cc72a44ff98687e236bf6fc8cd4f9271da1272b3b81b0e25a20966f1"
+        },
+        {
+          "name": "git_push",
+          "schemaSha256": "b5e26250c6d1ed592abca7be5bb87dc0968200cb11ff23cbe54a0ffff22a46ea"
+        },
+        {
+          "name": "git_create_branch",
+          "schemaSha256": "ce7257358c3224ab6d1ab83be200b5a15731d2dd7dba8d8ad90e82b8a661cb1a"
+        },
+        {
+          "name": "git_merge",
+          "schemaSha256": "7d8e6f3b6cb48aef4f0d37bd36ea59b768686d2b15ffe7e8489c6f501b31d47a"
+        },
+        {
+          "name": "git_stash",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_stash_pop",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "git_reset",
+          "schemaSha256": "14132acf08efc074ba3f016470c203e5cb75bcc1502b03ca66308f9a1d205e82"
+        },
+        {
+          "name": "git_revert",
+          "schemaSha256": "f3832baf09f5d0cca643fd82167a0c8a52bfc8c29cdbaffcf8485c3c93c12ef8"
+        },
+        {
+          "name": "git_fetch",
+          "schemaSha256": "f31191d1cec73e5051671ac8f5f551ba50e43704e72700399ed7e5c667b63448"
+        },
+        {
+          "name": "git_pull",
+          "schemaSha256": "3344da8f3dbd05445b42855e12e3cbea0b182a2c9a16e26c188064eb9c951484"
+        },
+        {
+          "name": "git_remote",
+          "schemaSha256": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+        },
+        {
+          "name": "mcp_list",
+          "schemaSha256": "92b59a78159424c28d0137811c5425dca6a864b512ff30be9b90f952a0679c00"
+        },
+        {
+          "name": "mcp_discover",
+          "schemaSha256": "fc15014fa5b55292c7b41c82be676ed985b9457dd9842fbf0f8ec5eabb16f692"
+        },
+        {
+          "name": "skill_search",
+          "schemaSha256": "95a1330f6ed50b67f3698e70536b1b1b309953eadd81aee157369c9133f5097d"
+        },
+        {
+          "name": "skill_load",
+          "schemaSha256": "95a1330f6ed50b67f3698e70536b1b1b309953eadd81aee157369c9133f5097d"
+        },
+        {
+          "name": "todo_write",
+          "schemaSha256": "5c9b0b178abaf832d68c10b6ff93bd88d1de70d1624d868e9c1b839c2bdb0608"
+        },
+        {
+          "name": "task_create",
+          "schemaSha256": "218fda51440f7eca5a0ef2dc067cf8ab61314ec2d3c0164ba17ddecd9423890e"
+        },
+        {
+          "name": "task_update",
+          "schemaSha256": "7ea9d060129b409a75a16f33e9dbd157a82ec1050cf80bb4585c57af53599a89"
+        },
+        {
+          "name": "goal_create",
+          "schemaSha256": "e0deb4f487fed3ae00d9b1a99dbfd030dfb85a2ca5cec432460d9dbe1cd491ae"
+        },
+        {
+          "name": "goal_update",
+          "schemaSha256": "99412b3b9417fe1801332f0442d902709212ea27453ac86526b206664816e771"
+        },
+        {
+          "name": "git_pr_create",
+          "schemaSha256": "96cd7b46e6bec87e36dfaefed59daf61790f4ad36810878c0d7f4290f9f9ffe5"
+        },
+        {
+          "name": "task_get",
+          "schemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d"
+        },
+        {
+          "name": "task_list",
+          "schemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f"
+        },
+        {
+          "name": "goal_list",
+          "schemaSha256": "d746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f"
+        },
+        {
+          "name": "goal_get",
+          "schemaSha256": "7717dd85c2e5ff939b47bf9369acc9c59e449e42f2f3bff74058dcd2eea9242d"
+        },
+        {
+          "name": "ask_user",
+          "schemaSha256": "3a6ac2076cd5bbe29ecbcc1c68dc67b1234e4dbce471b109aa7d87446a46edca"
+        },
+        {
+          "name": "tool_search",
+          "schemaSha256": "4e435746a671ee12aab22ded46e8149c005ac745ccffeb49d358a674af851275"
+        },
+        {
+          "name": "web_fetch",
+          "schemaSha256": "70a0ee4ad267a54f0f15e23c0f816a1f1920eacbeb10283a06dca6c593c3ca2d"
+        },
+        {
+          "name": "dispatch_subagent",
+          "schemaSha256": "cb5da5707a26cc06b6bcc8803cbe5cce556ce887f0e6fca608e341157c7ea557"
+        }
+      ],
+      "advertisedToolsSha256": "9f59fd09bf92d099026db0c75673b2658813402f98b717e798df57d7a5dd06cf",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": [],
+      "finishReasons": [
+        "stop"
+      ],
+      "terminalStreamMarker": true,
+      "route": {
+        "id": 1792904580251,
+        "time": "2026-10-25T15:56:43.441415+08:00",
+        "ms": 3456,
+        "asked": "codex/gpt-6.1-sol",
+        "model": "codex/gpt-6.1-sol",
+        "served": "gpt-6.1-sol",
+        "tier_served": "default",
+        "status": 200,
+        "done": true,
+        "tries": [
+          {
+            "model": "codex/gpt-6.1-sol",
+            "tier_served": "default",
+            "done": true,
+            "status": 200,
+            "ms": 3389
+          }
+        ],
+        "captureBridgeSequence": 20,
+        "session": "go-cli-live-dynamic-dynamic-interactive-1eae389f",
+        "routeStateSequence": 420
+      },
+      "toolCalls": [],
+      "strictModelIdentityMatched": true
+    }
+  ],
+  "durableEntries": [
+    {
+      "id": "runcommit_e4208be52bc7e2881a435e568c4165bd1da610c7fab0ea28193c3a0821e2024c",
+      "seq": 73,
+      "type": "user",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "contentBytes": 143,
+      "contentSha256": "4332bcf4202c156992b41c6a5684365b4103c8716ff0b20277c577c6c36dedf1",
+      "matchedPromptIDs": [
+        "D01"
+      ],
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_faf8e82e5c11c40fe97782082ab2c440ce77cacb829264718a1da363126f0b38",
+      "seq": 74,
+      "type": "assistant",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "contentBytes": 76,
+      "contentSha256": "4e0734594387137ccac5e30a2d4e206cfcdbaab25a9b777ba9945ad8d1447b5f",
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_c281d3017730cacf05e225dfe49807ab0b4f2fc84c7f571bcd512989786de4f5",
+      "seq": 75,
+      "type": "tool",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "tool_name": "skill_search",
+      "tool_call_id": "call_8526066ad663404c9d16c2d7a4f781d2",
+      "action_state": "intent",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-1430d799d3066a74",
+      "action_id": "action-d7dd4c805673d539",
+      "owner_generation": "owner-035606b21aa36725",
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "schema_digest": "95a1330f6ed50b67f3698e70536b1b1b309953eadd81aee157369c9133f5097d",
+      "argument_digest": "e9fbc4cd6c1efcc5262002360072280f21ebe171c77bc35ab046ee5ea8f53b58",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_785455833fa2089afb9a658bfae7925780085d141e99c0df67ee7542297185c7",
+      "seq": 76,
+      "type": "tool",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "tool_name": "skill_search",
+      "tool_call_id": "call_8526066ad663404c9d16c2d7a4f781d2",
+      "action_state": "execution",
+      "dispatch_state": "dispatched",
+      "resource_state": "quiescent",
+      "completion_proof": "inline_pipeline_joined",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-1430d799d3066a74",
+      "action_id": "action-d7dd4c805673d539",
+      "owner_generation": "owner-035606b21aa36725",
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_edb11bcb987aaff9c5352cb1473018e78f1eef85c68ba524dd7e91dc95113780",
+      "seq": 77,
+      "type": "tool",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "tool_name": "skill_search",
+      "tool_call_id": "call_8526066ad663404c9d16c2d7a4f781d2",
+      "dispatch_state": "dispatched",
+      "receipt_outcome": "success",
+      "contentBytes": 188,
+      "contentSha256": "013ea67adf6e1c69b7c1b570e1499c170442b5b40c2cb8ce38e533e65ed335d7",
+      "action_batch_id": "batch-1430d799d3066a74",
+      "action_id": "action-d7dd4c805673d539",
+      "owner_generation": "owner-035606b21aa36725",
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_3bb134a77a4f62b613b1ece6f86a08fd85573a8fefe973e184e54569197d8c9e",
+      "seq": 78,
+      "type": "checkpoint",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "tool_name": "skill_search",
+      "tool_call_id": "call_8526066ad663404c9d16c2d7a4f781d2",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-1430d799d3066a74",
+      "action_id": "action-d7dd4c805673d539",
+      "owner_generation": "owner-035606b21aa36725",
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "checkpoint_kind": "execution_resolution",
+      "execution_resolution": {
+        "run_id": "a217f3eac9dc823d",
+        "action_id": "action-d7dd4c805673d539",
+        "evidence": "local_resources_quiescent",
+        "evidence_ref": "runcommit_785455833fa2089afb9a658bfae7925780085d141e99c0df67ee7542297185c7"
+      },
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_bfe3dc413daa79c33206d974de80b5a914d5e6979ee622200f05918988a20231",
+      "seq": 79,
+      "type": "assistant",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_ba718a6c8ebc29d63c1dfe29f1b3a1ee92d55157ef6ef4b57cbb591990ecb037",
+      "seq": 80,
+      "type": "tool",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "tool_name": "skill_load",
+      "tool_call_id": "call_c9512b6f042a400eb259957f2cf1c65b",
+      "action_state": "intent",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-09bd40e3cc7bc440",
+      "action_id": "action-e81e9193b83c6a63",
+      "owner_generation": "owner-035606b21aa36725",
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "schema_digest": "95a1330f6ed50b67f3698e70536b1b1b309953eadd81aee157369c9133f5097d",
+      "argument_digest": "e9fbc4cd6c1efcc5262002360072280f21ebe171c77bc35ab046ee5ea8f53b58",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_5cb6c0b3d83cceee4c5f21f7694e89c22cabe10da9a81f5cca0e0addd540c5df",
+      "seq": 81,
+      "type": "tool",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "tool_name": "skill_load",
+      "tool_call_id": "call_c9512b6f042a400eb259957f2cf1c65b",
+      "action_state": "execution",
+      "dispatch_state": "dispatched",
+      "resource_state": "quiescent",
+      "completion_proof": "inline_pipeline_joined",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-09bd40e3cc7bc440",
+      "action_id": "action-e81e9193b83c6a63",
+      "owner_generation": "owner-035606b21aa36725",
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_806d298da7fb60ecfa367240abcec765d8abcd3fedb4fba80400385238f7621b",
+      "seq": 82,
+      "type": "tool",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "tool_name": "skill_load",
+      "tool_call_id": "call_c9512b6f042a400eb259957f2cf1c65b",
+      "dispatch_state": "dispatched",
+      "receipt_outcome": "success",
+      "materialized_artifact_digest": "4d9dfffc19ab9c51ea2f14e291583c5a6267a1f699e9138e93986c2864f1e6b4",
+      "contentBytes": 406,
+      "contentSha256": "1dfe8f2a772ca5a80811c3356a72f662144d891b389d37e33ad9a50cfe9af295",
+      "action_batch_id": "batch-09bd40e3cc7bc440",
+      "action_id": "action-e81e9193b83c6a63",
+      "owner_generation": "owner-035606b21aa36725",
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_c0fb40b20b1b410ef39a3194ccdaf00e72bcd5d47efcfabd56e55dc32a4eaf88",
+      "seq": 83,
+      "type": "checkpoint",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "tool_name": "skill_load",
+      "tool_call_id": "call_c9512b6f042a400eb259957f2cf1c65b",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "action_batch_id": "batch-09bd40e3cc7bc440",
+      "action_id": "action-e81e9193b83c6a63",
+      "owner_generation": "owner-035606b21aa36725",
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "checkpoint_kind": "execution_resolution",
+      "execution_resolution": {
+        "run_id": "a217f3eac9dc823d",
+        "action_id": "action-e81e9193b83c6a63",
+        "evidence": "local_resources_quiescent",
+        "evidence_ref": "runcommit_5cb6c0b3d83cceee4c5f21f7694e89c22cabe10da9a81f5cca0e0addd540c5df"
+      },
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_16d58989a14f956894c88af9a33452d77db258b323d5ef33cac7005b8e7d1837",
+      "seq": 84,
+      "type": "assistant",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_fcb44470ef2ae4bb84ef21308e44e02c9733a058284fbf533c13785b036569de",
+      "seq": 85,
+      "type": "tool",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "tool_name": "read",
+      "tool_call_id": "call_fdf294eacefa40658e288c4e4a0f9d34",
+      "dispatch_state": "not_dispatched",
+      "receipt_outcome": "interrupted",
+      "contentBytes": 33,
+      "contentSha256": "674b3562121afca0965546c33e6a462f5e6c442d395608981e8d3e5a4a964f89",
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "record_version": 1
+    },
+    {
+      "id": "runcommit_52626f8a4a22eff509d8ebe388c5417981a27b762e959a42822fdd3076c8a448",
+      "seq": 86,
+      "type": "assistant",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "contentBytes": 12,
+      "contentSha256": "eb35098d6b64d654c2c90af6ea6867c1ca96c07f2c7690dcab4a4aa4b36b4047",
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "record_version": 1
+    },
+    {
+      "id": "terminal-28fe5367d25da26d",
+      "seq": 87,
+      "type": "checkpoint",
+      "session_id": "s_c6a602bb2b922b88c390db78dd50e9af",
+      "run_id": "a217f3eac9dc823d",
+      "run_outcome": "success",
+      "contentBytes": 0,
+      "contentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "workspace_id": "workspace-v1-ed2f8ca62b9e7b3795c6de6c7b471e38e8c4258864d6449bb40e6f919737ea5a",
+      "checkpoint_kind": "run_terminal",
+      "record_version": 1
+    }
+  ],
+  "effects": [
+    {
+      "name": "input.txt",
+      "exists": true,
+      "bytes": 30,
+      "sha256": "f1fbad8cb2122f11a4e3011e5c1b0ddec325ce021863a0bfc9d3c02847e0c842"
+    },
+    {
+      "name": "search.txt",
+      "exists": true,
+      "bytes": 30,
+      "sha256": "e12f5aee529272f1a9679b03818ff97d2ed6e81d8dfe867185c233eb5ab55bfa"
+    },
+    {
+      "name": "ask-approved.txt",
+      "exists": false
+    },
+    {
+      "name": "ask-denied.txt",
+      "exists": false
+    },
+    {
+      "name": "ask-escaped.txt",
+      "exists": false
+    },
+    {
+      "name": "auto-created.txt",
+      "exists": false
+    },
+    {
+      "name": "deny-policy.txt",
+      "exists": false
+    },
+    {
+      "name": "cancel-late-marker.txt",
+      "exists": false
+    },
+    {
+      "name": "hook-events.jsonl",
+      "exists": true,
+      "bytes": 120,
+      "sha256": "1eca72bafb7b83d04b690fd37d542b266740a5ad6e038dad62886229dcb9ce8b",
+      "markerCounts": {
+        "HOOK_V1": 6,
+        "HOOK_V2": 6,
+        "HOOK_V3": 3
+      }
+    }
+  ],
+  "mcpStartMarkerExists": false,
+  "mcpRPCMethodCounts": {},
+  "rawEvidenceRemainsPrivate": true,
+  "rawCutManifestSha256": "784f0f6a13ae6bec28d93afe1b41f74987f2947e4f21fdeb1314f94d67d525f4",
+  "inputMetadata": {
+    "sourceSha256": "4be3f66c7578e794711900dafff7888e59e7195a7c47da3b7107fe82448ad578",
+    "events": [
+      {
+        "at": 1792914897.887729,
+        "kind": "text+enter",
+        "bytes": 20,
+        "sha256": "6728a5f245239389cc1037e369cfc6b11978cde6f9bea34d661413e6d89de82d"
+      },
+      {
+        "at": 1792914950.3573928,
+        "kind": "text+enter",
+        "bytes": 156,
+        "sha256": "e968a4e20fc40d0d47fe2ffdd4760027212fcf5df2642adeca47faa61cedb492"
+      },
+      {
+        "at": 1792914977.789558,
+        "kind": "key:y",
+        "bytes": 1,
+        "sha256": "a1fce4363854ff888cff4b8e7875d600c2682390412a8cf79b37d0b11148b0fa"
+      },
+      {
+        "at": 1792914999.776421,
+        "kind": "key:y",
+        "bytes": 1,
+        "sha256": "a1fce4363854ff888cff4b8e7875d600c2682390412a8cf79b37d0b11148b0fa"
+      }
+    ]
+  },
+  "images": {
+    "phaseCut": "dynamic-hook-deny",
+    "phaseCutManifestSha256": "784f0f6a13ae6bec28d93afe1b41f74987f2947e4f21fdeb1314f94d67d525f4",
+    "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+    "pid": 57936,
+    "sessionIDs": [
+      "s_c6a602bb2b922b88c390db78dd50e9af"
+    ],
+    "images": [
+      {
+        "file": "46-hook-blocked-read-iab.jpg",
+        "bytes": 106997,
+        "sha256": "00602e8ef3aa9cccab64b1bd805ac6f54cf59cd3e1bc8d768e916c92c7e0c42f",
+        "format": "jpeg",
+        "mime": "image/jpeg",
+        "width": 826,
+        "height": 862,
+        "sourceRelativeToRoleRoot": "artifacts/screenshots/46-hook-blocked-read-iab.jpg"
+      }
+    ],
+    "capture": "CUA IAB tab viewport, actual Go PTY xterm; no pixel edits or encoding changes"
+  },
+  "selectedLiteralObservation": {
+    "phase": "dynamic-hook-deny",
+    "sourceCutManifestSha256": "784f0f6a13ae6bec28d93afe1b41f74987f2947e4f21fdeb1314f94d67d525f4",
+    "sourceBridgeMetadataSha256": "871c475c351b901ca94794e7394a7891b92bda314e6799252195d3e17c5c35c8",
+    "sourceKind": "Exact projection of previously recorded bridge flags, not a new scan",
+    "selectedLabels": [
+      "mcp-private-command",
+      "mcp-private-env"
+    ],
+    "records": [
+      {
+        "sequence": 17,
+        "requestSha256": "0e21b8a47a07edeb6d61ea45aeafcc59bd35ff8cee03643e84ccfa4038866089",
+        "responseSha256": "44d60b745889308c0aeb417b5585f214bcc36677d55f6022a1dc79790c497600",
+        "responseId": "chatcmpl-resp_09a767400760e6d2016addb6095a88819b8d3119ac35ab7dcb",
+        "fixtureFactsChecked": true,
+        "fixtureFactsPresent": []
+      },
+      {
+        "sequence": 18,
+        "requestSha256": "ed5961aa1b8b4094eaf4263e23e578b7b7ec4a547a0b60176065bcea0fb35ea2",
+        "responseSha256": "dc437e3112868043f238f5f2d0bcd767fb9db6e3351f264e402d7c2e12e755ac",
+        "responseId": "chatcmpl-resp_0988e1982bc34d81016addb622c358819b95184ac9dbfd09c6",
+        "fixtureFactsChecked": true,
+        "fixtureFactsPresent": []
+      },
+      {
+        "sequence": 19,
+        "requestSha256": "da681d8ac43010e9ed781fce65b28c3ae9d796c91e8b308de79ebd35324ea970",
+        "responseSha256": "619c8379a05d2771385878a2adc0fb5cb30704a91d7898b062f792e158dc1acd",
+        "responseId": "chatcmpl-resp_007691e28ece8ca5016addb63963bc8199b02e16879184df2d",
+        "fixtureFactsChecked": true,
+        "fixtureFactsPresent": []
+      },
+      {
+        "sequence": 20,
+        "requestSha256": "316965756a2e4dc1d4a475455491af8b1a7393d894aa04a21f4b3f2521d20e50",
+        "responseSha256": "aea2f4a0c88b5eedd4a7b0f2520242f1b8e60740e4dde2c3a7d012ceb64c4747",
+        "responseId": "chatcmpl-resp_0023f0f1eac8c991016addb63d4254819bb92043eb17c63833",
+        "fixtureFactsChecked": true,
+        "fixtureFactsPresent": []
+      }
+    ],
+    "scope": "Selected decoded-JSON visible literal flags only; original upstream JSON was not retained and is not independently rescanned; no encoded/general information-flow claim"
+  },
+  "skillResultObservation": {
+    "V1TagInFinalAssistant": false,
+    "V2TagInFinalAssistant": false,
+    "readBlockedInFinalAssistant": true
+  }
+}

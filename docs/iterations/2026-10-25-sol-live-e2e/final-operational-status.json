@@ -1,0 +1,25 @@
+{
+  "liveUIFinished": true,
+  "activeCLI": 0,
+  "dynamicRevokedAdmissionExitCode": 1,
+  "otherObservedInteractiveExitCodes": 0,
+  "frontendsStopped": [
+    14943,
+    44127
+  ],
+  "frontendStopProofSha256": "591cff8f746c765973f3b028649af0105a94234f046ff87ebe63f482d4c629f2",
+  "cleanupChecksPassed": true,
+  "cleanupReceiptSha256": "d3fd82d51e8818d7e60e8788ce1324d91faf040318cce7f258982bc7e289a622",
+  "cleanupChecks": {
+    "hardPersonal8Unchanged": true,
+    "original58Unchanged": true,
+    "trustStableLockRetained": true,
+    "unrelatedTrustSemanticsUnchanged": true
+  },
+  "ownCanonicalRolesRevokedThenRemoved": 5,
+  "ownAuthorityJournalsArchivedFsyncedThenRemoved": 5,
+  "unrelatedAuthoritiesLocksCheckoutAuthorityRetained": true,
+  "MagpiePIDPreserved": 2300,
+  "GoSourceWholeSha256": "7886f9740952df3ebff7558eb41e2849b8c37f51f9ed9ddd6eabec3069f42554",
+  "finalTaskRemoval": "Recorded separately by cleanup.md owner"
+}

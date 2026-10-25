@@ -1,0 +1,30 @@
+"""Record opaque prefix hashes for owned stores before a new component starts."""
+import hashlib,json,pathlib,re,sys,time
+root=pathlib.Path(__file__).resolve().parent.parent
+role,label=sys.argv[1:3]
+if role not in ('ask','auto','deny','dynamic') or re.fullmatch(r'[a-z0-9-]{1,80}',label) is None:
+ raise ValueError('invalid owned baseline label')
+files=[p for p in (root/'artifacts/stores'/role).rglob('*.jsonl') if p.is_file()]
+files += [p for p in (root/'workspaces'/role/'.go-cli/audit').glob('*.jsonl') if p.is_file()]
+rows={}
+for p in sorted(set(files)):
+ data=p.read_bytes()
+ if data and not data.endswith(b'\n'):raise ValueError('owned evidence is not at a JSONL boundary')
+ rows[str(p.relative_to(root))]={'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
+process=None
+owned_path=root/'artifacts/owned-resources.json'
+if owned_path.exists():
+ owned=json.loads(owned_path.read_text())
+ current=next((v for v in reversed(owned['sessions']) if v['role']==role and v['action']=='interactive'),None)
+ if current:
+  pty_id=current['id'];provider=root/'artifacts'/(pty_id+'.provider-evidence.json');inputs=root/'artifacts'/(pty_id+'.input-metadata.json')
+  events=json.loads(inputs.read_text()) if inputs.exists() else []
+  evidence=json.loads(provider.read_text()) if provider.exists() else None
+  sequence=max((v['sequence'] for v in evidence['snapshot']['requests']),default=0) if evidence else 0
+  process={'ptyID':pty_id,'pid':current['pid'],'providerSequence':sequence,'providerEvidenceSha256':hashlib.sha256(provider.read_bytes()).hexdigest() if provider.exists() else None,'inputEventCount':len(events),'inputEventPrefixSha256':hashlib.sha256(json.dumps(events,sort_keys=True,separators=(',',':')).encode()).hexdigest()}
+result={'role':role,'label':label,'root':str(root),'observedAtEpoch':time.time(),'files':rows,'process':process}
+folder=root/'artifacts/baselines';folder.mkdir(mode=0o700,exist_ok=True)
+out=folder/(label+'.json')
+with out.open('x') as f:f.write(json.dumps(result,indent=2)+'\n')
+out.chmod(0o600)
+print(json.dumps({'baseline':str(out),'files':len(rows),'role':role,'label':label}))

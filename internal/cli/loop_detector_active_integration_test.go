@@ -173,7 +173,11 @@ func TestAssembledLoopDetectorStopsParallelDurableBatchBeforeDispatch(t *testing
 	defer provider.Close()
 
 	assembly, durableSession, _ := newActiveLoopDurableAssembly(ctx, t, provider.URL, "terminate", 2)
-	require.NoError(t, assembly.ToolRegistry.Register(ctx, executorProbe))
+	// The probe has a synchronous lifetime. Declare that host contract so this
+	// fixture reaches the loop detector rather than unsupported-tool preflight.
+	registrar, ok := assembly.ToolRegistry.(tools.TrustedInlineControlRegistrar)
+	require.True(t, ok)
+	require.NoError(t, registrar.RegisterTrustedInlineControl(ctx, executorProbe))
 	runCtx := bindActiveLoopDurableRun(ctx, t, assembly, durableSession)
 	stream, err := assembly.Harness.Submit(runCtx, "repeat the write in parallel")
 	require.NoError(t, err)

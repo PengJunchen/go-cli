@@ -12,6 +12,8 @@ Inspired by and building upon [CloudWeGo Eino](https://github.com/cloudwego/eino
 
 **[中文文档](README.zh-CN.md)**
 
+**[Iteration reports and architecture diagrams](docs/iterations/README.md)**
+
 ---
 
 ## About This Project
