@@ -2,7 +2,7 @@
 
 ## 2026-10-25：Sol runtime 与 MCP 合同
 
-**状态：本轮 build、verify 和 E2E gates 已通过，真实 live E2E 验收仍在进行。** 2026-10-22 的历史报告不能替代本轮结果；当前 live 报告是阶段记录，Dynamic、Skill、Hook 和 MCP 动态路径尚未验收。完整终态资料待 owner 完成后更新。
+**状态：本轮 build、verify、E2E gates 和真实 Sol 矩阵已完成，临时构建与原始测试数据已清理。** 94 个真实请求分开记录旧候选、最终场景和失败校准；结果区分正向通过、安全负边界及原预期未满足项。durable 远端 MCP 执行仍不受支持，不能将连接或预检拒绝算作远端执行成功。2026-10-22 的历史记录不能替代本轮结果。
 
 - [迭代设计](2026-10-25-sol-runtime/design.md)
 - [本轮交互式架构图](2026-10-25-sol-runtime/architecture-iteration.html)：切换 379134d 基线与本轮路径，区分已新增边界、仍 unsupported 的 durable 远端 MCP，以及沿用的 Skill/Hook 与 edge 能力。
@@ -10,8 +10,10 @@
 - [运行时验证记录](2026-10-25-sol-runtime/verification.md)：记录 build 与验证门禁结果。
 - [审批行为说明](2026-10-25-sol-runtime/approval-behavior.md)：记录审批行为与当前候选范围。
 - [真实 Sol 实测计划](2026-10-25-sol-live-e2e/plan.md)
-- [阶段性独立证据审查](2026-10-25-sol-live-e2e/independent-review.md)：范围限于已审的基础场景，不代表整体验收。
-- [真实 Sol 阶段报告](2026-10-25-sol-live-e2e/report.md)：动态场景仍待验收，不将未完成项标记为通过。
+- [独立证据审查](2026-10-25-sol-live-e2e/independent-review.md)：覆盖基础工具、审批、Skill/Hook、MCP 和撤权边界，并注明审查范围。
+- [真实 Sol 最终报告](2026-10-25-sol-live-e2e/report.md)：含 41 张真实截图，保留失败校准、取消围栏、EOF 和 Deny-all 的实测差异。
+- [清理记录](2026-10-25-sol-live-e2e/cleanup.md)及[安全摘要](2026-10-25-sol-live-e2e/cleanup-summary.json)：真实撤权、精确清理和 root 最终临时目录删除结果。
+- [交付文件检查](2026-10-25-sol-runtime/artifact-checks.json)：文件哈希、图片签名与新增本地链接检查。
 
 ## 2026-10-22：动态能力运行时与真实模型 PTY E2E
 
@@ -24,7 +26,7 @@
 
 ### 交付物保留边界
 
-报告引用的审阅截图、脱敏证据 JSON 和架构图是交付内容。清理构建产物、缓存、raw PTY 或临时 fixture 时，必须保留这些文件，不得一并清理：`2026-10-22-live-e2e/screenshots/`、`2026-10-22-live-e2e/{live-evidence.json,failure-*.json}` 和 `2026-10-22-dynamic-runtime/architecture-iteration.html`。
+报告引用的审阅截图、脱敏证据 JSON 和架构图是交付内容。清理构建产物、缓存、raw PTY 或临时 fixture 时，必须保留这些文件，不得一并清理：`2026-10-22-live-e2e/screenshots/`、`2026-10-22-live-e2e/{live-evidence.json,failure-*.json}`、`2026-10-22-dynamic-runtime/architecture-iteration.html`、`2026-10-25-sol-live-e2e/` 及 `2026-10-25-sol-runtime/` 内的报告、证据、图片和架构资料。
 
 ### 完整截图
 

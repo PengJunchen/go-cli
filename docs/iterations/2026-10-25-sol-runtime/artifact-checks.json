@@ -2,7 +2,7 @@
   "manifestFilesVerified": 111,
   "artifactManifestMismatches": 0,
   "markdownFilesChecked": 17,
-  "localLinksChecked": 147,
+  "localLinksChecked": 150,
   "unchangedBaselineMissingLinks": [
     {
       "file": "README.md",
@@ -16,7 +16,7 @@
     }
   ],
   "newArtifactLinkErrors": [],
-  "jsonDocumentsParsed": 67,
+  "jsonDocumentsParsed": 68,
   "imageSignaturesChecked": 65,
   "jpegImagesInCurrentReport": 41,
   "protectedFilesChanged": 0,
