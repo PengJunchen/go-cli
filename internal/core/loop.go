@@ -237,9 +237,10 @@ type LoopAgent struct {
 	// registry version changes. When the registry does not support
 	// versioning (Version() returns 0), the cache is always considered
 	// valid after the first build.
-	toolDefsCache   []llm.ToolDefinition
-	toolDefsVersion int
-	toolDefsMu      sync.RWMutex
+	toolDefsCache      []llm.ToolDefinition
+	toolDefsGeneration string
+	toolDefsVersion    int
+	toolDefsMu         sync.RWMutex
 }
 
 var _ AgentLoop = (*LoopAgent)(nil)
@@ -335,6 +336,12 @@ func (l *LoopAgent) newPreToolCallEvent(ctx context.Context, toolName, toolCallI
 	interceptors := append([]ToolInterceptor(nil), l.toolInterceptors...)
 	contextInterceptors := append([]ContextToolInterceptor(nil), l.contextToolInterceptors...)
 	l.mu.RUnlock()
+	if pinned, ok := ctx.Value(runContextToolInterceptorKey{}).(runContextToolInterceptorValue); ok {
+		contextInterceptors = nil
+		if pinned.interceptor != nil {
+			contextInterceptors = []ContextToolInterceptor{pinned.interceptor}
+		}
+	}
 
 	return &PreToolCallEvent{
 		ToolName:            toolName,
@@ -360,25 +367,32 @@ func (l *LoopAgent) WithToolSearchThreshold(n int) *LoopAgent {
 // does not support versioning (Version() returns 0), the cache is always
 // considered valid after the first build.
 func (l *LoopAgent) buildToolDefinitions(ctx context.Context) ([]llm.ToolDefinition, error) {
-	if l.tools == nil {
+	return l.buildToolDefinitionsFor(ctx, runToolRegistry(ctx, l.tools))
+}
+
+func (l *LoopAgent) buildToolDefinitionsFor(ctx context.Context, registry tools.ToolRegistry) ([]llm.ToolDefinition, error) {
+	if registry == nil {
 		return nil, nil
 	}
 
 	version := 0
-	if v, ok := l.tools.(interface{ Version() int }); ok {
+	if v, ok := registry.(interface{ Version() int }); ok {
 		version = v.Version()
 	}
 
 	l.toolDefsMu.RLock()
 	cached := l.toolDefsCache
 	cachedVersion := l.toolDefsVersion
+	cachedGeneration := l.toolDefsGeneration
 	l.toolDefsMu.RUnlock()
 
-	if cached != nil && version == cachedVersion {
+	metadata, _ := RunGenerationMetadataFromContext(ctx)
+	_, hasPinnedRegistry := ctx.Value(runToolRegistryKey{}).(tools.ToolRegistry)
+	if cached != nil && version == cachedVersion && metadata.GenerationID == cachedGeneration && (!hasPinnedRegistry || metadata.GenerationID != "") {
 		return cached, nil
 	}
 
-	defs, err := l.tools.List(ctx)
+	defs, err := registry.List(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -398,6 +412,7 @@ func (l *LoopAgent) buildToolDefinitions(ctx context.Context) ([]llm.ToolDefinit
 	l.toolDefsMu.Lock()
 	l.toolDefsCache = llmTools
 	l.toolDefsVersion = version
+	l.toolDefsGeneration = metadata.GenerationID
 	l.toolDefsMu.Unlock()
 
 	return llmTools, nil
@@ -446,6 +461,8 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 // owned by this invocation. Prior submission history remains model context
 // only and is never copied into Transcript.
 func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, stream ...EventStream) (runResult CanonicalRunResult, runErr error) {
+	ctx = withMaterializedArtifactAudit(ctx)
+	registry := runToolRegistry(ctx, l.tools)
 	events := make([]AgentEvent, 0)
 	transcript := []TranscriptEntry{{Message: AgentMessage{
 		Role:      string(llm.RoleUser),
@@ -525,7 +542,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				return
 			}
 			runErr = normalizeLoopDetectedCause(spanCtx, runErr)
-			terminalErr := consumer.commitTerminal(runResult.Transcript, consumer.projections, terminalOutcome(runErr))
+			terminalErr := consumer.commitTerminal(runResult.Transcript, consumer.projections, terminalOutcome(spanCtx, runErr))
 			if terminalErr != nil {
 				markRunOutcomeUnknown(spanCtx)
 				runErr = errors.Join(runErr, terminalErr)
@@ -566,18 +583,22 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 	// filtering, prompt builder, system prompt) reuse the same snapshot
 	// instead of calling List again. buildToolDefinitions has its own
 	// version-based cache and is left untouched.
+	toolCatalogVersion := 0
+	if versioned, ok := registry.(interface{ Version() int }); ok {
+		toolCatalogVersion = versioned.Version()
+	}
 	var toolDefs []tools.ToolDefinition
 	var toolOpts []llm.Option
 	var searchTool tools.TopToolsProvider
 	needToolFiltering := false
-	if l.tools != nil {
-		if defs, err := l.tools.List(spanCtx); err == nil {
+	if registry != nil {
+		if defs, err := registry.List(spanCtx); err == nil {
 			toolDefs = defs
 		} else {
 			logger.Warn("core.loop.list_tools_failed", "err", err)
 		}
 
-		llmTools, listErr := l.buildToolDefinitions(spanCtx)
+		llmTools, listErr := l.buildToolDefinitionsFor(spanCtx, registry)
 		if listErr != nil {
 			logger.Warn("core.loop.list_tools_failed", "err", listErr)
 		} else if len(llmTools) > 0 {
@@ -608,6 +629,9 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 	// sendEvent emits an event both to the local events slice and (when
 	// streaming) to the EventStream in real time.
 	sendEvent := func(ev AgentEvent) {
+		if ev.Kind != "error" && CheckRunGeneration(spanCtx) != nil {
+			return
+		}
 		ev = stampAgentEvent(eventCoordinates, ev)
 		events = append(events, cloneAgentEvent(ev))
 		if es != nil {
@@ -635,7 +659,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 	var sysPrompt string
 	if l.promptBuilder != nil {
 		opts := l.promptOpts
-		if l.tools != nil {
+		if registry != nil {
 			opts.Tools = toolDefs
 		}
 		sysPrompt = l.promptBuilder.Build(spanCtx, opts)
@@ -714,6 +738,9 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			sendEvent(errEvent(err))
 			return CanonicalRunResult{Events: events, Transcript: transcript}, err
 		}
+		if fenceErr := CheckRunGeneration(spanCtx); fenceErr != nil {
+			return CanonicalRunResult{Events: events, Transcript: transcript}, toolOutcomeUnknownError{cause: fenceErr}
+		}
 
 		// Block here if the loop has been paused via Pause(). This allows
 		// the user to suspend agent execution between LLM iterations.
@@ -761,6 +788,38 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				}
 				messages[len(messages)-1].Runtime = entry.Message.Runtime
 				transcript = append(transcript, entry)
+			}
+		}
+
+		// Progressive disclosure may only add capabilities from the pinned
+		// generation. Capture one catalog between requests, then derive both
+		// model schemas and prompt from that same detached definition slice.
+		if versioned, ok := registry.(interface{ Version() int }); ok && versioned.Version() != toolCatalogVersion {
+			version := versioned.Version()
+			defs, listErr := registry.List(spanCtx)
+			if listErr != nil {
+				return CanonicalRunResult{Events: events, Transcript: transcript}, listErr
+			}
+			toolOpts = buildToolOpts(defs, l.thinkingConfig)
+			toolCatalogVersion = version
+			searchTool, needToolFiltering = nil, false
+			if toolSearchThreshold > 0 && len(defs) > toolSearchThreshold {
+				for _, definition := range defs {
+					if search, found := definition.(tools.TopToolsProvider); found {
+						searchTool, needToolFiltering = search, true
+						break
+					}
+				}
+			}
+			if l.promptBuilder != nil {
+				opts := l.promptOpts
+				opts.Tools = defs
+				sysPrompt = l.promptBuilder.Build(spanCtx, opts)
+			} else if l.systemPromptOverride == "" {
+				sysPrompt = systemPromptFromDefs(defs)
+			}
+			if len(messages) > 0 && messages[0].Role == llm.RoleSystem {
+				messages[0].Content = sysPrompt
 			}
 		}
 
@@ -860,10 +919,28 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			sendEvent(errEvent(err))
 			return CanonicalRunResult{Events: events, Transcript: transcript}, err
 		}
+		if fenceErr := CheckRunGeneration(iterationCtx); fenceErr != nil {
+			return CanonicalRunResult{Events: events, Transcript: transcript}, toolOutcomeUnknownError{cause: fenceErr}
+		}
 		if err := validateCompleteToolCalls(resp.ToolCalls); err != nil {
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			sendEvent(errEvent(err))
 			return CanonicalRunResult{Events: events, Transcript: transcript}, err
+		}
+		if metadata, pinned := RunGenerationMetadataFromContext(iterationCtx); pinned && metadata.GenerationID != "" {
+			requestOptions := llm.GenerationOptions{}
+			for _, option := range iterOpts {
+				option(&requestOptions)
+			}
+			declared := make(map[string]bool, len(requestOptions.Tools))
+			for _, definition := range requestOptions.Tools {
+				declared[definition.Name] = true
+			}
+			for _, call := range resp.ToolCalls {
+				if !declared[call.Name] {
+					return CanonicalRunResult{Events: events, Transcript: transcript}, fmt.Errorf("core: tool %q was not disclosed in this model request", call.Name)
+				}
+			}
 		}
 		if len(resp.ToolCalls) > 0 && iterationCoordinates.runID != "" {
 			iterationCoordinates.assistantTranscriptOrdinal = &assistantOrdinal
@@ -926,7 +1003,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			}
 			if consumer != nil {
 				startIndex := len(transcript)
-				commitErr := consumer.executeParallelGroup(iterationCtx, l.tools, assistantOrdinal, assistantEntry.Message, resp.ToolCalls, canceledCalls, es, &transcript, &messages)
+				commitErr := consumer.executeParallelGroup(iterationCtx, registry, assistantOrdinal, assistantEntry.Message, resp.ToolCalls, canceledCalls, es, &transcript, &messages)
 				for index := startIndex; index < len(transcript); index++ {
 					entry := transcript[index]
 					message := entry.Message
@@ -945,7 +1022,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				var unknownToolErr error
 				resultsByID := make(map[string]ParallelToolResult, len(activeCalls))
 				if len(activeCalls) > 0 {
-					results, execErr := executeToolsParallel(iterationCtx, l.tools, activeCalls, es)
+					results, execErr := executeToolsParallel(iterationCtx, registry, activeCalls, es)
 					parallelErr = execErr
 					matched, matchErr := matchToolResultsByID(activeCalls, results)
 					if matchErr != nil {
@@ -979,7 +1056,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 					}
 					outcome := toolReceiptOutcome(iterationCtx, res.Err, res.IsError)
 					sendToolResultEvent(res.Output, res.IsError, res.ID, outcome, nil)
-					appendToolReceipt(&messages, &transcript, tc, res.Output, outcome, consumer)
+					appendToolReceipt(&messages, &transcript, tc, res.Output, outcome, consumer, spanCtx)
 					if outcome == ReceiptOutcomeUnknown && unknownToolErr == nil {
 						unknownToolErr = markUnknownToolOutcome(res.Err)
 					}
@@ -1031,6 +1108,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 					} else {
 						appendToolReceipt(&messages, &transcript, tc, canceledOutput, ReceiptOutcomeInterrupted, consumer)
 					}
+					sendToolResultEvent(canceledOutput, true, tc.ID, ReceiptOutcomeInterrupted, nil)
 					continue
 				}
 
@@ -1038,7 +1116,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name)
 
 				if consumer != nil {
-					result, commitErr := consumer.executeSequentialCall(iterationCtx, l.tools, assistantOrdinal, assistantEntry.Message, tc, es, &transcript, &messages)
+					result, commitErr := consumer.executeSequentialCall(iterationCtx, registry, assistantOrdinal, assistantEntry.Message, tc, es, &transcript, &messages)
 					sendToolResultEvent(result.output, result.isError, tc.ID, result.outcome, result.sourceTruncated)
 					if commitErr != nil {
 						if !hasUnknownToolOutcome(commitErr) && callIndex+1 < len(resp.ToolCalls) && (errors.Is(commitErr, context.Canceled) || errors.Is(commitErr, context.DeadlineExceeded) || errors.Is(commitErr, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(commitErr, ErrRunCommitChildUnsupported) || errors.Is(commitErr, ErrRunCommitStreamingUnsupported)) {
@@ -1066,7 +1144,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				}
 				outcome := toolReceiptOutcome(iterationCtx, execErr, isError)
 				sendToolResultEvent(resultText, isError, tc.ID, outcome, nil)
-				appendToolReceipt(&messages, &transcript, tc, resultText, outcome, consumer)
+				appendToolReceipt(&messages, &transcript, tc, resultText, outcome, consumer, spanCtx)
 				if outcome == ReceiptOutcomeUnknown {
 					for _, undispatched := range resp.ToolCalls[callIndex+1:] {
 						skippedOutput := "Tool call not dispatched because a prior tool outcome is unknown"
@@ -1364,7 +1442,7 @@ func validateCompleteToolCalls(calls []llm.ToolCall) error {
 	return nil
 }
 
-func appendToolReceipt(messages *[]llm.Message, transcript *[]TranscriptEntry, call llm.ToolCall, content, outcome string, consumer *runCommitConsumer) {
+func appendToolReceipt(messages *[]llm.Message, transcript *[]TranscriptEntry, call llm.ToolCall, content, outcome string, consumer *runCommitConsumer, auditContexts ...context.Context) {
 	metadata := consumer.transcriptMetadata(uint64(len(*transcript)), outcome)
 	*messages = append(*messages, llm.Message{
 		Role:       llm.RoleTool,
@@ -1373,17 +1451,26 @@ func appendToolReceipt(messages *[]llm.Message, transcript *[]TranscriptEntry, c
 		Content:    content,
 		Runtime:    metadata,
 	})
-	appendTranscriptToolReceipt(transcript, call, content, outcome, consumer)
+	appendTranscriptToolReceipt(transcript, call, content, outcome, consumer, auditContexts...)
 }
 
-func appendTranscriptToolReceipt(transcript *[]TranscriptEntry, call llm.ToolCall, content, outcome string, consumer *runCommitConsumer) {
+func appendTranscriptToolReceipt(transcript *[]TranscriptEntry, call llm.ToolCall, content, outcome string, consumer *runCommitConsumer, auditContexts ...context.Context) {
+	var auditCtx context.Context
+	if consumer != nil {
+		auditCtx = consumer.ctx
+	}
+	if len(auditContexts) > 0 {
+		auditCtx = auditContexts[0]
+	}
+	digest := takeMaterializedArtifact(auditCtx, call.ID)
 	*transcript = append(*transcript, TranscriptEntry{Message: AgentMessage{
-		Role:           string(llm.RoleTool),
-		Content:        content,
-		ToolCallID:     call.ID,
-		ToolName:       call.Name,
-		ReceiptOutcome: outcome,
-		Runtime:        consumer.transcriptMetadata(uint64(len(*transcript)), outcome),
+		Role:                       string(llm.RoleTool),
+		Content:                    content,
+		ToolCallID:                 call.ID,
+		ToolName:                   call.Name,
+		MaterializedArtifactDigest: digest,
+		ReceiptOutcome:             outcome,
+		Runtime:                    consumer.transcriptMetadata(uint64(len(*transcript)), outcome),
 	}})
 }
 
@@ -1631,6 +1718,10 @@ func (l *LoopAgent) streamGenerateWithBudget(ctx context.Context, model llm.Base
 		}
 		if !ok {
 			break
+		}
+		if fenceErr := CheckRunGeneration(ctx); fenceErr != nil {
+			abortAndDrain(fenceErr)
+			return nil, toolOutcomeUnknownError{cause: fenceErr}
 		}
 		if chunk.Error != nil {
 			abortAndDrain(chunk.Error)
@@ -2433,7 +2524,7 @@ func compactPreparedOverflowRequest(
 	if compactor == nil || estimator == nil || messageBudget <= 0 {
 		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow recovery requires a positive prepared message budget and compactor"}
 	}
-	textBudget, err := preparedCompactionTextBudget(messages, estimator, messageBudget, 0)
+	textBudget, err := preparedCompactionMessageBudget(messages, estimator, messageBudget, 0)
 	if err != nil {
 		return nil, currentSubmissionIndex, err
 	}
@@ -2532,6 +2623,7 @@ func providerOperationContext(ctx context.Context, model llm.BaseChatModel, kind
 // "tool_output" AgentEvent carrying the ToolCallID and Stream ("stdout"/
 // "stderr") so consumers can associate the line with its originating call.
 type eventStreamSink struct {
+	ctx         context.Context
 	es          EventStream
 	coordinates agentEventCoordinates
 }
@@ -2539,6 +2631,9 @@ type eventStreamSink struct {
 // Send wraps content as a "tool_output" AgentEvent and forwards it to the
 // underlying EventStream.
 func (s *eventStreamSink) Send(content, toolCallID, stream string) error {
+	if err := CheckRunGeneration(s.ctx); err != nil {
+		return err
+	}
 	return s.es.Send(stampAgentEvent(s.coordinates, AgentEvent{
 		Kind:       "tool_output",
 		Content:    content,
@@ -2554,7 +2649,7 @@ func (s *eventStreamSink) Send(content, toolCallID, stream string) error {
 // returned isError flag is propagated from ToolResult.IsError so callers can
 // detect tool errors via a structured marker instead of string matching.
 func (l *LoopAgent) executeTool(ctx context.Context, call tools.ToolCall, es EventStream) (string, bool, error) {
-	return executeSingleTool(ctx, l.tools, call, es)
+	return executeSingleTool(ctx, runToolRegistry(ctx, l.tools), call, es)
 }
 
 // toToolsCall converts an llm.ToolCall (Args is `any`) into a tools.ToolCall

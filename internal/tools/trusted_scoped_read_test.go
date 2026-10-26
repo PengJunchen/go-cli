@@ -49,7 +49,7 @@ func TestRegisterDefaultsMintsScopedWorkspaceReadForConcreteReaders(t *testing.T
 				if name == "read" || name == "ls" {
 					assert.Equal(t, CompletionInlinePipelineJoined, snapshot.completionProof, name)
 				} else {
-					assert.Empty(t, snapshot.completionProof, name, "read effect cannot mint helper completion proof")
+					assert.Equal(t, completionScopedSearchJoined, snapshot.completionProof, name, "scoped search readers capture a mode whose final proof depends on their execution path")
 				}
 			}
 		})
@@ -97,7 +97,7 @@ func TestUnscopedAndInvalidReadersKeepTheirExistingRegistrationMetadata(t *testi
 			assert.Equal(t, CompletionInlinePipelineJoined, snapshot.completionProof, name)
 		} else {
 			assert.Equal(t, RegistrationSourceToolRegistry, snapshot.identity.RegistrationSource(), name)
-			assert.Empty(t, snapshot.completionProof, name)
+			assert.Equal(t, completionScopedSearchJoined, snapshot.completionProof, name, "search completion authority must not depend on workspace scope")
 		}
 	}
 
@@ -135,9 +135,24 @@ func TestUnscopedAndInvalidReadersKeepTheirExistingRegistrationMetadata(t *testi
 			assert.Equal(t, CompletionInlinePipelineJoined, snapshot.completionProof, reader.Name())
 		} else {
 			assert.Equal(t, RegistrationSourceToolRegistry, snapshot.identity.RegistrationSource(), reader.Name())
-			assert.Empty(t, snapshot.completionProof, reader.Name())
+			assert.Equal(t, completionScopedSearchJoined, snapshot.completionProof, reader.Name(), "invalid scope still permits only path-completion attestation")
 		}
 	}
+}
+
+func TestUnreviewedToolNamedGrepDoesNotReceiveSearchCompletionMode(t *testing.T) {
+	ctx := context.Background()
+	base := newScopedReadTestRegistry(t)
+	custom := &stubTool{name: "grep"}
+	require.Error(t, base.registerTrustedScopedWorkspaceRead(ctx, custom), "the trusted scoped-reader path accepts only concrete reviewed reader types")
+	require.NoError(t, base.Register(ctx, custom), "ordinary custom registration remains available")
+
+	snapshot, err := base.toolRegistrationSnapshot(ctx, "grep")
+	require.NoError(t, err)
+	assert.Equal(t, RegistrationSourceToolRegistry, snapshot.identity.RegistrationSource())
+	assert.Equal(t, []TrustedToolEffect{EffectUnknown}, snapshot.effects.Values())
+	assert.Equal(t, [32]byte{}, snapshot.identity.Scope().Fingerprint())
+	assert.Empty(t, snapshot.completionProof, "a matching tool name cannot inherit first-party search completion authority")
 }
 
 type scopedReadReplacement struct {

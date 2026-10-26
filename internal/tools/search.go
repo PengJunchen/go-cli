@@ -102,11 +102,17 @@ type searchResult struct {
 // An empty query returns all tools. Results are sorted by name for
 // determinism.
 func (t *ToolSearchTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	if synchronousToolSearchRegistry(t.reg) {
+		defer reportPreparedNoProcessCompletion(ctx)
+	}
 	span, _ := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	defer span.End()
 
 	start := time.Now()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	if t.reg == nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
@@ -188,6 +194,41 @@ func (t *ToolSearchTool) Execute(ctx context.Context, call ToolCall) (*ToolResul
 	}, nil
 }
 
+// synchronousToolSearchRegistry permits completion authority only for the
+// reviewed in-process registry chain. Arbitrary List implementations retain
+// unknown completion, including wrappers embedding one of these registries.
+func synchronousToolSearchRegistry(reg ToolRegistry) bool {
+	if reg == nil {
+		return true // Execute rejects a nil dependency before acquiring resources.
+	}
+	seen := make(map[ToolRegistry]bool)
+	for reg != nil {
+		var inner ToolRegistry
+		switch typed := reg.(type) {
+		case *DefaultToolRegistry:
+			return typed != nil
+		case *MiddlewareToolRegistry:
+			if typed == nil {
+				return false
+			}
+			inner = typed.inner
+		case *DeferredToolRegistryAdapter:
+			if typed == nil || typed.DefaultDeferredToolRegistry == nil {
+				return false
+			}
+			inner = typed.underlying
+		default:
+			return false
+		}
+		if seen[reg] || inner == nil {
+			return false
+		}
+		seen[reg] = true
+		reg = inner
+	}
+	return false
+}
+
 // Score ranks a tool's relevance to a query using weighted keyword matching.
 // Name matches weight 3, Description matches weight 2, Category matches weight 1.
 // Higher score means more relevant.
@@ -202,7 +243,7 @@ func (t *ToolSearchTool) Score(query string, def ToolDefinition) float64 {
 
 	var score float64
 	// Name match (highest weight)
-	if strings.Contains(name, q) {
+	if strings.Contains(name, q) || queryNamesTool(q, name) {
 		score += 3.0
 	} else {
 		// Partial word matching
@@ -229,6 +270,23 @@ func (t *ToolSearchTool) Score(query string, def ToolDefinition) float64 {
 		score += 1.0
 	}
 	return score
+}
+
+// queryNamesTool recognizes ASCII tool identifiers next to Chinese text or
+// punctuation without matching names inside other English identifiers.
+func queryNamesTool(query, name string) bool {
+	if name == "" {
+		return false
+	}
+	identifiers := strings.FieldsFunc(query, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-')
+	})
+	for _, identifier := range identifiers {
+		if identifier == name {
+			return true
+		}
+	}
+	return false
 }
 
 // TopTools returns the top-K tools ranked by Score against the query.

@@ -75,7 +75,7 @@ func TestFactoryWithSummarizer(t *testing.T) {
 		{Role: RoleUser, Content: strings.Repeat("u", 300)},
 		{Role: RoleUser, Content: "keep"},
 	}
-	outResult, err := sc.Compact(ctx, items, 30, est)
+	outResult, err := sc.Compact(ctx, items, 34, est)
 	out := outResult.Items
 	require.NoError(t, err, "SummaryCompactor with injected summarizer must succeed")
 	require.NotEmpty(t, sum.conversations(), "injected summarizer must be invoked")

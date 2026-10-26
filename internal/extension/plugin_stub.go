@@ -7,17 +7,14 @@ package extension
 import (
 	"context"
 	"errors"
+	"net/http"
 )
 
-// This file is the build-tag stub selected when the extension package is
-// compiled with `-tags no_plugin`. The real plugin.go (build tag !no_plugin)
-// depends on the stdlib `plugin` package and the full JSON-over-HTTP / gRPC
-// routing. When plugins are disabled the package still builds by providing the
-// same PluginLoader contract as a stub that returns ErrUnsupportedRPC for every
-// load, so manager.go's process-wide loader registry and callers that merely
-// reference the interface keep compiling.
+// This variant removes the native shared-object loader. The public loader
+// constructor and options remain source compatible; process-based SDK loaders
+// are selected separately by the extension manager and remain available.
 
-// ErrUnsupportedRPC is returned by the no_plugin stub loader, signalling that
+// ErrUnsupportedRPC is returned by the no_plugin stub loader, signaling that
 // plugin loading is disabled in this build.
 var ErrUnsupportedRPC = errors.New("extension: plugin loading is not embedded in this build (no_plugin)")
 
@@ -31,12 +28,17 @@ type PluginLoader interface {
 
 // DefaultPluginLoader is the no_plugin stub of the default PluginLoader.
 type DefaultPluginLoader struct {
-	name string
+	name       string
+	httpClient *http.Client
 }
 
 // NewDefaultPluginLoader creates a DefaultPluginLoader for the no_plugin build.
-func NewDefaultPluginLoader() PluginLoader {
-	return &DefaultPluginLoader{name: "default-plugin-loader"}
+func NewDefaultPluginLoader(options ...PluginLoaderOption) PluginLoader {
+	loader := &DefaultPluginLoader{name: "default-plugin-loader"}
+	for _, option := range options {
+		option(loader)
+	}
+	return loader
 }
 
 var _ PluginLoader = (*DefaultPluginLoader)(nil)
@@ -53,4 +55,12 @@ func (l *DefaultPluginLoader) Name() string {
 // the no_plugin build.
 func (l *DefaultPluginLoader) Load(_ context.Context, _ string) ([]Extension, error) {
 	return nil, ErrUnsupportedRPC
+}
+
+// PluginLoaderOption configures a loader in either build variant.
+type PluginLoaderOption func(*DefaultPluginLoader)
+
+// WithPluginHTTPClient retains API parity; remote plugins remain unsupported.
+func WithPluginHTTPClient(client *http.Client) PluginLoaderOption {
+	return func(loader *DefaultPluginLoader) { loader.httpClient = client }
 }

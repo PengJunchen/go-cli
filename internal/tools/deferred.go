@@ -62,6 +62,18 @@ type DefaultDeferredToolRegistry struct {
 	mcpEntries      map[string]mcpDeferredEntry
 }
 
+// Version combines the local exposure revision with the backing registry's
+// monotonic version. It deliberately does not change the dispatch authority fence.
+func (r *DefaultDeferredToolRegistry) Version() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	version := int(r.revision)
+	if underlying, ok := r.underlying.(interface{ Version() int }); ok {
+		version += underlying.Version()
+	}
+	return version
+}
+
 var _ DeferredToolRegistry = (*DefaultDeferredToolRegistry)(nil)
 
 // NewDefaultDeferredToolRegistry wraps the given underlying ToolRegistry. The
@@ -404,6 +416,16 @@ func (a *DeferredToolRegistryAdapter) RegisterTrustedControl(ctx context.Context
 		return ErrTrustedControlRegistrationUnavailable
 	}
 	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.RegisterTrustedControl(ctx, def) })
+}
+
+// RegisterTrustedInlineControl forwards the host completion declaration while
+// preserving deferred MCP name reservations.
+func (a *DeferredToolRegistryAdapter) RegisterTrustedInlineControl(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := a.underlying.(TrustedInlineControlRegistrar)
+	if !ok {
+		return ErrTrustedControlRegistrationUnavailable
+	}
+	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.RegisterTrustedInlineControl(ctx, def) })
 }
 
 // RegisterTrustedNetworkRead forwards the narrow reviewed network-reader

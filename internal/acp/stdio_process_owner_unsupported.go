@@ -16,4 +16,6 @@ func acpStdioProcessGroupAlive(int) (bool, error) {
 	return false, ErrStdioProcessContainmentUnsupported
 }
 
+func isACPStdioProcessGroupPermissionError(error) bool { return false }
+
 func expectedACPStdioShutdown(error) bool { return false }

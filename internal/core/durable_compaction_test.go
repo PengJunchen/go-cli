@@ -2,8 +2,11 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -220,6 +223,93 @@ func TestDurableCurrentInputPreservationUsesTypedSourceIdentity(t *testing.T) {
 	require.NoError(t, validateDurableCurrentInputPreserved(captured, []compaction.TurnItem{prior, current}))
 }
 
+func TestDurableEnvelopePreflightCompactsLargeWriteArgumentsWithTypedProjection(t *testing.T) {
+	snapshot, messages := durableLargeWriteFixture()
+	const runID = "run-large-write-envelope"
+	estimator := durableRuneCountEstimator{}
+	providerMessageTokens, multimodal, err := estimateProviderMessages(messages, estimator, 0)
+	require.NoError(t, err)
+	require.Equal(t, llm.EstimateKnown, multimodal.State)
+	require.Equal(t, providerMessageTokens, compaction.EstimateTokens(messagesToTurnItems(messages), estimator),
+		"the compactor and request-envelope preflight must use the same provider-visible message terms")
+	const requestCeiling = 8000
+	messageBudget := fourFifthsFloor(requestCeiling)
+	require.Equal(t, 6400, messageBudget)
+	require.Greater(t, providerMessageTokens, messageBudget,
+		"write arguments plus the rest of the message transcript exceed the local budget")
+
+	summarizer := &durableCompactionSummarizer{summary: "summary of earlier durable context"}
+	compactor := compaction.NewUnifiedCompactor(compaction.WithSummary(compaction.NewSummaryCompactor(summarizer)))
+	sink := &compactionCommitCountingSink{}
+	owner := newRunOwner(context.Background(), nil, RunClaim{ID: runID}, nil)
+	consumer := &runCommitConsumer{ctx: owner.ctx, owner: owner, source: snapshot, runID: runID, sink: sink}
+	compacted, currentIndex, err := preflightDurableRequestAt(
+		context.Background(), messages, consumer, compactor,
+		estimator, messageBudget, 3,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, sink.commits, "only a validated typed summary may update durable compaction state")
+	require.Equal(t, CompactionCursor{PriorHistoryCount: 3}, sink.projection.Through)
+	require.Equal(t, 1, currentIndex)
+	require.Equal(t, messages[3], compacted[currentIndex], "the exact current source-backed input stays unchanged")
+	require.Len(t, compacted, 2, "the old source prefix becomes one typed summary plus the current input")
+	require.Equal(t, llm.SourceRunSummary, compacted[0].Runtime.Source.Kind)
+	require.Equal(t, runID, compacted[0].Runtime.Source.RunID)
+	require.Equal(t, llm.SourceThrough{PriorHistoryCount: 3}, compacted[0].Runtime.Source.Through)
+	require.NotEmpty(t, summarizer.calls, "a real summary strategy must establish the typed projection")
+}
+
+func TestDurableEnvelopePreflightFailsClosedWithoutTypedSummary(t *testing.T) {
+	failingSummarizer := &durableCompactionFailingSummarizer{err: errors.New("summary service unavailable")}
+	for _, test := range []struct {
+		name              string
+		compactor         compaction.Compactor
+		failingSummarizer *durableCompactionFailingSummarizer
+	}{
+		{name: "no summarizer", compactor: compaction.NewUnifiedCompactor()},
+		{
+			name:              "summarizer failed",
+			compactor:         compaction.NewUnifiedCompactor(compaction.WithSummary(compaction.NewSummaryCompactor(failingSummarizer))),
+			failingSummarizer: failingSummarizer,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot, messages := durableLargeWriteFixture()
+			sink := &compactionCommitCountingSink{}
+			consumer := &runCommitConsumer{source: snapshot, runID: "run-large-write-envelope", sink: sink}
+			_, _, err := preflightDurableRequestAt(
+				context.Background(), messages, consumer, test.compactor,
+				durableRuneCountEstimator{}, 6400, 3,
+			)
+			require.Error(t, err, "a no-op micro or truncating result must not fake a typed projection")
+			require.Zero(t, sink.commits)
+			if test.failingSummarizer != nil {
+				require.Equal(t, 1, test.failingSummarizer.calls, "the configured summary path must be attempted")
+			}
+		})
+	}
+}
+
+func TestDurableEnvelopePreflightCannotSummarizeAwayOversizedCurrentInput(t *testing.T) {
+	snapshot, messages := durableLargeWriteFixture()
+	messages[3].Content = strings.Repeat("current-input-", 451)
+	originalCurrentInput := messages[3].Content
+	sink := &compactionCommitCountingSink{}
+	owner := newRunOwner(context.Background(), nil, RunClaim{ID: "run-large-write-envelope"}, nil)
+	consumer := &runCommitConsumer{ctx: owner.ctx, owner: owner, source: snapshot, runID: "run-large-write-envelope", sink: sink}
+	summarizer := &durableCompactionSummarizer{summary: "summary that cannot replace the current input"}
+	compactor := compaction.NewUnifiedCompactor(compaction.WithSummary(compaction.NewSummaryCompactor(summarizer)))
+
+	_, _, err := preflightDurableRequestAt(
+		context.Background(), messages, consumer, compactor,
+		durableRuneCountEstimator{}, 6400, 3,
+	)
+	require.ErrorIs(t, err, ErrDurableCompactionUnsupported,
+		"a source-safe summary may not drop the current input just to satisfy a small budget")
+	require.Zero(t, sink.commits, "a summary covering the current input must not be committed")
+	require.Equal(t, originalCurrentInput, messages[3].Content, "the caller-owned current input stays unchanged")
+}
+
 func TestCloneCompactionTurnItemCopiesNestedToolArguments(t *testing.T) {
 	args := map[string]any{"nested": []any{map[string]any{"path": "original"}}}
 	item := compaction.TurnItem{
@@ -293,12 +383,76 @@ func TestDurableProjectionRejectsSameRunSummaryInRetainedSuffix(t *testing.T) {
 
 type compactionCommitCountingSink struct {
 	inertRunCommitSink
-	commits int
+	commits    int
+	projection CompactionProjection
 }
 
-func (sink *compactionCommitCountingSink) CommitCompaction(context.Context, CompactionProjection) error {
+func (sink *compactionCommitCountingSink) CommitCompaction(_ context.Context, projection CompactionProjection) error {
 	sink.commits++
+	sink.projection = projection
 	return nil
+}
+
+type durableCompactionSummarizer struct {
+	summary string
+	calls   []string
+}
+
+func (summarizer *durableCompactionSummarizer) Summarize(_ context.Context, conversation string) (string, error) {
+	summarizer.calls = append(summarizer.calls, conversation)
+	return summarizer.summary, nil
+}
+
+type durableCompactionFailingSummarizer struct {
+	err   error
+	calls int
+}
+
+func (summarizer *durableCompactionFailingSummarizer) Summarize(context.Context, string) (string, error) {
+	summarizer.calls++
+	return "", summarizer.err
+}
+
+type durableRuneCountEstimator struct{}
+
+func (durableRuneCountEstimator) Estimate(text string) (int, error) {
+	return utf8.RuneCountInString(text), nil
+}
+
+func durableLargeWriteFixture() (*CompactionSourceSnapshot, []llm.Message) {
+	const revision = "rev-large-write-envelope"
+	const branch = "branch-main"
+	const runID = "run-large-write-envelope"
+	callID := "call-large-write"
+	args := map[string]any{"path": "old.go", "content": strings.Repeat("x", 7200)}
+	toolResult := strings.Repeat("r", 8000)
+	snapshot := &CompactionSourceSnapshot{
+		Revision: revision, BranchID: branch,
+		Messages: []AgentMessage{
+			{Role: "user", Content: "older user context"},
+			{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: callID, Name: "write", Args: args}}},
+			{Role: "tool", Content: toolResult, ToolCallID: callID, ToolName: "write", ReceiptOutcome: ReceiptOutcomeSuccess},
+		},
+		SourceEntryIDs: []string{"entry-user", "entry-write-call", "entry-write-receipt"},
+	}
+	prior := func(ordinal int) llm.RuntimeMetadata {
+		return llm.RuntimeMetadata{Source: llm.SourceRef{
+			Kind: llm.SourcePriorPublished, HistoryRevision: revision, BranchID: branch,
+			SourceEntryID: snapshot.SourceEntryIDs[ordinal], PriorOrdinal: uint64(ordinal),
+		}}
+	}
+	messages := []llm.Message{
+		{Role: llm.RoleUser, Content: "older user context", Runtime: prior(0)},
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: callID, Name: "write", Args: args}}, Runtime: prior(1)},
+		{Role: llm.RoleTool, Content: toolResult, ToolCallID: callID, Name: "write", Runtime: llm.RuntimeMetadata{
+			Source:         llm.SourceRef{Kind: llm.SourcePriorPublished, HistoryRevision: revision, BranchID: branch, SourceEntryID: snapshot.SourceEntryIDs[2], PriorOrdinal: 2},
+			ReceiptOutcome: ReceiptOutcomeSuccess,
+		}},
+		{Role: llm.RoleUser, Content: "current request", Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{
+			Kind: llm.SourceRunTranscript, RunID: runID, PriorSourceCount: 3, TranscriptIndex: 0,
+		}}},
+	}
+	return snapshot, messages
 }
 
 type fixedCompactionResult struct {

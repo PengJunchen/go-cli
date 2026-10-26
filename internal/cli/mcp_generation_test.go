@@ -46,6 +46,7 @@ func newMCPGenerationPeer(
 	invalidSchema bool,
 	blockList bool,
 	blockCall bool,
+	schemas ...any,
 ) *mcpGenerationPeer {
 	t.Helper()
 	peer := &mcpGenerationPeer{}
@@ -83,6 +84,9 @@ func newMCPGenerationPeer(
 			remoteTools := make([]map[string]any, 0, len(toolNames))
 			for _, name := range toolNames {
 				schema := any(mockMCPInputSchema())
+				if len(schemas) > 0 {
+					schema = schemas[0]
+				}
 				if invalidSchema {
 					schema = "not-an-object"
 				}

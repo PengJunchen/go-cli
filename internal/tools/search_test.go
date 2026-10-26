@@ -100,6 +100,34 @@ func TestSearchEmptyQueryReturnsAll(t *testing.T) {
 	assert.Equal(t, 5, res.Metadata["matches"])
 }
 
+func TestTopToolsRecallsNamedToolInChinesePrompt(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	tool := NewToolSearchTool(newSearchFixture(t))
+	for _, query := range []string{"请只用write工具创建文件", "只用 WRITE 工具", "请用read工具读取资料", "用bash运行命令"} {
+		selected, err := tool.TopTools(context.Background(), query, 1)
+		require.NoError(t, err)
+		require.Len(t, selected, 1)
+		switch {
+		case strings.Contains(strings.ToLower(query), "write"):
+			assert.Equal(t, "write", selected[0].Name(), query)
+		case strings.Contains(query, "read"):
+			assert.Equal(t, "read", selected[0].Name(), query)
+		default:
+			assert.Equal(t, "bash", selected[0].Name(), query)
+		}
+	}
+}
+
+func TestToolScoreDoesNotMatchToolNameInsideEnglishWord(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	tool := NewToolSearchTool(newSearchFixture(t))
+	for _, query := range []string{"thread", "rewrite", "credit", "thread123", "foo_read", "please readwrite"} {
+		for _, name := range []string{"read", "write", "edit"} {
+			assert.Zero(t, tool.Score(query, &searchTestTool{name: name}), "%s should not recall %s", query, name)
+		}
+	}
+}
+
 func TestSearchInvalidCategory(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 

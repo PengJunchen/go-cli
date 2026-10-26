@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
@@ -37,8 +38,9 @@ func NewDefaultValidator() Validator {
 
 // minTemperature and maxTemperature bound the allowed model temperature.
 const (
-	minTemperature = 0.0
-	maxTemperature = 2.0
+	minTemperature  = 0.0
+	maxTemperature  = 2.0
+	maxModelTimeout = 24 * time.Hour
 )
 
 func validTemperature(value float64) bool {
@@ -59,6 +61,21 @@ var (
 // every constraint violation, or nil when the config is valid.
 func (v *DefaultValidator) Validate(cfg Config) error {
 	var errs []string
+	if cfg.Runtime.Profile != "" && cfg.Runtime.Profile != "default" && cfg.Runtime.Profile != "edge" {
+		errs = append(errs, "invalid runtime profile (supported: default, edge)")
+	}
+	if cfg.MCP.Loading != "" && cfg.MCP.Loading != "eager" && cfg.MCP.Loading != "lazy" {
+		errs = append(errs, "invalid mcp loading (supported: eager, lazy)")
+	}
+	if cfg.Runtime.MaxSkills < 0 || cfg.Runtime.MaxSkills > 1024 {
+		errs = append(errs, "runtime max_skills must be between 0 and 1024")
+	}
+	if cfg.Runtime.MaxMCPServers < 0 || cfg.Runtime.MaxMCPServers > 128 {
+		errs = append(errs, "runtime max_mcp_servers must be between 0 and 128")
+	}
+	if cfg.Runtime.MaxPromptBytes < 0 || cfg.Runtime.MaxPromptBytes > 16<<20 {
+		errs = append(errs, "runtime max_prompt_bytes must be between 0 and 16777216")
+	}
 
 	if !validTemperature(cfg.Provider.Temperature) {
 		errs = append(errs, "provider temperature out of range")
@@ -106,6 +123,7 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 	if !contains(validLoopDetectorDispositions, cfg.Production.LoopDetector.Disposition) {
 		errs = append(errs, "invalid production.loop_detector disposition (supported: warn, steer, terminate)")
 	}
+	validateProductionModelTimeout(cfg.Production.ModelTimeout, &errs)
 
 	// LSP config: when ServerCommand is non-empty, WorkspaceRoot (if set)
 	// must be an existing directory.
@@ -159,6 +177,7 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 	for _, p := range []struct{ value, name string }{
 		{cfg.Tracing.FilePath, "tracing file_path"},
 		{cfg.Session.StorePath, "session store_path"},
+		{cfg.Memory.StorePath, "memory store_path"},
 		{cfg.Skill.Dir, "skill dir"},
 		{cfg.Commands.Dir, "commands dir"},
 		{cfg.Production.Audit.Path, "audit path"},
@@ -207,6 +226,34 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 		return errors.New(strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+func validateProductionModelTimeout(cfg ModelTimeoutConfig, errs *[]string) {
+	total := 30 * time.Second
+	idle := 10 * time.Second
+	totalValid := true
+	idleValid := true
+	if cfg.Total != "" {
+		parsed, err := time.ParseDuration(cfg.Total)
+		if err != nil || parsed <= 0 || parsed > maxModelTimeout {
+			*errs = append(*errs, "production.model_timeout.total must be a duration greater than 0 and no more than 24h")
+			totalValid = false
+		} else {
+			total = parsed
+		}
+	}
+	if cfg.StreamIdle != "" {
+		parsed, err := time.ParseDuration(cfg.StreamIdle)
+		if err != nil || parsed <= 0 || parsed > maxModelTimeout {
+			*errs = append(*errs, "production.model_timeout.stream_idle must be a duration greater than 0 and no more than 24h")
+			idleValid = false
+		} else {
+			idle = parsed
+		}
+	}
+	if totalValid && idleValid && idle > total {
+		*errs = append(*errs, "production.model_timeout.stream_idle must be no greater than total")
+	}
 }
 
 func contains(all []string, target string) bool {

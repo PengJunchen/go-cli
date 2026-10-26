@@ -191,6 +191,58 @@ func TestSummaryCompactorBudgetIncludesProjectedSummaryWrapper(t *testing.T) {
 	assert.NotEmpty(t, summarizer.conversations())
 }
 
+func TestSummaryCompactorReservesBoundedSummaryForDurableHistory(t *testing.T) {
+	ctx, _ := newTracedCtx(t)
+	const revision = "revision-summary-headroom"
+	const branch = "branch-main"
+	const runID = "run-summary-headroom"
+	priorSource := func(ordinal uint64, entryID string) llm.RuntimeMetadata {
+		return llm.RuntimeMetadata{Source: llm.SourceRef{
+			Kind: llm.SourcePriorPublished, HistoryRevision: revision, BranchID: branch,
+			SourceEntryID: entryID, PriorOrdinal: ordinal,
+		}}
+	}
+	currentContent := "current123"
+	current := TurnItem{
+		Role: RoleUser, Content: currentContent,
+		Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{
+			Kind: llm.SourceRunTranscript, RunID: runID, PriorSourceCount: 3, TranscriptIndex: 0,
+		}},
+	}
+	items := []TurnItem{
+		{Role: RoleUser, Content: strings.Repeat("a", 46), Runtime: priorSource(0, "entry-old-a")},
+		{Role: RoleUser, Content: strings.Repeat("b", 46), Runtime: priorSource(1, "entry-old-b")},
+		{Role: RoleUser, Content: "c", Runtime: priorSource(2, "entry-old-c")},
+		current,
+	}
+	const summaryTokens = 20
+	const budget = 112
+	summarizer := &fakeSummarizer{summary: strings.Repeat("s", summaryTokens)}
+	compactor := NewSummaryCompactor(summarizer, WithMaxSummaryTokens(summaryTokens))
+	estimator := runeCountEstimator{}
+
+	// With the rune-count estimator, the bounded summary plus its provider
+	// framing costs 4 role runes + 74 untrusted-prefix runes + 20 summary runes.
+	// The unchanged current input costs 4 role runes + 10 content runes, so the
+	// 112-token budget fits them exactly. The old placeholder reservation also
+	// left the 5-token third prior item in the suffix, which made the real
+	// 20-token summary result exceed this budget.
+	result, err := compactor.Compact(ctx, items, budget, estimator)
+	require.NoError(t, err)
+	require.Equal(t, StrategySummary, result.Strategy)
+	require.NotNil(t, result.NewProjection)
+	assert.Equal(t, strings.Repeat("s", summaryTokens), result.NewProjection.Summary)
+	assert.Equal(t, llm.SourceThrough{PriorHistoryCount: 3}, result.NewProjection.Through,
+		"the larger cut summarizes only the complete prior prefix")
+	assert.LessOrEqual(t, estimateTokens(result.Items, estimator), budget)
+	require.Len(t, result.Items, 2)
+	assert.True(t, result.Items[0].IsCompaction)
+	resultCurrent := result.Items[1]
+	resultCurrent.EstimatedTokens = 0
+	assert.Equal(t, current, resultCurrent, "the current source-backed input must remain exact and outside the summary")
+	assert.Equal(t, current, items[3], "compaction must not mutate caller-owned current input")
+}
+
 func TestUnifiedCompactorFallsBackAfterTransientSummaryError(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, _ := newTracedCtx(t)

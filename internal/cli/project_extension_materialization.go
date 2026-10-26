@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -37,8 +38,20 @@ func materializeProjectExtensionPaths(cfg *config.Config, configuredPaths []stri
 		if !ok {
 			return nil, nil, fmt.Errorf("verified bytes are unavailable for project extension %q", configuredPath)
 		}
-		digest := sha256.Sum256(data)
 		extension := filepath.Ext(configuredPath)
+		if strings.HasSuffix(configuredPath, ".rpc.json") {
+			extension = ".rpc.json"
+			verified := cfg.VerifiedProjectSources()
+			if verified == nil {
+				return nil, nil, errors.New("RPC descriptor requires verified project sources")
+			}
+			var err error
+			data, err = normalizeProjectRPCDescriptor(data, verified.CanonicalRoot())
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		digest := sha256.Sum256(data)
 		if strings.ContainsAny(extension, string(filepath.Separator)+string(filepath.ListSeparator)) {
 			return nil, nil, fmt.Errorf("invalid project extension suffix for %q", configuredPath)
 		}
@@ -186,4 +199,40 @@ func releaseProjectExtensionPathLocked(path string) error {
 	}
 	projectExtensionStageCache.leases[path] = count - 1
 	return nil
+}
+
+func normalizeProjectRPCDescriptor(data []byte, projectRoot string) ([]byte, error) {
+	var descriptor map[string]json.RawMessage
+	if err := json.Unmarshal(data, &descriptor); err != nil {
+		return nil, fmt.Errorf("cli: RPC descriptor: %w", err)
+	}
+	var cwd string
+	if raw, ok := descriptor["cwd"]; ok {
+		if err := json.Unmarshal(raw, &cwd); err != nil {
+			return nil, errors.New("cli: RPC descriptor cwd must be a string")
+		}
+	}
+	if cwd == "" {
+		cwd = projectRoot
+	} else if !filepath.IsAbs(cwd) {
+		cwd = filepath.Join(projectRoot, cwd)
+	}
+	encoded, err := json.Marshal(cwd)
+	if err != nil {
+		return nil, err
+	}
+	descriptor["cwd"] = encoded
+	var command []string
+	if err := json.Unmarshal(descriptor["command"], &command); err != nil || len(command) == 0 {
+		return nil, errors.New("cli: RPC descriptor command is required")
+	}
+	if !filepath.IsAbs(command[0]) {
+		command[0] = filepath.Join(projectRoot, command[0])
+	}
+	encoded, err = json.Marshal(command)
+	if err != nil {
+		return nil, err
+	}
+	descriptor["command"] = encoded
+	return json.Marshal(descriptor)
 }

@@ -395,8 +395,15 @@ func TestPreparedApprovalUserDenyInvalidatesSiblingPermit(t *testing.T) {
 
 	permitA, err := registry.PrepareToolCall(ctx, tools.ToolCall{Name: "write_a", Args: map[string]any{"path": "a"}})
 	require.NoError(t, err)
+	fence, err := tools.DispatchFenceFromRegistry(registry)
+	require.NoError(t, err)
+	before := fence.Snapshot()
 	_, err = registry.PrepareToolCall(ctx, tools.ToolCall{Name: "write_b", Args: map[string]any{"path": "b"}})
 	require.ErrorIs(t, err, ErrToolDenied)
+	after := fence.Snapshot()
+	require.Equal(t, before.Approval, after.Approval, "declining one call does not replace the permission policy")
+	require.Equal(t, before.Plan, after.Plan)
+	require.Equal(t, before.Decision+1, after.Decision, "every older prepared decision is still invalidated")
 
 	_, err = permitA.Dispatch(ctx)
 	require.ErrorIs(t, err, tools.ErrDispatchFenceChanged, "an explicit user denial revokes previously prepared permits")

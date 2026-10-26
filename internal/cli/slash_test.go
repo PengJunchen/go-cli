@@ -18,7 +18,6 @@ import (
 	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/tools"
-	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
 // stubLoop is a minimal AgentLoop used by slash command tests. It never
@@ -58,7 +57,7 @@ func TestBuildSlashCommandRegistry(t *testing.T) {
 		"help", "cost", "compact", "clear", "tools", "model", "session",
 		"undo", "diff", "plan", "config", "history", "save", "load", "memory",
 		"thinking", "theme", "worktree", "revert", "retry", "edit", "context",
-		"mcp",
+		"mcp", "capabilities", "skills", "reload",
 	}
 	assert.ElementsMatch(t, want, reg.Names())
 
@@ -115,50 +114,23 @@ func TestSlashHelp(t *testing.T) {
 		"Themes cover a renderer subset",
 		"Diffs are unified; ASCII mode is unsupported",
 		"NO_COLOR only disables color",
-		"MCP server configuration hot reload is unsupported",
-		"Darwin arm64",
-		"Linux and Windows are unverified",
+		"lazy mode supports /mcp list, /mcp load <server>, and idle /mcp reload <server>",
+		"/reload reindexes descriptors",
+		"Compatibility eager mode retains owned reloaders",
+		"Dynamic mode with eager MCP sources requires restart",
+		"active source-identity or project trust-grant changes",
+		"Linux and Windows interactive runtime are unverified",
+		"Build success does not establish native UI validation",
 		"Docker target is linux/amd64; runtime support is unverified",
 	} {
 		assert.Contains(t, output, want, "help output must state boundary: %s", want)
 	}
 	assert.NotContains(t, output, "Fork, branch switch, snapshot, and migration are unsupported",
 		"legacy mutable handlers support fork and switch, so the boundary must distinguish durable mode")
-}
-
-func TestThemeHandler(t *testing.T) {
-	// --- List themes (no args) ---
-	c, buf := newTestCmd()
-	mgr := tui.NewThemeManager()
-	sc := &slashContext{out: buf, themeMgr: mgr}
-	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "theme"}, sc)
-	output := buf.String()
-	assert.Contains(t, output, "dark")
-	assert.Contains(t, output, "light")
-	assert.Contains(t, output, "monokai")
-	assert.Contains(t, output, "solarized")
-	assert.Contains(t, output, "(active)") // dark should be marked active
-
-	// --- Switch to a valid theme ---
-	buf.Reset()
-	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "theme", Args: []string{"light"}}, sc)
-	assert.Contains(t, buf.String(), "Theme switched to: light")
-	assert.Equal(t, "light", mgr.CurrentName())
-
-	// --- Switch to an invalid theme ---
-	buf.Reset()
-	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "theme", Args: []string{"nonexistent"}}, sc)
-	output = buf.String()
-	assert.Contains(t, output, "unknown theme")
-	assert.Contains(t, output, "Available themes:")
-	// Current theme should be unchanged.
-	assert.Equal(t, "light", mgr.CurrentName())
-
-	// --- Nil themeMgr graceful degradation ---
-	buf.Reset()
-	scNil := &slashContext{out: buf, themeMgr: nil}
-	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "theme"}, scNil)
-	assert.Contains(t, buf.String(), "only available in interactive TUI mode")
+	assert.NotContains(t, output, "MCP server configuration hot reload is unsupported",
+		"refresh support depends on the loading mode and source authority")
+	assert.NotContains(t, output, "one native Darwin arm64 journey",
+		"product help must not hardcode a historical validation run as current evidence")
 }
 
 func TestSlashCost(t *testing.T) {

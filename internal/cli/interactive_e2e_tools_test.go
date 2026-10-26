@@ -22,12 +22,11 @@ import (
 )
 
 // newE2ETestConfig creates a config pointing to the given mock server URL.
-// It sets HOME to a temp directory so history files and other side-effects
-// do not touch the real home directory.
+// Persistent stores use explicit temporary paths, without changing HOME or
+// the caller's workspace/sandbox configuration.
 func newE2ETestConfig(t *testing.T, srvURL string) *config.Config {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
-	return &config.Config{
+	cfg := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    "test",
 			BaseURL: srvURL,
@@ -35,6 +34,8 @@ func newE2ETestConfig(t *testing.T, srvURL string) *config.Config {
 			Model:   "test-model",
 		},
 	}
+	isolateCLITestStorage(cfg, t.TempDir())
+	return cfg
 }
 
 // TestE2E_NonTTYApprovalDenied drives a tool-call cycle through the

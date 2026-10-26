@@ -1,3 +1,5 @@
+//go:build !headless
+
 package tui
 
 import (
@@ -9,9 +11,18 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/pengjunchen/go-cli/internal/core"
 )
 
 const maxCanonicalTranscriptPreviewBytes = maxStreamingRenderBytes
+
+type canonicalToolProgressState uint8
+
+const (
+	canonicalToolProgressRunning canonicalToolProgressState = iota + 1
+	canonicalToolProgressCompleted
+)
 
 type liveToolOccurrence struct {
 	Key                      ToolOccurrenceKey
@@ -19,10 +30,14 @@ type liveToolOccurrence struct {
 }
 
 func (m *teaModel) installTranscriptSnapshotLocked(snapshot CanonicalTranscriptSnapshot) error {
+	m.ensureCanonicalToolProgressLocked()
 	rows := canonicalTranscriptViewportRows(snapshot)
 	assistantKeys, toolEntryKeys := canonicalTranscriptOccurrenceIndexes(snapshot)
 	m.canonicalAssistantKeys = assistantKeys
 	m.canonicalToolEntryKeys = toolEntryKeys
+	for occurrence := range toolEntryKeys {
+		m.canonicalToolProgress[occurrence] = canonicalToolProgressCompleted
+	}
 	matchedLive := make([]AssistantOccurrenceKey, 0)
 	matchedKeys := make(map[string]struct{})
 	for occurrence, key := range m.liveAssistantRows {
@@ -88,7 +103,125 @@ func (m *teaModel) installTranscriptSnapshotLocked(snapshot CanonicalTranscriptS
 	m.transcriptSplitActive = m.width >= splitWidthThreshold
 	m.transcriptSnapshot = snapshot.Clone()
 	m.hasTranscriptSnapshot = true
+	m.spinnerActive = m.hasRunningToolLocked()
 	return nil
+}
+
+func (m *teaModel) ensureCanonicalToolProgressLocked() {
+	if m.canonicalToolProgress == nil {
+		m.canonicalToolProgress = make(map[liveToolOccurrence]canonicalToolProgressState)
+	}
+	if m.quiescentToolRuns == nil {
+		m.quiescentToolRuns = make(map[string]struct{})
+	}
+}
+
+// reconcileCanonicalToolProgressLocked closes only the presentation state for
+// one quiescent run. It does not establish or modify resource completion proof.
+func (m *teaModel) reconcileCanonicalToolProgressLocked(observation RunObservation) bool {
+	if observation.RunID == "" || observation.ExecutionState != core.RunExecutionQuiescent {
+		return false
+	}
+	m.ensureCanonicalToolProgressLocked()
+	_, alreadyQuiescent := m.quiescentToolRuns[observation.RunID]
+	m.quiescentToolRuns[observation.RunID] = struct{}{}
+	changed := !alreadyQuiescent
+	for occurrence := range m.canonicalToolProgress {
+		if occurrence.Key.RunID == observation.RunID {
+			delete(m.canonicalToolProgress, occurrence)
+			changed = true
+		}
+	}
+	m.pruneQuiescentToolRunsLocked()
+	wasActive := m.spinnerActive
+	m.spinnerActive = m.hasRunningToolLocked()
+	return changed || wasActive != m.spinnerActive
+}
+
+func (m *teaModel) pruneQuiescentToolRunsLocked() {
+	if m.expectedRunID == "" {
+		return
+	}
+	for runID := range m.quiescentToolRuns {
+		if runID != m.expectedRunID {
+			delete(m.quiescentToolRuns, runID)
+		}
+	}
+}
+
+func (m *teaModel) recordCanonicalToolProgressLocked(event AgentEvent, occurrence liveToolOccurrence) {
+	m.ensureCanonicalToolProgressLocked()
+	m.pruneQuiescentToolRunsLocked()
+	key := occurrence.Key
+	if m.expectedRunID != "" && key.RunID != m.expectedRunID {
+		return
+	}
+	if !m.canonicalToolOccurrenceFitsSnapshotLocked(occurrence) {
+		return
+	}
+	if m.runObservation.RunID == key.RunID && m.runObservation.ExecutionState == core.RunExecutionQuiescent {
+		m.quiescentToolRuns[key.RunID] = struct{}{}
+	}
+	if _, quiescent := m.quiescentToolRuns[key.RunID]; quiescent {
+		return
+	}
+
+	switch event.ContentType {
+	case ContentTypeToolCall:
+		if event.Type != "" && event.Type != "tool_call" {
+			return
+		}
+		if m.canonicalToolProgress[occurrence] == canonicalToolProgressCompleted {
+			return
+		}
+		m.canonicalToolProgress[occurrence] = canonicalToolProgressRunning
+	case ContentTypeToolResult:
+		if event.Type != "" && event.Type != "tool_result" {
+			return
+		}
+		m.canonicalToolProgress[occurrence] = canonicalToolProgressCompleted
+	default:
+		return
+	}
+	m.spinnerActive = m.hasRunningToolLocked()
+}
+
+func (m *teaModel) canonicalToolOccurrenceFitsSnapshotLocked(occurrence liveToolOccurrence) bool {
+	coordinateFound := false
+	coordinateAmbiguous := false
+	keyFound := false
+	for _, row := range m.transcriptSnapshot.Rows {
+		if row.Kind != TranscriptRowAssistant || row.AssistantOccurrence == nil ||
+			row.AssistantOccurrence.RunID != occurrence.Key.RunID {
+			continue
+		}
+		atCoordinate := row.AssistantOccurrence.CanonicalTranscriptIndex == occurrence.CanonicalTranscriptIndex
+		if atCoordinate {
+			if coordinateFound {
+				coordinateAmbiguous = true
+			}
+			coordinateFound = true
+		}
+		for _, call := range row.Calls {
+			if call.Key != occurrence.Key {
+				continue
+			}
+			if !atCoordinate || keyFound {
+				return false
+			}
+			keyFound = true
+		}
+	}
+	if coordinateAmbiguous {
+		return false
+	}
+	if coordinateFound {
+		return keyFound
+	}
+	// The live run may emit an exact, fully identified tool event before the
+	// durable snapshot refresh includes that assistant coordinate. Permit that
+	// first observation unless the snapshot associates the full key elsewhere.
+	return !keyFound
 }
 
 func canonicalTranscriptOccurrenceIndexes(snapshot CanonicalTranscriptSnapshot) (
@@ -199,21 +332,27 @@ func applyLiveToolMetadataToCanonicalRow(
 	if !canonicalTranscriptHasTool(snapshot, occurrence) {
 		return
 	}
-	for index, source := range snapshot.Rows {
+	for _, source := range snapshot.Rows {
 		if source.Kind != TranscriptRowTool || source.Occurrence == nil ||
 			source.Occurrence.RunID != occurrence.Key.RunID ||
 			source.Occurrence.AssistantTranscriptOrdinal != occurrence.Key.AssistantTranscriptOrdinal ||
 			source.Occurrence.ToolCallID != occurrence.Key.ToolCallID {
 			continue
 		}
-		if rows[index].sourceTruncated == nil && fact != nil {
-			value := *fact
-			rows[index].sourceTruncated = &value
+		for index := range rows {
+			if rows[index].key != source.Key.EntryID {
+				continue
+			}
+			if rows[index].sourceTruncated == nil && fact != nil {
+				value := *fact
+				rows[index].sourceTruncated = &value
+			}
+			if receipt != "" {
+				rows[index].receiptOutcome = receipt
+			}
+			composeTranscriptViewportRowText(&rows[index])
+			return
 		}
-		if receipt != "" {
-			rows[index].receiptOutcome = receipt
-		}
-		composeTranscriptViewportRowText(&rows[index])
 		return
 	}
 }
@@ -277,6 +416,10 @@ func composeTranscriptViewportRowText(row *transcriptViewportRow) {
 func canonicalTranscriptViewportRows(snapshot CanonicalTranscriptSnapshot) []transcriptViewportRow {
 	rows := make([]transcriptViewportRow, 0, len(snapshot.Rows))
 	for index, source := range snapshot.Rows {
+		if source.Kind == TranscriptRowAssistant && source.Message.Content == "" &&
+			len(source.Message.ContentBlocks) == 0 && len(source.Message.ToolCalls) > 0 && source.Message.ReceiptOutcome == "" {
+			continue
+		}
 		content := source.Message.Content
 		if content == "" && source.Compaction != nil {
 			content = source.Compaction.Summary
@@ -557,6 +700,31 @@ func (m *teaModel) handleCanonicalTranscriptEvent(event AgentEvent) tea.Cmd {
 		m.mu.Unlock()
 		return nil
 	}
+	if !event.Incremental && event.Content == "" && len(event.ToolCalls) > 0 && !event.IsError && event.ReceiptOutcome == "" {
+		renderer := m.liveAssistantRenderers[occurrence]
+		if renderer == nil || renderer.inputBytes == 0 {
+			if key := m.liveAssistantRows[occurrence]; key != "" {
+				delete(m.liveTranscriptRows, key)
+				delete(m.liveAssistantRows, occurrence)
+				delete(m.liveAssistantRenderers, occurrence)
+				for index, orderedKey := range m.liveRowOrder {
+					if orderedKey == key {
+						m.liveRowOrder = append(m.liveRowOrder[:index], m.liveRowOrder[index+1:]...)
+						break
+					}
+				}
+				if err := m.rebuildTranscriptPaneLayoutLocked(); err != nil {
+					slog.Debug("tui.transcript.hide_tool_only_body_failed", "err", err)
+				}
+			}
+			if notify {
+				view = m.renderViewLocked()
+			}
+			m.mu.Unlock()
+			m.notify(view)
+			return nil
+		}
+	}
 	renderer := m.liveAssistantRenderers[occurrence]
 	if renderer == nil {
 		renderer = NewStreamingMarkdownRenderer(NewMarkdownRenderer())
@@ -616,6 +784,7 @@ func (m *teaModel) handleCanonicalToolEvent(event AgentEvent) tea.Cmd {
 	notify := m.shouldNotify()
 	var view string
 	m.mu.Lock()
+	m.recordCanonicalToolProgressLocked(event, occurrence)
 	entryKey, canonicalMatch := m.canonicalToolEntryKeys[occurrence]
 	if event.SourceTruncated != nil {
 		value := *event.SourceTruncated

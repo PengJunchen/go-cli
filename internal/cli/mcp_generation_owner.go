@@ -24,9 +24,48 @@ type assemblyMCPGeneration struct {
 	generation uint64
 	clients    []mcp.MCPClient
 	leases     []*mcp.MCPClientGeneration
+	toolNames  []string
 	done       chan struct{}
 	cleanup    sync.Once
 	cleanupErr error
+}
+
+// publishMaterializedMCPGeneration commits a prevalidated interactive candidate.
+// A publication rejection aborts the transaction without disabling the current
+// source. No client callbacks or network operations run in this critical section.
+func (r *assemblyMCPResources) publishMaterializedMCPGeneration(candidate *assemblyMCPGeneration, update *tools.MCPGenerationUpdate) error {
+	if r == nil || candidate == nil || update == nil {
+		if update != nil {
+			update.Abort()
+		}
+		return errors.New("cli: MCP generation publication is unavailable")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closing {
+		update.Abort()
+		return mcp.ErrHotReloadPending
+	}
+	if err := update.PublishMaterialized(); err != nil {
+		update.Abort()
+		return fmt.Errorf("cli: publish MCP generation: %w", err)
+	}
+	state := r.sourceStateLocked(candidate.sourceID)
+	old := state.current
+	state.generation = candidate.generation
+	state.current = candidate
+	delete(r.staged, candidate)
+	r.retireMCPGenerationLocked(old)
+	return nil
+}
+
+func (r *assemblyMCPResources) mcpToolNames(sourceID string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if state := r.sources[sourceID]; state != nil && state.current != nil {
+		return append([]string(nil), state.current.toolNames...)
+	}
+	return nil
 }
 
 func newAssemblyMCPGeneration(sourceID string, generation uint64) *assemblyMCPGeneration {

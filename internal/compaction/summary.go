@@ -128,7 +128,14 @@ func (c *SummaryCompactor) findCutPoint(items []TurnItem, maxTokens int, estimat
 }
 
 func (c *SummaryCompactor) findCutPointAtGroups(items []TurnItem, groups []itemGroup, maxTokens int, estimator TokenEstimator) int {
-	placeholder := estimateLength(UntrustedSummaryContext(summaryPlaceholder), estimator)
+	placeholder := saturatingTokenAdd(
+		estimateLength(RoleUser, estimator),
+		estimateLength(UntrustedSummaryContext(summaryPlaceholder), estimator),
+	)
+	return c.findCutPointAtGroupsWithSummaryReservation(items, groups, maxTokens, estimator, placeholder)
+}
+
+func (c *SummaryCompactor) findCutPointAtGroupsWithSummaryReservation(items []TurnItem, groups []itemGroup, maxTokens int, estimator TokenEstimator, summaryTokens int) int {
 	mandatorySystemTokens := mandatorySystemPromptTokens(items, estimator)
 
 	// Build a suffix sum by complete item group. estimateItemTokens caches each
@@ -138,10 +145,10 @@ func (c *SummaryCompactor) findCutPointAtGroups(items []TurnItem, groups []itemG
 		groupTokens := 0
 		if !groups[i].system {
 			for itemIndex := groups[i].start; itemIndex < groups[i].end; itemIndex++ {
-				groupTokens += estimateItemTokens(&items[itemIndex], estimator)
+				groupTokens = saturatingTokenAdd(groupTokens, estimateItemTokens(&items[itemIndex], estimator))
 			}
 		}
-		suffixSum[i] = suffixSum[i+1] + groupTokens
+		suffixSum[i] = saturatingTokenAdd(suffixSum[i+1], groupTokens)
 	}
 
 	for groupCut := 0; groupCut <= len(groups); groupCut++ {
@@ -149,7 +156,9 @@ func (c *SummaryCompactor) findCutPointAtGroups(items []TurnItem, groups []itemG
 		if groupCut < len(groups) {
 			cut = groups[groupCut].start
 		}
-		if placeholder+mandatorySystemTokens+suffixSum[groupCut] <= maxTokens {
+		candidateTokens := saturatingTokenAdd(summaryTokens, mandatorySystemTokens)
+		candidateTokens = saturatingTokenAdd(candidateTokens, suffixSum[groupCut])
+		if candidateTokens < maxTokenEstimate && candidateTokens <= maxTokens {
 			return cut
 		}
 	}
@@ -179,6 +188,18 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 	)
 
 	cut := c.findCutPointAtGroups(normalized, groups, maxTokens, estimator)
+	if hasDurableSource(normalized) && c.maxSummaryTokens > 0 {
+		// Durable summaries must leave room for the largest body this compactor
+		// can actually emit, including the user role and untrusted-context
+		// framing projected to the provider. Legacy histories retain the smaller
+		// placeholder reservation and rely on the final exact-result check below.
+		summaryReservation := saturatingTokenAdd(
+			estimateLength(RoleUser, estimator),
+			estimateLength(summaryUntrustedContextPrefix, estimator),
+		)
+		summaryReservation = saturatingTokenAdd(summaryReservation, c.maxSummaryTokens)
+		cut = c.findCutPointAtGroupsWithSummaryReservation(normalized, groups, maxTokens, estimator, summaryReservation)
+	}
 	if cut == 0 {
 		// Nothing can be summarized without exceeding budget; escalate to the
 		// truncating fallback. Returning the input unchanged primitives the

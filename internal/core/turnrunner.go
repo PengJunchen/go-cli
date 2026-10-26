@@ -42,20 +42,21 @@ type messageSource interface {
 // steering channel is set via SetSteerChannel, Steer sends the instruction to
 // that channel so the running loop picks it up between LLM iterations.
 type EinoTurnRunner struct {
-	loop           AgentLoop
-	agent          Agent
-	stream         EventStream
-	lifetimeCtx    context.Context
-	steerCh        chan string
-	followUpCh     chan string
-	hookChain      *HookChain
-	runSlot        RunSlotGuard
-	cleanupTimeout time.Duration
-	mu             sync.Mutex
-	turns          map[string]*Turn
-	running        map[string]context.CancelFunc
-	owners         map[string]*runOwner
-	idSeq          atomic.Uint64
+	loop               AgentLoop
+	agent              Agent
+	stream             EventStream
+	lifetimeCtx        context.Context
+	generationProvider RunGenerationProvider
+	steerCh            chan string
+	followUpCh         chan string
+	hookChain          *HookChain
+	runSlot            RunSlotGuard
+	cleanupTimeout     time.Duration
+	mu                 sync.Mutex
+	turns              map[string]*Turn
+	running            map[string]context.CancelFunc
+	owners             map[string]*runOwner
+	idSeq              atomic.Uint64
 }
 
 var _ TurnRunner = (*EinoTurnRunner)(nil)
@@ -108,6 +109,7 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (re
 	agent := r.agent
 	stream := r.stream
 	lifetimeCtx := r.lifetimeCtx
+	generationProvider := r.generationProvider
 	r.mu.Unlock()
 
 	if runSlot == nil {
@@ -177,6 +179,21 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (re
 		panic(leaseCapturePanic)
 	}
 
+	var generationLease RunGenerationLease
+	if generationProvider != nil {
+		var acquireErr error
+		turnCtx, generationLease, acquireErr = generationProvider.AcquireRun(turnCtx)
+		if acquireErr != nil {
+			return Result{Outcome: RunOutcomeError, ExecutionState: RunExecutionQuiescent}, acquireErr
+		}
+	}
+	defer func() {
+		if !ownerStarted {
+			returnErr = errors.Join(returnErr, releaseGeneration(generationLease))
+		}
+	}()
+	hookChain = runHookChain(turnCtx, hookChain)
+
 	// Claim before borrowing tracing or invoking any hook/message provider so
 	// Assembly.Close cannot observe idle while accepted entrypoint work runs.
 	var spanCtx context.Context
@@ -220,6 +237,7 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (re
 	r.owners[id] = owner
 	r.mu.Unlock()
 
+	owner.generationLease = generationLease
 	owner.adoptRunCommitLease(leaseGuard)
 	leaseTransferred = true
 	ownerStarted = true

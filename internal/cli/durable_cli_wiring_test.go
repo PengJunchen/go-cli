@@ -64,8 +64,9 @@ func (script *durablePromptScript) requestBodies() []string {
 	return append([]string(nil), script.bodies...)
 }
 
-func durablePromptConfig(baseURL, storeDirectory string) *config.Config {
-	cfg := newPromptConfig(baseURL)
+func durablePromptConfig(t *testing.T, baseURL, storeDirectory string) *config.Config {
+	t.Helper()
+	cfg := newPromptConfig(t, baseURL)
 	cfg.Session.StorePath = storeDirectory
 	return cfg
 }
@@ -115,14 +116,14 @@ func TestPromptDurableTwoInvocationsResumeExactPhysicalSession(t *testing.T) {
 	storeDirectory := filepath.Join(t.TempDir(), "sessions")
 	firstOut := &bytes.Buffer{}
 	firstCmd := newPromptCmd(firstOut)
-	require.NoError(t, firstCmd.Run(t.Context(), durablePromptConfig(server.URL, storeDirectory), []string{"first request"}))
+	require.NoError(t, firstCmd.Run(t.Context(), durablePromptConfig(t, server.URL, storeDirectory), []string{"first request"}))
 	physicalID := physicalSessionIDFromOutput(t, firstOut.String())
 	_, err := os.Stat(filepath.Join(storeDirectory, "sessions", physicalID+".jsonl"))
 	require.NoError(t, err, "a configured prompt store creates a real durable physical session")
 
 	secondOut := &bytes.Buffer{}
 	secondCmd := newPromptCmd(secondOut)
-	require.NoError(t, secondCmd.Run(t.Context(), durablePromptConfig(server.URL, storeDirectory), []string{"--resume-session", physicalID, "second request"}))
+	require.NoError(t, secondCmd.Run(t.Context(), durablePromptConfig(t, server.URL, storeDirectory), []string{"--resume-session", physicalID, "second request"}))
 	require.Equal(t, physicalID, physicalSessionIDFromOutput(t, secondOut.String()))
 
 	bodies := script.requestBodies()
@@ -148,7 +149,7 @@ func TestPromptDurableForkRejectsBeforeInitializingWorkspace(t *testing.T) {
 	configRoot := os.Getenv("XDG_CONFIG_HOME")
 
 	cmd := newPromptCmd(io.Discard)
-	err := cmd.Run(t.Context(), durablePromptConfig(server.URL, storeDirectory), []string{"--fork", "entry-1", "hello"})
+	err := cmd.Run(t.Context(), durablePromptConfig(t, server.URL, storeDirectory), []string{"--fork", "entry-1", "hello"})
 	require.Error(t, err)
 	var unsupported *UnsupportedDurableCLIError
 	require.ErrorAs(t, err, &unsupported)
@@ -169,7 +170,7 @@ func TestPromptDurableRejectsLegacyJSONLPathWithoutRewrite(t *testing.T) {
 	legacyContents := []byte(`{"type":"legacy"}` + "\n")
 	require.NoError(t, os.WriteFile(legacyPath, legacyContents, 0o600))
 
-	err := newPromptCmd(io.Discard).Run(t.Context(), durablePromptConfig(server.URL, legacyPath), []string{"hello"})
+	err := newPromptCmd(io.Discard).Run(t.Context(), durablePromptConfig(t, server.URL, legacyPath), []string{"hello"})
 	require.Error(t, err)
 	require.ErrorIs(t, err, errDurableSessionPathNotDirectory)
 	require.Contains(t, err.Error(), "durable session path must be a directory")
@@ -211,7 +212,7 @@ func TestPromptDurableOutputFailureDrainsRunAndReturnsLease(t *testing.T) {
 	writer := &durablePromptFailingWriter{needle: "answer after writer failure", err: writeErr}
 	storeDirectory := filepath.Join(t.TempDir(), "sessions")
 
-	err := newPromptCmd(writer).Run(t.Context(), durablePromptConfig(server.URL, storeDirectory), []string{"persist despite output failure"})
+	err := newPromptCmd(writer).Run(t.Context(), durablePromptConfig(t, server.URL, storeDirectory), []string{"persist despite output failure"})
 	require.ErrorIs(t, err, writeErr)
 	physicalID := physicalSessionIDFromOutput(t, writer.String())
 	require.Len(t, script.requestBodies(), 1)
@@ -237,7 +238,7 @@ func TestInteractiveDurableSessionKeepsOnePhysicalSessionAcrossTurns(t *testing.
 	)
 	defer server.Close()
 	storeDirectory := filepath.Join(t.TempDir(), "sessions")
-	cfg := durablePromptConfig(server.URL, storeDirectory)
+	cfg := durablePromptConfig(t, server.URL, storeDirectory)
 	var out bytes.Buffer
 	cmd := newInteractiveCmd(nil, &out)
 	cmd.lineEditor = &scriptedLineEditor{results: []lineReadResult{
@@ -305,7 +306,7 @@ func TestInteractiveWithoutSessionStoreReportsSessionCommandsUnsupported(t *test
 	configureDurableCLISessionTest(t)
 	server, script := newDurablePromptServer(t, `{"choices":[{"message":{"content":"unused"}}]}`)
 	defer server.Close()
-	cfg := durablePromptConfig(server.URL, "")
+	cfg := durablePromptConfig(t, server.URL, "")
 	var out bytes.Buffer
 	cmd := newInteractiveCmd(nil, &out)
 	cmd.lineEditor = &scriptedLineEditor{results: []lineReadResult{
@@ -335,7 +336,7 @@ func TestInteractiveConfiguredStoreRejectsBooleanResume(t *testing.T) {
 	server, script := newDurablePromptServer(t, `{"choices":[{"message":{"content":"unused"}}]}`)
 	defer server.Close()
 	storeDirectory := filepath.Join(t.TempDir(), "sessions")
-	cfg := durablePromptConfig(server.URL, storeDirectory)
+	cfg := durablePromptConfig(t, server.URL, storeDirectory)
 	cmd := newInteractiveCmd(nil, io.Discard)
 	cmd.lineEditor = &scriptedLineEditor{results: []lineReadResult{{line: "exit"}}}
 	err := cmd.Run(t.Context(), cfg, []string{"--resume", "--no-onboarding"})
@@ -354,7 +355,7 @@ func TestInteractiveDurableResumeUsesExactPhysicalSessionAfterRestart(t *testing
 	)
 	defer server.Close()
 	storeDirectory := filepath.Join(t.TempDir(), "sessions")
-	cfg := durablePromptConfig(server.URL, storeDirectory)
+	cfg := durablePromptConfig(t, server.URL, storeDirectory)
 
 	firstCmd := newInteractiveCmd(nil, io.Discard)
 	firstCmd.lineEditor = &scriptedLineEditor{results: []lineReadResult{
@@ -412,7 +413,7 @@ func TestInteractiveDurableHistoryMutatorsAreUnsupportedAndReadOnlySlashStillWor
 	defer server.Close()
 
 	storeDirectory := filepath.Join(t.TempDir(), "sessions")
-	cfg := durablePromptConfig(server.URL, storeDirectory)
+	cfg := durablePromptConfig(t, server.URL, storeDirectory)
 	var out bytes.Buffer
 	cmd := newInteractiveCmd(nil, &out)
 	cmd.lineEditor = &scriptedLineEditor{results: []lineReadResult{
@@ -460,7 +461,7 @@ func TestServeRejectsConfiguredDurableSessionBeforeListenerStart(t *testing.T) {
 	configureDurableCLISessionTest(t)
 	server, script := newDurablePromptServer(t, `{"choices":[{"message":{"content":"unused"}}]}`)
 	defer server.Close()
-	cfg := durablePromptConfig(server.URL, filepath.Join(t.TempDir(), "sessions"))
+	cfg := durablePromptConfig(t, server.URL, filepath.Join(t.TempDir(), "sessions"))
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
