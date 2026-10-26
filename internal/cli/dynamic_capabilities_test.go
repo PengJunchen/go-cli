@@ -472,3 +472,97 @@ func TestDynamicRuntimeEagerMCPSourcesRequireRestartWithoutBackgroundReload(t *t
 	require.EqualValues(t, 1, oldPeer.calls.Load())
 	require.Zero(t, newPeer.calls.Load())
 }
+
+func TestTrustedProjectSkillREADMEAndInvalidReload(t *testing.T) {
+	for _, testCase := range []struct {
+		name          string
+		projectConfig string
+		wantProfile   string
+	}{
+		{
+			name: "progressive",
+			projectConfig: "skill:\n  dir: .go-cli/skills\n  progressive: true\n" +
+				"runtime:\n  dynamic: true\n",
+			wantProfile: "default",
+		},
+		{
+			name:          "edge",
+			projectConfig: "skill:\n  dir: .go-cli/skills\nruntime:\n  profile: edge\n",
+			wantProfile:   "edge",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := context.Background()
+			root := t.TempDir()
+			t.Chdir(root)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			writeProjectSkill(t, filepath.Join(root, ".go-cli.yaml"), testCase.projectConfig)
+			writeProjectSkill(t, filepath.Join(root, ".go-cli", "skills", "README.md"), "# Project skills\n\nDocumentation for this directory.\n")
+			skillPath := filepath.Join(root, ".go-cli", "skills", "writer", "SKILL.md")
+			writeProjectSkill(t, skillPath, projectSkillContent("writer", "Write clearly"))
+
+			trustStorePath := filepath.Join(home, ".config", "go-cli", "trust.json")
+			require.NoError(t, os.MkdirAll(filepath.Dir(trustStorePath), 0o700))
+			manager := approval.NewDefaultTrustManager(approval.NewFileTrustStore(trustStorePath))
+			baseConfig := newAssembleTestConfig(t)
+			loadTrusted := func(loadCtx context.Context) (*config.Config, error) {
+				loaded, err := config.LoadTrustedWithManager(loadCtx, manager)
+				if err != nil {
+					return nil, err
+				}
+				loaded.Provider = baseConfig.Provider
+				loaded.Git = baseConfig.Git
+				loaded.Memory = baseConfig.Memory
+				loaded.History = baseConfig.History
+				loaded.Production.Audit = baseConfig.Production.Audit
+				return loaded, nil
+			}
+			uncurated, err := loadTrusted(ctx)
+			require.NoError(t, err)
+			snapshot := uncurated.CapturedProjectSourcesForGrant()
+			require.NotNil(t, snapshot)
+			frozen, ok := manager.(approval.FrozenProjectSourceTrust)
+			require.True(t, ok)
+			require.NoError(t, frozen.TrustProjectSourceSnapshot(ctx, snapshot))
+
+			trusted, err := loadTrusted(ctx)
+			require.NoError(t, err)
+			require.NotNil(t, trusted.VerifiedProjectSources())
+			sources, err := verifiedProjectSkillFiles(trusted.VerifiedProjectSources(), trusted.Skill.Dir)
+			require.NoError(t, err)
+			var sourcePaths []string
+			for _, source := range sources {
+				sourcePaths = append(sourcePaths, source.RelativePath)
+			}
+			require.ElementsMatch(t, []string{"README.md", "writer/SKILL.md"}, sourcePaths)
+
+			runtimeCtx := WithRuntimeConfigLoader(ctx, loadTrusted)
+			assembly, err := AssembleAgent(runtimeCtx, trusted, "openai", "test-model", io.Discard, WithApproveMode(ApproveAuto))
+			require.NoError(t, err)
+			t.Cleanup(assembly.Cleanup)
+			before, err := assembly.CapabilityStatus(ctx)
+			require.NoError(t, err)
+			require.Equal(t, testCase.wantProfile, before.Profile)
+			require.Len(t, before.Skills, 1)
+			require.Equal(t, "writer", before.Skills[0].Name)
+
+			writeProjectSkill(t, skillPath, projectSkillContent("live/check", "invalid skill name"))
+			changed, err := loadTrusted(ctx)
+			require.NoError(t, err)
+			require.Equal(t, config.ProjectSourceTrustChanged, changed.ProjectSourceTrustStatus)
+			changedSnapshot := changed.CapturedProjectSourcesForGrant()
+			require.NotNil(t, changedSnapshot)
+			require.NoError(t, frozen.TrustProjectSourceSnapshot(ctx, changedSnapshot))
+			regGranted, err := loadTrusted(ctx)
+			require.NoError(t, err)
+			require.NotNil(t, regGranted.VerifiedProjectSources())
+
+			err = assembly.ReloadCapabilities(runtimeCtx)
+			require.ErrorContains(t, err, "invalid catalog name")
+			after, err := assembly.CapabilityStatus(ctx)
+			require.NoError(t, err)
+			require.Equal(t, before.Generation, after.Generation)
+		})
+	}
+}
