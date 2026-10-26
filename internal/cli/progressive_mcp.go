@@ -158,21 +158,20 @@ func (p *progressiveMCP) prepareActivationLocked(ctx context.Context, name strin
 	if selected == nil {
 		return nil, nil, nil, errors.New("cli: unknown MCP server")
 	}
-	child := mcpServerSource{kind: source.kind, id: source.id + "/server/" + name, path: source.path, projectRoot: source.projectRoot, manager: source.manager, trustLatched: true}
+	sourceID := source.id + "/server/" + name
 	var binding tools.ProjectTrustBinding
 	if source.projectOwned() {
 		verified, ok := source.latchedProjectBinding()
 		if !ok {
 			return nil, nil, nil, errMCPSourceUnverified
 		}
-		child.trustBinding = verified
 		binding = verified
 	}
-	candidate, candidates, err := buildMCPGeneration(ctx, child.id, p.owner.nextMCPGeneration(child.id), []config.MCPServerConfig{*selected}, p.owner, binding)
+	candidate, candidates, err := buildMCPGeneration(ctx, sourceID, p.owner.nextMCPGeneration(sourceID), []config.MCPServerConfig{*selected}, p.owner, binding)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	definitions, err := p.projectDefinitions(ctx, child.id, candidates)
+	definitions, err := p.projectDefinitions(ctx, sourceID, candidates)
 	if err == nil {
 		if p.validateCandidate == nil {
 			err = errors.New("cli: MCP candidate validator is unavailable")
@@ -187,7 +186,7 @@ func (p *progressiveMCP) prepareActivationLocked(ctx context.Context, name strin
 	if refresh {
 		begin = p.registry.BeginMCPGenerationUpdate
 	}
-	update, err := begin(ctx, child.id, candidate.generation, candidates)
+	update, err := begin(ctx, sourceID, candidate.generation, candidates)
 	if err != nil {
 		return nil, nil, nil, errors.Join(err, p.owner.cleanupMCPCandidate(candidate))
 	}

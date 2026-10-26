@@ -17,6 +17,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 func TestDynamicRuntimeReloadPinsPromptAndRejectsColdConfiguration(t *testing.T) {
@@ -261,10 +262,15 @@ func TestNamedMCPRefreshRejectsChangedProjectGrantBeforeReconnect(t *testing.T) 
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
 	require.NoError(t, assembly.LoadMCPServer(ctx, "lazy"))
+	prepared, err := assembly.ToolRegistry.(tools.ToolCallPreparer).PrepareToolCall(ctx, tools.ToolCall{ID: "stale-lazy-call", Name: "mcp__lazy__lookup", Args: map[string]any{}})
+	require.NoError(t, err)
 	requests := peer.requests.Load()
 	before, err := assembly.CapabilityStatus(ctx)
 	require.NoError(t, err)
 	require.NoError(t, manager.RevokeTrust(ctx, root))
+	_, err = prepared.Dispatch(ctx)
+	require.ErrorIs(t, err, approval.ErrProjectSourceTrustStale)
+	require.Zero(t, peer.calls.Load(), "lazy activation must retain its project binding through final dispatch")
 	trustMCPGenerationProjectSnapshot(t, root, manager)
 	fresh, err := config.LoadTrustedWithManager(ctx, manager)
 	require.NoError(t, err)
