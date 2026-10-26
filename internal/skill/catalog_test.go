@@ -48,3 +48,102 @@ func TestCapturedStandardCatalogOwnsBytesAndRejectsDuplicates(t *testing.T) {
 	_, err = CatalogFromSources(context.Background(), []SkillSourceFile{{RelativePath: "a.md", Content: []byte("---\nname: duplicate\n---\na")}, {RelativePath: "b.md", Content: []byte("---\nname: duplicate\n---\nb")}}, CatalogOptions{})
 	require.True(t, errors.Is(err, ErrCatalogDuplicate))
 }
+
+func TestCapturedCatalogSkipsPlainREADMEAndKeepsNestedSkill(t *testing.T) {
+	catalog, err := CatalogFromSources(context.Background(), []SkillSourceFile{
+		{RelativePath: "README.md", Content: []byte("# Project skills\n\nThis directory contains project skills.\n")},
+		{RelativePath: "writer/SKILL.md", Content: []byte("---\nname: writer\ndescription: Write clearly\n---\nWriter instructions")},
+	}, CatalogOptions{})
+	require.NoError(t, err)
+
+	entries := catalog.Search("", 100)
+	require.Len(t, entries, 1)
+	require.Equal(t, "writer", entries[0].Name)
+}
+
+func TestCapturedCatalogPreservesREADMEFlatSkillCompatibility(t *testing.T) {
+	catalog, err := CatalogFromSources(context.Background(), []SkillSourceFile{{
+		RelativePath: "README.md",
+		Content:      []byte("---\nname: readme-skill\ndescription: A documented skill\n---\nSkill instructions"),
+	}}, CatalogOptions{})
+	require.NoError(t, err)
+
+	entries := catalog.Search("", 100)
+	require.Len(t, entries, 1)
+	require.Equal(t, "readme-skill", entries[0].Name)
+}
+
+func TestCapturedCatalogREADMEHandlingDoesNotMaskInvalidEntries(t *testing.T) {
+	validSkill := []byte("---\nname: writer\ndescription: Write clearly\n---\nWriter instructions")
+	for _, testCase := range []struct {
+		name    string
+		sources []SkillSourceFile
+		wantErr error
+		wantMsg string
+	}{
+		{
+			name:    "malformed README frontmatter",
+			sources: []SkillSourceFile{{RelativePath: "README.md", Content: []byte("---\nname: incomplete\n")}},
+			wantErr: errParse,
+		},
+		{
+			name:    "malformed standard skill",
+			sources: []SkillSourceFile{{RelativePath: "writer/SKILL.md", Content: []byte("not frontmatter\n")}},
+			wantErr: errParse,
+		},
+		{
+			name:    "malformed legacy flat skill",
+			sources: []SkillSourceFile{{RelativePath: "writer.md", Content: []byte("not frontmatter\n")}},
+			wantErr: errParse,
+		},
+		{
+			name:    "invalid skill name",
+			sources: []SkillSourceFile{{RelativePath: "writer/SKILL.md", Content: []byte("---\nname: live/check\ndescription: Invalid\n---\n")}},
+			wantMsg: "invalid catalog name",
+		},
+		{
+			name: "duplicate name between README and nested skill",
+			sources: []SkillSourceFile{
+				{RelativePath: "README.md", Content: validSkill},
+				{RelativePath: "writer/SKILL.md", Content: validSkill},
+			},
+			wantErr: ErrCatalogDuplicate,
+		},
+		{
+			name:    "unclean README path",
+			sources: []SkillSourceFile{{RelativePath: "./README.md", Content: []byte("# docs\n")}},
+			wantErr: ErrSkillUnsafeSource,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := CatalogFromSources(context.Background(), testCase.sources, CatalogOptions{})
+			require.Error(t, err)
+			if testCase.wantErr != nil {
+				require.ErrorIs(t, err, testCase.wantErr)
+			}
+			if testCase.wantMsg != "" {
+				require.ErrorContains(t, err, testCase.wantMsg)
+			}
+		})
+	}
+}
+
+func TestCapturedCatalogPlainREADMEHonorsMetadataLimitAndCancellation(t *testing.T) {
+	t.Run("metadata limit", func(t *testing.T) {
+		_, err := CatalogFromSources(context.Background(), []SkillSourceFile{{
+			RelativePath: "README.md",
+			Content:      []byte("# documentation that is too long\n"),
+		}}, CatalogOptions{MaxMetadataBytes: 8})
+		require.ErrorIs(t, err, ErrSkillResourceLimit)
+	})
+
+	t.Run("cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := CatalogFromSources(ctx, []SkillSourceFile{{
+			RelativePath: "README.md",
+			Content:      []byte("# documentation\n"),
+		}}, CatalogOptions{})
+		require.ErrorIs(t, err, context.Canceled)
+	})
+}

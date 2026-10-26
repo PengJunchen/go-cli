@@ -160,6 +160,13 @@ func CatalogFromSources(ctx context.Context, sources []SkillSourceFile, opts Cat
 		if !isSkillFileName(filepath.Base(path)) {
 			continue
 		}
+		plainReadme, err := isPlainReadme(ctx, path, source.Content, opts)
+		if err != nil {
+			return nil, err
+		}
+		if plainReadme {
+			continue
+		}
 		inside := false
 		for dir := range standard {
 			if strings.HasPrefix(path, dir+"/") && path != dir+"/SKILL.md" {
@@ -179,6 +186,30 @@ func CatalogFromSources(ctx context.Context, sources []SkillSourceFile, opts Cat
 		}
 	}
 	return catalog, nil
+}
+
+func isPlainReadme(ctx context.Context, path string, content []byte, opts CatalogOptions) (bool, error) {
+	if !strings.EqualFold(filepath.Base(path), "README.md") {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	limit := opts.MaxMetadataBytes
+	if limit <= 0 {
+		limit = defaultMetadataBytes
+	}
+	probeLen := len(content)
+	if probeLen > limit {
+		probeLen = limit
+	}
+	firstLine := content[:probeLen]
+	if newline := bytes.IndexByte(firstLine, '\n'); newline >= 0 {
+		firstLine = firstLine[:newline]
+	} else if len(content) > limit {
+		return false, ErrSkillResourceLimit
+	}
+	return !bytes.Equal(bytes.TrimSpace(firstLine), []byte(frontmatterDelimiter)), nil
 }
 
 func readCatalogMetadata(ctx context.Context, r io.Reader, opts CatalogOptions) ([]byte, error) {
