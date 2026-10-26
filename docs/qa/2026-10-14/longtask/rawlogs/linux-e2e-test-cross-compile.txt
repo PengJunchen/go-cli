@@ -1,3 +1,0 @@
-Command: rtk proxy env GOOS=linux GOARCH=amd64 go test -c -tags=e2e -o /tmp/go-cli-e2e-linux.test ./tests
-Exit status: 0
-The Go compiler emitted no output on success. This is a cross-compile only; no Linux runtime test was run.

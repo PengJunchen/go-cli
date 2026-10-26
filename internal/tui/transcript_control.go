@@ -1,3 +1,5 @@
+//go:build !headless
+
 package tui
 
 import (
@@ -5,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-
-	"github.com/pengjunchen/go-cli/internal/core"
 )
 
 var errTranscriptRefreshContext = errors.New("tui: transcript refresh requires the active UI context")
@@ -143,45 +143,13 @@ func (request *transcriptRefreshRequest) apply(model *teaModel) bool {
 }
 
 func (m *teaModel) validateTranscriptRefresh(refresh TranscriptRefresh) error {
-	if err := refresh.Snapshot.Validate(); err != nil {
-		return err
-	}
 	m.mu.Lock()
 	hasSnapshot := m.hasTranscriptSnapshot
 	currentSession := m.transcriptSnapshot.PhysicalSessionID
 	currentBranch := m.transcriptSnapshot.BranchID
+	expectedRunID, expectedOwnerGen := m.expectedRunID, m.expectedOwnerGen
 	m.mu.Unlock()
-	if !hasSnapshot || refresh.Snapshot.PhysicalSessionID != currentSession || refresh.Snapshot.BranchID != currentBranch {
-		return ErrTranscriptRefreshIdentity
-	}
-	publication := refresh.Publication
-	if publication.State != core.DurablePublicationUnbound && publication.State != core.DurablePublicationPending &&
-		publication.State != core.DurablePublicationSynced && publication.State != core.DurablePublicationFailed {
-		return fmt.Errorf("%w: invalid durable publication state %q", ErrTranscriptRefreshIdentity, publication.State)
-	}
-	if publication.State != core.DurablePublicationUnbound {
-		if publication.RunID == "" || publication.SessionID != refresh.Snapshot.PhysicalSessionID || publication.OwnerGeneration == "" {
-			return ErrTranscriptRefreshIdentity
-		}
-		if refresh.Observation.RunID != publication.RunID || refresh.Observation.OwnerGeneration != publication.OwnerGeneration {
-			return ErrTranscriptRefreshIdentity
-		}
-		if m.expectedRunID != "" && publication.RunID != m.expectedRunID {
-			return ErrTranscriptRefreshIdentity
-		}
-		if m.expectedOwnerGen != "" && publication.OwnerGeneration != m.expectedOwnerGen {
-			return ErrTranscriptRefreshIdentity
-		}
-	}
-	if publication.State == core.DurablePublicationSynced {
-		if refresh.Observation.ExecutionState != core.RunExecutionQuiescent ||
-			refresh.Observation.Outcome == core.RunOutcomeUnknown ||
-			refresh.Observation.TerminalEntryID == "" ||
-			refresh.Observation.TerminalOutcome != refresh.Observation.Outcome {
-			return ErrTranscriptRefreshIdentity
-		}
-	}
-	return nil
+	return ValidateTranscriptRefresh(hasSnapshot, currentSession, currentBranch, expectedRunID, expectedOwnerGen, refresh)
 }
 
 // TranscriptRefresher applies a canonical snapshot through a model-apply ACK.

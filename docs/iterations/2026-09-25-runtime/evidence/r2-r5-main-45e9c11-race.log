@@ -1,5 +1,0 @@
-ok  	github.com/pengjunchen/go-cli/internal/tools	51.166s
-ok  	github.com/pengjunchen/go-cli/internal/session	14.379s
-ok  	github.com/pengjunchen/go-cli/internal/core	3.937s
-ok  	github.com/pengjunchen/go-cli/internal/cli	18.935s
-ok  	github.com/pengjunchen/go-cli/internal/tui	2.325s

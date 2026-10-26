@@ -1,29 +1,0 @@
-=== RUN   TestHITLQuestionReachesRealBubbleteaModel
-[?25l[?2004h     hitl_test.go:443: 
-        	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/tui/internal/cli/hitl_test.go:138
-        	            				/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/tui/internal/cli/hitl_test.go:443
-        	Error:      	Condition never satisfied
-        	Test:       	TestHITLQuestionReachesRealBubbleteaModel
-        	Messages:   	TUI never rendered "Choose a deployment"
-[2K[?2004l[?25h[?1002l[?1003l[?1006l--- FAIL: TestHITLQuestionReachesRealBubbleteaModel (2.00s)
-=== RUN   TestHITLQuestionCancellationRemovesRealTUIWait
-[?25l[?2004h     hitl_test.go:472: 
-        	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/tui/internal/cli/hitl_test.go:138
-        	            				/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/tui/internal/cli/hitl_test.go:472
-        	Error:      	Condition never satisfied
-        	Test:       	TestHITLQuestionCancellationRemovesRealTUIWait
-        	Messages:   	TUI never rendered "This question will be canceled"
-[2K[?2004l[?25h[?1002l[?1003l[?1006l--- FAIL: TestHITLQuestionCancellationRemovesRealTUIWait (2.00s)
-FAIL
-FAIL	github.com/pengjunchen/go-cli/internal/cli	4.021s
-FAIL
-=== RUN   TestTUIConcurrentApprovalRequestsRemainResolvable
-    approval_entry_test.go:205: 
-        	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/tui/internal/tui/approval_entry_test.go:205
-        	Error:      	"\n\x1b[1;38;2;255;192;0m[approval]\x1b[0m \x1b[38;2;0;217;255msecond-tool\x1b[0m\n  [y] once  [a] always  [n] reject" does not contain "first-tool"
-        	Test:       	TestTUIConcurrentApprovalRequestsRemainResolvable
-        	Messages:   	the first approval must remain active
---- FAIL: TestTUIConcurrentApprovalRequestsRemainResolvable (0.00s)
-FAIL
-FAIL	github.com/pengjunchen/go-cli/internal/tui	0.019s
-FAIL

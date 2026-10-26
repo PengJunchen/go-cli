@@ -1,369 +1,0 @@
-]11;?\[6nInteractive session started. Type 'exit' to quit.
-[?2004h> [J> P[J> PT[J> PTY[J> PTY [J> PTY c[J> PTY ca[J> PTY can[J> PTY canc[J> PTY cance[J> PTY cancel[J> PTY cancel [J> PTY cancel q[J> PTY cancel qu[J> PTY cancel que[J> PTY cancel queu[J> PTY cancel queue[J> PTY cancel queued
-[?2004l[?25l[?2004h  [K
-  ⠹ [tool] write[K
-  [K
-▶ ⠙ [tool] write[K
-⠹ working...[K
-pty-review-model | turn #1 | interact | chat[K[5A[approval] write[K
-  local interaction #1 · 1 waiting[K
-  scope: unknown; once only; reuse unavailable[K
-  view truncated · details 1-1/7 · ↑/↓ PgUp/PgDn[K
-  args:[K
-  [y] review details [n] reject [d] diff[K[2K[?2004l[?25h[?1002l[?1003l[?1006l[interrupted]
-[?2004h> [J> P[J> PT[J> PTY[J> PTY [J> PTY d[J> PTY de[J> PTY den[J> PTY deny
-[?2004l[?25l[?2004h  AI: [K
-  [K
-▶ ⠙ [tool] write[K
-⠙ working...[K
-pty-review-model | turn #2 | interact | chat[K[4A[approval] write[K
-  local interaction #1[K
-  scope: unknown; once only; reuse unavailable[K
-  view truncated · details 1-1/7 · ↑/↓ PgUp/PgDn[K
-  args:[K
-  [y] review details [n] reject [d] diff[K[5A[approval] write[K
-  local interaction 
-scope unknown · resi
-[y] locked [n] no[K[J[3Ad the requested inte
-raction.            
-pty-review-model | t
-Tokens: 59/8000 (0%)[2K[?2004l[?25h[?1002l[?1003l[?1006l[?2004h> [J> P[J> PT[J> PTY[J> PTY [J> PTY o[J> PTY on[J> PTY onc[J> PTY once
-[?2004l[?25l[?2004h  AI: [K
-  [K
-▶ ⠙ [tool] write[K
-⠙ working...[K
-pty-review-model | turn #3 | interact | chat[K[4A[approval] write[K
-  local interaction #1[K
-  scope: unknown; once only; reuse unavailable[K
-  view truncated · details 1-1/29 · ↑/↓ PgUp/PgDn[K
-  args:[K
-  [y] review details [n] reject [d] diff[K[5A[approval] write[K
-  local interaction 
-scope unknown · resi
-[y] locked [n] no[K[J[3A[approval] write[K
-  local interaction #1[K
-  scope: unknown; once only; reuse unavailable[K
-  view truncated · details 1-7/29 · ↑/↓ PgUp/PgDn[K
-  args:[K
-    content: PTY_ONCE_BEGIN safe-review-row-0123456789-saf[K
-e-review-row-0123456789-safe-review-row-0123456789-safe-re[K
-view-row-0123456789-safe-review-row-0123456789-safe-review[K
--row-0123456789-safe-review-row-0123456789-safe-review-row[K
--0123456789-safe-review-row-0123456789-safe-review-row-012[K
-3456789-safe-review-row-0123456789-safe-review-row-0123456[K
-  [y] review details [n] reject [d] diff[K[11A
-
-
-  view truncated · details 2-8/29 · ↑/↓ PgUp/PgDn[K
-    content: PTY_ONCE_BEGIN safe-review-row-0123456789-saf[K
-e-review-row-0123456789-safe-review-row-0123456789-safe-re[K
-view-row-0123456789-safe-review-row-0123456789-safe-review[K
--row-0123456789-safe-review-row-0123456789-safe-review-row[K
--0123456789-safe-review-row-0123456789-safe-review-row-012[K
-3456789-safe-review-row-0123456789-safe-review-row-0123456[K
-789-safe-review-row-0123456789-safe-review-row-0123456789-[K
-[11A
-
-
-  view truncated · details 3-9/29 · ↑/↓ PgUp/PgDn[K
-e-review-row-0123456789-safe-review-row-0123456789-safe-re[K
-view-row-0123456789-safe-review-row-0123456789-safe-review[K
--row-0123456789-safe-review-row-0123456789-safe-review-row[K
--0123456789-safe-review-row-0123456789-safe-review-row-012[K
-3456789-safe-review-row-0123456789-safe-review-row-0123456[K
-789-safe-review-row-0123456789-safe-review-row-0123456789-[K
-safe-review-row-0123456789-safe-review-row-0123456789-safe[K
-[11A
-
-
-  view truncated · details 4-10/29 · ↑/↓ PgUp/PgDn[K
-view-row-0123456789-safe-review-row-0123456789-safe-review[K
--row-0123456789-safe-review-row-0123456789-safe-review-row[K
--0123456789-safe-review-row-0123456789-safe-review-row-012[K
-3456789-safe-review-row-0123456789-safe-review-row-0123456[K
-789-safe-review-row-0123456789-safe-review-row-0123456789-[K
-safe-review-row-0123456789-safe-review-row-0123456789-safe[K
--review-row-0123456789-safe-review-row-0123456789-safe-rev[K
-[11A
-
-
-  view truncated · details 5-11/29 · ↑/↓ PgUp/PgDn[K
--row-0123456789-safe-review-row-0123456789-safe-review-row[K
--0123456789-safe-review-row-0123456789-safe-review-row-012[K
-3456789-safe-review-row-0123456789-safe-review-row-0123456[K
-789-safe-review-row-0123456789-safe-review-row-0123456789-[K
-safe-review-row-0123456789-safe-review-row-0123456789-safe[K
--review-row-0123456789-safe-review-row-0123456789-safe-rev[K
-iew-row-0123456789-safe-review-row-0123456789-safe-review-[K
-[11A
-
-
-  view truncated · details 6-12/29 · ↑/↓ PgUp/PgDn[K
--0123456789-safe-review-row-0123456789-safe-review-row-012[K
-3456789-safe-review-row-0123456789-safe-review-row-0123456[K
-789-safe-review-row-0123456789-safe-review-row-0123456789-[K
-safe-review-row-0123456789-safe-review-row-0123456789-safe[K
--review-row-0123456789-safe-review-row-0123456789-safe-rev[K
-iew-row-0123456789-safe-review-row-0123456789-safe-review-[K
-row-0123456789-safe-review-row-0123456789-safe-review-row-[K
-[11A
-
-
-  view truncated · details 7-13/29 · ↑/↓ PgUp/PgDn[K
-3456789-safe-review-row-0123456789-safe-review-row-0123456[K
-789-safe-review-row-0123456789-safe-review-row-0123456789-[K
-safe-review-row-0123456789-safe-review-row-0123456789-safe[K
--review-row-0123456789-safe-review-row-0123456789-safe-rev[K
-iew-row-0123456789-safe-review-row-0123456789-safe-review-[K
-row-0123456789-safe-review-row-0123456789-safe-review-row-[K
-0123456789-safe-review-row-0123456789- PTY_ONCE_END[K
-[11A
-
-
-  view truncated · details 8-14/29 · ↑/↓ PgUp/PgDn[K
-789-safe-review-row-0123456789-safe-review-row-0123456789-[K
-safe-review-row-0123456789-safe-review-row-0123456789-safe[K
--review-row-0123456789-safe-review-row-0123456789-safe-rev[K
-iew-row-0123456789-safe-review-row-0123456789-safe-review-[K
-row-0123456789-safe-review-row-0123456789-safe-review-row-[K
-0123456789-safe-review-row-0123456789- PTY_ONCE_END[K
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T[K
-[11A
-
-
-  view truncated · details 9-15/29 · ↑/↓ PgUp/PgDn[K
-safe-review-row-0123456789-safe-review-row-0123456789-safe[K
--review-row-0123456789-safe-review-row-0123456789-safe-rev[K
-iew-row-0123456789-safe-review-row-0123456789-safe-review-[K
-row-0123456789-safe-review-row-0123456789-safe-review-row-[K
-0123456789-safe-review-row-0123456789- PTY_ONCE_END[K
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T[K
-/go-cli-r5-pty-p4mfziv0/workspace/once.txt[K
-[11A
-
-
-  view truncated · details 10-16/29 · ↑/↓ PgUp/PgDn[K
--review-row-0123456789-safe-review-row-0123456789-safe-rev[K
-iew-row-0123456789-safe-review-row-0123456789-safe-review-[K
-row-0123456789-safe-review-row-0123456789-safe-review-row-[K
-0123456789-safe-review-row-0123456789- PTY_ONCE_END[K
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T[K
-/go-cli-r5-pty-p4mfziv0/workspace/once.txt[K
-  diff:[K
-[11A
-
-
-  view truncated · details 11-17/29 · ↑/↓ PgUp/PgDn[K
-iew-row-0123456789-safe-review-row-0123456789-safe-review-[K
-row-0123456789-safe-review-row-0123456789-safe-review-row-[K
-0123456789-safe-review-row-0123456789- PTY_ONCE_END[K
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T[K
-/go-cli-r5-pty-p4mfziv0/workspace/once.txt[K
-  diff:[K
-    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review[K
-[11A
-
-
-  view truncated · details 12-18/29 · ↑/↓ PgUp/PgDn[K
-row-0123456789-safe-review-row-0123456789-safe-review-row-[K
-0123456789-safe-review-row-0123456789- PTY_ONCE_END[K
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T[K
-/go-cli-r5-pty-p4mfziv0/workspace/once.txt[K
-  diff:[K
-    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review[K
--row-0123456789-safe-review-row-0123456789-safe-review-row[K
-[11A
-
-
-  view truncated · details 13-19/29 · ↑/↓ PgUp/PgDn[K
-0123456789-safe-review-row-0123456789- PTY_ONCE_END[K
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T[K
-/go-cli-r5-pty-p4mfziv0/workspace/once.txt[K
-  diff:[K
-    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review[K
--row-0123456789-safe-review-row-0123456789-safe-review-row[K
--0123456789-safe-review-row-0123456789-safe-review-row-012[K
-[11A
-
-
-  view truncated · details 14-20/29 · ↑/↓ PgUp/PgDn[K
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T[K
-/go-cli-r5-pty-p4mfziv0/workspace/once.txt[K
-  diff:[K
-    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review[K
--row-0123456789-safe-review-row-0123456789-safe-review-row[K
--0123456789-safe-review-row-0123456789-safe-review-row-012[K
-3456789-safe-review-row-0123456789-safe-review-row-0123456[K
-[11A
-
-
-  view truncated · details 15-21/29 · ↑/↓ PgUp/PgDn[K
-/go-cli-r5-pty-p4mfziv0/workspace/once.txt[K
-  diff:[K
-    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review[K
--row-0123456789-safe-review-row-0123456789-safe-review-row[K
--0123456789-safe-review-row-0123456789-safe-review-row-012[K
-3456789-safe-review-row-0123456789-safe-review-row-0123456[K
-789-safe-review-row-0123456789-safe-review-row-0123456789-[K
-[11A
-
-
-  view truncated · details 16-22/29 · ↑/↓ PgUp/PgDn[K
-  diff:[K
-    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review[K
--row-0123456789-safe-review-row-0123456789-safe-review-row[K
--0123456789-safe-review-row-0123456789-safe-review-row-012[K
-3456789-safe-review-row-0123456789-safe-review-row-0123456[K
-789-safe-review-row-0123456789-safe-review-row-0123456789-[K
-safe-review-row-0123456789-safe-review-row-0123456789-safe[K
-[11A
-
-
-  view truncated · details 17-23/29 · ↑/↓ PgUp/PgDn[K
-    +PTY_ONCE_BEGIN safe-review-row-0123456789-safe-review[K
--row-0123456789-safe-review-row-0123456789-safe-review-row[K
--0123456789-safe-review-row-0123456789-safe-review-row-012[K
-3456789-safe-review-row-0123456789-safe-review-row-0123456[K
-789-safe-review-row-0123456789-safe-review-row-0123456789-[K
-safe-review-row-0123456789-safe-review-row-0123456789-safe[K
--review-row-0123456789-safe-review-row-0123456789-safe-rev[K
-[11A
-
-
-  view truncated · details 18-24/29 · ↑/↓ PgUp/PgDn[K
--row-0123456789-safe-review-row-0123456789-safe-review-row[K
--0123456789-safe-review-row-0123456789-safe-review-row-012[K
-3456789-safe-review-row-0123456789-safe-review-row-0123456[K
-789-safe-review-row-0123456789-safe-review-row-0123456789-[K
-safe-review-row-0123456789-safe-review-row-0123456789-safe[K
--review-row-0123456789-safe-review-row-0123456789-safe-rev[K
-iew-row-0123456789-safe-review-row-0123456789-safe-review-[K
-[11A
-
-
-  view truncated · details 19-25/29 · ↑/↓ PgUp/PgDn[K
--0123456789-safe-review-row-0123456789-safe-review-row-012[K
-3456789-safe-review-row-0123456789-safe-review-row-0123456[K
-789-safe-review-row-0123456789-safe-review-row-0123456789-[K
-safe-review-row-0123456789-safe-review-row-0123456789-safe[K
--review-row-0123456789-safe-review-row-0123456789-safe-rev[K
-iew-row-0123456789-safe-review-row-0123456789-safe-review-[K
-row-0123456789-safe-review-row-0123456789-safe-review-row-[K
-[11A
-
-
-  view truncated · details 20-26/29 · ↑/↓ PgUp/PgDn[K
-3456789-safe-review-row-0123456789-safe-review-row-0123456[K
-789-safe-review-row-0123456789-safe-review-row-0123456789-[K
-safe-review-row-0123456789-safe-review-row-0123456789-safe[K
--review-row-0123456789-safe-review-row-0123456789-safe-rev[K
-iew-row-0123456789-safe-review-row-0123456789-safe-review-[K
-row-0123456789-safe-review-row-0123456789-safe-review-row-[K
-0123456789-safe-review-row-0123456789-safe-review-row-0123[K
-[11A
-
-
-  view truncated · details 21-27/29 · ↑/↓ PgUp/PgDn[K
-789-safe-review-row-0123456789-safe-review-row-0123456789-[K
-safe-review-row-0123456789-safe-review-row-0123456789-safe[K
--review-row-0123456789-safe-review-row-0123456789-safe-rev[K
-iew-row-0123456789-safe-review-row-0123456789-safe-review-[K
-row-0123456789-safe-review-row-0123456789-safe-review-row-[K
-0123456789-safe-review-row-0123456789-safe-review-row-0123[K
-456789-safe-review-row-0123456789-safe-review-row-01234567[K
-[11A
-
-
-  view truncated · details 22-28/29 · ↑/↓ PgUp/PgDn[K
-safe-review-row-0123456789-safe-review-row-0123456789-safe[K
--review-row-0123456789-safe-review-row-0123456789-safe-rev[K
-iew-row-0123456789-safe-review-row-0123456789-safe-review-[K
-row-0123456789-safe-review-row-0123456789-safe-review-row-[K
-0123456789-safe-review-row-0123456789-safe-review-row-0123[K
-456789-safe-review-row-0123456789-safe-review-row-01234567[K
-89-safe-review-row-0123456789- PTY_ONCE_END[K
-[11A
-
-
-  view truncated · details 23-29/29 · ↑/↓ PgUp/PgDn[K
--review-row-0123456789-safe-review-row-0123456789-safe-rev[K
-iew-row-0123456789-safe-review-row-0123456789-safe-review-[K
-row-0123456789-safe-review-row-0123456789-safe-review-row-[K
-0123456789-safe-review-row-0123456789-safe-review-row-0123[K
-456789-safe-review-row-0123456789-safe-review-row-01234567[K
-89-safe-review-row-0123456789- PTY_ONCE_END[K
-[K
-  [y] once [n] reject [Esc] cancel [d] diff[K[11A  AI: [K
-  [K
-▶ ⠏ [tool] write[K
-⠏ working...[K
-pty-review-model | turn #3 | interact | chat[K[J[4A
-
-  ✓ [tool] write[K
-  AI: PTY fixture completed the requested interaction.[K
-▼ PTY fixture completed the requested interaction.[K
-pty-review-model | turn #3 | interact | chat[K
-Tokens: 107/8000 (1%) | Cost: $0.0000[K[2K[?2004l[?25h[?1002l[?1003l[?1006l[?2004h> [J> P[J> PT[J> PTY[J> PTY [J> PTY a[J> PTY as[J> PTY ask
-[?2004l[?25l[?2004h[approval] ask_user[K
-  local interaction #1[K
-  scope: unknown; once only; reuse unavailable[K
-  details 1-2/2[K
-  args:[K
-    question: 请用中文确认临时测试方案。[K
-  [y] once [n] reject [Esc] cancel[K[6A  AI: [K
-  [K
-▶ ⠹ [tool] ask_user[K
-⠹ working...[K
-[ask_user] 请用中文确认临时测试方案。[K
-  answer: █[K
-  [Enter] submit  [Esc] cancel[K
-pty-review-model | turn #4 | interact | chat[K[7A
-
-▶ ⠸ [tool] ask_user[K
-⠸ working...[K
-
-
-
-[7A
-
-
-
-
-  answer: X保留队列：交互通过 ✅ 🙂█[K
-
-[7A
-
-▶ ⠼ [tool] ask_user[K
-⠼ working...[K
-
-
-
-[7A
-
-▶ ⠴ [tool] ask_user[K
-⠴ working...[K
-
-
-
-[7A
-
-▶ ✓ [tool] ask_user[K
-pty-review-model | turn #4 | interact | chat[K[J[3A
-
-  ✓ [tool] ask_user[K
-  AI: PTY fixture completed the requested interaction.[K
-▼ PTY fixture completed the requested interaction.[K
-pty-review-model | turn #4 | interact | chat[K
-Tokens: 143/8000 (1%) | Cost: $0.0000[K[2K[?2004l[?25h[?1002l[?1003l[?1006l[?2004h> 
-⚠ IME (input method editor) detected. CJK input may not work correctly in raw mode.
-Press Ctrl+\ to switch to cooked mode for better IME support.
-[J> 测[J> 测试[J> 测试🙂[J> 测试🙂B[1D[J> 测试🙂XB[1D[1D[J> 测试XB[2D
-[?2004l[?25l[?2004h  AI: PTY fixture received the input.[K
-▼ PTY fixture received the input.[K
-pty-review-model | turn #5 | interact | chat[K
-Tokens: 157/8000 (1%) | Cost: $0.0000[K[2K[?2004l[?25h[?1002l[?1003l[?1006l[?2004h> [?2004l> PTY cooked handoff
-[?2004l[?25l[?2004h  AI: PTY fixture received the input.[K
-▼ PTY fixture received the input.[K
-pty-review-model | turn #6 | interact | chat[K
-Tokens: 171/8000 (2%) | Cost: $0.0000[K[2K[?2004l[?25h[?1002l[?1003l[?1006l> /exit
-Session ended.

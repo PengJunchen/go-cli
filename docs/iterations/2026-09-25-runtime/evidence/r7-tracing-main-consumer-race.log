@@ -1,8 +1,0 @@
-source_head=785f33a2e673eedfbf03a40dd8c109fa2d6cb3a9
-command=go test -race -p 2 -count=1 ./internal/tracing ./internal/config ./internal/cli ./cmd/cli
-ok  	github.com/pengjunchen/go-cli/internal/tracing	1.295s
-ok  	github.com/pengjunchen/go-cli/internal/config	1.079s
-ok  	github.com/pengjunchen/go-cli/internal/cli	17.488s
-ok  	github.com/pengjunchen/go-cli/cmd/cli	1.367s
-
-exit=0 elapsed_seconds=53.5

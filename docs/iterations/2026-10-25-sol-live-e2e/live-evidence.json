@@ -1,0 +1,248 @@
+{
+  "status": "matrix_executed_with_scoped_negatives_and_unmet_original_expectations",
+  "phases": [
+    {
+      "phase": "a6ef-basic-ask",
+      "file": "live-evidence-a6ef-basic-ask.json",
+      "sha256": "a6257ec03589752d0bf630d465bd25d23a9d119de60ad30bb0ac719e97693621",
+      "requests": 25,
+      "strictModelIdentityAll": true,
+      "binarySha256": "a6efefa788fee9cc84d2066d90b84fb6e8859200c0387e847bb4e405566e5912",
+      "physicalSessionIDs": [
+        "s_eafec58b6be3e31772974f973359c83e"
+      ]
+    },
+    {
+      "phase": "final-full-ask",
+      "file": "live-evidence-final-full-ask.json",
+      "sha256": "f71b076795fdbaf8b8029f77677579959159f669829bb3b16fa84cf121d01703",
+      "requests": 17,
+      "strictModelIdentityAll": true,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_ae64f8dc740b62a03ef45c8d551c0ff9"
+      ]
+    },
+    {
+      "phase": "edge-input-calibration",
+      "file": "live-evidence-edge-input-calibration.json",
+      "sha256": "7acaa0ddd32a98ff12c38cdd0e516a8103a7eed2f50658238c33c8fe5798371a",
+      "requests": 2,
+      "strictModelIdentityAll": true,
+      "binarySha256": "75487918ffd1262773cd7e61b230c56826eee421e4ce65b8f44ad2f0ab799d69",
+      "physicalSessionIDs": [
+        "s_b7cfbd2cb641772e23007f5741b8ea04"
+      ]
+    },
+    {
+      "phase": "edge-yn-positive",
+      "file": "live-evidence-edge-yn-positive.json",
+      "sha256": "41bb74dc15c9dde796739f94cbcca244cd7b766a0ce465379fe0711394bdd438",
+      "requests": 8,
+      "strictModelIdentityAll": true,
+      "binarySha256": "75487918ffd1262773cd7e61b230c56826eee421e4ce65b8f44ad2f0ab799d69",
+      "physicalSessionIDs": [
+        "s_b7cfbd2cb641772e23007f5741b8ea04"
+      ]
+    },
+    {
+      "phase": "edge-eof-negative",
+      "file": "live-evidence-edge-eof-negative.json",
+      "sha256": "1ac5b9ac2d99cd03cf13d64170efacb5768458e59b6c104fc90b9bdad1becab0",
+      "requests": 2,
+      "strictModelIdentityAll": true,
+      "binarySha256": "75487918ffd1262773cd7e61b230c56826eee421e4ce65b8f44ad2f0ab799d69",
+      "physicalSessionIDs": [
+        "s_b7cfbd2cb641772e23007f5741b8ea04"
+      ]
+    },
+    {
+      "phase": "auto-positive",
+      "file": "live-evidence-auto-positive.json",
+      "sha256": "3bfb762b542b5ba1357c2cc6eabe67cc6835cac36a11820da97c13d70e579027",
+      "requests": 5,
+      "strictModelIdentityAll": true,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_62a6766468ca6552641d219a25142948"
+      ]
+    },
+    {
+      "phase": "auto-cancel-negative",
+      "file": "live-evidence-auto-cancel-negative.json",
+      "sha256": "a40f533fa512df6fdd3270b9536739699485a9105a6d2128c28a19a684eec9ff",
+      "requests": 1,
+      "strictModelIdentityAll": true,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_62a6766468ca6552641d219a25142948"
+      ]
+    },
+    {
+      "phase": "deny-all-policy",
+      "file": "live-evidence-deny-all-policy.json",
+      "sha256": "a493bbd520548201333cc12d0201d9f4f569a40775901c10f44de15b443bf596",
+      "requests": 4,
+      "strictModelIdentityAll": true,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_f6d7c858fc9baf42fee08b8a511d0a71"
+      ]
+    },
+    {
+      "phase": "dynamic-skill-v1",
+      "file": "live-evidence-dynamic-skill-v1.json",
+      "sha256": "cc3da9970e3f47a338ec2fef73edff9d8e9c91ef3893c22a45fe99849c3d66bc",
+      "requests": 4,
+      "strictModelIdentityAll": true,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_c6a602bb2b922b88c390db78dd50e9af"
+      ]
+    },
+    {
+      "phase": "dynamic-skill-v2",
+      "file": "live-evidence-dynamic-skill-v2.json",
+      "sha256": "4650e37c3d639683c0d8bd7d8abe9ef2434f7be9415c6fb253c68fe4777f9233",
+      "requests": 4,
+      "strictModelIdentityAll": true,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_c6a602bb2b922b88c390db78dd50e9af"
+      ]
+    },
+    {
+      "phase": "dynamic-hook-v2",
+      "file": "live-evidence-dynamic-hook-v2.json",
+      "sha256": "5b8d11630659a4810a33847107935087f504b51c5a02f3d1e282d64edff6ceb1",
+      "requests": 4,
+      "strictModelIdentityAll": true,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_c6a602bb2b922b88c390db78dd50e9af"
+      ]
+    },
+    {
+      "phase": "dynamic-invalid-candidate",
+      "file": "live-evidence-dynamic-invalid-candidate.json",
+      "sha256": "c09f9f9f88478ada0cbee91e71eabb2b2295c49ee95e6184a446e6fab6435b17",
+      "requests": 0,
+      "strictModelIdentityAll": null,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_c6a602bb2b922b88c390db78dd50e9af"
+      ]
+    },
+    {
+      "phase": "dynamic-invalid-recovery",
+      "file": "live-evidence-dynamic-invalid-recovery.json",
+      "sha256": "f56459bf625d42c6363e519ae467eeb91036445a5d1ca4b72371409686661fee",
+      "requests": 4,
+      "strictModelIdentityAll": true,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_c6a602bb2b922b88c390db78dd50e9af"
+      ]
+    },
+    {
+      "phase": "dynamic-hook-deny",
+      "file": "live-evidence-dynamic-hook-deny.json",
+      "sha256": "e130df7404dc6139c0108cd8e459f9a6ade697440a2c8fc3690b7352d77c2819",
+      "requests": 4,
+      "strictModelIdentityAll": true,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_c6a602bb2b922b88c390db78dd50e9af"
+      ]
+    },
+    {
+      "phase": "mcp-metadata-read",
+      "file": "live-evidence-mcp-metadata-read.json",
+      "sha256": "a6e7c7397f671b90eb821d5f8ba97b1a2bc323774033086c87b5e5089c4e6092",
+      "requests": 3,
+      "strictModelIdentityAll": true,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_c6a602bb2b922b88c390db78dd50e9af"
+      ]
+    },
+    {
+      "phase": "mcp-directory-followup",
+      "file": "live-evidence-mcp-directory-followup.json",
+      "sha256": "14e957966892eef2ad90c78c2e869425f83ec1647b4092aa1f7b708d9b6af487",
+      "requests": 1,
+      "strictModelIdentityAll": true,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_c6a602bb2b922b88c390db78dd50e9af"
+      ]
+    },
+    {
+      "phase": "mcp-discover-negative",
+      "file": "live-evidence-mcp-discover-negative.json",
+      "sha256": "47d7897da627a9b144dae55c22bf321de114800517a9d4158a9d86980f0cba35",
+      "requests": 3,
+      "strictModelIdentityAll": true,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_c6a602bb2b922b88c390db78dd50e9af"
+      ]
+    },
+    {
+      "phase": "mcp-idle-activation",
+      "file": "live-evidence-mcp-idle-activation.json",
+      "sha256": "8f6e2afcd27b61a740e50f6da63959b0f0b2ad45c5534f4b45d10d8daf3c0436",
+      "requests": 0,
+      "strictModelIdentityAll": null,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_c6a602bb2b922b88c390db78dd50e9af"
+      ]
+    },
+    {
+      "phase": "mcp-remote-negative",
+      "file": "live-evidence-mcp-remote-negative.json",
+      "sha256": "0c545b90cd5042490650d9dbc3e357af69e2f20442925d5d69504b1e733950a9",
+      "requests": 3,
+      "strictModelIdentityAll": true,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_c6a602bb2b922b88c390db78dd50e9af"
+      ]
+    },
+    {
+      "phase": "dynamic-revoked-admission",
+      "file": "live-evidence-dynamic-revoked-admission.json",
+      "sha256": "0f56db016c7d5652aa27a64575df35d421e428616b491b9ade2635a65873ac3e",
+      "requests": 0,
+      "strictModelIdentityAll": null,
+      "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+      "physicalSessionIDs": [
+        "s_c6a602bb2b922b88c390db78dd50e9af"
+      ]
+    }
+  ],
+  "allActualModelRequests": 94,
+  "oldCandidateRequests": 25,
+  "finalCandidateRequestsIncludingCalibration": 69,
+  "finalCandidateScenarioRequestsExcludingCalibration": 67,
+  "preservedCalibrationRequests": 2,
+  "dynamicRequests": 30,
+  "dynamicDurableUserTurns": 9,
+  "allNonemptyPhasesStrictIdentityMatched": true,
+  "scopedUnsupported": [
+    "Full positive remote MCP tools/call remains unsupported and was safely rejected",
+    "Canceled unknown-effect run rejects an unacknowledged same-SID read"
+  ],
+  "unmetOriginalExpectations": [
+    "Deny read-success expectation: actual deny-all rejects read",
+    "One approval EOF causing process exit: actual approval EOF denies then separate idle EOF exits",
+    "Immediate same-SID positive read after running cancellation: actual unknown fence rejects"
+  ],
+  "literalEvidence": "30 previously recorded decoded-JSON selected-literal flags checked/empty; original upstream JSON not retained, no independent body re-scan or general encoded flow claim",
+  "operationalStatusFile": "final-operational-status.json",
+  "imageFilesVerified": 41,
+  "imageFormats": {
+    "JPEG": 41
+  }
+}

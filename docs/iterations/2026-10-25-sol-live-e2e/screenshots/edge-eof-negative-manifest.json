@@ -1,0 +1,42 @@
+{
+  "phaseCut": "edge-eof-negative",
+  "phaseCutManifestSha256": "c91d1affa1fb13d6433939baebe4607ae540dd068137dfb357dfc89e24233379",
+  "binarySha256": "75487918ffd1262773cd7e61b230c56826eee421e4ce65b8f44ad2f0ab799d69",
+  "pid": 47709,
+  "sessionIDs": [
+    "s_b7cfbd2cb641772e23007f5741b8ea04"
+  ],
+  "images": [
+    {
+      "file": "16-edge-eof-before-key.jpg",
+      "bytes": 743789,
+      "sha256": "cedf3afca047b3a9f63a5209b5c8be1fbca0d143f6b33820f7b6df5d9b31152c",
+      "format": "jpeg",
+      "mime": "image/jpeg",
+      "width": 2780,
+      "height": 1878,
+      "sourceRelativeToRoleRoot": "artifacts/screenshots/16-edge-eof-before-key.jpg"
+    },
+    {
+      "file": "17-edge-eof-rejected.jpg",
+      "bytes": 767168,
+      "sha256": "eb25080c649cefda710548cdbb99eb851a42fa75e1fe9ceb6e3f9d0c9921706a",
+      "format": "jpeg",
+      "mime": "image/jpeg",
+      "width": 2780,
+      "height": 1878,
+      "sourceRelativeToRoleRoot": "artifacts/screenshots/17-edge-eof-rejected.jpg"
+    },
+    {
+      "file": "18-edge-eof-normal-exit.jpg",
+      "bytes": 720308,
+      "sha256": "78721f7bcdcd29b61d6f5eb19c76b4aa692fc71884547eb7a059fe765637ae74",
+      "format": "jpeg",
+      "mime": "image/jpeg",
+      "width": 2780,
+      "height": 1878,
+      "sourceRelativeToRoleRoot": "artifacts/screenshots/18-edge-eof-normal-exit.jpg"
+    }
+  ],
+  "capture": "CUA native Chrome window with browser chrome, actual Go PTY xterm; no pixel edits or encoding changes"
+}

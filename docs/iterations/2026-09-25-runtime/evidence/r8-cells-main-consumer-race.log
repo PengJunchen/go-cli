@@ -1,8 +1,0 @@
-HEAD=d83be9de5fff13755999e592ca178fd1d08dc120
-GOMAXPROCS=2 NO_COLOR=1 TERM=dumb
-DEFAULT BUILD (no -tags=e2e)
-COMMAND=go test -race -p 2 -count=1 ./internal/tui ./tests/e2e_20260802
-ok  	github.com/pengjunchen/go-cli/internal/tui	1.993s
-ok  	github.com/pengjunchen/go-cli/tests/e2e_20260802	3.751s
-
-EXIT=0 ELAPSED_SECONDS=36.18

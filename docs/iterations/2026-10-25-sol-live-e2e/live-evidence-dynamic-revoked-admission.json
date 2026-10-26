@@ -1,0 +1,158 @@
+{
+  "collectorSourceSha256": "b21c2c0e049915ea4c4eba791a5ce641972dbd0b63f812f93656ad3ced67b7ba",
+  "providerSequenceBaseline": 30,
+  "inputEvidenceBounds": {
+    "source": "artifacts/dynamic-interactive-1eae389f.input-metadata.json",
+    "baselineEvents": 37,
+    "capturedEvents": 38,
+    "suffixSha256": "c17ceac256891f97b505fb8fd9ec0cdae34003169e2755d3ac45211ab1fcf66a"
+  },
+  "baselineManifestSha256": "91dd2431483e7637bcd7764321ded9ded70c361b5bc2202857174d5a1e325074",
+  "sessionEvidenceBounds": [
+    {
+      "source": "artifacts/stores/dynamic/sessions/sessions/s_c6a602bb2b922b88c390db78dd50e9af.jsonl",
+      "baselineBytes": 126267,
+      "capturedBytes": 126267,
+      "suffixSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "approvalAuditEvidenceBounds": [
+    {
+      "source": "workspaces/dynamic/.go-cli/audit/2026-10-25.jsonl",
+      "baselineBytes": 20653,
+      "capturedBytes": 20653,
+      "suffixSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "approvalAuditEntries": [],
+  "selectedPhysicalSessionID": "s_c6a602bb2b922b88c390db78dd50e9af",
+  "roleAuditHistoryMayBeCumulative": true,
+  "phase": "dynamic-revoked-admission",
+  "recordedAtEpoch": 1792916300.171891,
+  "role": "dynamic",
+  "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+  "ptyID": "dynamic-interactive-1eae389f",
+  "pid": 57936,
+  "sessionIDs": [],
+  "requests": [],
+  "durableEntries": [],
+  "effects": [
+    {
+      "name": "input.txt",
+      "exists": true,
+      "bytes": 30,
+      "sha256": "f1fbad8cb2122f11a4e3011e5c1b0ddec325ce021863a0bfc9d3c02847e0c842"
+    },
+    {
+      "name": "search.txt",
+      "exists": true,
+      "bytes": 30,
+      "sha256": "e12f5aee529272f1a9679b03818ff97d2ed6e81d8dfe867185c233eb5ab55bfa"
+    },
+    {
+      "name": "ask-approved.txt",
+      "exists": false
+    },
+    {
+      "name": "ask-denied.txt",
+      "exists": false
+    },
+    {
+      "name": "ask-escaped.txt",
+      "exists": false
+    },
+    {
+      "name": "auto-created.txt",
+      "exists": false
+    },
+    {
+      "name": "deny-policy.txt",
+      "exists": false
+    },
+    {
+      "name": "cancel-late-marker.txt",
+      "exists": false
+    },
+    {
+      "name": "hook-events.jsonl",
+      "exists": true,
+      "bytes": 168,
+      "sha256": "e79e92dd19d75804b1a22425466bfb18cedc85d5ba76835ea9f61043e9843347",
+      "markerCounts": {
+        "HOOK_V1": 6,
+        "HOOK_V2": 12,
+        "HOOK_V3": 3
+      }
+    }
+  ],
+  "mcpStartMarkerExists": true,
+  "mcpRPCMethodCounts": {
+    "initialize": 1,
+    "notifications/initialized": 1,
+    "tools/list": 1
+  },
+  "rawEvidenceRemainsPrivate": true,
+  "rawCutManifestSha256": "a52dc8c8c67db0255ea4d0f959bf53b80cfd1559757f546d5130f410a26a0f08",
+  "inputMetadata": {
+    "sourceSha256": "aeeb3218ac1c9785faf459b1ebc64459c03c58bd8081b67a6dbed5f0da43e6c1",
+    "events": [
+      {
+        "at": 1792916051.644334,
+        "kind": "text+enter",
+        "bytes": 215,
+        "sha256": "7fb526b5d1df9c7bdd0d9d793d0eef7c4f32be89338e1702bfeac0025c57b9ed"
+      }
+    ]
+  },
+  "images": {
+    "phaseCut": "dynamic-revoked-admission",
+    "phaseCutManifestSha256": "a52dc8c8c67db0255ea4d0f959bf53b80cfd1559757f546d5130f410a26a0f08",
+    "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+    "pid": 57936,
+    "sessionIDs": [],
+    "selectedPhysicalSessionID": "s_c6a602bb2b922b88c390db78dd50e9af",
+    "images": [
+      {
+        "file": "53-revoked-before-provider-iab.jpg",
+        "bytes": 99162,
+        "sha256": "0be1ea8c5f4844c144d056819b7efe7480469164327ce14111eb189289e18312",
+        "format": "jpeg",
+        "mime": "image/jpeg",
+        "width": 826,
+        "height": 862,
+        "sourceRelativeToRoleRoot": "artifacts/screenshots/53-revoked-before-provider-iab.jpg"
+      }
+    ],
+    "capture": "CUA IAB tab viewport, actual Go PTY xterm; no pixel edits or encoding changes"
+  },
+  "actualTrustRevokeTerminal": {
+    "canonicalRole": "parent-dynamic",
+    "trustTerminalID": "dynamic-trust-revoke-4dd219a0",
+    "pid": 62084,
+    "exitCode": 0,
+    "actualArgvVerified": true,
+    "safeArgvProjection": [
+      "released-go-cli",
+      "trust",
+      "revoke",
+      "owned-canonical-role:parent-dynamic"
+    ],
+    "actualArgvSha256": "878bae25f231daf19711f01259fea8bae4fb746bb3d57dbaae2ac4f95b56dc6c",
+    "execSourceSha256": "1e667faa6a5e6338ae4ede8523b5526482fa6536b3ce19893966effd876c9da4",
+    "rawCaptureSha256": "63c403d86278152f8d6ecad2ee2eaf2d18a53361a06555636c7798f2e36a45a7",
+    "execSpecFileMtimeUTC": "2026-10-25T08:13:54.828469+00:00",
+    "lastRawCaptureFileMtimeUTC": "2026-10-25T08:13:55.016452+00:00",
+    "timeSemantics": "Filesystem capture metadata timestamps, not invented process start/exit timestamps",
+    "targetLivePID": 57936,
+    "targetPhysicalSID": "s_c6a602bb2b922b88c390db78dd50e9af"
+  },
+  "trustTerminalManifestSha256": "2ed941df85d113d2ac5798320fec9c958dc3ca064b3a1610f1eb9854be9e3b55",
+  "negativeOracle": {
+    "expectedNewProviderRequests": 0,
+    "observedNewProviderRequests": 0,
+    "newDurableUsers": 0,
+    "hookBytesUnchanged": true,
+    "actualCLIExitCode": 1,
+    "scope": "Stale/revoked capability admission failed before provider; unbound publication/transcript not advanced; no seamless continuation claim"
+  }
+}

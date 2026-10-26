@@ -185,6 +185,9 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		workDir = absDir
 	}
 	if err := t.Sandbox.Validate(ctx, command, workDir); err != nil {
+		// Validation completes synchronously before any local process helper is
+		// entered, so this concrete rejection can attest the no-process path.
+		reportPreparedNoProcessCompletion(ctx)
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("bash.sandbox_blocked", "tool", "bash", "err", err)
 		return nil, err

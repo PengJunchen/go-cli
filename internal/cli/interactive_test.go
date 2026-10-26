@@ -41,14 +41,7 @@ func TestInteractiveCmd_ExitCommand(t *testing.T) {
 	var out bytes.Buffer
 	in := strings.NewReader("exit\n")
 	cmd := newInteractiveCmd(in, &out)
-	cfg := &config.Config{
-		Provider: config.ProviderConfig{
-			Name:    "test",
-			BaseURL: srv.URL,
-			APIKey:  "test",
-			Model:   "test-model",
-		},
-	}
+	cfg := newPromptConfig(t, srv.URL)
 
 	err := cmd.Run(t.Context(), cfg, nil)
 	require.NoError(t, err)
@@ -70,14 +63,7 @@ func TestInteractiveCmd_EmptyInput(t *testing.T) {
 	// Empty line then exit.
 	in := strings.NewReader("\nexit\n")
 	cmd := newInteractiveCmd(in, &out)
-	cfg := &config.Config{
-		Provider: config.ProviderConfig{
-			Name:    "test",
-			BaseURL: srv.URL,
-			APIKey:  "test",
-			Model:   "test-model",
-		},
-	}
+	cfg := newPromptConfig(t, srv.URL)
 
 	err := cmd.Run(t.Context(), cfg, nil)
 	require.NoError(t, err)

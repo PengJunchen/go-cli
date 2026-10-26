@@ -1,0 +1,21 @@
+{
+  "phaseCut": "dynamic-revoked-admission",
+  "phaseCutManifestSha256": "a52dc8c8c67db0255ea4d0f959bf53b80cfd1559757f546d5130f410a26a0f08",
+  "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+  "pid": 57936,
+  "sessionIDs": [],
+  "selectedPhysicalSessionID": "s_c6a602bb2b922b88c390db78dd50e9af",
+  "images": [
+    {
+      "file": "53-revoked-before-provider-iab.jpg",
+      "bytes": 99162,
+      "sha256": "0be1ea8c5f4844c144d056819b7efe7480469164327ce14111eb189289e18312",
+      "format": "jpeg",
+      "mime": "image/jpeg",
+      "width": 826,
+      "height": 862,
+      "sourceRelativeToRoleRoot": "artifacts/screenshots/53-revoked-before-provider-iab.jpg"
+    }
+  ],
+  "capture": "CUA IAB tab viewport, actual Go PTY xterm; no pixel edits or encoding changes"
+}

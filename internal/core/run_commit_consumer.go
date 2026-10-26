@@ -20,6 +20,10 @@ var (
 	ErrRunCommitSinkPanicked                    = errors.New("core: run commit sink panicked")
 )
 
+// ErrRunCommitCompletionUnsupported rejects a tool before any durable dispatch
+// reservation when its captured executor has no reviewed completion contract.
+var ErrRunCommitCompletionUnsupported = errors.New("core: tool is unavailable in durable sessions because its completion cannot be verified (tool_not_executed=true)")
+
 type runCommitSinkPanicError struct{ operation string }
 
 func (err runCommitSinkPanicError) Error() string {
@@ -104,6 +108,27 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 		handoffRunCompletionTask(ctx, taskID)
 	}()
 
+	guardedCtx, finishCapability, admissionErr := beginRunCapability(ctx, invocation.NormalizedCall().Name)
+	if admissionErr != nil {
+		return runCommitDispatchResult{output: "Error: capability authorization revoked", isError: true, err: admissionErr}
+	}
+	defer func() {
+		if fenceErr := finishCapability(); fenceErr != nil {
+			if result.returned && !result.committed && ctx.Err() != nil && fenceErr == ctx.Err() {
+				// The sealed prepared invocation positively never entered its
+				// executor. Only the exact caller cancellation may retain this
+				// known outcome; wrapped/combined authority errors stay unknown.
+				result.isError = true
+				result.err = errors.Join(result.err, fenceErr)
+				return
+			}
+			result.output = "Error: capability authorization revoked; execution outcome unknown"
+			result.isError = true
+			result.err = toolOutcomeUnknownError{cause: errors.Join(result.err, fenceErr)}
+			markRunOutcomeUnknown(ctx)
+		}
+	}()
+	ctx = guardedCtx
 	var toolResult *tools.ToolResult
 	var err error
 	if streamSink != nil {
@@ -145,6 +170,7 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 		result.err = errToolMissingReceipt
 		return result
 	}
+	captureMaterializedArtifact(ctx, invocation.NormalizedCall(), toolResult)
 	result.output = toolResult.Output
 	result.isError = toolResult.IsError
 	result.sourceTruncated = sourceTruncatedFromMetadata(toolResult.Metadata)
@@ -240,6 +266,7 @@ func (consumer *runCommitConsumer) commitInput(index uint64, message AgentMessag
 		TranscriptIndex: index,
 		Message:         message,
 		InputKind:       message.InputKind,
+		Generation:      runGenerationMetadataPointer(consumer.ctx),
 	})
 	return persistenceError("input", err)
 }
@@ -428,7 +455,11 @@ func (consumer *runCommitConsumer) commitTerminal(transcript []TranscriptEntry, 
 	if projections == nil {
 		projections = consumer.projections
 	}
+	if err := CheckRunGeneration(consumer.commitContext()); err != nil {
+		return toolOutcomeUnknownError{cause: err}
+	}
 	terminal := RunTerminal{
+		Generation:           runGenerationMetadataPointer(consumer.ctx),
 		RunID:                consumer.runID,
 		Transcript:           cloneTranscriptEntries(transcript),
 		Projections:          append([]CompactionProjection(nil), projections...),
@@ -553,6 +584,9 @@ func (consumer *runCommitConsumer) prepareInvocation(ctx context.Context, regist
 				if invocation == nil {
 					return nil, nil, ErrRunCommitPreparedInvocationUnavailable
 				}
+				if err := preflightDurableCompletion(ctx, invocation, streamSink); err != nil {
+					return nil, nil, err
+				}
 				return invocation, streamSink, nil
 			}
 		}
@@ -575,7 +609,27 @@ func (consumer *runCommitConsumer) prepareInvocation(ctx context.Context, regist
 			return nil, nil, ErrRunCommitStreamingUnsupported
 		}
 	}
+	if err := preflightDurableCompletion(ctx, invocation, nil); err != nil {
+		return nil, nil, err
+	}
 	return invocation, nil, nil
+}
+
+func preflightDurableCompletion(ctx context.Context, invocation tools.PreparedInvocation, streamSink tools.SynchronousStreamSink) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := CheckRunGeneration(ctx); err != nil {
+		return err
+	}
+	supported, err := tools.PreparedCompletionSupported(ctx, invocation, streamSink)
+	if err != nil {
+		return err
+	}
+	if !supported {
+		return ErrRunCommitCompletionUnsupported
+	}
+	return nil
 }
 
 func (consumer *runCommitConsumer) executeSequentialCall(
@@ -1013,7 +1067,7 @@ func persistenceError(operation string, err error) error {
 	return runCommitPersistenceError{operation: operation, cause: err}
 }
 
-func terminalOutcome(err error) RunOutcome {
+func terminalOutcome(runCtx context.Context, err error) RunOutcome {
 	if err == nil {
 		return RunOutcomeSuccess
 	}
@@ -1023,8 +1077,10 @@ func terminalOutcome(err error) RunOutcome {
 	if errors.Is(err, ErrLoopDetected) {
 		return RunOutcomeError
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return RunOutcomeCancelled
+	if runCtx != nil {
+		if runContextErr := runCtx.Err(); runContextErr != nil && errors.Is(err, runContextErr) {
+			return RunOutcomeCancelled
+		}
 	}
 	return RunOutcomeError
 }

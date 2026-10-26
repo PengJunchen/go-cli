@@ -153,6 +153,19 @@ func executeSingleToolRegistered(ctx context.Context, tr tools.ToolRegistry, cal
 	if workerDone == nil {
 		workerDone = func() {}
 	}
+	ctx, finishCapability, admissionErr := beginRunCapability(ctx, call.Name)
+	if admissionErr != nil {
+		workerDone()
+		return "", true, admissionErr
+	}
+	defer func() {
+		if fenceErr := finishCapability(); fenceErr != nil {
+			output = ""
+			isError = true
+			err = toolOutcomeUnknownError{cause: errors.Join(err, fenceErr)}
+			markRunOutcomeUnknown(ctx)
+		}
+	}()
 	dispatched := false
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -196,7 +209,7 @@ func executeSingleToolRegistered(ctx context.Context, tr tools.ToolRegistry, cal
 	}
 	// Check if the tool supports streaming output.
 	if st, ok := def.(tools.StreamingBashTool); ok && es != nil {
-		sink := &eventStreamSink{es: es, coordinates: agentEventCoordinatesFromContext(ctx)}
+		sink := &eventStreamSink{ctx: ctx, es: es, coordinates: agentEventCoordinatesFromContext(ctx)}
 		dispatched = true
 		result, err := st.ExecuteStreaming(ctx, call, sink)
 		if err != nil {
@@ -205,6 +218,7 @@ func executeSingleToolRegistered(ctx context.Context, tr tools.ToolRegistry, cal
 		if result == nil {
 			return "", false, errToolMissingReceipt
 		}
+		captureMaterializedArtifact(ctx, call, result)
 		return result.Output, result.IsError, nil
 	}
 	dispatched = true
@@ -215,6 +229,7 @@ func executeSingleToolRegistered(ctx context.Context, tr tools.ToolRegistry, cal
 	if result == nil {
 		return "", false, errToolMissingReceipt
 	}
+	captureMaterializedArtifact(ctx, call, result)
 	return result.Output, result.IsError, nil
 }
 

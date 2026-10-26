@@ -140,7 +140,7 @@ func TestMicroCompactorNormalizesLegacySummaryWithoutMutatingInput(t *testing.T)
 	before := append([]TurnItem(nil), items...)
 	before[3].ToolCalls = append([]llm.ToolCall(nil), items[3].ToolCalls...)
 
-	outResult, err := compactor.Compact(ctx, items, 180, runeCountEstimator{})
+	outResult, err := compactor.Compact(ctx, items, 223, runeCountEstimator{})
 
 	out := outResult.Items
 	require.NoError(t, err)

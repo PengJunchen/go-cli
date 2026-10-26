@@ -1,0 +1,209 @@
+<div id="go-cli-dynamic-runtime">
+  <style>
+    #go-cli-dynamic-runtime { container-type: inline-size; container-name: go-cli-runtime; }
+    #go-cli-dynamic-runtime .architecture-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding-right: 90px; }
+    #go-cli-dynamic-runtime .architecture-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    #go-cli-dynamic-runtime .architecture-graph { position: relative; margin-top: 14px; }
+    #go-cli-dynamic-runtime .architecture-nodes { position: relative; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 32px; row-gap: 34px; }
+    #go-cli-dynamic-runtime .architecture-node { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 76px; gap: 5px; }
+    #go-cli-dynamic-runtime .architecture-state { color: var(--muted-foreground); }
+    #go-cli-dynamic-runtime .architecture-state[data-active="true"] { color: var(--foreground); }
+    #go-cli-dynamic-runtime .architecture-edges { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+    #go-cli-dynamic-runtime .architecture-detail { margin-top: 18px; }
+    #go-cli-dynamic-runtime .architecture-metrics { margin-top: 20px; }
+    #go-cli-dynamic-runtime .architecture-key { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; color: var(--muted-foreground); }
+    #go-cli-dynamic-runtime .architecture-progress { display: inline-flex; align-items: center; gap: 6px; }
+    #go-cli-dynamic-runtime .architecture-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--viz-series-1); }
+    @container go-cli-runtime (max-width: 520px) {
+      #go-cli-dynamic-runtime .architecture-nodes { grid-template-columns: minmax(0, 1fr); row-gap: 24px; }
+      #go-cli-dynamic-runtime .architecture-toolbar { padding-right: 0; }
+    }
+  </style>
+  <div class="architecture-toolbar">
+    <h3>go-cli 能力如何按需进入一次运行</h3>
+    <div class="viz-row" role="group" aria-label="架构版本">
+      <button class="btn" type="button" data-mode="before" aria-pressed="false">迭代前</button>
+      <button class="btn" type="button" data-mode="after" aria-pressed="true">本轮实现</button>
+    </div>
+  </div>
+  <div class="architecture-controls" role="group" aria-label="渐进加载播放">
+    <button class="btn" type="button" data-action="previous" aria-label="上一步">上一步</button>
+    <button class="btn btn-primary" type="button" data-action="play">播放</button>
+    <button class="btn" type="button" data-action="next" aria-label="下一步">下一步</button>
+    <span class="tabular-nums" data-step aria-live="polite"></span>
+  </div>
+  <div class="architecture-key text-small">
+    <span class="architecture-progress"><span class="architecture-dot" aria-hidden="true"></span>已经过的边</span>
+    <span>点击节点查看实际边界</span>
+  </div>
+  <div class="architecture-graph" role="group" aria-label="运行时架构与加载路径">
+    <svg class="architecture-edges" aria-hidden="true"></svg>
+    <div class="architecture-nodes"></div>
+  </div>
+  <div class="card architecture-detail" aria-live="polite" data-detail></div>
+  <div class="architecture-metrics">
+    <table class="table table-sm" aria-label="构建与运行实测状态">
+      <caption class="text-small">默认 compat profile 固定任务 · 工具集 / 持久化模式不同 · edge 另列功能证据</caption>
+      <thead><tr><th>证据</th><th>结果</th></tr></thead>
+      <tbody data-metrics>
+        <tr><td>CGO0 · darwin/arm64</td><td>full 22,651,666 B · headless 14,213,890 B（小 37.3%）</td></tr>
+        <tr><td>read → edit → read · median</td><td>baseline 102.9 ms · full 102.6 ms · headless 94.7 ms</td></tr>
+        <tr><td>工具旅程 · 50 ms 树 RSS 采样</td><td>full 30.9 MiB · headless 23.7 MiB · 各 2 个样本，可能漏峰</td></tr>
+        <tr><td>官方发行 · 同任务 median</td><td>PI 1.3.0：341.5 ms · OpenCode 2.0.32 新私有服务：660.6 ms</td></tr>
+        <tr><td>edge 入口功能 · 非性能 arm</td><td>4 请求 · 未选 MCP 0 请求 · schema 17,419 B · Skill 正文未披露</td></tr>
+        <tr><td>最终验证</td><td>make verify / 受控 E2E 通过 · CLI 350/350 · 跨平台编译通过，目标运行未测</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <script>
+    (() => {
+      const root = document.getElementById("go-cli-dynamic-runtime");
+      const graph = root.querySelector(".architecture-graph");
+      const nodes = root.querySelector(".architecture-nodes");
+      const edges = root.querySelector(".architecture-edges");
+      const detail = root.querySelector("[data-detail]");
+      const stepLabel = root.querySelector("[data-step]");
+      const playButton = root.querySelector('[data-action="play"]');
+      const paths = {
+        before: [
+          {id:"input", title:"配置与项目授权", state:"原有可信来源", detail:"原有 precedence 与项目 trust 检查；本轮继续复用同一个 loader，不把历史 digest 作为执行授权。"},
+          {id:"eager", title:"启动读取与连接", state:"eager Skill / MCP", detail:"默认启动读取 Skill 正文、连接配置的 MCP 并注册工具；迭代后 default profile 仍保留兼容路径。"},
+          {id:"fixed", title:"固定装配计划", state:"Assembly / prompt / hooks", detail:"工具、提示词与 hooks 随 Assembly 装配；定制主要通过内部接口与可选 native 插件。"},
+          {id:"core", title:"Agent 与受控执行", state:"已有审批与会话提交", detail:"迭代前已有 prepared dispatch、审批与 durable 会话边界；本轮复用这些执行合同。"}
+        ],
+        after: [
+          {id:"input", title:"同源可信配置", state:"捕获字节与来源", detail:"/reload 重用原 loader，新项目字节需对应 grant，验证失败保旧。dynamic + eager 禁后台 watcher；存在当前/新 MCP 来源或 owner 时 reload 要求重启。加载模式变化也是 cold。"},
+          {id:"catalog", title:"轻量能力索引", state:"Skill metadata · MCP descriptors", detail:"edge 的目录与模型先投影 Skill metadata、MCP descriptors；空目录也保留发现控制器。项目 Skill 为 trust 已完整捕获有界正文，不是启动零 IO；用户完整正文才 lazy 读。未选 MCP 不连接。"},
+          {id:"candidate", title:"完整候选计划", state:"预算、摘要与校验", detail:"校验 prompt / hook / Skill 计划与 public SDK/RPC 贡献后发布；edge 默认 128 Skills、2 active MCP、128 KiB prompt + schema 预算。候选失败保旧；扩展代码变化需重启。"},
+          {id:"publish", title:"发布 generation", state:"CLI 在 idle 边界切换", detail:"Manager 限制 current + candidate/retiring 两代；CLI 显式刷新等待 idle。lazy 模式才提供 MCP 刷新；active MCP 上限或已加载来源身份变化需重启，native 代码不承诺热卸载。"},
+          {id:"lease", title:"一次运行固定计划", state:"run lease · owner drain", detail:"run-slot admission 后 pin registry / prompt / hooks；run owner 等 callback、worker 与 durable completion 后释放 lease。Close deadline 只限制等待。"},
+          {id:"activate", title:"需要时加载能力", state:"skill_load · mcp_discover", detail:"Skill 正文按需加载并缓存到 /reload；MCP 按 server 构建候选连接与 schema，预算检查后才提交，失败回收候选并保留旧 executor。list_changed 只标记需要刷新。"},
+          {id:"request", title:"下一次模型请求披露", state:"registry Version → schemas", detail:"激活后的真实 schema 在下一次模型请求生效；同一响应调用尚未披露的工具会被拒绝。search / activate 是 host 策略，并非 MCP 标准方法。"},
+          {id:"dispatch", title:"最新授权与结果归属", state:"admission + completion fence", detail:"工具 admission 与完成都复核 policy / trust；撤销取消在途调用并拒绝迟到结果。RPC 失联、超时、畸形结果或 panic 保留 unknown，不自动重放。"}
+        ]
+      };
+      let mode = "after", stage = 0, selected = "input", timer = null;
+      const validMode = value => value === "before" || value === "after";
+      function applySaved(value) {
+        const saved = value && value.modelContent;
+        if (!saved || !validMode(saved.mode)) return;
+        mode = saved.mode;
+        stage = Math.max(0, Math.min(paths[mode].length - 1, Number(saved.stage) || 0));
+        selected = paths[mode].some(node => node.id === saved.selected) ? saved.selected : paths[mode][stage].id;
+      }
+      function save() {
+        if (window.openai && window.openai.setWidgetState) {
+          window.openai.setWidgetState({modelContent:{mode, stage, selected},privateContent:null}).catch(() => {});
+        }
+      }
+      function stop() {
+        if (timer !== null) clearInterval(timer);
+        timer = null;
+        playButton.textContent = "播放";
+      }
+      function drawEdges() {
+        const wrappers = [...nodes.querySelectorAll(".architecture-node")].map(node => node.getBoundingClientRect());
+        const boxes = [...nodes.querySelectorAll("button")].map(node => node.getBoundingClientRect());
+        const bounds = graph.getBoundingClientRect();
+        edges.setAttribute("width", bounds.width);
+        edges.setAttribute("height", bounds.height);
+        edges.setAttribute("viewBox", `0 0 ${bounds.width} ${bounds.height}`);
+        edges.replaceChildren();
+        const ns = "http://www.w3.org/2000/svg";
+        for (let index = 0; index < boxes.length - 1; index++) {
+          const a = boxes[index], b = boxes[index + 1];
+          const sameRow = Math.abs(a.top - b.top) < 2;
+          let x1, y1, x2, y2;
+          if (sameRow) {
+            const forward = a.left < b.left;
+            x1 = (forward ? a.right : a.left) - bounds.left;
+            x2 = (forward ? b.left : b.right) - bounds.left;
+            y1 = a.top + a.height / 2 - bounds.top;
+            y2 = b.top + b.height / 2 - bounds.top;
+          } else {
+            x1 = a.left + a.width / 2 - bounds.left;
+            x2 = b.left + b.width / 2 - bounds.left;
+            y1 = wrappers[index].bottom - bounds.top + 2;
+            y2 = wrappers[index + 1].top - bounds.top - 4;
+          }
+          const path = document.createElementNS(ns, "path");
+          path.setAttribute("d", `M${x1},${y1} L${x2},${y2}`);
+          path.setAttribute("fill", "none");
+          path.setAttribute("stroke", index < stage ? "var(--viz-series-1)" : "var(--border)");
+          path.setAttribute("stroke-width", "2");
+          edges.appendChild(path);
+          const angle = Math.atan2(y2-y1,x2-x1), size = 5;
+          const arrow = document.createElementNS(ns, "path");
+          arrow.setAttribute("d", `M${x2-size*Math.cos(angle-.55)},${y2-size*Math.sin(angle-.55)} L${x2},${y2} L${x2-size*Math.cos(angle+.55)},${y2-size*Math.sin(angle+.55)}`);
+          arrow.setAttribute("fill", "none");
+          arrow.setAttribute("stroke", index < stage ? "var(--viz-series-1)" : "var(--border)");
+          arrow.setAttribute("stroke-width", "2");
+          edges.appendChild(arrow);
+        }
+      }
+      function render() {
+        const list = paths[mode], narrow = root.clientWidth <= 520;
+        nodes.replaceChildren();
+        list.forEach((node, index) => {
+          const wrapper = document.createElement("div");
+          wrapper.className = "architecture-node";
+          if (!narrow) {
+            wrapper.style.gridRow = String(Math.floor(index / 2) + 1);
+            wrapper.style.gridColumn = String(Math.floor(index / 2) % 2 === 0 ? index % 2 + 1 : 2 - index % 2);
+          }
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "btn";
+          button.textContent = node.title;
+          button.setAttribute("aria-pressed", String(node.id === selected));
+          button.addEventListener("click", () => { selected = node.id; render(); save(); });
+          const state = document.createElement("span");
+          state.className = "text-small architecture-state";
+          state.dataset.active = String(index <= stage);
+          state.textContent = (index <= stage ? "● " : "○ ") + node.state;
+          wrapper.append(button, state);
+          nodes.appendChild(wrapper);
+        });
+        root.querySelectorAll("[data-mode]").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.mode === mode)));
+        root.querySelector('[data-action="previous"]').disabled = stage === 0;
+        root.querySelector('[data-action="next"]').disabled = stage === list.length - 1;
+        stepLabel.textContent = `${stage + 1} / ${list.length} · ${list[stage].title}`;
+        const chosen = list.find(node => node.id === selected) || list[stage];
+        detail.textContent = chosen.title + "：" + chosen.detail;
+        requestAnimationFrame(drawEdges);
+      }
+      root.querySelectorAll("[data-mode]").forEach(button => button.addEventListener("click", () => {
+        stop(); mode = button.dataset.mode; stage = 0; selected = paths[mode][0].id; render(); save();
+      }));
+      root.querySelector('[data-action="previous"]').addEventListener("click", () => {
+        stop(); stage = Math.max(0, stage - 1); selected = paths[mode][stage].id; render(); save();
+      });
+      root.querySelector('[data-action="next"]').addEventListener("click", () => {
+        stop(); stage = Math.min(paths[mode].length - 1, stage + 1); selected = paths[mode][stage].id; render(); save();
+      });
+      playButton.addEventListener("click", () => {
+        if (timer !== null) { stop(); save(); return; }
+        if (stage === paths[mode].length - 1) stage = 0;
+        playButton.textContent = "暂停";
+        render();
+        timer = setInterval(() => {
+          stage = Math.min(paths[mode].length - 1, stage + 1); selected = paths[mode][stage].id; render();
+          if (stage === paths[mode].length - 1) { stop(); save(); }
+        }, 1800);
+      });
+      applySaved(window.openai && window.openai.widgetState);
+      window.addEventListener("openai:set_globals", event => {
+        if (event.detail && event.detail.globals && event.detail.globals.widgetState) {
+          stop(); applySaved(event.detail.globals.widgetState); render();
+        }
+      });
+      let lastWidth = 0;
+      new ResizeObserver(() => {
+        const width = root.clientWidth;
+        if (width !== lastWidth) { lastWidth = width; render(); }
+        else drawEdges();
+      }).observe(root);
+      render();
+    })();
+  </script>
+</div>

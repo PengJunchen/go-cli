@@ -301,3 +301,42 @@ func validTranscriptCompletionProof(proof string) bool {
 		return false
 	}
 }
+
+// ValidateTranscriptRefresh checks the same durable publication identity for
+// graphical and headless consumers before either installs a replacement view.
+func ValidateTranscriptRefresh(hasSnapshot bool, currentSession, currentBranch, expectedRunID, expectedOwnerGen string, refresh TranscriptRefresh) error {
+	if err := refresh.Snapshot.Validate(); err != nil {
+		return err
+	}
+	if !hasSnapshot || refresh.Snapshot.PhysicalSessionID != currentSession || refresh.Snapshot.BranchID != currentBranch {
+		return ErrTranscriptRefreshIdentity
+	}
+	publication := refresh.Publication
+	if publication.State != core.DurablePublicationUnbound && publication.State != core.DurablePublicationPending &&
+		publication.State != core.DurablePublicationSynced && publication.State != core.DurablePublicationFailed {
+		return fmt.Errorf("%w: invalid durable publication state %q", ErrTranscriptRefreshIdentity, publication.State)
+	}
+	if publication.State != core.DurablePublicationUnbound {
+		if publication.RunID == "" || publication.SessionID != refresh.Snapshot.PhysicalSessionID || publication.OwnerGeneration == "" {
+			return ErrTranscriptRefreshIdentity
+		}
+		if refresh.Observation.RunID != publication.RunID || refresh.Observation.OwnerGeneration != publication.OwnerGeneration {
+			return ErrTranscriptRefreshIdentity
+		}
+		if expectedRunID != "" && publication.RunID != expectedRunID {
+			return ErrTranscriptRefreshIdentity
+		}
+		if expectedOwnerGen != "" && publication.OwnerGeneration != expectedOwnerGen {
+			return ErrTranscriptRefreshIdentity
+		}
+	}
+	if publication.State == core.DurablePublicationSynced {
+		if refresh.Observation.ExecutionState != core.RunExecutionQuiescent ||
+			refresh.Observation.Outcome == core.RunOutcomeUnknown ||
+			refresh.Observation.TerminalEntryID == "" ||
+			refresh.Observation.TerminalOutcome != refresh.Observation.Outcome {
+			return ErrTranscriptRefreshIdentity
+		}
+	}
+	return nil
+}

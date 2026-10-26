@@ -101,6 +101,7 @@ type capturedProjectSources struct {
 }
 
 type sourceCapture struct {
+	progressiveSkills         bool
 	ctx                       context.Context
 	root                      string
 	rootAliases               []string
@@ -158,6 +159,7 @@ func captureProjectSources(ctx context.Context, root string, globalConfig *Confi
 	if err != nil {
 		return nil, err
 	}
+	capture.progressiveSkills = (globalConfig != nil && (globalConfig.Skill.Progressive || globalConfig.Runtime.Profile == "edge")) || (projectConfig != nil && (projectConfig.Skill.Progressive || projectConfig.Runtime.Profile == "edge"))
 	projectMCPConfig, err := captureFixedSources(capture)
 	if err != nil {
 		return nil, err
@@ -684,6 +686,17 @@ func scanProjectDirectory(
 			}
 		}
 	}()
+	standardPackage := false
+	if kind == sourceSkillDirectory && capture.progressiveSkills {
+		if info, err := inspectProjectPath(capture.root, filepath.ToSlash(filepath.Join(relative, "SKILL.md"))); err != nil {
+			return err
+		} else if info != nil {
+			if !info.Mode().IsRegular() {
+				return ErrProjectSourceNonRegular
+			}
+			standardPackage = true
+		}
+	}
 	for {
 		if err := capture.ctx.Err(); err != nil {
 			return err
@@ -712,6 +725,9 @@ func scanProjectDirectory(
 			if isProjectSourceCandidate(kind, entry.Name()) && childInfo.IsDir() {
 				return fmt.Errorf("%w: %s", ErrProjectSourceNonRegular, childRelative)
 			}
+			if standardPackage && entry.Name() != "SKILL.md" {
+				continue
+			}
 			if childInfo.IsDir() {
 				if depth+1 > projectSourceMaxDepth {
 					return fmt.Errorf("%w: directory depth in %s exceeds %d", ErrProjectSourceLimit, relative, projectSourceMaxDepth)
@@ -725,7 +741,11 @@ func scanProjectDirectory(
 				continue
 			}
 			tracker.candidateCount++
-			if tracker.candidateCount > projectSourceMaxCandidatesPerRoot {
+			candidateLimit := projectSourceMaxCandidatesPerRoot
+			if kind == sourceSkillDirectory && capture.progressiveSkills {
+				candidateLimit = 1024
+			}
+			if tracker.candidateCount > candidateLimit {
 				return fmt.Errorf("%w: candidates in %s exceed %d", ErrProjectSourceLimit, relative, projectSourceMaxCandidatesPerRoot)
 			}
 			if !childInfo.Mode().IsRegular() {

@@ -1,0 +1,22 @@
+{
+  "phaseCut": "edge-input-calibration",
+  "phaseCutManifestSha256": "d75db19b1bc9f460eefd53cb87a7bf0f58050ccb92454b4d61fff0087f464158",
+  "binarySha256": "75487918ffd1262773cd7e61b230c56826eee421e4ce65b8f44ad2f0ab799d69",
+  "pid": 47709,
+  "sessionIDs": [
+    "s_b7cfbd2cb641772e23007f5741b8ea04"
+  ],
+  "images": [
+    {
+      "file": "12-edge-calibration-denied.jpg",
+      "bytes": 450864,
+      "sha256": "75085b0df7839182688d4df0b1f3a93abb893d776f34bc5a00e4dae5d29301e6",
+      "format": "jpeg",
+      "mime": "image/jpeg",
+      "width": 2780,
+      "height": 1878,
+      "sourceRelativeToRoleRoot": "artifacts/screenshots/12-edge-calibration-denied.png"
+    }
+  ],
+  "capture": "CUA native Chrome window with browser chrome, actual Go PTY xterm; no pixel edits or encoding changes"
+}

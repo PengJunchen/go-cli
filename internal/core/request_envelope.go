@@ -442,11 +442,12 @@ func estimateProviderToolSchemas(tools []llm.ToolDefinition, estimator compactio
 	return tokens, nil
 }
 
-// preparedCompactionTextBudget reserves protocol fields that the content-only
-// Compactor estimator does not count. Reserving the original request metadata
-// is conservative: dropping history can shrink it. The final envelope check
-// still validates the actual compacted output, including custom summaries.
-func preparedCompactionTextBudget(messages []llm.Message, estimator compaction.TokenEstimator, messageBudget, multimodalTokens int) (int, error) {
+// preparedCompactionMessageBudget validates provider-visible metadata estimates
+// and subtracts only the configured multimodal reserve. The compactor estimates
+// message metadata itself; subtracting the same metadata again here would
+// double-reserve it. The final envelope check still validates the actual
+// compacted output, including custom summaries.
+func preparedCompactionMessageBudget(messages []llm.Message, estimator compaction.TokenEstimator, messageBudget, multimodalTokens int) (int, error) {
 	if estimator == nil || messageBudget < 0 || multimodalTokens < 0 || multimodalTokens > messageBudget {
 		return 0, &RequestEnvelopeError{Reason: "compaction message budget or estimator is unavailable"}
 	}
@@ -455,15 +456,11 @@ func preparedCompactionTextBudget(messages []llm.Message, estimator compaction.T
 		metadata[index].Content = ""
 		metadata[index].ContentBlocks = nil
 	}
-	metadataTokens, _, err := estimateProviderMessages(metadata, estimator, 0)
+	_, _, err := estimateProviderMessages(metadata, estimator, 0)
 	if err != nil {
 		return 0, &RequestEnvelopeError{Reason: "compaction message metadata estimate failed", Cause: err}
 	}
-	textBudget := messageBudget - multimodalTokens
-	if metadataTokens > textBudget {
-		return 0, &RequestEnvelopeError{Reason: "message metadata reserve exceeds the available message budget"}
-	}
-	return textBudget - metadataTokens, nil
+	return messageBudget - multimodalTokens, nil
 }
 
 func compactPreparedMessages(
@@ -477,7 +474,7 @@ func compactPreparedMessages(
 	multimodalTokens int,
 	currentSubmissionIndex int,
 ) ([]llm.Message, int, error) {
-	textBudget, err := preparedCompactionTextBudget(messages, estimator, messageBudget, multimodalTokens)
+	textBudget, err := preparedCompactionMessageBudget(messages, estimator, messageBudget, multimodalTokens)
 	if err != nil {
 		return nil, currentSubmissionIndex, err
 	}

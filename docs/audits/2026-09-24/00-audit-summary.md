@@ -1,5 +1,8 @@
 # Go CLI 源码审计总览
 
+> Retention note (2026-10-24): raw command logs under this audit were removed after the audit summaries retained outcomes, failure causes, and proposed work. Linked log paths are historical references only.
+
+
 日期：2026-09-24  
 状态：本总览定稿；分项结论、任务级发现映射与建议迭代计划已汇总。定稿仅表示审计材料完成，不表示产品缺陷已修复、全量验证通过或达到发布条件。  
 代码基线：`40692e35e4815f0dff1c9f91b13905008f7221a4`（验证报告采样时工作树干净）。  

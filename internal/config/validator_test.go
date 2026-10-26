@@ -62,6 +62,49 @@ func TestDefaultValidatorLoopDetectorDisposition(t *testing.T) {
 	assert.Contains(t, err.Error(), "production.loop_detector disposition")
 }
 
+func TestDefaultValidatorProductionModelTimeout(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		total      string
+		streamIdle string
+	}{
+		{name: "defaults"},
+		{name: "explicit bounds", total: "24h", streamIdle: "24h"},
+		{name: "total only within default idle", total: "30s"},
+		{name: "idle only within default total", streamIdle: "30s"},
+	} {
+		t.Run("valid/"+testCase.name, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.Production.ModelTimeout.Total = testCase.total
+			cfg.Production.ModelTimeout.StreamIdle = testCase.streamIdle
+			require.NoError(t, NewDefaultValidator().Validate(*cfg))
+		})
+	}
+
+	for _, testCase := range []struct {
+		name       string
+		total      string
+		streamIdle string
+		want       string
+	}{
+		{name: "invalid total", total: "later", want: "production.model_timeout.total"},
+		{name: "zero total", total: "0s", want: "production.model_timeout.total"},
+		{name: "negative idle", streamIdle: "-1s", want: "production.model_timeout.stream_idle"},
+		{name: "too-large idle", streamIdle: "24h1s", want: "production.model_timeout.stream_idle"},
+		{name: "idle exceeds total", total: "5s", streamIdle: "6s", want: "stream_idle must be no greater than total"},
+		{name: "total below default idle", total: "5s", want: "stream_idle must be no greater than total"},
+	} {
+		t.Run("invalid/"+testCase.name, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.Production.ModelTimeout.Total = testCase.total
+			cfg.Production.ModelTimeout.StreamIdle = testCase.streamIdle
+			err := NewDefaultValidator().Validate(*cfg)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), testCase.want)
+		})
+	}
+}
+
 func TestDefaultValidator_ValidEmptyModel(t *testing.T) {
 	// A config with no model configured (empty name) is still valid.
 	cfg := defaultConfig()

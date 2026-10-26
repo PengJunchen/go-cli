@@ -54,8 +54,7 @@ func (m *OutputMode) Set(s string) error {
 	return nil
 }
 
-// ApproveMode controls how the prompt command handles tool approval in
-// headless mode.
+// ApproveMode controls tool approval in prompt and interactive commands.
 type ApproveMode int
 
 const (

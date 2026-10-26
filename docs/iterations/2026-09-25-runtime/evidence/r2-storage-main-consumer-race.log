@@ -1,8 +1,0 @@
-source_snapshot=1c285accb00a95cc492eabd0c45ed9b700e8c1c9
-command=go test -race -p 2 -count=1 ./internal/session ./internal/cli ./tests ./tests/e2e_20260802
-ok  	github.com/pengjunchen/go-cli/internal/session	2.299s
-ok  	github.com/pengjunchen/go-cli/internal/cli	16.763s
-ok  	github.com/pengjunchen/go-cli/tests	24.782s
-ok  	github.com/pengjunchen/go-cli/tests/e2e_20260802	3.746s
-
-exit_code=0 elapsed_seconds=59.88

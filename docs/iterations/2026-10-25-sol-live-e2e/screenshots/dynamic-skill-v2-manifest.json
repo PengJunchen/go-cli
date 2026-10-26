@@ -1,0 +1,22 @@
+{
+  "phaseCut": "dynamic-skill-v2",
+  "phaseCutManifestSha256": "9f0311dec1020fe99c6f506c0a110d5a51d24b6a88094219d782d27dacd49019",
+  "binarySha256": "7fa6752af212af58d4ea4c69e72bf9c1e731e535d71d4fd2fafc91edcf471dc0",
+  "pid": 57936,
+  "sessionIDs": [
+    "s_c6a602bb2b922b88c390db78dd50e9af"
+  ],
+  "images": [
+    {
+      "file": "42-skill-v2-reloaded-iab.jpg",
+      "bytes": 99927,
+      "sha256": "3db06c5af13adb11ee8475f4863e832fed46f93df98b6bd12dc04f436ae70cd4",
+      "format": "jpeg",
+      "mime": "image/jpeg",
+      "width": 826,
+      "height": 862,
+      "sourceRelativeToRoleRoot": "artifacts/screenshots/42-skill-v2-reloaded-iab.jpg"
+    }
+  ],
+  "capture": "CUA IAB tab viewport, actual Go PTY xterm; no pixel edits or encoding changes"
+}

@@ -23,6 +23,8 @@ extend-ignore-re = [
 ]
 
 [default.extend-identifiers]
+# Canonical project name; preserve it as one identifier.
+HashiCorp = "HashiCorp"
 # Plural file-format abbreviation, not the misspelled word PN.
 PNGs = "PNGs"
 # Short variable names in Go code that trigger false positives

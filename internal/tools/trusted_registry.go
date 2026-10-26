@@ -59,6 +59,13 @@ type TrustedControlRegistrar interface {
 	RegisterTrustedControl(context.Context, ToolDefinition) error
 }
 
+// TrustedInlineControlRegistrar is a host-only declaration that a reviewed
+// control tool owns no work after Execute returns. It must not be used for
+// extension callbacks or controls that hand untracked work to another owner.
+type TrustedInlineControlRegistrar interface {
+	RegisterTrustedInlineControl(context.Context, ToolDefinition) error
+}
+
 // TrustedNetworkReadRegistrar exposes only the reviewed first-party network
 // readers. It does not accept a caller-selected effect or scope.
 type TrustedNetworkReadRegistrar interface {
@@ -295,7 +302,21 @@ func (r *DefaultToolRegistry) RegisterTrustedControl(ctx context.Context, def To
 		// keep the default unproven completion behavior.
 		completionProof = CompletionInlinePipelineJoined
 	}
+	if search, ok := def.(*ToolSearchTool); ok {
+		if search == nil {
+			return errors.New("tools: trusted tool_search control must be non-nil")
+		}
+		if synchronousToolSearchRegistry(search.reg) {
+			completionProof = CompletionInlinePipelineJoined
+		}
+	}
 	return r.registerDefinitionWithCompletion(def, RegistrationSourceTrustedControl, newTrustedEffectSet(EffectControl), completionProof)
+}
+
+// RegisterTrustedInlineControl records an explicit host completion contract;
+// ordinary Register and RegisterTrustedControl retain their existing proofs.
+func (r *DefaultToolRegistry) RegisterTrustedInlineControl(_ context.Context, def ToolDefinition) error {
+	return r.registerDefinitionWithCompletion(def, RegistrationSourceTrustedControl, newTrustedEffectSet(EffectControl), CompletionInlinePipelineJoined)
 }
 
 func (r *DefaultToolRegistry) RegisterTrustedNetworkRead(ctx context.Context, def ToolDefinition) error {
@@ -337,7 +358,7 @@ func (r *DefaultToolRegistry) registerTrustedLocalProcess(ctx context.Context, d
 		}
 		proof := PreparedCompletionProof("")
 		if supportsLocalProcessCompletion(tool) {
-			proof = CompletionOwnedProcessGroupJoined
+			proof = completionLocalProcessOrPrestartNoProcessJoined
 		}
 		return r.registerDefinitionWithCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), proof)
 	case *StreamingBashToolImpl:
@@ -346,7 +367,7 @@ func (r *DefaultToolRegistry) registerTrustedLocalProcess(ctx context.Context, d
 		}
 		proof := PreparedCompletionProof("")
 		if supportsLocalProcessCompletion(tool.BashTool) {
-			proof = CompletionOwnedProcessGroupJoined
+			proof = completionLocalProcessOrPrestartNoProcessJoined
 		}
 		return r.registerDefinitionWithCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), proof)
 	default:
@@ -375,6 +396,7 @@ func (r *DefaultToolRegistry) registerTrustedScopedWorkspaceRead(ctx context.Con
 	completionProof := PreparedCompletionProof("")
 	canonicalRoot := ""
 	proofEligibleReader := false
+	completionOnlySearchReader := false
 	switch tool := def.(type) {
 	case *ReadTool:
 		if tool == nil {
@@ -397,18 +419,26 @@ func (r *DefaultToolRegistry) registerTrustedScopedWorkspaceRead(ctx context.Con
 			return errors.New("tools: scoped workspace-read registration requires a non-nil grep tool")
 		}
 		whitelist = tool.whitelist
+		completionProof = completionScopedSearchJoined
+		completionOnlySearchReader = true
 	case *FindTool:
 		if tool == nil {
 			return errors.New("tools: scoped workspace-read registration requires a non-nil find tool")
 		}
 		whitelist = tool.whitelist
+		completionProof = completionScopedSearchJoined
+		completionOnlySearchReader = true
 	default:
 		return errors.New("tools: scoped workspace-read registration requires a reviewed concrete reader")
 	}
 
 	if whitelist.invalid || len(whitelist.paths) == 0 {
 		if completionProof != "" {
-			return r.registerDefinitionWithScopeAndCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), TrustedToolScope{}, completionProof)
+			source := RegistrationSourceBuiltin
+			if completionOnlySearchReader {
+				source = RegistrationSourceToolRegistry
+			}
+			return r.registerDefinitionWithScopeAndCompletion(def, source, newTrustedEffectSet(), TrustedToolScope{}, completionProof)
 		}
 		return r.Register(ctx, def)
 	}

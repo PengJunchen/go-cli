@@ -58,11 +58,7 @@ type binaryRunResult struct {
 
 func buildCLIForBinaryE2E(t *testing.T) string {
 	t.Helper()
-	_, sourceFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve binary E2E source path")
-	}
-	repoRoot := filepath.Dir(filepath.Dir(sourceFile))
+	repoRoot := binaryE2EModuleRoot(t)
 	binaryPath := filepath.Join(t.TempDir(), "go-cli")
 	cmd := exec.Command("go", "build", "-race", "-o", binaryPath, "./cmd/cli")
 	cmd.Dir = repoRoot
@@ -71,6 +67,29 @@ func buildCLIForBinaryE2E(t *testing.T) string {
 		t.Fatalf("build CLI binary: %v\n%s", err, output)
 	}
 	return binaryPath
+}
+
+// binaryE2EModuleRoot follows the real test working directory because
+// -trimpath deliberately removes filesystem roots from runtime source paths.
+func binaryE2EModuleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("read binary E2E working directory: %v", err)
+	}
+	for {
+		if data, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil {
+			fields := strings.Fields(string(data))
+			if len(fields) >= 2 && fields[0] == "module" && fields[1] == "github.com/pengjunchen/go-cli" {
+				return dir
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("could not find go-cli go.mod walking up from the binary E2E working directory")
+		}
+		dir = parent
+	}
 }
 
 func newBinaryMockProvider(t *testing.T, steps ...binaryCompletion) (*httptest.Server, *binaryMockProvider) {

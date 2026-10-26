@@ -1,6 +1,7 @@
 package compaction
 
 import (
+	"encoding/json"
 	"log/slog"
 	"math"
 	"unicode"
@@ -182,41 +183,93 @@ func (e *CompositeTokenEstimator) Estimate(text string) (int, error) {
 // AC-3: each TurnItem is estimated once and the result is cached.
 func estimateItemTokens(item *TurnItem, estimator TokenEstimator) int {
 	if item.IsCompaction {
-		// Compaction summaries are projected to the model with a fixed untrusted
-		// context prefix. Their cached estimates may predate that framing, so
-		// always estimate the provider-visible content again.
-		content := item.Content
-		if content == "" {
-			content = "[compacted]"
-		}
-		total := estimateLength(UntrustedSummaryContext(content), estimator)
+		// A cached value may predate the canonical untrusted wrapper or role, so
+		// always account the exact provider-visible summary projection again.
+		total := estimateProviderVisibleItemTokens(*item, estimator)
 		item.EstimatedTokens = total
 		return total
 	}
 	if item.EstimatedTokens > 0 {
 		return item.EstimatedTokens
 	}
+	total := estimateProviderVisibleItemTokens(*item, estimator)
+	item.EstimatedTokens = total
+	return total
+}
+
+// estimateProviderVisibleItemTokens estimates the text terms represented by a
+// TurnItem after it is converted to an llm.Message. Keep this aligned with the
+// request-envelope estimator: roles, names, tool-call identifiers and JSON
+// arguments consume budget too, and ContentBlocks shadow Content when present.
+// It does not use or mutate EstimatedTokens so callers can use it for fresh
+// request estimates without trusting a prior strategy cache.
+func estimateProviderVisibleItemTokens(item TurnItem, estimator TokenEstimator) int {
+	if item.IsCompaction {
+		// Compaction summaries are projected as untrusted user content. Other
+		// TurnItem fields are cleared by turnItemsToMessages for this projection.
+		content := item.Content
+		if content == "" {
+			content = "[compacted]"
+		}
+		return saturatingTokenAdd(
+			estimateLength(RoleUser, estimator),
+			estimateLength(UntrustedSummaryContext(content), estimator),
+		)
+	}
+
 	total := 0
-	if item.Content != "" {
-		total += estimateLength(item.Content, estimator)
+	addText := func(value string) {
+		if value != "" {
+			total = saturatingTokenAdd(total, estimateLength(value, estimator))
+		}
 	}
-	if item.ToolResult != "" {
-		total += estimateLength(item.ToolResult, estimator)
-	}
-	for _, block := range item.ContentBlocks {
-		switch block.Type {
-		case "text":
-			if block.Text != "" {
-				total += estimateLength(block.Text, estimator)
-			}
-		case "image_url":
-			total += 85
-		default:
-			if block.Text != "" {
-				total += estimateLength(block.Text, estimator)
+	addText(item.Role)
+	addText(item.ToolName)
+	addText(item.ToolCallID)
+
+	if item.ContentBlocks == nil {
+		if item.Role == RoleTool {
+			addText(item.ToolResult)
+		} else {
+			addText(item.Content)
+		}
+	} else {
+		for _, block := range item.ContentBlocks {
+			switch block.Type {
+			case "text":
+				addText(block.Text)
+			case "image_url":
+				// The request envelope tracks images as a separate unknown
+				// multimodal term. Preserve the compactor's conservative local
+				// image estimate while keeping text accounting in the same units.
+				total = saturatingTokenAdd(total, 85)
+			default:
+				addText(block.Text)
 			}
 		}
 	}
-	item.EstimatedTokens = total
+
+	for _, call := range item.ToolCalls {
+		addText(call.ID)
+		addText(call.Name)
+		encoded, err := json.Marshal(call.Args)
+		if err != nil {
+			// Request preparation reports this error before provider dispatch.
+			// A direct compaction estimate cannot represent an unserializable
+			// provider argument, so fail closed as an over-budget item.
+			slog.Warn("compaction.tool_args_estimate_error", "err", err)
+			return maxTokenEstimate
+		}
+		addText(string(encoded))
+	}
 	return total
+}
+
+const maxTokenEstimate = int(^uint(0) >> 1)
+
+func saturatingTokenAdd(total, value int) int {
+	if total < 0 || value < 0 || total > maxTokenEstimate-value {
+		return maxTokenEstimate
+	}
+	return total + value
 }

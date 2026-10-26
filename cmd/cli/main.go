@@ -146,6 +146,9 @@ func runWithContextLoader(
 		return 2
 	}
 
+	// Reload uses the same precedence and trust-capturing loader as startup.
+	// The closure never bypasses project-source verification.
+	ctx = cli.WithRuntimeConfigLoader(ctx, loadConfig)
 	tracer, exporter, err := newTracing(cfg, stdout)
 	if err != nil {
 		var pathErr *os.PathError

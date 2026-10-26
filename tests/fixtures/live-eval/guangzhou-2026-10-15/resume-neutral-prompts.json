@@ -1,0 +1,23 @@
+[
+  {
+    "id": "T301",
+    "prompt": "TURN_GZ_T301。请从恢复的既有会话中回忆最初的 GZ_ORIGIN_CANARY，原样写出；若无法回忆就明确说无法回忆。不要使用工具，不要猜测。最多80字。保留本轮标记。",
+    "phase": "original-failed-store-clone-resume",
+    "kind": "short-text",
+    "approval": "none"
+  },
+  {
+    "id": "T302",
+    "prompt": "TURN_GZ_T302。请回忆中断之前最后已确认的出行人数、房间数、每间每晚预算，并说明你能否确定实际 PPT 是否已经生成。只依据已有会话，不使用工具，不猜测。最多120字。保留本轮标记。",
+    "phase": "original-failed-store-clone-resume",
+    "kind": "short-text",
+    "approval": "none"
+  },
+  {
+    "id": "T303",
+    "prompt": "TURN_GZ_T303。继续已有广州行程：午休与不吃牛肉要求目前是什么状态？只依据已恢复上下文回答，不使用工具，最多80字。保留本轮标记。",
+    "phase": "original-failed-store-clone-resume",
+    "kind": "short-text",
+    "approval": "none"
+  }
+]

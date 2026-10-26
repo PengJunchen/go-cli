@@ -1,5 +1,8 @@
 # Runtime iteration execution ledger
 
+> Retention note (2026-10-24): raw `.log` files in this iteration, scanner JSON output, test-gate JSONL, and temporary command output under `evidence/` were removed after the execution ledger and verification notes preserved the tested snapshots, counts, failures, and fixes. Historical artifact paths below are provenance references only.
+
+
 Last updated: 2026-09-25. This ledger tracks execution evidence for the 47 tasks in [execution-tasks.json](execution-tasks.json), including mapped execution prerequisites and review splits from the audit task IDs. The iteration designer is the sole writer of this shared ledger; builders send lane evidence in their own reports, and the parent forwards approved updates for entry here. Do not mark a task `done` until its isolated commit is cherry-picked to the execution branch and independently reviewed.
 
 ## Baseline and branch

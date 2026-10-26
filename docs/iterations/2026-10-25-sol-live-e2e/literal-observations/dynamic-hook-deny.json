@@ -1,0 +1,45 @@
+{
+  "phase": "dynamic-hook-deny",
+  "sourceCutManifestSha256": "784f0f6a13ae6bec28d93afe1b41f74987f2947e4f21fdeb1314f94d67d525f4",
+  "sourceBridgeMetadataSha256": "871c475c351b901ca94794e7394a7891b92bda314e6799252195d3e17c5c35c8",
+  "sourceKind": "Exact projection of previously recorded bridge flags, not a new scan",
+  "selectedLabels": [
+    "mcp-private-command",
+    "mcp-private-env"
+  ],
+  "records": [
+    {
+      "sequence": 17,
+      "requestSha256": "0e21b8a47a07edeb6d61ea45aeafcc59bd35ff8cee03643e84ccfa4038866089",
+      "responseSha256": "44d60b745889308c0aeb417b5585f214bcc36677d55f6022a1dc79790c497600",
+      "responseId": "chatcmpl-resp_09a767400760e6d2016addb6095a88819b8d3119ac35ab7dcb",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": []
+    },
+    {
+      "sequence": 18,
+      "requestSha256": "ed5961aa1b8b4094eaf4263e23e578b7b7ec4a547a0b60176065bcea0fb35ea2",
+      "responseSha256": "dc437e3112868043f238f5f2d0bcd767fb9db6e3351f264e402d7c2e12e755ac",
+      "responseId": "chatcmpl-resp_0988e1982bc34d81016addb622c358819b95184ac9dbfd09c6",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": []
+    },
+    {
+      "sequence": 19,
+      "requestSha256": "da681d8ac43010e9ed781fce65b28c3ae9d796c91e8b308de79ebd35324ea970",
+      "responseSha256": "619c8379a05d2771385878a2adc0fb5cb30704a91d7898b062f792e158dc1acd",
+      "responseId": "chatcmpl-resp_007691e28ece8ca5016addb63963bc8199b02e16879184df2d",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": []
+    },
+    {
+      "sequence": 20,
+      "requestSha256": "316965756a2e4dc1d4a475455491af8b1a7393d894aa04a21f4b3f2521d20e50",
+      "responseSha256": "aea2f4a0c88b5eedd4a7b0f2520242f1b8e60740e4dde2c3a7d012ceb64c4747",
+      "responseId": "chatcmpl-resp_0023f0f1eac8c991016addb63d4254819bb92043eb17c63833",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": []
+    }
+  ],
+  "scope": "Selected decoded-JSON visible literal flags only; original upstream JSON was not retained and is not independently rescanned; no encoded/general information-flow claim"
+}

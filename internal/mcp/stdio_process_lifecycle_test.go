@@ -62,6 +62,18 @@ func TestMCPStdioOwnedChildHelper(t *testing.T) {
 			}
 		}
 
+		if mode == "lifetime" && len(request.ID) > 0 && (request.Method == "tools/list" || request.Method == "tools/call") {
+			result := map[string]any{"content": []map[string]any{{"type": "text", "text": "alive"}}, "isError": false}
+			if request.Method == "tools/list" {
+				result = map[string]any{"tools": []map[string]any{{"name": "alive", "description": "owned lifetime", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}}}}
+			}
+			data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(request.ID), "result": result})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeHelperChildOutput(t, append(data, '\n'))
+			continue
+		}
 		if len(request.ID) > 0 && request.Method == "tools/call" {
 			switch mode {
 			case "oversized-line":
@@ -745,4 +757,28 @@ func TestOwnedStdioDisconnectDeadlineRetainsSameOwnerUntilDone(t *testing.T) {
 	}
 	require.NoError(t, adapter.Disconnect(context.Background()))
 	require.NotNil(t, proc.ProcessState, "shared Done closed before cmd.Wait completed")
+}
+
+func TestOwnedStdioPublishedProcessSurvivesSetupContextCancellation(t *testing.T) {
+	adapter, pidFile, _ := newOwnedStdioHelperAdapter(t, "lifetime")
+	setup, cancel := context.WithCancel(context.Background())
+	require.NoError(t, adapter.Connect(setup))
+	waitForHelperFile(t, pidFile)
+	before, err := os.ReadFile(pidFile)
+	require.NoError(t, err)
+	cancel()
+	for run := 0; run < 2; run++ {
+		ctx, done := context.WithTimeout(context.Background(), time.Second)
+		definitions, err := adapter.ListTools(ctx)
+		require.NoError(t, err)
+		require.Len(t, definitions, 1)
+		result, err := adapter.CallTool(ctx, "alive", map[string]any{})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		done()
+	}
+	after, err := os.ReadFile(pidFile)
+	require.NoError(t, err)
+	require.Equal(t, string(before), string(after), "cancelled setup must not trigger a replacement process")
+	require.NoError(t, adapter.Disconnect(context.Background()))
 }

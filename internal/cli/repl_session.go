@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/config"
@@ -44,6 +45,14 @@ type REPLSession struct {
 	// cmd is the owning interactiveCmd, kept for handleSlashCommand.
 	cmd *interactiveCmd
 
+	// extraAssembleOptions supplies focused dependency overrides to REPL tests.
+	// The interactive command itself does not expose these as user flags.
+	extraAssembleOptions []AssembleOption
+
+	// unknownCancelRecovery is set only after an explicit TUI cancellation has
+	// joined a quiescent owner and its exact unknown terminal checkpoint.
+	unknownCancelRecovery *durableUnknownCancelRecovery
+
 	// I/O
 	out io.Writer
 	in  io.Reader
@@ -65,6 +74,7 @@ type REPLSession struct {
 	resumeSessionID  string
 	noSandboxFlag    bool
 	noOnboardingFlag bool
+	approveMode      ApproveMode
 
 	// Agent assembly
 	assembly        *AgentAssembly
@@ -79,7 +89,7 @@ type REPLSession struct {
 	// Session
 	sessionTree    session.SessionTree
 	sessionHandler *session.SessionSlashHandler
-	sharedThemeMgr *tui.ThemeManager
+	sharedThemeMgr ThemeController
 
 	// pendingWrites buffers session entries for batched persistence,
 	// reducing syscall overhead by flushing multiple entries in a single
@@ -114,21 +124,22 @@ type REPLSession struct {
 	spanCtx context.Context
 
 	// Turn-level state (shared across executeTurn sub-methods)
-	line        string
-	turnSpan    tracing.TraceSpan
-	turnCtx     context.Context
-	cancelTurn  context.CancelFunc
-	interrupter *InterruptHandler
-	stream      *core.EventStreamImpl
-	turnResult  core.Result
-	turnErr     error
-	turnDone    chan struct{}
-	isTTY       bool
-	app         *tui.BubbleteaApp
-	eventSource *tui.OwnedAgentEventStream
-	uiCtx       context.Context
-	cancelUI    context.CancelFunc
-	appStarted  bool
+	line              string
+	turnSpan          tracing.TraceSpan
+	turnCtx           context.Context
+	cancelTurn        context.CancelFunc
+	interrupter       *InterruptHandler
+	stream            *core.EventStreamImpl
+	turnResult        core.Result
+	turnErr           error
+	turnDone          chan struct{}
+	uiCancelRequested atomic.Bool
+	isTTY             bool
+	app               *replApp
+	eventSource       *tui.OwnedAgentEventStream
+	uiCtx             context.Context
+	cancelUI          context.CancelFunc
+	appStarted        bool
 }
 
 const durableOwnerJoinWait = 2 * time.Second
@@ -230,6 +241,7 @@ func (s *REPLSession) parseFlags() error {
 		thinkingFlag     string
 		noSandboxFlag    bool
 		noOnboardingFlag bool
+		approveMode      ApproveMode
 	)
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
@@ -240,6 +252,7 @@ func (s *REPLSession) parseFlags() error {
 	fs.StringVar(&thinkingFlag, "thinking", "medium", "thinking level: none|minimal|low|medium|high|max")
 	fs.BoolVar(&noSandboxFlag, "no-sandbox", false, "disable bash sandbox enforcement")
 	fs.BoolVar(&noOnboardingFlag, "no-onboarding", false, "skip first-run onboarding wizard")
+	fs.Var(&approveMode, "approve", "approval mode: ask|auto|deny (flag > approval.mode > ask)")
 	if err := fs.Parse(s.args); err != nil {
 		return newUsageError("interactive: %v", err)
 	}
@@ -252,6 +265,17 @@ func (s *REPLSession) parseFlags() error {
 	if v, ok := s.cfg.(*config.Config); ok {
 		s.rc = v
 	}
+	approveExplicit := false
+	fs.Visit(func(option *flag.Flag) {
+		if option.Name == "approve" {
+			approveExplicit = true
+		}
+	})
+	resolvedApproval, err := resolveApprovalMode(s.rc, approveMode, approveExplicit)
+	if err != nil {
+		return err
+	}
+	s.approveMode = resolvedApproval
 	if s.rc != nil && s.rc.Session.StorePath != "" && resumeFlag {
 		return newUsageError("interactive: durable sessions require --resume-session <physical-id>; --resume is ambiguous")
 	}
@@ -324,19 +348,21 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 		}
 	}
 	assembleOpts := []AssembleOption{
+		WithApproveMode(s.approveMode),
 		WithMaxTokens(s.maxTokens),
 		WithResume(s.resumeFlag),
 		WithSessionPersistence(true),
 		WithAgentName("interactive"),
 		WithThinkingLevel(s.thinkingLevel),
 	}
+	assembleOpts = append(assembleOpts, s.extraAssembleOptions...)
 	if durableSession != nil {
 		assembleOpts = append(assembleOpts, withDurableCLISession(durableSession))
 	}
 	if s.noSandboxFlag {
 		assembleOpts = append(assembleOpts, WithNoSandbox())
 	}
-	if tui.IsTerminal() {
+	if s.approveMode == ApproveAsk && interactiveApprovalsEnabled() {
 		approvalCh = make(chan tui.ApprovalRequest, 32)
 		assembleOpts = append(assembleOpts, WithApprovalChannel(approvalCh))
 	}
@@ -346,6 +372,9 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 		return newExecutionError("interactive: assemble agent", err)
 	}
 	s.assembly = assembly
+	if _, err := fmt.Fprintf(s.out, "Approval mode: %s\n", assembly.ApprovalMode.String()); err != nil {
+		return errors.Join(newExecutionError("interactive: display approval mode", err), assembly.Close(context.Background()))
+	}
 	if err := assembly.setInteractiveCloseHooks(func() {
 		s.stopFlushTicker()
 	}, func(ctx context.Context) error {
@@ -453,6 +482,7 @@ func (s *REPLSession) setupSlashContext() error {
 		promptBuilder:          s.assembly.PromptBuilder,
 		contextLoader:          s.assembly.ContextLoader,
 		mcpResources:           s.assembly.mcpResources,
+		capabilities:           s.assembly,
 	}
 	if s.assembly.PhysicalSessionID != "" {
 		s.slashCtx.sessionID = s.assembly.PhysicalSessionID
@@ -462,8 +492,8 @@ func (s *REPLSession) setupSlashContext() error {
 	// without restarting. The initial theme is set from config; subsequent
 	// switches via /theme persist across turns because the same manager is
 	// passed to every BubbleteaApp via WithThemeManager.
-	s.sharedThemeMgr = tui.NewThemeManager()
-	if s.rc != nil {
+	s.sharedThemeMgr = newREPLThemeManager()
+	if s.rc != nil && s.sharedThemeMgr != nil {
 		themeName := strings.TrimSpace(strings.ToLower(s.rc.TUI.Theme))
 		if themeName == "" || themeName == "auto" {
 			themeName = "dark"
@@ -689,6 +719,10 @@ func (s *REPLSession) readInput() error {
 			if cmd.Name == "exit" {
 				break
 			}
+			if s.unknownCancelRecovery != nil && !allowedDuringUnknownCancellation(cmd, s.slashReg) {
+				printUnknownCancellationFence(s.out)
+				continue
+			}
 			// Custom Markdown command handlers may return a pendingInput to
 			// inject a prompt template that the REPL loop processes as user
 			// input.
@@ -703,6 +737,10 @@ func (s *REPLSession) readInput() error {
 		if strings.EqualFold(line, exitCommand) {
 			s.logger.Info("cli_interactive_exit", "op", "cli.interactive.exit")
 			break
+		}
+		if s.unknownCancelRecovery != nil {
+			printUnknownCancellationFence(s.out)
+			continue
 		}
 
 		s.line = line
@@ -760,7 +798,7 @@ func (s *REPLSession) executeTurn() error {
 	// The bubbletea program from this turn has exited; leaving a stale
 	// reference would cause the next turn to send to a dead program.
 	if s.assembly.HITLEmitter != nil {
-		s.assembly.HITLEmitter.SetProgram(nil)
+		s.assembly.HITLEmitter.clearProgram()
 	}
 
 	// Wait for RunTurn to finish so turnResult and turnErr are populated.
@@ -796,6 +834,12 @@ func (s *REPLSession) executeTurn() error {
 	s.cancelTurn()
 	s.interrupter.Stop()
 	s.stopTUI()
+	if s.unknownCancelRecovery != nil {
+		s.finishTurnSpan(context.Canceled)
+		fmt.Fprintln(s.out, "[interrupted] The run outcome remains unknown; this is not a rollback. External or workspace side effects may be partial.")              //nolint:errcheck
+		fmt.Fprintln(s.out, "The old run will not be retried. Use /session pending to inspect unresolved actions, then /session new to continue in a fresh session.") //nolint:errcheck
+		return nil
+	}
 
 	if err := s.finishTurnSpanAfterCompletion(interrupted); err != nil {
 		return err
@@ -927,6 +971,9 @@ func (s *REPLSession) finishTurnSpanAfterCompletion(interrupted bool) error {
 	} else if s.assembly.durableSession != nil && s.turnResult.DurablePublication.State == core.DurablePublicationFailed {
 		completionErr = errors.New("interactive: durable run finished without positive transcript publication")
 	}
+	if completionErr != nil {
+		completionErr = errors.Join(completionErr, s.turnErr)
+	}
 
 	spanErr := completionErr
 	if spanErr == nil {
@@ -949,7 +996,14 @@ func durableTurnIsJoinable(result core.Result) bool {
 	return result.ExecutionState == core.RunExecutionQuiescent && result.Outcome != core.RunOutcomeUnknown
 }
 
-func (s *REPLSession) applyDurableTurnRefresh(initial *session.PreparedSessionSnapshot) error {
+func (s *REPLSession) applyDurableTurnRefresh(initial *session.PreparedSessionSnapshot) (refreshErr error) {
+	defer func() {
+		if refreshErr != nil {
+			// Publication failures remain fatal. Keep the run's typed cause so
+			// callers can distinguish denial, timeout, and persistence failures.
+			refreshErr = errors.Join(refreshErr, s.turnErr)
+		}
+	}()
 	if initial == nil || s.app == nil || s.uiCtx == nil {
 		return errors.New("interactive: durable transcript refresh requires its initial snapshot and active TUI")
 	}
@@ -972,6 +1026,21 @@ func (s *REPLSession) applyDurableTurnRefresh(initial *session.PreparedSessionSn
 		}
 	} else if publication.State != core.DurablePublicationUnbound {
 		waitErr = errors.New("interactive: durable publication has no owner status handle")
+	}
+	if waitErr == nil && publication.State == core.DurablePublicationSynced {
+		recovery, ok, err := s.unknownCancellationRecovery(initial, status, publication)
+		if err != nil {
+			return err
+		}
+		if ok {
+			handler := s.durableSessionCommandHandler()
+			if handler == nil {
+				return errors.New("interactive: durable unknown cancellation recovery requires the /session command")
+			}
+			s.unknownCancelRecovery = recovery
+			handler.recoveryNewSession = s.startNewSessionAfterUnknownCancellation
+			return nil
+		}
 	}
 
 	var sourceSnapshot session.PreparedSessionSnapshot
@@ -1069,9 +1138,173 @@ func (s *REPLSession) applyDurableSessionSnapshot(snapshot session.PreparedSessi
 	return nil
 }
 
+func (s *REPLSession) unknownCancellationRecovery(
+	initial *session.PreparedSessionSnapshot,
+	joined core.RunStatus,
+	publication core.DurablePublication,
+) (*durableUnknownCancelRecovery, bool, error) {
+	if initial == nil || s == nil || s.spanCtx == nil || s.turnCtx == nil ||
+		s.assembly == nil || s.assembly.durableSession == nil || s.assembly.durableSession.manager == nil {
+		return nil, false, nil
+	}
+	result := s.turnResult
+	guard, ok := s.assembly.runSlotGuard.(core.RunSlotWrapperRegistrar)
+	if !ok {
+		return nil, false, nil
+	}
+	_, runSlotActive := guard.ActiveRunStatus()
+	evidence := unknownCancellationOwnerEvidence{
+		explicitUICancel: s.uiCancelRequested.Load(),
+		parentContextErr: s.spanCtx.Err(), turnContextErr: s.turnCtx.Err(),
+		// applyDurableTurnRefresh only reaches this method after WaitForCompletion returns nil.
+		joinErr: nil, statusHandle: result.StatusHandle != nil,
+		resultRunID: result.RunID, initialSessionID: initial.SessionID,
+		joinedStatus: joined, publication: publication, runSlotActive: runSlotActive,
+	}
+	if !validUnknownCancellationOwnerEvidence(evidence) {
+		return nil, false, nil
+	}
+	snapshot, err := s.assembly.durableSession.snapshotSelected()
+	if err != nil {
+		return nil, false, fmt.Errorf("interactive: inspect unknown canceled durable run: %w", err)
+	}
+	if err := validateSamePreparedTranscript(*initial, snapshot); err != nil {
+		return nil, false, err
+	}
+	observation, err := ProjectRunObservation(s.spanCtx, snapshot, result.StatusHandle, result.RunID)
+	if err != nil {
+		return nil, false, fmt.Errorf("interactive: inspect unknown canceled run terminal: %w", err)
+	}
+	if observation.RunID != joined.RunID || observation.ExecutionState != core.RunExecutionQuiescent ||
+		observation.Outcome != core.RunOutcomeUnknown || observation.TerminalEntryID == "" ||
+		observation.TerminalOutcome != core.RunOutcomeUnknown {
+		return nil, false, nil
+	}
+	recovery := &durableUnknownCancelRecovery{
+		sessionID: initial.SessionID, activeBranchID: initial.ActiveBranchID, runID: result.RunID,
+		ownerGeneration: publication.OwnerGeneration, terminalEntryID: observation.TerminalEntryID,
+	}
+	if err := validateUnknownCancellationRecoverySelection(recovery, result.RunID, joined, publication, snapshot, observation); err != nil {
+		return nil, false, nil
+	}
+	return recovery, true, nil
+}
+
+func (s *REPLSession) durableSessionCommandHandler() *SessionHandler {
+	if s.slashReg == nil {
+		return nil
+	}
+	registered, ok := s.slashReg.Lookup("session")
+	if !ok {
+		return nil
+	}
+	handler, _ := registered.(*SessionHandler)
+	return handler
+}
+
+func (s *REPLSession) startNewSessionAfterUnknownCancellation(ctx context.Context) (string, error) {
+	recovery := s.unknownCancelRecovery
+	if recovery == nil || s.assembly == nil || s.assembly.durableSession == nil || s.assembly.durableSession.manager == nil {
+		return "", errors.New("/session new is available only after a quiescent unknown cancellation")
+	}
+	guard, ok := s.assembly.runSlotGuard.(core.RunSlotWrapperRegistrar)
+	if !ok {
+		return "", errors.New("cannot verify that the previous run slot is idle")
+	}
+	if _, active := guard.ActiveRunStatus(); active {
+		return "", errors.New("cannot start a new session while a run owner is active")
+	}
+	if s.turnResult.StatusHandle == nil || s.turnResult.RunID != recovery.runID {
+		return "", errors.New("the interrupted run no longer matches the saved recovery binding")
+	}
+	waiter, ok := s.turnResult.StatusHandle.(core.RunStatusWaiter)
+	if !ok {
+		return "", errors.New("cannot revalidate the joined owner publication for /session new")
+	}
+	waitCtx, cancel := context.WithTimeout(normalizeSessionContext(ctx), durableOwnerJoinWait)
+	status, publication, waitErr := waiter.WaitForCompletion(waitCtx)
+	cancel()
+	if waitErr != nil {
+		return "", fmt.Errorf("rejoin the interrupted run before starting a new session: %w", waitErr)
+	}
+	selected, err := s.assembly.durableSession.snapshotSelected()
+	if err != nil {
+		return "", fmt.Errorf("inspect the selected durable session before starting a new one: %w", err)
+	}
+	observation, err := ProjectRunObservation(ctx, selected, s.turnResult.StatusHandle, recovery.runID)
+	if err != nil {
+		return "", fmt.Errorf("revalidate the unknown terminal checkpoint before starting a new session: %w", err)
+	}
+	if err := validateUnknownCancellationRecoverySelection(recovery, s.turnResult.RunID, status, publication, selected, observation); err != nil {
+		return "", err
+	}
+	if err := s.assembly.durableSession.manager.prepareNew(ctx, "interactive after unknown cancellation"); err != nil {
+		return "", fmt.Errorf("prepare a new durable session after unknown cancellation: %w", err)
+	}
+	if _, active := guard.ActiveRunStatus(); active {
+		return "", errors.New("a run owner became active while starting a new session")
+	}
+	snapshot, err := s.assembly.durableSession.snapshotSelected()
+	if err != nil {
+		return "", fmt.Errorf("inspect the newly selected durable session: %w", err)
+	}
+	if snapshot.SessionID == recovery.sessionID || len(snapshot.PublishedView.Messages) != 0 {
+		return "", errors.New("new durable session did not select a fresh empty physical session")
+	}
+	tree, err := session.NewDefaultSessionTreeBuilder().BuildFromSnapshot(ctx, snapshot)
+	if err != nil {
+		return "", fmt.Errorf("build the new durable session tree: %w", err)
+	}
+	s.sessionTree = tree
+	s.sessionHandler = session.NewDurableReadOnlySessionSlashHandler(tree)
+	s.slashCtx.sessionHandler = s.sessionHandler
+	s.assembly.Agent.SetHistory(snapshot.PublishedView.Messages)
+	s.assembly.PhysicalSessionID = snapshot.SessionID
+	s.slashCtx.sessionID = snapshot.SessionID
+	s.entryCounter = len(s.assembly.Agent.Messages())
+	s.unknownCancelRecovery = nil
+	if handler := s.durableSessionCommandHandler(); handler != nil {
+		handler.recoveryNewSession = nil
+	}
+	return snapshot.SessionID, nil
+}
+
+func allowedDuringUnknownCancellation(command session.SlashCommand, registry *SlashCommandRegistry) bool {
+	if registry == nil {
+		return false
+	}
+	registered, ok := registry.Lookup(command.Name)
+	if !ok {
+		return false
+	}
+	switch handler := registered.(type) {
+	case *HelpHandler:
+		return handler != nil
+	case *SessionHandler:
+		if handler == nil || handler.mode != sessionCommandModeDurable || len(command.Args) != 1 {
+			return false
+		}
+		switch command.Args[0] {
+		case "pending":
+			return true
+		case "new":
+			return handler.recoveryNewSession != nil
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
+func printUnknownCancellationFence(out io.Writer) {
+	fmt.Fprintln(out, "The interrupted run is unresolved; no new model request was sent. Use /session pending, /help, /session new, or exit.") //nolint:errcheck
+}
+
 // setupTurn creates the cancelable turn context, interrupt handler, and
 // event stream, and expands @-mentions in the user input.
 func (s *REPLSession) setupTurn() {
+	s.uiCancelRequested.Store(false)
 	s.turnSpan, s.turnCtx = tracing.SpanFromContext(s.spanCtx, spanInteractiveTurn, tracing.SpanKindInternal)
 	s.turnSpan.SetAttributes(
 		tracing.SensitiveAttribute("user_message", s.line),
@@ -1146,151 +1379,6 @@ func (s *REPLSession) runAgentGoroutine(runCtx context.Context) {
 		}
 		s.stream.Close()
 	}()
-}
-
-// renderTUI builds the TUI options, creates the BubbleteaApp, starts the
-// render goroutine, and wires HITL through the bubbletea program.
-func (s *REPLSession) renderTUI(initialTranscript *tui.CanonicalTranscriptSnapshot) error {
-	// Bridge core events to TUI events and render. Bubbletea owns terminal
-	// rendering in TTY mode (raw mode, diff-based repaint on stderr), so
-	// the legacy onUpdate manual redraw and ANSI cursor logic has been
-	// removed.
-	var eventSource *tui.OwnedAgentEventStream
-	if s.rc != nil && s.rc.TUI.Mode == "remote" && s.rc.TUI.RemoteURL != "" {
-		eventSource = tui.NewACPStreamAdapter(s.rc.TUI.RemoteURL).StreamOwned(s.turnCtx)
-	} else {
-		eventSource = tui.BridgeEventsOwned(s.turnCtx, s.stream)
-	}
-	s.eventSource = eventSource
-	s.turnCounter++
-	s.isTTY = tui.IsTerminal()
-	tsp := tui.NewDefaultTerminalSizeProvider()
-	appOpts := []tui.AppOption{
-		tui.WithWidth(tsp.Width()),
-		tui.WithModelInfo(s.slashCtx.ModelName()),
-		tui.WithTurnCount(s.turnCounter),
-		tui.WithSessionInfo(s.assembly.SessionID),
-	}
-	if snapshot, ok := s.assembly.todoSnapshot(); ok {
-		appOpts = append(appOpts, tui.WithTodoSnapshot(todoUpdateMsg(snapshot)))
-	}
-	// Mode label: show "plan" when plan mode is active, otherwise "chat".
-	if s.assembly.PlanCtrl != nil && s.assembly.PlanCtrl.IsActive() {
-		appOpts = append(appOpts, tui.WithModeLabel("plan"))
-	} else {
-		appOpts = append(appOpts, tui.WithModeLabel("chat"))
-	}
-	// TUIConfig: word wrap, diff style. The shared theme manager is
-	// passed separately so runtime /theme switches persist across turns.
-	if s.rc != nil {
-		appOpts = append(appOpts,
-			tui.WithWordWrap(s.rc.TUI.WordWrap),
-			tui.WithDiffStyle(s.rc.TUI.DiffStyle),
-		)
-	}
-	appOpts = append(appOpts, tui.WithThemeManager(s.sharedThemeMgr))
-	if s.assembly.ApprovalChannel != nil {
-		appOpts = append(appOpts, tui.WithApprovalChannel(s.assembly.ApprovalChannel))
-	}
-	if s.slashCtx.thinkingVisibility != "" {
-		appOpts = append(appOpts, tui.WithThinkingVisibility(s.slashCtx.thinkingVisibility))
-	}
-	if s.assembly.durableSession != nil {
-		appOpts = append(appOpts, tui.WithDeferQuitUntilTranscriptRefresh())
-	}
-	appOpts = append(appOpts, s.buildCallbackOptions()...)
-	s.uiCtx, s.cancelUI = context.WithCancel(s.spanCtx)
-	if initialTranscript != nil {
-		app, err := tui.NewBubbleteaAppWithTranscript(eventSource.Events(), *initialTranscript, appOpts...)
-		if err != nil {
-			s.cancelUI()
-			return fmt.Errorf("interactive: create canonical transcript TUI: %w", err)
-		}
-		s.app = app
-	} else {
-		s.app = tui.NewBubbleteaApp(eventSource.Events(), appOpts...)
-	}
-
-	s.appStarted = true
-	go func() {
-		if runErr := s.app.Run(s.uiCtx); runErr != nil && runErr != context.Canceled {
-			s.logger.Debug("cli_interactive_tui_error", "err", runErr)
-		}
-	}()
-
-	s.wireHITL()
-	return nil
-}
-
-// buildCallbackOptions constructs the steer, follow-up, cancel, pause, and
-// resume callback options for the BubbleteaApp.
-func (s *REPLSession) buildCallbackOptions() []tui.AppOption {
-	return []tui.AppOption{
-		tui.WithSteerCallback(func(input string) {
-			turnID := s.assembly.TurnRunner.RunningTurnID()
-			if turnID != "" {
-				if steerErr := s.assembly.TurnRunner.Steer(s.turnCtx, turnID, input); steerErr != nil {
-					s.logger.Warn("cli_interactive_steer_callback_failed", "err", steerErr)
-				}
-			} else if s.assembly.SteerChannel != nil {
-				select {
-				case s.assembly.SteerChannel <- input:
-				default:
-				}
-			}
-		}),
-		tui.WithFollowUpCallback(func(input string) {
-			turnID := s.assembly.TurnRunner.RunningTurnID()
-			if turnID != "" {
-				if err := s.assembly.TurnRunner.FollowUp(s.turnCtx, turnID, input); err != nil {
-					s.logger.Warn("cli_interactive_followup_callback_failed", "err", err)
-				}
-			} else if s.assembly.FollowUpChannel != nil {
-				select {
-				case s.assembly.FollowUpChannel <- input:
-				default:
-					s.logger.Warn("cli_interactive_followup_channel_full")
-				}
-			}
-		}),
-		tui.WithCancelCallback(func() {
-			s.cancelTurn()
-		}),
-		tui.WithPauseCallback(func() {
-			if s.assembly.LoopAgent != nil {
-				s.assembly.LoopAgent.Pause()
-			}
-		}),
-		tui.WithResumeCallback(func() {
-			if s.assembly.LoopAgent != nil {
-				s.assembly.LoopAgent.Resume()
-			}
-		}),
-	}
-}
-
-// wireHITL waits for the bubbletea program to be initialized so HITL can
-// route through it.
-func (s *REPLSession) wireHITL() {
-	// Wait for the tea.Program to be initialized so HITL can route
-	// through it. The program is created inside Run (which runs in the
-	// goroutine above); instead of polling, we wait on the
-	// ProgramReady channel which closes once the program is stored.
-	// In TTY mode this routes HITL questions through bubbletea instead
-	// of corrupting stdout.
-	if s.assembly.HITLEmitter != nil {
-		select {
-		case <-s.app.ProgramReady():
-			if prog := s.app.Program(); prog != nil {
-				s.assembly.HITLEmitter.SetProgram(prog)
-			}
-		case <-time.After(5 * time.Second):
-			s.logger.Warn("cli_interactive_hitl_program_timeout",
-				"op", "cli.interactive.hitl.program_timeout",
-			)
-		case <-s.turnCtx.Done():
-		}
-	}
 }
 
 // waitForTurnCompletion waits for the render loop to finish, forwarding any

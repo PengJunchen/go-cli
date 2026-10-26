@@ -1,0 +1,153 @@
+{
+  "restored_on": "2026-10-26",
+  "source_revision": "8e65b284ad55299b80f46202d903384a71a85d3c",
+  "source_ref_at_restore": "origin/main@8e65b284ad55299b80f46202d903384a71a85d3c",
+  "scope": "24 historical documentation evidence assets removed by 09c007b: 12 terminal screenshots, 1 terminal run report, 7 scanner/integration JSON reports, and 4 probe source excerpts.",
+  "preservation_boundary": "These review screenshots, structured evidence, and probe-source excerpts are retained. Raw command logs, PTY/ANSI transcripts, JSONL event streams, temporary fixtures, stderr captures, and other unlisted raw artifacts remain deleted.",
+  "entries": [
+    {
+      "path": "docs/iterations/2026-09-25-runtime/evidence/integration-main-575fc5f-scan-report.json",
+      "source_git_blob_sha1": "f022388a82d990594fd44de9fa6c3d4410b02b5a",
+      "bytes": 379896,
+      "retention_reason": "Historical structured scanner or integration report retained to support review of the 2026-09-25 runtime iteration."
+    },
+    {
+      "path": "docs/iterations/2026-09-25-runtime/evidence/r0-scanner-integrated-report.json",
+      "source_git_blob_sha1": "4bf319373ed0c60b1f6ad4a9f0db2f8fa841617d",
+      "bytes": 326265,
+      "retention_reason": "Historical structured scanner or integration report retained to support review of the 2026-09-25 runtime iteration."
+    },
+    {
+      "path": "docs/iterations/2026-09-25-runtime/evidence/r0-scanner-postfix-report.json",
+      "source_git_blob_sha1": "364072626cf8b97a9cc173a98e02651b76b8324a",
+      "bytes": 322973,
+      "retention_reason": "Historical structured scanner or integration report retained to support review of the 2026-09-25 runtime iteration."
+    },
+    {
+      "path": "docs/iterations/2026-09-25-runtime/evidence/r1-final-integration.json",
+      "source_git_blob_sha1": "3eef049f2367c5416a01685735a20fd7a71e31d5",
+      "bytes": 4466,
+      "retention_reason": "Historical structured scanner or integration report retained to support review of the 2026-09-25 runtime iteration."
+    },
+    {
+      "path": "docs/iterations/2026-09-25-runtime/evidence/r1-integrated-scanner-report.json",
+      "source_git_blob_sha1": "268f6b433b55c699922e2abd48508d8e1aba6923",
+      "bytes": 325353,
+      "retention_reason": "Historical structured scanner or integration report retained to support review of the 2026-09-25 runtime iteration."
+    },
+    {
+      "path": "docs/iterations/2026-09-25-runtime/evidence/r6-acp-stdio-d094-blocking-probes.go.txt",
+      "source_git_blob_sha1": "5529893ccccf31d39883fd3e039ce491bf30b0c8",
+      "bytes": 4650,
+      "retention_reason": "Historical probe source excerpt retained as review material for the 2026-09-25 runtime iteration."
+    },
+    {
+      "path": "docs/iterations/2026-09-25-runtime/evidence/r6-http-identity-probes.go.txt",
+      "source_git_blob_sha1": "f89185ecea6f65ecd3d2ba18592a6fdc386e31a7",
+      "bytes": 5308,
+      "retention_reason": "Historical probe source excerpt retained as review material for the 2026-09-25 runtime iteration."
+    },
+    {
+      "path": "docs/iterations/2026-09-25-runtime/evidence/r6-http-route-fix-probes.go.txt",
+      "source_git_blob_sha1": "4cd41d608c0dd18dfe5736147091aa20a4274bc9",
+      "bytes": 4045,
+      "retention_reason": "Historical probe source excerpt retained as review material for the 2026-09-25 runtime iteration."
+    },
+    {
+      "path": "docs/iterations/2026-09-25-runtime/evidence/r7-mcp-hotreload-probes.go.txt",
+      "source_git_blob_sha1": "3f552fc8178cf22aba0adb0c3193946cf076b499",
+      "bytes": 2819,
+      "retention_reason": "Historical probe source excerpt retained as review material for the 2026-09-25 runtime iteration."
+    },
+    {
+      "path": "docs/iterations/2026-09-25-runtime/evidence/scanner-56ee4a0.json",
+      "source_git_blob_sha1": "c0ebaff950a86a6386b4c82aedcc991bf493847b",
+      "bytes": 363189,
+      "retention_reason": "Historical structured scanner or integration report retained to support review of the 2026-09-25 runtime iteration."
+    },
+    {
+      "path": "docs/iterations/2026-09-25-runtime/evidence/scanner-b7ffe0b.json",
+      "source_git_blob_sha1": "1e0d6e45a4dd1842f366f5326edd5cdc6947116c",
+      "bytes": 350446,
+      "retention_reason": "Historical structured scanner or integration report retained to support review of the 2026-09-25 runtime iteration."
+    },
+    {
+      "path": "docs/qa/2026-10-14/terminal/01-startup.png",
+      "source_git_blob_sha1": "8dab34b1b7595b322a8964018805a1c2f271fce5",
+      "bytes": 5859,
+      "retention_reason": "Historical review screenshot cited by the 2026-10-14 terminal evidence report; retained for audit and review."
+    },
+    {
+      "path": "docs/qa/2026-10-14/terminal/02-chinese-stream-midstream.png",
+      "source_git_blob_sha1": "b9a5772029121bb0178b421d36f112f8387d7d7b",
+      "bytes": 35351,
+      "retention_reason": "Historical review screenshot cited by the 2026-10-14 terminal evidence report; retained for audit and review."
+    },
+    {
+      "path": "docs/qa/2026-10-14/terminal/03-chinese-stream-complete.png",
+      "source_git_blob_sha1": "0a7c9bee19eabfcf2d57a656b9d8069f2613550d",
+      "bytes": 35505,
+      "retention_reason": "Historical review screenshot cited by the 2026-10-14 terminal evidence report; retained for audit and review."
+    },
+    {
+      "path": "docs/qa/2026-10-14/terminal/04-approval-deny-wide-page-one.png",
+      "source_git_blob_sha1": "d64273a21596d1189ca2388b8a10a1bff247ec02",
+      "bytes": 102565,
+      "retention_reason": "Historical review screenshot cited by the 2026-10-14 terminal evidence report; retained for audit and review."
+    },
+    {
+      "path": "docs/qa/2026-10-14/terminal/05-approval-deny-wide-page-two.png",
+      "source_git_blob_sha1": "27e25dd4afbfefce72122436348d8569424a4a2a",
+      "bytes": 177511,
+      "retention_reason": "Historical review screenshot cited by the 2026-10-14 terminal evidence report; retained for audit and review."
+    },
+    {
+      "path": "docs/qa/2026-10-14/terminal/06-approval-deny-narrow-after-resize.png",
+      "source_git_blob_sha1": "1981f4792be561b2cae686d5589699d7933cc5e6",
+      "bytes": 62766,
+      "retention_reason": "Historical review screenshot cited by the 2026-10-14 terminal evidence report; retained for audit and review."
+    },
+    {
+      "path": "docs/qa/2026-10-14/terminal/07-approval-denied-complete.png",
+      "source_git_blob_sha1": "b0a55b4fd7fc7e9b21dad0933af5abffcefcb30f",
+      "bytes": 18936,
+      "retention_reason": "Historical review screenshot cited by the 2026-10-14 terminal evidence report; retained for audit and review."
+    },
+    {
+      "path": "docs/qa/2026-10-14/terminal/08-approval-allow-wide-page-one.png",
+      "source_git_blob_sha1": "d64273a21596d1189ca2388b8a10a1bff247ec02",
+      "bytes": 102565,
+      "retention_reason": "Historical review screenshot cited by the 2026-10-14 terminal evidence report; retained for audit and review."
+    },
+    {
+      "path": "docs/qa/2026-10-14/terminal/09-approval-allow-wide-page-two.png",
+      "source_git_blob_sha1": "27e25dd4afbfefce72122436348d8569424a4a2a",
+      "bytes": 177511,
+      "retention_reason": "Historical review screenshot cited by the 2026-10-14 terminal evidence report; retained for audit and review."
+    },
+    {
+      "path": "docs/qa/2026-10-14/terminal/10-approval-allow-wide-last-page.png",
+      "source_git_blob_sha1": "26dc000b990aad216d36b23e3af0f4922240a839",
+      "bytes": 177886,
+      "retention_reason": "Historical review screenshot cited by the 2026-10-14 terminal evidence report; retained for audit and review."
+    },
+    {
+      "path": "docs/qa/2026-10-14/terminal/11-long-bash-running-followup-edited.png",
+      "source_git_blob_sha1": "eebe69b47c9e9966e7fb1760e64c074de3bc189a",
+      "bytes": 46668,
+      "retention_reason": "Historical review screenshot cited by the 2026-10-14 terminal evidence report; retained for audit and review."
+    },
+    {
+      "path": "docs/qa/2026-10-14/terminal/12-long-bash-complete.png",
+      "source_git_blob_sha1": "476f06f57030b5e4371227efa6ff41e6c928a8d5",
+      "bytes": 49804,
+      "retention_reason": "Historical review screenshot cited by the 2026-10-14 terminal evidence report; retained for audit and review."
+    },
+    {
+      "path": "docs/qa/2026-10-14/terminal/run-report.json",
+      "source_git_blob_sha1": "8b0dffbaa14287086ddaaad387b51f953a676afd",
+      "bytes": 27517,
+      "retention_reason": "Structured capture metadata, screenshot provenance, dimensions, and assertions supporting the historical terminal report."
+    }
+  ]
+}

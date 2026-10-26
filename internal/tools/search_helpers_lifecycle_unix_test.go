@@ -62,6 +62,42 @@ func TestGrepForcedPipeCloseStopsFallbackAndWithholdsProof(t *testing.T) {
 	assertProcessFromFileStopped(t, pidPath)
 }
 
+func TestPreparedScopedGrepForcedPipeCloseDoesNotAttestInlineFallback(t *testing.T) {
+	workdir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, "match.txt"), []byte("needle\n"), 0o600))
+	helperDir := t.TempDir()
+	pidPath := filepath.Join(t.TempDir(), "prepared-rg-escaped.pid")
+	writeFailingHelperWithEscapedPipeWriter(t, helperDir, "rg", pidPath)
+	t.Setenv("PATH", helperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SEARCH_HELPER_ESCAPED_PIPE_PID", pidPath)
+
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	tool := NewGrepTool(WithGrepWorkdir(workdir), WithGrepPathWhitelist([]string{workdir}))
+	require.NoError(t, base.registerTrustedScopedWorkspaceRead(ctx, tool))
+	registry := NewMiddlewareToolRegistry(base)
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+	invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: "grep", Args: map[string]any{"pattern": "needle", "path": workdir}})
+	require.NoError(t, err)
+	result, dispatchErr := invocation.Dispatch(ctx)
+	pid := waitForChildPIDFile(t, pidPath)
+	require.Error(t, dispatchErr)
+	assert.Empty(t, result.Output, "an uncontained helper failure must not return fallback output")
+	assertUnknownWithoutPendingResource(t, dispatchErr)
+
+	signal := invocation.CompletionSignal()
+	require.NotNil(t, signal.Done(), "the local invocation return remains observable")
+	select {
+	case <-signal.Done():
+	default:
+		t.Fatal("the failed local reader has returned")
+	}
+	assert.Empty(t, signal.Proof(), "a started but uncontained helper cannot be relabeled as a pure-Go completion")
+	assert.NoError(t, syscall.Kill(pid, 0), "the deliberately escaped writer remains alive for the assertion")
+	killProcessFromFile(t, pidPath)
+	assertProcessFromFileStopped(t, pidPath)
+}
+
 func TestGrepTimeoutWithEscapedPipeWriterPreservesCancellationCause(t *testing.T) {
 	workdir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(workdir, "match.txt"), []byte("needle\n"), 0o600))
@@ -149,6 +185,76 @@ func (ctx *controlledDeadlineContext) expire() {
 	default:
 		close(ctx.done)
 	}
+}
+
+func TestPreparedScopedGrepTimeoutWithEscapedWriterKeepsCompletionUnproven(t *testing.T) {
+	workdir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, "match.txt"), []byte("needle\n"), 0o600))
+	helperDir := t.TempDir()
+	pidPath := filepath.Join(t.TempDir(), "prepared-rg-timeout-escaped.pid")
+	testBinary, err := os.Executable()
+	require.NoError(t, err)
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' '{"type":"match","data":{"path":{"text":"match.txt"},"lines":{"text":"needle\\n"},"line_number":1}}'
+%s -test.run=%s &
+child=$!
+while [ ! -s %s ]; do sleep 0.01; done
+wait "$child"
+`,
+		shellQuoteTestArgument(testBinary),
+		shellQuoteTestArgument("^TestSearchHelperEscapedPipeWriter$"),
+		shellQuoteTestArgument(pidPath))
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "rg"), []byte(script), 0o700))
+	t.Setenv("PATH", helperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SEARCH_HELPER_ESCAPED_PIPE_PID", pidPath)
+	t.Cleanup(func() { killProcessFromFile(t, pidPath) })
+
+	deadline := newControlledDeadlineContext()
+	t.Cleanup(func() { deadline.expire() })
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	tool := NewGrepTool(WithGrepWorkdir(workdir), WithGrepPathWhitelist([]string{workdir}))
+	require.NoError(t, base.registerTrustedScopedWorkspaceRead(context.Background(), tool))
+	registry := NewMiddlewareToolRegistry(base)
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+	invocation, err := registry.PrepareToolCall(deadline, ToolCall{Name: "grep", Args: map[string]any{"pattern": "needle", "path": workdir}})
+	require.NoError(t, err)
+	dispatchResult := make(chan struct {
+		result *ToolResult
+		err    error
+	}, 1)
+	go func() {
+		result, dispatchErr := invocation.Dispatch(deadline)
+		dispatchResult <- struct {
+			result *ToolResult
+			err    error
+		}{result: result, err: dispatchErr}
+	}()
+	pid := waitForChildPIDFile(t, pidPath)
+	deadline.expire()
+	var got struct {
+		result *ToolResult
+		err    error
+	}
+	select {
+	case got = <-dispatchResult:
+	case <-time.After(3 * time.Second):
+		t.Fatal("prepared Grep did not return after the controlled deadline")
+	}
+	require.ErrorIs(t, got.err, context.DeadlineExceeded)
+	assert.Empty(t, got.result.Output, "an unknown helper must not return fallback search output")
+	assertUnknownWithoutPendingResource(t, got.err)
+
+	signal := invocation.CompletionSignal()
+	require.NotNil(t, signal.Done())
+	select {
+	case <-signal.Done():
+	default:
+		t.Fatal("the prepared executor returned after the helper's forced-close path")
+	}
+	assert.Empty(t, signal.Proof(), "a helper timeout cannot be relabeled as synchronous no-process completion")
+	assert.NoError(t, syscall.Kill(pid, 0), "the deliberately escaped writer remains alive for the assertion")
+	killProcessFromFile(t, pidPath)
+	assertProcessFromFileStopped(t, pidPath)
 }
 
 func TestFindForcedPipeCloseStopsFallbackAndWithholdsProof(t *testing.T) {

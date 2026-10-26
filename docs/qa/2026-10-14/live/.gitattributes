@@ -1,0 +1,4 @@
+# Preserve immutable terminal and verification captures byte-for-byte.
+*.ansi -text -diff
+*.log -text -diff
+*.patch -text -diff

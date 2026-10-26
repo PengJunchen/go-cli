@@ -1,7 +1,0 @@
-Fixed 3c7dcb production capacity 64 targeted count20
-ok  	github.com/pengjunchen/go-cli/internal/acp	1.186s
-exit=0
-
-Test-only capacity 1 probability amplification count40; not production capacity evidence
-ok  	github.com/pengjunchen/go-cli/internal/acp	1.025s
-exit=0

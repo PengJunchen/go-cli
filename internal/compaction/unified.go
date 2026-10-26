@@ -14,12 +14,18 @@ import (
 // only annotates tracing; the router does not branch on it.
 const defaultTriggerReason = "unknown"
 
-// UnifiedCompactor is the routing layer of the compaction package. It tries the
-// strategies in order of increasing cost — micro, then summary, then truncating
-// — and falls through to the next strategy whenever the current one cannot
-// satisfy the token budget. Truncating keeps the mandatory system instructions;
-// if those instructions alone exceed the budget, the router returns an explicit
-// error instead of producing an over-budget result.
+// ErrDurableSummaryProjectionRequired reports that source-backed history
+// exceeded its budget but no typed summary projection was produced. Durable
+// callers cannot commit a projection-free micro or truncating result.
+var ErrDurableSummaryProjectionRequired = errors.New("compaction: durable history requires a typed summary projection")
+
+// UnifiedCompactor is the routing layer of the compaction package. For legacy
+// history it tries strategies in order of increasing cost — micro, then summary,
+// then truncating — and falls through when a strategy cannot satisfy the
+// budget. Source-backed durable history over budget requires a typed summary
+// projection, so projection-free micro/truncating winners are not eligible.
+// Truncating keeps mandatory system instructions; if those alone exceed the
+// budget, the router returns an explicit error instead of an over-budget result.
 //
 // Each strategy is held by the Compactor interface (never a concrete type) so
 // the router stays decoupled and injectable, and so callers can substitute
@@ -106,10 +112,10 @@ func (u *UnifiedCompactor) setLastStrategy(s Strategy) {
 	u.mu.Unlock()
 }
 
-// Compact routes compaction across the configured strategies, cheapest first.
-// It emits a single `compaction` span annotating the trigger reason, the token
-// counts, and which strategy ultimately succeeded, and it exposes the chosen
-// strategy through LastStrategy.
+// Compact routes compaction across the configured strategies. Source-backed
+// history that exceeds its budget is sent directly to the summary strategy so
+// the result can carry a durable projection; other history remains cheapest
+// first. It emits one `compaction` span and exposes the selected strategy.
 func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) (CompactionResult, error) {
 	span, sctx := tracing.SpanFromContext(ctx, "compaction", tracing.SpanKindInternal)
 	defer span.End()
@@ -129,6 +135,15 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		return CompactionResult{Items: items}, err
 	}
 	items = normalized
+	durable := hasDurableSource(items)
+	if durable {
+		// Durable routing must not trust an old strategy cache after adding the
+		// provider-visible fields to the estimate. `normalized` is a defensive
+		// copy, so clearing these hints cannot mutate caller-owned history.
+		for i := range items {
+			items[i].EstimatedTokens = 0
+		}
+	}
 
 	// Pre-compute token counts per item, caching results in EstimatedTokens so
 	// sub-compactors (micro, summary) reuse the cached values instead of
@@ -136,10 +151,10 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 	current := 0
 	for i := range items {
 		if items[i].Role == RoleSystem && !items[i].IsCompaction {
-			current += mandatorySystemPromptItemTokens(items[i], estimator)
+			current = saturatingTokenAdd(current, mandatorySystemPromptItemTokens(items[i], estimator))
 			continue
 		}
-		current += estimateItemTokens(&items[i], estimator)
+		current = saturatingTokenAdd(current, estimateItemTokens(&items[i], estimator))
 	}
 	span.SetAttributes(
 		tracing.Attribute{Key: "trigger_reason", Value: u.triggerReason},
@@ -147,6 +162,21 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		tracing.Attribute{Key: "max_tokens", Value: maxTokens},
 		tracing.Attribute{Key: "items_count", Value: len(items)},
 	)
+
+	if durable && current > maxTokens {
+		span.AddEvent("trying_summary")
+		if u.summary == nil {
+			return CompactionResult{Items: items}, ErrDurableSummaryProjectionRequired
+		}
+		result, err := u.summary.Compact(sctx, items, maxTokens, estimator)
+		if err != nil {
+			return CompactionResult{}, err
+		}
+		if result.NewProjection == nil {
+			return CompactionResult{Items: items}, ErrDurableSummaryProjectionRequired
+		}
+		return u.finish(sctx, logger, span, originalItems, current, maxTokens, estimator, result, StrategySummary), nil
+	}
 
 	// Micro: cheapest, zero-LLM. Any failure (including ErrRequiresTruncating)
 	// escalates to the next strategy.

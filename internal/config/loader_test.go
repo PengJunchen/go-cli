@@ -67,6 +67,30 @@ func TestLoad_FromEnv(t *testing.T) {
 	assert.Equal(t, "stdout", cfg.Tracing.Exporter)
 }
 
+func TestLoad_ProductionModelTimeoutDefaultsAndEnv(t *testing.T) {
+	defaultCfg, err := NewLoader().WithEnvPrefix("MODEL_TIMEOUT_DEFAULT_TEST").Load(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, defaultCfg.Production.ModelTimeout.Total)
+	assert.Empty(t, defaultCfg.Production.ModelTimeout.StreamIdle)
+
+	t.Setenv("MODEL_TIMEOUT_ENV_TEST_PRODUCTION_MODEL_TIMEOUT_TOTAL", "5m")
+	t.Setenv("MODEL_TIMEOUT_ENV_TEST_PRODUCTION_MODEL_TIMEOUT_STREAM_IDLE", "90s")
+	cfg, err := NewLoader().WithEnvPrefix("MODEL_TIMEOUT_ENV_TEST").Load(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "5m", cfg.Production.ModelTimeout.Total)
+	assert.Equal(t, "90s", cfg.Production.ModelTimeout.StreamIdle)
+}
+
+func TestLoad_ProductionModelTimeoutFromFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := "production:\n  model_timeout:\n    total: 5m\n    stream_idle: 90s\n"
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+	cfg, err := NewLoader().WithFile(path).WithEnvPrefix("MODEL_TIMEOUT_FILE_TEST").Load(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "5m", cfg.Production.ModelTimeout.Total)
+	assert.Equal(t, "90s", cfg.Production.ModelTimeout.StreamIdle)
+}
+
 func TestLoad_FiveLevelPriority(t *testing.T) {
 	// File layer.
 	dir := t.TempDir()

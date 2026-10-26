@@ -57,11 +57,13 @@ const (
 // SessionEntry is a single immutable record in a session. Entries are linked
 // into a tree via ParentID and are never mutated once appended.
 type SessionEntry struct {
-	ID            string             `json:"id"`
-	ParentID      string             `json:"parent_id,omitempty"`
-	Type          EntryType          `json:"type"`
-	Content       string             `json:"content"`
-	ContentBlocks []llm.ContentBlock `json:"content_blocks,omitempty"`
+	// Generation records audit identity only; replay always uses current authorization.
+	Generation    *core.RunGenerationMetadata `json:"generation,omitempty"`
+	ID            string                      `json:"id"`
+	ParentID      string                      `json:"parent_id,omitempty"`
+	Type          EntryType                   `json:"type"`
+	Content       string                      `json:"content"`
+	ContentBlocks []llm.ContentBlock          `json:"content_blocks,omitempty"`
 	// Usage preserves token accounting reported on the canonical assistant
 	// message so durable history can be compared with the R1 transcript.
 	Usage     *llm.Usage `json:"usage,omitempty"`
@@ -79,6 +81,8 @@ type SessionEntry struct {
 	// ToolName is the name of the tool that produced this entry. Populated
 	// for tool entries.
 	ToolName string `json:"tool_name,omitempty"`
+	// MaterializedArtifactDigest identifies an instruction artifact read during this run.
+	MaterializedArtifactDigest string `json:"materialized_artifact_digest,omitempty"`
 	// SurfaceOp controls how DeriveMessages projects this entry into the
 	// model-visible message stream. An empty value is treated as
 	// SurfaceOpVisible.
@@ -171,6 +175,10 @@ func (e *SessionEntry) clone() *SessionEntry {
 		return nil
 	}
 	cp := *e
+	if e.Generation != nil {
+		metadata := *e.Generation
+		cp.Generation = &metadata
+	}
 	message := core.AgentMessage{
 		Role:           string(e.Type),
 		Content:        e.Content,

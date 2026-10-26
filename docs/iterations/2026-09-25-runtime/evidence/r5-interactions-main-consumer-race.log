@@ -1,8 +1,0 @@
-snapshot: ed72cd654fb3ff68f29aaecc9c6bdc91fbc88dd7
-command: go test -race -p 2 -count=1 ./internal/tui ./internal/cli ./tests/e2e_20260802
-ok  	github.com/pengjunchen/go-cli/internal/tui	2.094s
-ok  	github.com/pengjunchen/go-cli/internal/cli	17.699s
-ok  	github.com/pengjunchen/go-cli/tests/e2e_20260802	4.124s
-
-exit: 0
-elapsed_seconds: 50.49

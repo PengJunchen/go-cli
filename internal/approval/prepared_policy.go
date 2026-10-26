@@ -242,6 +242,7 @@ func (m *ApprovalMiddleware) resolvePreparedAsk(
 		}
 		return m.publishPreparedAllow(ctx, span, req, mode, key, true, auditClassifier, proposal, choice, resolution)
 	case ApprovalDeny:
+		denied := preparedApprovalDenial(choice, resolution)
 		auditErr := recordPreparedResolution(auditClassifier, call, proposal, choice, resolution)
 		if m.fence.Snapshot() != req.Generations {
 			return decision, errors.Join(tools.ErrDispatchFenceChanged, auditErr)
@@ -250,10 +251,10 @@ func (m *ApprovalMiddleware) resolvePreparedAsk(
 			return decision, errors.Join(fmt.Errorf("publish explicit approval denial: %w", err), auditErr)
 		}
 		if auditErr != nil {
-			return decision, errors.Join(ErrToolDenied, auditErr)
+			return decision, errors.Join(denied, auditErr)
 		}
 		recordPreparedDecision(span, req, mode, "callback_deny", false, false, false)
-		return decision, ErrToolDenied
+		return decision, denied
 	default:
 		if err := recordPreparedResolution(auditClassifier, call, proposal, "", "invalid_response"); err != nil {
 			return decision, errors.Join(ErrToolDenied, err)
@@ -265,6 +266,33 @@ func (m *ApprovalMiddleware) resolvePreparedAsk(
 
 type approvalChoiceProvider interface {
 	requestApprovalWithChoice(context.Context, string, map[string]any) (ApprovalResult, string, string, error)
+}
+
+type approvalDenialError struct {
+	source string
+	choice string
+}
+
+func (e *approvalDenialError) Error() string {
+	if e.source == "user" {
+		return ErrToolDenied.Error() + ": rejected by the user (decision_source=user; choice=deny; tool_not_executed=true)"
+	}
+	return fmt.Sprintf("%s (decision_source=%s; choice=%s; tool_not_executed=true)", ErrToolDenied.Error(), e.source, e.choice)
+}
+
+func (*approvalDenialError) Unwrap() error { return ErrToolDenied }
+
+func preparedApprovalDenial(choice, resolution string) error {
+	source, decisionChoice := "callback", "deny"
+	switch resolution {
+	case "user":
+		if choice == "deny" {
+			source = "user"
+		}
+	case "canceled", "non_tty_deny", "input_ended", "invalid_response":
+		source, decisionChoice = resolution, "none"
+	}
+	return &approvalDenialError{source: source, choice: decisionChoice}
 }
 
 func (m *ApprovalMiddleware) requestPreparedApproval(ctx context.Context, call tools.ToolCall) (ApprovalResult, string, string, error) {
@@ -501,7 +529,7 @@ func (m *ApprovalMiddleware) publishPreparedRevocation(expected tools.DispatchFe
 	if m.fence == nil {
 		return ErrPreparedPolicyUnavailable
 	}
-	_, err := m.fence.Publish(tools.DispatchFenceApproval, &expected, func() {
+	_, err := m.fence.Publish(tools.DispatchFenceDecision, &expected, func() {
 		m.sessionMu.Lock()
 		defer m.sessionMu.Unlock()
 		m.policyEpoch++

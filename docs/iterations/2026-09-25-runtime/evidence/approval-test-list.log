@@ -1,3 +1,0 @@
-TestTeaApprovalCallback_SendsRequest
-TestTeaApprovalCallback_DeniesAlwaysAllowResponseAfterCancellation
-ok  	github.com/pengjunchen/go-cli/internal/approval	0.020s

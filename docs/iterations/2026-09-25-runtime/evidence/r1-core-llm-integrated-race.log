@@ -1,7 +1,0 @@
-Snapshot: c847496
-Command: GOMAXPROCS=2 go test -p 2 -race -count=1 ./internal/core ./internal/llm
-ok  	github.com/pengjunchen/go-cli/internal/core	3.927s
-ok  	github.com/pengjunchen/go-cli/internal/llm	2.690s
-
-Exit: 0
-ElapsedSeconds: 6.56

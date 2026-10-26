@@ -79,6 +79,9 @@ const (
 	DispatchFenceApproval
 	// DispatchFencePlan tracks Plan Mode transitions.
 	DispatchFencePlan
+	// DispatchFenceDecision invalidates prepared decisions after an explicit
+	// refusal without replacing the runtime permission policy.
+	DispatchFenceDecision
 )
 
 // DispatchFenceSnapshot is the generation tuple captured by one prepared
@@ -87,6 +90,7 @@ type DispatchFenceSnapshot struct {
 	Registry uint64
 	Approval uint64
 	Plan     uint64
+	Decision uint64
 }
 
 // DispatchFence serializes the short state publications and final dispatch
@@ -145,7 +149,7 @@ func (f *DispatchFence) WithSnapshot(callback func(DispatchFenceSnapshot) error)
 }
 
 // Publish applies a short state update under the fence and advances its
-// generation domain. When expected is non-nil, the complete three-domain
+// generation domain. When expected is non-nil, the complete generation
 // snapshot must still match; this prevents an approval-cache update from
 // overlooking an intervening registry or Plan change. The callback must only
 // publish in-memory state and must not block or perform I/O.
@@ -156,7 +160,7 @@ func (f *DispatchFence) Publish(domain DispatchFenceDomain, expected *DispatchFe
 	if update == nil {
 		return DispatchFenceSnapshot{}, errors.New("tools: dispatch fence update is nil")
 	}
-	if domain != DispatchFenceRegistry && domain != DispatchFenceApproval && domain != DispatchFencePlan {
+	if domain != DispatchFenceRegistry && domain != DispatchFenceApproval && domain != DispatchFencePlan && domain != DispatchFenceDecision {
 		return DispatchFenceSnapshot{}, ErrInvalidDispatchFenceDomain
 	}
 
@@ -174,6 +178,8 @@ func (f *DispatchFence) Publish(domain DispatchFenceDomain, expected *DispatchFe
 		f.generations.Approval++
 	case DispatchFencePlan:
 		f.generations.Plan++
+	case DispatchFenceDecision:
+		f.generations.Decision++
 	}
 	return f.generations, nil
 }
@@ -982,11 +988,11 @@ func (p *preparedInvocation) commitAndInvoke(ctx context.Context) (*ToolResult, 
 		return nil, err
 	}
 	executeCtx := ctx
-	if p.completionProof == CompletionOwnedProcessGroupJoined {
+	if p.completionProof == CompletionOwnedProcessGroupJoined || p.completionProof == completionScopedSearchJoined || p.completionProof == completionLocalProcessOrPrestartNoProcessJoined {
 		executeCtx = withPreparedCompletionReporter(ctx, func(proof PreparedCompletionProof, done <-chan struct{}) {
 			p.completion.attach(proof, done)
 		})
-		done := p.completion.begin(CompletionOwnedProcessGroupJoined)
+		done := p.completion.begin(p.completionProof)
 		if done == nil {
 			return nil, ErrPreparedInvocationUnavailable
 		}
@@ -1136,11 +1142,11 @@ func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sin
 	if p.streamingSink == nil {
 		completionProof = ""
 	}
-	if completionProof == CompletionOwnedProcessGroupJoined {
+	if completionProof == CompletionOwnedProcessGroupJoined || completionProof == completionScopedSearchJoined || completionProof == completionLocalProcessOrPrestartNoProcessJoined {
 		executeCtx = withPreparedCompletionReporter(ctx, func(proof PreparedCompletionProof, done <-chan struct{}) {
 			p.completion.attach(proof, done)
 		})
-		done := p.completion.begin(CompletionOwnedProcessGroupJoined)
+		done := p.completion.begin(completionProof)
 		if done == nil {
 			return nil, ErrPreparedInvocationUnavailable
 		}

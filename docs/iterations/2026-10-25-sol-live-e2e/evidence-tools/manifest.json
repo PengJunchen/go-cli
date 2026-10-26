@@ -1,0 +1,51 @@
+{
+  "purpose": "Exact-byte one-run evidence verification source appendix; no production entry point",
+  "files": [
+    {
+      "file": "collect-phase.py.txt",
+      "sourceRelativeToTaskRoot": "artifacts/collect-phase.py",
+      "bytes": 9486,
+      "sha256": "58779ded9ee64bfd4c89ace70320bd88240a8c0f8a3dd257b134d2a3b09c3596"
+    },
+    {
+      "file": "evidence_session_selection.py.txt",
+      "sourceRelativeToTaskRoot": "artifacts/evidence_session_selection.py",
+      "bytes": 1773,
+      "sha256": "a492deac544a5e522525a09f621c2fa46628ef52b4b01f1872f54c0a1f212b3f"
+    },
+    {
+      "file": "capture-phase-baseline.py.txt",
+      "sourceRelativeToTaskRoot": "artifacts/capture-phase-baseline.py",
+      "bytes": 2122,
+      "sha256": "47d934a40b00cbaf579ca92ed64d5c605f8e8249661497f971769f8251d908b7"
+    }
+  ],
+  "privacyChecks": {
+    "currentControlNonceAbsent": true,
+    "selectedPrivateMCPLiteralsAbsent": true,
+    "fixtureCanaryValuesAbsent": true,
+    "personalAbsolutePathsAbsent": true
+  },
+  "offlineTestsPassed": 9,
+  "oldDataZeroAppendSelfcheck": {
+    "newRequests": 0,
+    "newDurableRows": 0,
+    "newApprovalAuditRows": 0,
+    "newInputEvents": 0,
+    "excludedOldRequests": 25
+  },
+  "collectorVersions": [
+    {
+      "version": "v1",
+      "file": "collect-phase.py.txt",
+      "sha256": "58779ded9ee64bfd4c89ace70320bd88240a8c0f8a3dd257b134d2a3b09c3596",
+      "scope": "final-full-ask and three edge cuts; PTY field corrected by separate supplements"
+    },
+    {
+      "version": "v2",
+      "file": "collect-phase-v2.py.txt",
+      "sha256": "b21c2c0e049915ea4c4eba791a5ce641972dbd0b63f812f93656ad3ced67b7ba",
+      "scope": "subsequent cuts; baseline loop local variable no longer shadows PTY identity"
+    }
+  ]
+}

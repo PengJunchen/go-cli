@@ -64,7 +64,10 @@ func TestAssemblePreparedPlanAllowsScopedReadersAndRejectsUnscopedPaths(t *testi
 		if call.Name == "read" || call.Name == "ls" {
 			assert.Equal(t, tools.CompletionInlinePipelineJoined, proof, call.Name)
 		} else {
-			assert.Empty(t, proof, call.Name, "workspace-read effect must not imply helper completion")
+			assert.Contains(t, []tools.PreparedCompletionProof{
+				tools.CompletionInlinePipelineJoined,
+				tools.CompletionOwnedProcessGroupJoined,
+			}, proof, call.Name, "scoped search must publish a concrete completion mode")
 		}
 	}
 

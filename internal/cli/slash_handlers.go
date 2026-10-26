@@ -57,8 +57,8 @@ func (h *HelpHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 		"Serve requires --approve auto or --approve deny. Hard cost budgets are unsupported; usage and cost reports may be incomplete or estimated, and a displayed $0 is not proof of zero spend.",
 		"Plan Mode changes only through the user's /plan enter|exit commands; model calls cannot switch it.",
 		"Themes cover a renderer subset. Diffs are unified; ASCII mode is unsupported; NO_COLOR only disables color.",
-		"MCP server configuration hot reload is unsupported.",
-		"Interactive terminal evidence is limited to one native Darwin arm64 journey; Linux and Windows are unverified.",
+		"MCP: lazy mode supports /mcp list, /mcp load <server>, and idle /mcp reload <server>; /reload reindexes descriptors. Compatibility eager mode retains owned reloaders. Dynamic mode with eager MCP sources requires restart, as do active source-identity or project trust-grant changes.",
+		"Interactive rendering depends on terminal capabilities; Linux and Windows interactive runtime are unverified. Build success does not establish native UI validation.",
 		"Docker target is linux/amd64; runtime support is unverified.",
 	} {
 		fmt.Fprintf(deps.Out(), "  %s\n", boundary) //nolint:errcheck
@@ -374,9 +374,10 @@ const (
 // SessionHandler delegates to the SessionSlashHandler for session operations.
 // Without sub-arguments it defaults to showing the tree.
 type SessionHandler struct {
-	mode           sessionCommandMode
-	durableSession *durableCLISession
-	runSlotGuard   core.RunSlotGuard
+	mode               sessionCommandMode
+	durableSession     *durableCLISession
+	runSlotGuard       core.RunSlotGuard
+	recoveryNewSession func(context.Context) (string, error)
 }
 
 var _ SlashCommandHandler = (*SessionHandler)(nil)
@@ -388,6 +389,9 @@ func (h *SessionHandler) Description() string {
 	}
 	switch h.mode {
 	case sessionCommandModeDurable:
+		if h.recoveryNewSession != nil {
+			return "Durable session commands: /session tree, /session branches, /session pending, and /session reconcile; after a quiescent unknown cancellation, /session new starts a fresh session. Resume at startup with --resume-session <physical-id>."
+		}
 		return "Durable session commands: /session tree, /session branches, /session pending, and /session reconcile; resume at startup with --resume-session <physical-id>."
 	case sessionCommandModeLegacy:
 		return "Legacy session operations (subcommands: tree, fork, resume, branches, clone, switch; requires a mutable session tree)."
@@ -402,12 +406,16 @@ func (h *SessionHandler) Subcommands() []Subcommand {
 		return nil
 	}
 	if h.mode == sessionCommandModeDurable {
-		return []Subcommand{
+		commands := []Subcommand{
 			{Name: "tree", Description: "Show the durable session tree"},
 			{Name: "branches", Description: "List durable session branches"},
 			{Name: "pending", Description: "List unresolved durable actions"},
 			{Name: "reconcile", Description: "Explicitly accept one unknown action outcome"},
 		}
+		if h.recoveryNewSession != nil {
+			commands = append(commands, Subcommand{Name: "new", Description: "Start a fresh durable session after an unknown cancellation"})
+		}
+		return commands
 	}
 	return []Subcommand{
 		{Name: "tree", Description: "Show session tree (default)"},
@@ -422,6 +430,22 @@ func (h *SessionHandler) Subcommands() []Subcommand {
 func (h *SessionHandler) Handle(ctx context.Context, args []string, deps Dependencies) (string, error) {
 	if h != nil && h.mode == sessionCommandModeDurable && len(args) > 0 {
 		switch args[0] {
+		case "new":
+			if len(args) != 1 {
+				fmt.Fprintln(deps.Out(), "Usage: /session new") //nolint:errcheck
+				return "", nil
+			}
+			if h.recoveryNewSession == nil {
+				fmt.Fprintln(deps.Out(), "Error: /session new is available only after a quiescent unknown cancellation.") //nolint:errcheck
+				return "", nil
+			}
+			physicalID, err := h.recoveryNewSession(ctx)
+			if err != nil {
+				fmt.Fprintf(deps.Out(), "Error: %v\n", err) //nolint:errcheck
+				return "", nil
+			}
+			fmt.Fprintf(deps.Out(), "Started fresh durable session %s. The prior run and any unresolved actions remain unchanged.\n", physicalID) //nolint:errcheck
+			return "", nil
 		case "pending":
 			if len(args) != 1 {
 				fmt.Fprintln(deps.Out(), "Usage: /session pending") //nolint:errcheck

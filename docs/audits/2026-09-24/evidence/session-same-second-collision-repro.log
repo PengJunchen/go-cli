@@ -1,7 +1,0 @@
-same_path=true first="/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-session-collision-repro-2960319202/sessions/20260924-143945-interactive.jsonl" second="/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-session-collision-repro-2960319202/sessions/20260924-143945-interactive.jsonl" reopened_entries=2
-2026/09/24 22:39:45 INFO session_open op=session.open path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-session-collision-repro-2960319202 entry_count=0 trace_id="" span_id=""
-2026/09/24 22:39:45 INFO session_save op=session.save entry_type=user entry_id=entry-a trace_id="" span_id=""
-2026/09/24 22:39:45 INFO session_flush op=session.flush path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-session-collision-repro-2960319202/sessions/20260924-143945-interactive.jsonl trace_id="" span_id=""
-2026/09/24 22:39:45 INFO session_save op=session.save entry_type=user entry_id=entry-b trace_id="" span_id=""
-2026/09/24 22:39:45 INFO session_flush op=session.flush path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-session-collision-repro-2960319202/sessions/20260924-143945-interactive.jsonl trace_id="" span_id=""
-2026/09/24 22:39:45 INFO session_open op=session.open path=/var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-session-collision-repro-2960319202/sessions/20260924-143945-interactive.jsonl entry_count=2 trace_id="" span_id=""

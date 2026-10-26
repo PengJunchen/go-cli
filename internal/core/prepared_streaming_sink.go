@@ -28,7 +28,7 @@ func attestedEventStreamSinkForContext(ctx context.Context, es EventStream) tool
 		return nil
 	}
 
-	attested, err := tools.AttestSynchronousStreamSink(&eventStreamSink{es: stream, coordinates: agentEventCoordinatesFromContext(ctx)})
+	attested, err := tools.AttestSynchronousStreamSink(&eventStreamSink{ctx: ctx, es: stream, coordinates: agentEventCoordinatesFromContext(ctx)})
 	if err != nil {
 		return nil
 	}

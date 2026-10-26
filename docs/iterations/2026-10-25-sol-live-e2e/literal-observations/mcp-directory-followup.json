@@ -1,0 +1,21 @@
+{
+  "phase": "mcp-directory-followup",
+  "sourceCutManifestSha256": "51a0c02ad75edfcdfbc738252d940bdeb9025a1c098ba4f1adb25d209e97210c",
+  "sourceBridgeMetadataSha256": "1f3d538629bc33cdfd2701f5394c4779ea9b6d4a5c2475a73f7312ccb783e2ef",
+  "sourceKind": "Exact projection of previously recorded bridge flags, not a new scan",
+  "selectedLabels": [
+    "mcp-private-command",
+    "mcp-private-env"
+  ],
+  "records": [
+    {
+      "sequence": 24,
+      "requestSha256": "0c043ed554e4f27f06b8f794ea8f91b16530d143c93e9dd62cbe8e652ee7783e",
+      "responseSha256": "c5b41b99e154a4ed723d4a9c5a7a7a586a8eab5c548e7ac69d22c5dc8f6612dd",
+      "responseId": "chatcmpl-resp_0fd6aea139336149016addb7ab784481998720f1a42c214e0c",
+      "fixtureFactsChecked": true,
+      "fixtureFactsPresent": []
+    }
+  ],
+  "scope": "Selected decoded-JSON visible literal flags only; original upstream JSON was not retained and is not independently rescanned; no encoded/general information-flow claim"
+}

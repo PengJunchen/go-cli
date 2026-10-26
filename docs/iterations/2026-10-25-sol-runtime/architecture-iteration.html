@@ -1,0 +1,188 @@
+<div id="goCliSolRuntimeArchitecture20261025">
+  <h1>Sol runtime · 2026-10-25</h1>
+  <p class="text-small">基线：379134d。切换查看本轮边界、调用路径和已有能力。</p>
+
+  <div class="viz-controls" role="group" aria-label="架构版本">
+    <button class="btn" type="button" data-view="before" aria-pressed="true">基线 · 379134d</button>
+    <button class="btn" type="button" data-view="after" aria-pressed="false">本轮 · 2026-10-25</button>
+  </div>
+
+  <section data-view-panel="before" aria-label="基线架构">
+    <h2>基线 · 379134d</h2>
+    <p>动态 Skill、Hook、MCP registry 和 edge profile 已存在；本轮从此状态继续。</p>
+    <h3>Ask 与 durable MCP 路径</h3>
+    <div class="viz-row" role="group" aria-label="基线审批路径">
+      <button class="btn" type="button" data-node="ask">TUI / stdio Ask</button>
+      <span aria-hidden="true">→</span>
+      <button class="btn" type="button" data-node="ask">默认策略来源不同</button>
+      <span aria-hidden="true">→</span>
+      <button class="btn" type="button" data-node="ask">呈现与策略耦合</button>
+    </div>
+    <div class="viz-row" role="group" aria-label="基线 MCP 路径">
+      <button class="btn" type="button" data-node="remote">mcp_discover / 远端工具</button>
+      <span aria-hidden="true">→</span>
+      <button class="btn" type="button" data-node="preflight">先 dispatch</button>
+      <span aria-hidden="true">→</span>
+      <button class="btn" type="button" data-node="preflight">之后才发现缺少 durable completion proof</button>
+    </div>
+    <p>本地 <code>mcp_list</code> 尚未提供；Skill/Hook 候选事务 reload 与 edge 档位是已有能力。</p>
+  </section>
+
+  <section data-view-panel="after" aria-label="本轮架构" hidden>
+    <h2>本轮 · 2026-10-25</h2>
+    <h3>共享 Ask 策略</h3>
+    <div class="viz-row" role="group" aria-label="本轮审批路径">
+      <button class="btn" type="button" data-node="ask">CLI Assembly</button>
+      <span aria-hidden="true">→</span>
+      <button class="btn" type="button" data-node="ask">共享 AuditResolver(DefaultPermissionModeResolver)</button>
+      <span aria-hidden="true">→</span>
+      <button class="btn" type="button" data-node="ask">Ask 决策</button>
+      <span aria-hidden="true">→</span>
+      <button class="btn" type="button" data-node="ask">TUI 或 stdio 回调</button>
+    </div>
+    <h3>本地目录与 durable preflight</h3>
+    <div class="viz-row" role="group" aria-label="本地 MCP 元数据路径">
+      <button class="btn" type="button" data-node="mcp-list">mcp_list(query)</button>
+      <span aria-hidden="true">→</span>
+      <button class="btn" type="button" data-node="mcp-list">本地配置投影：name / state</button>
+      <span aria-hidden="true">→</span>
+      <span>无连接、无远端请求</span>
+    </div>
+    <div class="viz-row" role="group" aria-label="durable MCP 调用路径">
+      <button class="btn" type="button" data-node="remote">mcp_discover / 远端工具</button>
+      <span aria-hidden="true">→</span>
+      <button class="btn" type="button" data-node="preflight">sealed completion preflight</button>
+      <span aria-hidden="true">→</span>
+      <button class="btn" type="button" data-node="preflight">unsupported：not_dispatched / error</button>
+    </div>
+    <p>durable 远端 MCP activation 与 completion 仍 unsupported；preflight 不授予完成证明。</p>
+    <h3>沿用的基线能力</h3>
+    <div class="viz-row" role="group" aria-label="保留的已有能力">
+      <button class="btn" type="button" data-node="retained">Skill / Hook 候选事务 reload</button>
+      <button class="btn" type="button" data-node="retained">edge profile</button>
+      <span>保持已有能力，本轮未新增</span>
+    </div>
+  </section>
+
+  <hr>
+  <h2>生命周期</h2>
+  <div class="viz-controls" role="group" aria-label="生命周期步骤">
+    <button class="btn" type="button" data-step-change="-1" aria-label="上一步">上一步</button>
+    <span class="tabular-nums" data-step-count aria-live="polite">1 / 4</span>
+    <button class="btn" type="button" data-step-change="1" aria-label="下一步">下一步</button>
+  </div>
+  <h3 data-step-title>提出工具请求</h3>
+  <p data-step-detail aria-live="polite"></p>
+
+  <h2>选择节点查看说明</h2>
+  <div class="viz-row" role="group" aria-label="架构节点">
+    <button class="btn" type="button" data-node="ask" aria-pressed="true">Ask resolver</button>
+    <button class="btn" type="button" data-node="mcp-list" aria-pressed="false">mcp_list</button>
+    <button class="btn" type="button" data-node="preflight" aria-pressed="false">Preflight</button>
+    <button class="btn" type="button" data-node="remote" aria-pressed="false">Durable remote MCP</button>
+    <button class="btn" type="button" data-node="retained" aria-pressed="false">Skill / Hook / edge</button>
+  </div>
+  <p data-node-detail aria-live="polite"></p>
+
+  <p class="text-small">release <code>--help</code> 中位数：Full 30.393 ms；headless/no-plugin 16.925 ms。二进制大小（Full / headless-no-plugin）：25,078,434 / 14,247,506 bytes。各运行 10 次；仅为 help 观察，不代表交互或模型延迟，也不作 Pi/Rust 性能排名。</p>
+
+  <script>
+    (() => {
+      const root = document.getElementById("goCliSolRuntimeArchitecture20261025");
+      if (!root) return;
+
+      const stepDetails = {
+        before: [
+          ["提出工具请求", "模型可提出 mcp_discover(server) 或远端 MCP 工具调用。"],
+          ["进入 dispatch", "基线没有 durable completion preflight；activation 可能已建立连接、注册工具并启动 watcher，远端调用也可能已发出。"],
+          ["完成证明缺失", "durable consumer 在 dispatch 后才发现没有可接受的 completion proof；远端副作用可能已发生，结果不能记为已完成。"],
+          ["保留未知边界", "执行结果仍需 fail-closed；本轮不把此前行为改写为 durable 远端支持。"]
+        ],
+        after: [
+          ["读取本地目录", "mcp_list 只投影本地配置中的 name 与 state，不连接 MCP peer，也不发送远端请求。"],
+          ["检查 sealed invocation", "mcp_discover 或远端调用进入 durable dispatch 前，preflight 检查精确封存的 prepared invocation、当前权限与 completion mode。"],
+          ["在副作用前拒绝", "unsupported durable activation/远端调用不预留 action intent、不进入 executor，写入已知 not_dispatched/error；不会新建连接、调用或 watcher。"],
+          ["继续当前会话", "模型可读取已知错误并继续，第二次提交仍可使用同一 physical session；durable 远端 completion 仍不支持。"]
+        ]
+      };
+
+      const nodeDetails = {
+        ask: {
+          before: "基线的默认 Ask 策略会随 TUI/stdio 呈现路径分歧；本轮统一使用同一 resolver 与 audited classifier，回调只负责呈现和收集决定。",
+          after: "本轮 Assembly 的 TUI 与 stdio Ask 共用 AuditResolver(DefaultPermissionModeResolver)；显式 yes 才允许对应调用执行。"
+        },
+        "mcp-list": {
+          before: "基线没有 mcp_list 这个纯本地目录工具。",
+          after: "mcp_list(query) 只返回本地配置的 name/state；它不激活服务器、不连 peer、不暴露诊断值。"
+        },
+        preflight: {
+          before: "基线在 dispatch 之后才发现 durable completion proof 不足，可能已经发生 activation 或远端副作用。",
+          after: "通用 sealed preflight 在 action intent 与 executor 之前检查 exact invocation 和当前 authority。支持只表示有已审查的完成路径，不等于已完成。"
+        },
+        remote: {
+          before: "已有 mcp_discover 与 MCP generation/registry；但 durable activation 与远端 completion 没有可接受的终态证明。",
+          after: "durable activation 和远端 MCP 调用在本轮仍 unsupported，并在 dispatch 前产生 known not_dispatched/error。没有声称远端 completion 已实现。"
+        },
+        retained: {
+          before: "Skill/Hook 候选事务 reload 与 opt-in edge profile 已属于 379134d 基线。",
+          after: "Skill/Hook 候选事务 reload 与 edge profile 保留原能力；它们不是本轮新增验收结论。"
+        }
+      };
+
+      let mode = "before";
+      let step = 0;
+      let selectedNode = "ask";
+
+      const viewButtons = Array.from(root.querySelectorAll("[data-view]"));
+      const viewPanels = Array.from(root.querySelectorAll("[data-view-panel]"));
+      const stepTitle = root.querySelector("[data-step-title]");
+      const stepDetail = root.querySelector("[data-step-detail]");
+      const stepCount = root.querySelector("[data-step-count]");
+      const nodeDetail = root.querySelector("[data-node-detail]");
+
+      function render() {
+        viewButtons.forEach((button) => {
+          button.setAttribute("aria-pressed", String(button.dataset.view === mode));
+        });
+        viewPanels.forEach((panel) => {
+          panel.hidden = panel.dataset.viewPanel !== mode;
+        });
+        const steps = stepDetails[mode];
+        stepTitle.textContent = steps[step][0];
+        stepDetail.textContent = steps[step][1];
+        stepCount.textContent = (step + 1) + " / " + steps.length;
+        root.querySelectorAll("[data-step-change]").forEach((button) => {
+          const delta = Number(button.dataset.stepChange);
+          button.disabled = (delta < 0 && step === 0) || (delta > 0 && step === steps.length - 1);
+        });
+        root.querySelectorAll("[data-node]").forEach((button) => {
+          button.setAttribute("aria-pressed", String(button.dataset.node === selectedNode && !button.closest("[hidden]")));
+        });
+        nodeDetail.textContent = nodeDetails[selectedNode][mode];
+      }
+
+      root.addEventListener("click", (event) => {
+        const view = event.target.closest("[data-view]");
+        if (view) {
+          mode = view.dataset.view;
+          step = 0;
+          render();
+          return;
+        }
+        const stepButton = event.target.closest("[data-step-change]");
+        if (stepButton) {
+          step = Math.max(0, Math.min(stepDetails[mode].length - 1, step + Number(stepButton.dataset.stepChange)));
+          render();
+          return;
+        }
+        const node = event.target.closest("[data-node]");
+        if (node) {
+          selectedNode = node.dataset.node;
+          render();
+        }
+      });
+
+      render();
+    })();
+  </script>
+</div>

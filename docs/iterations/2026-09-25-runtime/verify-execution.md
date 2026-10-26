@@ -1,5 +1,8 @@
 # R0 verification execution record
 
+> Retention note (2026-10-24): raw verification logs and machine output files referenced below were removed after the summarized results and failure analysis were retained in the runtime execution ledger.
+
+
 All commands below ran in `/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/verify` on branch `codex/runtime-r0-verify`. These are worktree results, not main-branch release evidence. No full `make fmt`, `make check`, or `make verify` was run before integration.
 
 | Purpose | Command | Exit | Result |

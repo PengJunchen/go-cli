@@ -1,0 +1,10 @@
+{
+  "productionCommit": "bdb76efb0b31152e4c554268b43d39ef6285115a",
+  "remote": "https://github.com/PengJunchen/go-cli.git",
+  "branch": "develop",
+  "push": "non-force fast-forward via existing gh credential helper",
+  "verifiedRemoteHead": "bdb76efb0b31152e4c554268b43d39ef6285115a",
+  "remoteIncomingPreserved": "595d0599ffb506e36141d6e5cee21b669cb69d75",
+  "previousPush": "push-e049-historical.json",
+  "qaEvidenceCommit": "subsequent evidence-only commit; final remote/local equality rechecked by root after push"
+}
