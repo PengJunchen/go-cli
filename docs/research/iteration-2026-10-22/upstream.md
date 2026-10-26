@@ -89,7 +89,7 @@ PI [skills文档](https://github.com/earendil-works/pi/blob/bd3c9b823762b7383954
 | lazy能力 | 0/10/100 server descriptors，0/100/1000工具与0/100/1000 Skills；启动必须检查真实子进程数和连接数。搜索一次、激活、调用一次；分别记录startup/first-use延迟、schema字节/模型token（有同一tokenizer才报token）、RSS和刷新成本。 |
 | hot reload | 有在途调用的单server/tool/skill变化；候选失败、list_changed风暴、分页cursor-cycle、删除/revoke；测p95、旧代存活时间和bounded close，正确性失败时不报为“性能提升”。 |
 | interaction | replay相同流式文本/大tool输出/中文emoji/resize/cancel/审批；记录首可见内容、input响应和render工作。人工评价同一任务盲序，维度预先确定。 |
-| 真实任务质量 | 独立sandbox、固定真实repo提交+隐藏deterministic grade，同provider/model与工具语义、同预算，多次配对运行AB/BA交替；报pass rate、成本、tokens、tool errors、wall和失败原因，不能用help启动替代。 |
+| 真实任务质量 | 独立sandbox、固定真实repo提交+隐藏deterministic grade，同provider/model与工具语义、同预算，多次配对运行；固定arm列表，按轮次在正序与逆序间交替（多arm时反转整表）；报pass rate、成本、tokens、tool errors、wall和失败原因，不能用help启动替代。 |
 
 框架重复微基准建议5 warmup+至少30 measured process runs；使用交替/随机AB顺序，报median/p95及样本数，样本足够才报p99。RSS统一OS单位并记录peak是parent还是整个进程树；macOS ru_maxrss与Linux单位不同。真实任务重复≥5并报告置信区间/失败率；该数只能提供初步稳定性，不能证明普遍优越。无API预算/相同模型可用性时真实任务明确未执行。
 

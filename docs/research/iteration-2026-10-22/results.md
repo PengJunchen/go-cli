@@ -11,7 +11,7 @@
 - 三个Go性能arm均是 **default compat profile**，extensions/git/tracing关闭。headless在此只表示build tags，**不是edge profile性能实测**。原始入口edge功能另列。
 - 官方发行PI `@earendil-works/pi-coding-agent@1.3.0` + Node22.22.2，print/no-session/no-extensions/no-skills/no-mcp/offline；OpenCode `@opencode/cli-darwin-arm64@2.0.32`，每次新状态目录与私有 `run --standalone --auto` 服务。它不代表复用已常驻OpenCode服务的单轮延迟。npm包来源不冒充已核验与研究Git SHA逐字节相同。
 - 相同loopback scripted OpenAI-compatible provider、相同任务输入。ready为完整prompt装配后一次模型请求；tools为read→edit→read→final四请求，验证41/42工具结果、最终文件42和成功输出。模型决策预设，未测真实模型任务质量、token成本或真实网络首token。
-- 每arm每场景5 warmup+30 measured，AB/BA顺序交替，共 **350/350调用成功**；warmup/measurement任一失败会阻止对应cohort headline。新隔离functional pilot10/10通过；旧pilot是校准，未混入统计。首轮泛化prompt使Go既有Top30筛掉read；锁定实际完整任务后重试阶段由receipt推进。随后补齐OpenCode官方资源根隔离并重新pilot。
+- 每arm每场景5 warmup+30 measured；每个cohort内index从0计，偶数轮按命令行arm列表正序、奇数轮逆序（本次5个arm，逆序时反转整表），共 **350/350调用成功**；warmup/measurement任一失败会阻止对应cohort headline。新隔离functional pilot10/10通过；旧pilot是校准，未混入统计。首轮泛化prompt使Go既有Top30筛掉read；锁定实际完整任务后重试阶段由receipt推进。随后补齐OpenCode官方资源根隔离并重新pilot。
 - HOME未改；仅metadata检查Go个人config、canonical Skills/MCP/hooks/auth/models/commands不存在；既有memory文件0字节、未改。PI独立资源目录；OpenCode XDG/config与官方 OPENCODE_TEST_HOME隔离兼容Skills，同时确认系统/MDM配置不存在。完整prompt、flags与隔离参数在JSON。
 - wall从Popen到主进程wait4；post-exit verification/cleanup另计，grace=0。350次全部无残留进程组/已观察PID，无RSS采样错误。检查只清理本次自身PGID。
 

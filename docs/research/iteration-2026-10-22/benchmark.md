@@ -18,7 +18,7 @@ rg 'charmbracelet/(bubbletea|glamour|lipgloss)|alecthomas/chroma|^plugin$' /tmp/
 
 Cross compile只能证明编译，边缘板实测必须记录具体CPU/RAM、Linux版本和实际运行结果。
 
-`scripts/runtime-benchmark.py` 运行已有真实CLI产物，创建本机loopback OpenAI-compatible scripted provider；ready场景执行完整prompt装配及一次真实模型请求，tools场景执行read→edit→read→final并验证文件产物。它不是LLM质量评价，也不测真实网络首token。三个Go性能arm均为默认compat profile，extensions/git/tracing关闭；headless在此仅是build tags，不是edge profile性能实测。edge另有原始入口功能/预算integration证据，不作为第六性能arm，也不外推dynamic或Skill/MCP满载成本。每次新workspace，AB/BA交替，输出protocol.json、每次stdout/stderr、observations.jsonl与summary.json。失败/缺失/超时计入记录，warmup或measurement任一失败不发布该cohort headline时延/RSS。临时raw文件产生于task temp，最终清理见verification；持久化结果仅保存参数、provenance及数值，不保存workspace、模型response正文或二进制。默认5 warmup+30 measured；OS缓存未清空，不能称冷OS缓存。
+`scripts/runtime-benchmark.py` 运行已有真实CLI产物，创建本机loopback OpenAI-compatible scripted provider；ready场景执行完整prompt装配及一次真实模型请求，tools场景执行read→edit→read→final并验证文件产物。它不是LLM质量评价，也不测真实网络首token。三个Go性能arm均为默认compat profile，extensions/git/tracing关闭；headless在此仅是build tags，不是edge profile性能实测。edge另有原始入口功能/预算integration证据，不作为第六性能arm，也不外推dynamic或Skill/MCP满载成本。每次新workspace；每轮按固定命令行arm列表的正序/逆序交替启动（偶数index正序、奇数index逆序，多arm时反转整表），输出protocol.json、每次stdout/stderr、observations.jsonl与summary.json。失败/缺失/超时计入记录，warmup或measurement任一失败不发布该cohort headline时延/RSS。临时raw文件产生于task temp，最终清理见verification；持久化结果仅保存参数、provenance及数值，不保存workspace、模型response正文或二进制。默认5 warmup+30 measured；OS缓存未清空，不能称冷OS缓存。
 
 ```bash
 python3 scripts/runtime-benchmark.py \
