@@ -1,0 +1,77 @@
+package mcp
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
+)
+
+type reviewPanicDisconnectClient struct{ *recordingMCPClient }
+
+func (c *reviewPanicDisconnectClient) Disconnect(context.Context) error {
+	panic("credential-worker-panic-payload")
+}
+
+func TestReviewReconnectWorkerPanicIsSanitizedAndJoined(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	require.NoError(t, os.WriteFile(path, []byte("{}"), 0o600))
+	client := &reviewPanicDisconnectClient{recordingMCPClient: newRecordingMCPClient("review", nil)}
+	tracer := tracing.NewTracer("hot-reload-worker-panic", &recordingExporter{})
+	rootSpan, ctx := tracer.Start(context.Background(), "test.root", tracing.SpanKindInternal)
+	defer rootSpan.End()
+	reloader := NewDefaultHotReloader(client, func([]MCPTool) {}, WithPollInterval(time.Hour))
+	lifecycle := reloader.(HotReloadLifecycle)
+	require.NoError(t, reloader.Watch(ctx, path))
+	require.NoError(t, reloader.Reload(context.Background()))
+	waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := lifecycle.Wait(waitCtx)
+	var panicErr *HotReloadWorkerPanicError
+	require.ErrorAs(t, err, &panicErr)
+	require.ErrorIs(t, err, ErrHotReloadWorkerPanic)
+	require.NotContains(t, err.Error(), "credential-worker-panic-payload")
+	select {
+	case <-lifecycle.Done():
+	default:
+		t.Fatal("Done must close after the panicking reconnect worker unwinds")
+	}
+	require.ErrorIs(t, reloader.Stop(), ErrHotReloadWorkerPanic)
+}
+
+func TestReviewInvalidPollIntervalPanicsOutsideOwner(t *testing.T) {
+	const helperEnv = "GO_CLI_REVIEW_HOT_RELOAD_INVALID_POLL"
+	if os.Getenv(helperEnv) == "1" {
+		path := filepath.Join(t.TempDir(), "mcp.json")
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		reloader := NewDefaultHotReloader(newRecordingMCPClient("review", nil), func([]MCPTool) {}, WithPollInterval(0))
+		if err := reloader.Watch(context.Background(), path); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(250 * time.Millisecond)
+		_ = reloader.Stop()
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestReviewInvalidPollIntervalPanicsOutsideOwner$")
+	cmd.Env = append(os.Environ(), helperEnv+"=1")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("zero poll interval unexpectedly completed without a panic: %s", output)
+	}
+	if !strings.Contains(string(output), "non-positive interval for NewTicker") {
+		t.Fatalf("expected uncontained ticker panic, got err=%v output=%s", err, output)
+	}
+	t.Logf("zero-poll interval subprocess exited %v with expected process panic: %s", err, output)
+}

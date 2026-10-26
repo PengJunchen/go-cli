@@ -1,0 +1,160 @@
+package acp
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/pengjunchen/go-cli/internal/core"
+)
+
+type reviewAliasAgent struct {
+	events chan core.AgentEvent
+	done   chan struct{}
+	stopOnce sync.Once
+}
+
+func (a *reviewAliasAgent) stop() {
+	a.stopOnce.Do(func() {
+		close(a.events)
+		close(a.done)
+	})
+}
+
+func (a *reviewAliasAgent) Name() string { return "review-alias-agent" }
+func (a *reviewAliasAgent) Run(context.Context, string) (<-chan core.AgentEvent, error) {
+	return a.events, nil
+}
+func (a *reviewAliasAgent) Send(context.Context, string) error { return nil }
+func (a *reviewAliasAgent) Interrupt(context.Context) error   { return nil }
+func (a *reviewAliasAgent) Wait(context.Context) (core.AgentMessage, error) {
+	<-a.done
+	return core.AgentMessage{Role: "assistant", Content: "finished"}, nil
+}
+
+type reviewAliasFactory struct{ created chan *reviewAliasAgent }
+
+func (f *reviewAliasFactory) Create(context.Context, string, core.SubAgentConfig) (core.SubAgent, error) {
+	a := &reviewAliasAgent{events: make(chan core.AgentEvent, 2), done: make(chan struct{})}
+	f.created <- a
+	return a, nil
+}
+
+func TestReviewHTTPSameAliasRoutesEventsToWrongSession(t *testing.T) {
+	factory := &reviewAliasFactory{created: make(chan *reviewAliasAgent, 2)}
+	dispatcher := core.NewDefaultSubagentDispatcher(factory)
+	handler := NewCoreHandler(dispatcher, nil)
+	srv, baseURL := startTestHTTPServer(t, handler)
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	connect := func() string {
+		t.Helper()
+		req := profileHTTPRequest(t, http.MethodPost, baseURL+"/connect", "", testHTTPACPEnvelope{
+			Version:  testHTTPACPProfile,
+			Type:     TypeConnect,
+			SenderID: "same-display-alias",
+		}, true)
+		return decodeConnectedSessionID(t, doProfileRequest(t, client, req))
+	}
+	firstID, secondID := connect(), connect()
+	getSession := func(id string) *Session {
+		t.Helper()
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return srv.sessions[id].session
+	}
+	firstSession, secondSession := getSession(firstID), getSession(secondID)
+
+	send := func(id, content string) {
+		t.Helper()
+		req := profileHTTPRequest(t, http.MethodPost, baseURL+"/send", "", testHTTPACPEnvelope{
+			SessionID: id,
+			Type:      TypeMessage,
+			SenderID:  "same-display-alias",
+			Content:   content,
+		}, true)
+		res := doProfileRequest(t, client, req)
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("send status = %d", res.StatusCode)
+		}
+	}
+	send(firstID, "first task")
+	firstAgent := <-factory.created // first CoreHandler dispatch reached the factory
+	send(secondID, "second task")
+	secondAgent := <-factory.created // second session mapping is now installed
+	t.Cleanup(func() {
+		for _, agent := range []*reviewAliasAgent{firstAgent, secondAgent} {
+			agent.stop()
+		}
+	})
+
+	firstAgent.events <- core.AgentEvent{Kind: "message", Content: "event-from-first-task", Timestamp: time.Now()}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		entries, _ := secondSession.EventHistorySince(0)
+		if len(entries) > 0 {
+			if entries[0].Event.Content != "event-from-first-task" {
+				t.Fatalf("unexpected event: %#v", entries[0].Event)
+			}
+			firstEntries, _ := firstSession.EventHistorySince(0)
+			if len(firstEntries) != 0 {
+				t.Fatalf("first session unexpectedly received event: %#v", firstEntries)
+			}
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	secondEntries, _ := secondSession.EventHistorySince(0)
+	if len(secondEntries) == 0 {
+		t.Fatal("first task event was not observed in the second session")
+	}
+
+	// Completion of the first request deletes the shared alias key even while
+	// the second request is still active; subsequent second-task events vanish.
+	firstAgent.stop()
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := handler.sessions.Load("acp-same-display-alias"); !ok {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, ok := handler.sessions.Load("acp-same-display-alias"); ok {
+		t.Fatal("first dispatch did not remove the shared session-map key")
+	}
+	secondAgent.events <- core.AgentEvent{Kind: "message", Content: "event-from-second-task", Timestamp: time.Now()}
+	time.Sleep(20 * time.Millisecond)
+	secondEntries, _ = secondSession.EventHistorySince(0)
+	if len(secondEntries) != 1 {
+		t.Fatalf("expected second task event to be lost after first cleanup; history = %#v", secondEntries)
+	}
+	secondAgent.stop()
+}
+
+func TestReviewHTTPDuplicateProfileHeaderAccepted(t *testing.T) {
+	_, baseURL := startTestHTTPServer(t, nil)
+	req := profileHTTPRequest(t, http.MethodPost, baseURL+"/connect", "", testHTTPACPEnvelope{
+		Version:  testHTTPACPProfile,
+		Type:     TypeConnect,
+		SenderID: "duplicate-header-probe",
+	}, true)
+	req.Header.Add(ACPHTTPProfileHeader, "unsupported-profile")
+	res := doProfileRequest(t, &http.Client{Timeout: 2 * time.Second}, req)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("duplicate profile values status = %d, want currently observed acceptance (first value wins)", res.StatusCode)
+	}
+	var response struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.SessionID == "" {
+		t.Fatal("accepted duplicate-header connect omitted session id")
+	}
+}

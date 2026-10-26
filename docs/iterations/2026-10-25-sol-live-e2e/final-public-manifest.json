@@ -50,8 +50,8 @@
     },
     {
       "file": "independent-review.md",
-      "bytes": 43685,
-      "sha256": "5f2b37251ccb5ee06c896e8310fe06970fd100271c8411c710bde1a447771b75"
+      "bytes": 44452,
+      "sha256": "cd82b8c939275c16b605c9cd6895f6d29974a2534db19ed035e53b959e69d7a5"
     },
     {
       "file": "literal-observations/dynamic-hook-deny-manifest.json",
@@ -570,5 +570,5 @@
     }
   ],
   "rootFinalizedAtUTC": "2026-10-25T08:47:49.273122+00:00",
-  "rootAdjustment": "Removed one trailing-whitespace line from the review and refreshed its file hash; scenario evidence and screenshots unchanged."
+  "rootAdjustment": "Removed one trailing-whitespace line from the review and refreshed its file hash; scenario evidence and screenshots unchanged. 2026-10-26 documentation closeout: clarified that the independent reviewer had not verified final task-directory absence at review close; the later removal and absence observation at 2026-10-25T08:45:14.291795+00:00 are attributed to root and documented in cleanup.md and cleanup-summary.json. Live evidence and validation counts are unchanged."
 }
