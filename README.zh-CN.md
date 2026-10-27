@@ -4,15 +4,17 @@
 
 > **实验性软件** — 本项目处于活跃的实验性开发阶段。由于时间和经费有限，尚未经过充分测试。风险自负，欢迎贡献和反馈。
 
-纯 Go 实现的 AI Agent CLI 框架。零外部运行时依赖，依赖倒置驱动，全链路 tracing。
+纯 Go 实现的 AI Agent CLI 框架。独立 Go 可执行文件无需另装虚拟机；配置使用的模型端点、MCP 服务和扩展 worker 仍是外部依赖。依赖倒置驱动，全链路 tracing。
 
-灵感来源于 [CloudWeGo Eino](https://github.com/cloudwego/eino/tree/main) 与 [Google ADK-Go](https://github.com/google/adk-go)，并在此基础上构建。开发过程中使用 [GLM 5.1](https://bigmodel.cn) 与 [DeepSeek-v4-flash](https://deepseek.com)（非 20260731 版本），借助 [Trae](https://www.trae.ai) 与 [Trae Work](https://www.trae.ai) 完成——六月底的更新大幅提升了稳定性和持续性，让长时间持续开发成为现实。
+受到 [CloudWeGo Eino](https://github.com/cloudwego/eino/tree/main) 与 [Google ADK-Go](https://github.com/google/adk-go) 的启发。开发过程中使用 [GLM 5.1](https://bigmodel.cn) 与 [DeepSeek-v4-flash](https://deepseek.com)（非 20260731 版本），借助 [Trae](https://www.trae.ai) 与 [Trae Work](https://www.trae.ai) 完成——六月底的更新大幅提升了稳定性和持续性，让长时间持续开发成为现实。
 
-> **关联项目**：[go-agent-core-v1](https://github.com/PengJunchen/go-agent-core) 是接口驱动的 Agent 核心 SDK（L0–L4 分层架构，依赖 Eino 做 LLM 适配，可供其他项目导入）。本仓库（**go-cli**）则是完整的 CLI 框架，包含 Harness→Agent→AgentLoop 三层架构、TUI、MCP/ACP/Skill/Extension 等——是可独立运行的 CLI 工具，而非可导入的 SDK。
+> **关联项目**：[go-agent-core-v1](https://github.com/PengJunchen/go-agent-core) 是接口驱动的 Agent 核心 SDK（L0–L4 分层架构，依赖 Eino 做 LLM 适配，可供其他项目导入）。本仓库（**go-cli**）则是完整的 CLI 框架，包含 Harness→Agent→AgentLoop 三层架构和 TUI，不是通用可导入的 Agent 核心 SDK。仓库另提供公开的[扩展 worker API](pkg/extensionapi/v1/README.md)；项目与 API 仍处于实验阶段。
 
 **[English](README.md)**
 
 **[迭代报告与架构图](docs/iterations/README.md)**
+
+**[运行时构建、profile 与扩展边界指南](docs/runtime-guide.md)**
 
 ---
 
@@ -92,6 +94,17 @@ make build           # 编译到 bin/go-cli
 ./bin/go-cli         # 运行
 ```
 
+同一个 CLI 入口支持四种构建组合：
+
+| 构建 | Go tags | UI | Native Go `.so` loader |
+|---|---|---|---|
+| 默认 | 无 | 完整 TUI | 可用 |
+| 不含 native plugin | `no_plugin` | 完整 TUI | 禁用 |
+| Headless | `headless` | 行式交互 | 可用 |
+| Headless 且不含 native plugin | `headless,no_plugin` | 行式交互 | 禁用 |
+
+`runtime.profile=edge` 是独立的运行时设置，不是 build tag：它启用渐进式 Skill 与 lazy MCP 加载，但不会从二进制中移除包。选定的设计参考包括 [Pi Coding Agent、OpenCode v2、DeepSeek Harness/Cordis、Magpie 和 HashiCorp go-plugin](docs/runtime-guide.md#what-informed-the-design)。它们是研究输入，不是必需依赖，也不代表本项目已实现所有上游功能。
+
 ### 开发常用命令
 
 ```bash
@@ -129,7 +142,7 @@ make check           # 提交前检查 (fmt+vet+lint+build+test)
 
 同名冲突：高优先级层胜出；同层内高 Priority 胜出。
 
-EinoProvider 基于 `net/http` 实现 OpenAI 兼容协议，零外部依赖。
+本仓库的 `EinoProvider` 是使用标准库 `net/http` 实现的 OpenAI 兼容适配器；它不导入 CloudWeGo Eino 模块。
 
 ### 内置工具
 
@@ -191,6 +204,8 @@ EinoProvider 基于 `net/http` 实现 OpenAI 兼容协议，零外部依赖。
 - **Middleware**: 请求/响应拦截，可包装 Agent 和 Model 调用
 - **Tool / Command / Provider**: 扩展注册
 
+外部 worker 使用实验性的公开 `pkg/extensionapi/v1` JSONL 合约。它是扩展 API，不是通用 Agent SDK 或操作系统沙箱；native `.so` 扩展仍是受信任的进程内代码。详见[运行时指南](docs/runtime-guide.md#know-which-extension-path-you-are-using)。
+
 ### 生产弹性
 
 | 组件 | 说明 |
@@ -220,7 +235,7 @@ EinoProvider 基于 `net/http` 实现 OpenAI 兼容协议，零外部依赖。
 
 ### MCP 工具集成
 
-将 MCP 服务端工具适配为 `ToolDefinition`，注册到工具注册表即可被 Agent Loop 调用。
+MCP 适配器和目录可以将远端工具 schema 提供给模型。默认 CLI 的 durable 路径目前会在 dispatch 前拒绝远端 `tools/call`；连接成功或 `tools/list` 返回 schema 都不代表远端工具已成功执行。详见[运行时指南](docs/runtime-guide.md#know-which-extension-path-you-are-using)与[MCP 合同复审](docs/iterations/2026-10-25-sol-runtime/mcp-contract-review.md)。
 
 工具名规范化：`mcp__{server}__{tool}`
 
@@ -251,6 +266,8 @@ optional body markdown
 - **YAMLSkillLoader**: 纯标准库解析，支持 `.md`/`.yaml`/`.yml`
 - **SkillAdapter**: 将 SkillDefinition 映射到 ToolDefinition
 - **渐进式披露匹配**: 从名称 → 触发提示 → 类别逐层匹配
+
+`edge` runtime profile 会启用渐进式 Skill 加载；可信项目来源仍会为信任检查而捕获。详见[运行时指南](docs/runtime-guide.md#build-tags-and-runtime-profile-are-separate-axes)。
 
 ### TUI
 
