@@ -1,5 +1,14 @@
 # 迭代报告与架构图
 
+## 2026-10-27：PR #5 合入与运行时构建指南
+
+PR [#5](https://github.com/PengJunchen/go-cli/pull/5) 于 `365f306bd26199b6f6276ca90b04ae04754e6a92` 合入 `main`。该 PR 的 13 项检查（12 个 CI jobs 与 1 个 PR Check）全部通过；合入后的 main CI 12 个 jobs 也通过：[PR CI run](https://github.com/PengJunchen/go-cli/actions/runs/40359106737)、[PR Check run](https://github.com/PengJunchen/go-cli/actions/runs/40359107344)、[main CI run](https://github.com/PengJunchen/go-cli/actions/runs/40361331207)。
+
+- [运行时构建、profile 与扩展边界指南](../runtime-guide.md)：解释 `headless` / `no_plugin` 与 `runtime.profile=edge` 的独立关系、Skill/MCP/worker/native plugin 的重叠和限制。
+- [PR #5 合入提交](https://github.com/PengJunchen/go-cli/commit/365f306bd26199b6f6276ca90b04ae04754e6a92)：动态能力与审批 preflight 的集成提交。
+- [10/25 runtime 验证记录](2026-10-25-sol-runtime/verification.md)与[真实 Sol 报告](2026-10-25-sol-live-e2e/report.md)：保留原验证 source freeze、Go gate 和分阶段 live 结果。它们不是本次文档编辑后的新运行。
+- [10/25 runtime 动态架构图](2026-10-25-sol-runtime/architecture-iteration.html)与[10/22 动态能力架构图](2026-10-22-dynamic-runtime/architecture-iteration.html)：前者展示本轮合入路径，后者记录先前动态能力迭代。
+
 ## 2026-10-25：Sol runtime 与 MCP 合同
 
 **状态：本轮 build、verify、E2E gates 和真实 Sol 矩阵已完成，临时构建与原始测试数据已清理。** 94 个真实请求分开记录旧候选、最终场景和失败校准；结果区分正向通过、安全负边界及原预期未满足项。durable 远端 MCP 执行仍不受支持，不能将连接或预检拒绝算作远端执行成功。2026-10-22 的历史记录不能替代本轮结果。

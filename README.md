@@ -4,15 +4,17 @@
 
 > **Experimental Software** — This project is under active, experimental development. Due to limited time and budget, it has not been thoroughly tested. Use at your own risk. Contributions and issue reports are welcome.
 
-A pure-Go AI Agent CLI framework. Zero external runtime dependencies, dependency-inversion driven, full-chain tracing.
+A pure-Go AI Agent CLI framework. Its standalone Go executable needs no separately installed VM; configured model endpoints, MCP servers, and extension workers remain external dependencies. Dependency-inversion driven, full-chain tracing.
 
 Inspired by and building upon [CloudWeGo Eino](https://github.com/cloudwego/eino/tree/main) and [Google ADK-Go](https://github.com/google/adk-go). Developed with [GLM 5.1](https://bigmodel.cn) and [DeepSeek-v4-flash](https://deepseek.com) (pre-20260731 release), using [Trae](https://www.trae.ai) and [Trae Work](https://www.trae.ai) — the late-June updates to Trae significantly improved stability and continuity, making sustained development sessions actually viable.
 
-> **Related project**: [go-agent-core-v1](https://github.com/PengJunchen/go-agent-core) is the interface-driven Agent core SDK (layered L0–L4, depends on Eino for LLM adaptation). This repo (**go-cli**) is the full CLI framework with Harness→Agent→AgentLoop architecture, TUI, MCP/ACP/Skill/Extension — a standalone runnable tool rather than an importable SDK.
+> **Related project**: [go-agent-core-v1](https://github.com/PengJunchen/go-agent-core) is the interface-driven Agent core SDK (layered L0–L4, depends on Eino for LLM adaptation). This repo (**go-cli**) is the full CLI framework with Harness→Agent→AgentLoop architecture and TUI, rather than a general importable Agent-core SDK. It does provide a separate public [extension worker API](pkg/extensionapi/v1/README.md); the project and API remain experimental.
 
 **[中文文档](README.zh-CN.md)**
 
 **[Iteration reports and architecture diagrams](docs/iterations/README.md)**
+
+**[Runtime build, profile, and extension guide](docs/runtime-guide.md)**
 
 ---
 
@@ -92,6 +94,17 @@ make build           # Build to bin/go-cli
 ./bin/go-cli         # Run
 ```
 
+The same CLI entry point supports four build variants:
+
+| Build | Go tags | UI | Native Go `.so` loader |
+|---|---|---|---|
+| Default | none | Full TUI | Available |
+| No native plugin | `no_plugin` | Full TUI | Disabled |
+| Headless | `headless` | Line-oriented | Available |
+| Headless, no native plugin | `headless,no_plugin` | Line-oriented | Disabled |
+
+`runtime.profile=edge` is a separate runtime setting, not a build tag: it enables progressive Skill and lazy MCP loading without removing packages from the binary. Selected design references include [Pi Coding Agent, OpenCode v2, DeepSeek Harness/Cordis, Magpie, and HashiCorp go-plugin](docs/runtime-guide.md#what-informed-the-design). They are research inputs, not required dependencies or evidence that every upstream feature is implemented here.
+
 ### Development Commands
 
 ```bash
@@ -129,7 +142,7 @@ Three-tier priority: **Extension > Config > Builtin**
 
 Name conflicts: higher-priority tier wins; within the same tier, higher `Priority` wins.
 
-EinoProvider implements OpenAI-compatible protocol via `net/http`, zero external dependencies.
+The local `EinoProvider` name identifies an OpenAI-compatible adapter implemented with the standard-library `net/http`; it does not import the CloudWeGo Eino module.
 
 ### Built-in Tools
 
@@ -191,6 +204,8 @@ Registration building blocks:
 - **Middleware**: Request/response interception, can wrap Agent and Model calls
 - **Tool / Command / Provider**: Extension registration
 
+External workers use the experimental public `pkg/extensionapi/v1` JSONL contract. It is an extension API, not a general Agent SDK or an OS sandbox; native `.so` extensions remain trusted in-process code. See the [runtime guide](docs/runtime-guide.md#know-which-extension-path-you-are-using).
+
 ### Production Resilience
 
 | Component | Description |
@@ -236,7 +251,7 @@ acp:
 
 ### MCP Tool Integration
 
-Adapts MCP server tools to `ToolDefinition`, registers them into the tool registry for Agent Loop invocation.
+The MCP adapters and catalog can expose remote tool schemas to the model. The durable CLI currently rejects remote `tools/call` before dispatch; a connection or `tools/list` schema is not a successful remote execution. See the [runtime guide](docs/runtime-guide.md#know-which-extension-path-you-are-using) and [MCP contract review](docs/iterations/2026-10-25-sol-runtime/mcp-contract-review.md).
 
 Tool name normalization: `mcp__{server}__{tool}`
 
@@ -267,6 +282,8 @@ optional body markdown
 - **YAMLSkillLoader**: Pure stdlib parsing, supports `.md`/`.yaml`/`.yml`
 - **SkillAdapter**: Maps SkillDefinition to ToolDefinition
 - **Progressive disclosure matching**: Name → trigger hint → category, layer by layer
+
+The `edge` runtime profile enables progressive Skill loading, while verified project sources are still captured for trust checks. See the [runtime guide](docs/runtime-guide.md#build-tags-and-runtime-profile-are-separate-axes).
 
 ### TUI
 
