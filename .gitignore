@@ -50,3 +50,26 @@ bin/
 /scanner
 ppt_build/
 *.pptx
+
+# Local development and manual acceptance material
+/.scratch/
+/docs/audits/
+/docs/iterations/
+/docs/qa/
+/docs/research/
+/docs/maintenance/
+/docs/product/
+/docs/gaps-and-findings.md
+/docs/integration-audit.md
+/docs/source-audit-*.md
+/reviews/
+/design/16-dsh-alignment-feasibility.md
+/scripts/e2e_live/
+/scripts/e2e_live_dynamic/
+/scripts/e2e_live_review/
+/scripts/e2e_terminal/
+/scripts/magpie/
+/scripts/runtime-benchmark.py
+/tests/fixtures/live-eval/
+/screenshots/
+/docs/screenshots/

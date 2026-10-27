@@ -1,409 +1,186 @@
 # go-cli
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+以 **Harness → Agent → AgentLoop** 为核心的 Go AI Agent CLI，集成模型、工具、持久会话、上下文管理和终端界面。独立可执行文件无需另装虚拟机；模型端点、MCP 服务和扩展 worker 仍有各自的运行要求。
 
-> **实验性软件** — 本项目处于活跃的实验性开发阶段。由于时间和经费有限，尚未经过充分测试。风险自负，欢迎贡献和反馈。
+项目及其公开扩展 API 目前均为实验性。
 
-纯 Go 实现的 AI Agent CLI 框架。独立 Go 可执行文件无需另装虚拟机；配置使用的模型端点、MCP 服务和扩展 worker 仍是外部依赖。依赖倒置驱动，全链路 tracing。
-
-受到 [CloudWeGo Eino](https://github.com/cloudwego/eino/tree/main) 与 [Google ADK-Go](https://github.com/google/adk-go) 的启发。开发过程中使用 [GLM 5.1](https://bigmodel.cn) 与 [DeepSeek-v4-flash](https://deepseek.com)（非 20260731 版本），借助 [Trae](https://www.trae.ai) 与 [Trae Work](https://www.trae.ai) 完成——六月底的更新大幅提升了稳定性和持续性，让长时间持续开发成为现实。
-
-> **关联项目**：[go-agent-core-v1](https://github.com/PengJunchen/go-agent-core) 是接口驱动的 Agent 核心 SDK（L0–L4 分层架构，依赖 Eino 做 LLM 适配，可供其他项目导入）。本仓库（**go-cli**）则是完整的 CLI 框架，包含 Harness→Agent→AgentLoop 三层架构和 TUI，不是通用可导入的 Agent 核心 SDK。仓库另提供公开的[扩展 worker API](pkg/extensionapi/v1/README.md)；项目与 API 仍处于实验阶段。
-
-**[English](README.md)**
-
-**[迭代报告与架构图](docs/iterations/README.md)**
-
-**[运行时构建、profile 与扩展边界指南](docs/runtime-guide.md)**
-
----
+[English](README.md) · [运行时指南](docs/runtime-guide.md) · [扩展 worker API](pkg/extensionapi/v1/README.md)
 
 ## 关于本项目
 
-这个项目的时间线读起来像一个兼职开发者的日记：
+架构演进分为三个阶段：
 
-- **2026 年 1 月** — 想法成型，但组织空气里弥漫着……不置可否。于是它等了等。
-- **2026 年 3 月** — 买了 CodePlan 订阅开始实践，只在周末写代码。Go 理论从头学起（学完基本忘光）。搞通了 ReAct Agent + Eino 框架的原型——SSE 流式输出、工具集成，全套。所有提交时间都在凌晨到周一清晨之间。
-- **2026 年 4 月** — 重拾多智能体编排和软件工程学，进行了多次快速迭代实验——记忆系统、上下文管理、MCP 集成、Hook 系统。用血泪教训验证了六个系统塞进一个 Agent 上下文窗口等于一场灾难。还学到了「未完全验证」不等于可以部署。
-- **2026 年 5 月** — 周末被工作全面接管，项目心电图拉直线。
-- **2026 年 6-7 月** — 在存在主义迷茫中徘徊：重复造轮子到底有没有意义？与此同时探索 Loop Engineering 和 Graph Engineering 的边界，眼看着行业飞速跑过——SubAgent 隔离、Git Worktree 并行、动态工作流……
-- **2026 年 8 月 1 日** — 受 DeepSeek Harness 评测激励，决定不再想太多，开始动手。四个月的教训浓缩成一个项目：**go-cli**。核心洞察凝结为一条公式：**Agent = Model + Loop + Harness**。剩下的都是架构。
+1. **基础 CLI：** 以 Harness、Agent、AgentLoop 分层，通过明确接口连接模型、工具、会话和上下文压缩。
+2. **可靠执行：** 加入审批与项目信任、持久会话、取消与资源生命周期、链路追踪和 TUI，使执行过程可检查、可控制。
+3. **动态轻量扩展：** 提供渐进式 Skill、惰性 MCP 发现、空闲边界刷新和公开 JSONL worker API，支持完整、headless 与 `no_plugin` 构建。独立的 `edge` profile 提供能力限额与惰性加载。
 
-**声明**：会继续迭代，但得看有没有时间。也就是说——更新频率不保证，但心意是真的。
+相关项目 [go-agent-core-v1](https://github.com/PengJunchen/go-agent-core) 是接口驱动的 Agent 核心 SDK。本仓库定位为完整 CLI 框架；公开 worker API 面向子进程扩展，不是通用 Agent 核心嵌入 SDK。
 
-**关于我**：[pjcmice.com](https://www.pjcmice.com)
-
-> Agent 工程正在进入与模型紧密协作的时代——循环不再只是基础设施，它是副驾驶的神经系统。
-
----
-
-## 架构概览
-
-```
-┌──────────────────────────────────────────────────────┐
-│  CLI (cmd/cli)                                       │
-│  signal → config → tracing → command dispatch        │
-└──────────────┬───────────────────────────────────────┘
-               │
-┌──────────────▼───────────────────────────────────────┐
-│  Harness ── Agent ── AgentLoop (ReAct)               │
-│  Submit→EventStream   Run→Result   think→act→observe │
-│              │                                       │
-│         TurnRunner (cancel/steer/follow-up)           │
-└──────┬───────┬──────────┬──────────┬─────────────────┘
-       │       │          │          │
-  ┌────▼──┐ ┌──▼───┐ ┌───▼────┐ ┌──▼──────┐
-  │  LLM  │ │Tools │ │Session │ │Compaction│
-  │Compose│ │Reg.  │ │Tree    │ │Unified   │
-  └───────┘ └──────┘ └────────┘ └──────────┘
-       │
-  Extension > Config > Builtin
-```
-
-### 核心分层
-
-| 层 | 职责 | 关键接口 |
-|---|---|---|
-| **core** | 接口定义、Agent/Harness/Loop | `Agent`, `Harness`, `AgentLoop`, `TurnRunner` |
-| **llm** | LLM 通信与 Provider 组合 | `BaseChatModel`, `ModelProvider`, `ProviderComposer` |
-| **tools** | 工具注册与执行 | `ToolDefinition`, `ToolRegistry` |
-| **session** | 会话树与持久化 | `SessionStore`, `SessionTree`, `ContextManager` |
-| **compaction** | 上下文压缩 | `Compactor`, `TokenEstimator` |
-| **extension** | 扩展生命周期 | `Extension`, `Hook`, `Middleware` |
-| **production** | 生产弹性 | `CircuitBreaker`, `RetryPolicy`, `AuditLog`, `OutputGuard` |
-| **approval** | 审批与信任 | `ApprovalClassifier`, `TrustManager` |
-| **config** | 配置加载 | `Loader`, `Config` |
-| **tracing** | 全链路追踪 | `Tracer`, `TraceExporter` |
-| **mcp** | MCP 协议集成 | `MCPClient`, `MCPToolAdapter` |
-| **acp** | Agent 通信协议 | `ACPClient`, `StdioAdapter`, `gRPCAdapter` |
-| **skill** | Skill 加载与匹配 | `SkillDefinition`, `SkillLoader`, `SkillRegistry` |
-| **tui** | 终端 UI | `App`, `Renderer`, `RendererRegistry` |
-| **verify** | 验证框架 | `Scanner`, `LogCapturer`, `GoLeakChecker` |
+作者主页：[pjcmice.com](https://www.pjcmice.com)
 
 ## 快速开始
 
-### 前置条件
+需要 Go 1.24+；确切最低版本以 [go.mod](go.mod) 为准。
 
-- Go 1.24+
-
-### 构建与运行
-
-```bash
+```sh
 go mod download
-make build           # 编译到 bin/go-cli
-./bin/go-cli         # 运行
+make build
+./bin/go-cli --help
 ```
 
-同一个 CLI 入口支持四种构建组合：
+发送提示前先配置模型端点。以下示例适用于 OpenAI 兼容端点：
 
-| 构建 | Go tags | UI | Native Go `.so` loader |
-|---|---|---|---|
-| 默认 | 无 | 完整 TUI | 可用 |
-| 不含 native plugin | `no_plugin` | 完整 TUI | 禁用 |
-| Headless | `headless` | 行式交互 | 可用 |
-| Headless 且不含 native plugin | `headless,no_plugin` | 行式交互 | 禁用 |
+```sh
+export GO_CLI_PROVIDER_NAME=eino
+export GO_CLI_PROVIDER_BASE_URL=https://api.openai.com/v1
+export GO_CLI_PROVIDER_API_KEY="your-api-key"
+export GO_CLI_MODEL_NAME=your-model-id
 
-`runtime.profile=edge` 是独立的运行时设置，不是 build tag：它启用渐进式 Skill 与 lazy MCP 加载，但不会从二进制中移除包。选定的设计参考包括 [Pi Coding Agent、OpenCode v2、DeepSeek Harness/Cordis、Magpie 和 HashiCorp go-plugin](docs/runtime-guide.md#what-informed-the-design)。它们是研究输入，不是必需依赖，也不代表本项目已实现所有上游功能。
-
-### 开发常用命令
-
-```bash
-make test            # 单元测试 (含 race)
-make test-cov        # 覆盖率报告
-make test-log        # 日志捕获验证
-make test-leak       # goroutine 泄漏检测
-make scan            # AST 扫描 (mock/硬编码绕过)
-make lint            # golangci-lint
-make fmt             # gofmt + goimports
-make verify          # 全量校验 (fmt+vet+lint+build+test+scan+log+leak)
-make check           # 提交前检查 (fmt+vet+lint+build+test)
+./bin/go-cli prompt "解释这个仓库的结构"
+./bin/go-cli interactive
 ```
 
-## 核心架构细节
+本地 `EinoProvider` 通过标准库 `net/http` 发送 OpenAI 兼容请求，并未导入 Eino 框架。
 
-### Agent 执行循环
+CLI 以用户/全局配置和环境设置为基础。只有项目来源清单通过信任验证后，才会叠加已捕获的项目配置；未获授权时，继续仅使用用户/全局配置。
 
-三层架构：**Harness → Agent → AgentLoop**
-
-- **HarnessImpl**: 异步门面，`Submit()` 非阻塞返回 `EventStream`，后台 goroutine 执行 agent
-- **AgentImpl**: 有状态包装，维护消息历史，线程安全 (`sync.Mutex`)
-- **LoopAgent**: 纯 ReAct 循环 (think → act → observe)，注入 `BaseChatModel` + `ToolRegistry`
-- **TurnRunner**: 单轮生命周期，支持 `Cancel`/`Steer`/`FollowUp`
-
-### LLM Provider 组合
-
-三层优先级：**Extension > Config > Builtin**
-
-| 层 | 来源 | 示例 |
-|---|---|---|
-| Builtin | 预注册 | eino, openai, claude, gemini |
-| Config | 配置文件 | 用户自定义 Provider |
-| Extension | 扩展注册 | 插件注入 Provider |
-
-同名冲突：高优先级层胜出；同层内高 Priority 胜出。
-
-本仓库的 `EinoProvider` 是使用标准库 `net/http` 实现的 OpenAI 兼容适配器；它不导入 CloudWeGo Eino 模块。
-
-### 内置工具
-
-此表描述已实现的工具组件，不等同于每次运行时实际提供给模型的工具注册表。请在交互会话中用 `/tools` 查看本次注册的工具，并用 `/help` 查看默认能力边界。
-
-| 分类 | 工具 | 说明 |
-|---|---|---|
-| 文件/Shell | `bash` | 执行 shell 命令 (流式输出、沙箱与资源限制) |
-| 文件/Shell | `read` | 读取文本文件 |
-| 文件/Shell | `write` | 写入文件 |
-| 文件/Shell | `edit` | 差异编辑 (old/new 替换) |
-| 文件/Shell | `grep` | 正则搜索 (支持纯 Go 模式) |
-| 文件/Shell | `find`/`ls` | 文件查找与列表 |
-| Git | `git_diff`/`git_status`/`git_log`/`git_blame` | Git 检查 |
-| Git | `git_commit`/`git_branch`/`git_create_branch`/`git_checkout` | Git 分支与提交 |
-| Git | `git_push`/`git_pull`/`git_fetch`/`git_remote` | Git 远程操作 |
-| Git | `git_merge`/`git_stash`/`git_stash_pop`/`git_reset`/`git_revert` | Git 工作流 |
-| Git | `git_pr_create` | 创建 Pull Request |
-| Web | `web_fetch` | 抓取 URL 内容 |
-| Web | `web_search` | 需要配置搜索提供者；默认不可用 |
-| Web | `tool_search` | 语义工具搜索 |
-| 效率 | `todo_write` | 仅当前进程有效；重启后不保留 |
-| 效率 | `task_create`/`task_get`/`task_list`/`task_update` | 仅当前进程有效；重启后不保留 |
-| 效率 | `goal_create`/`goal_update`/`goal_list`/`goal_get` | 仅当前进程有效；重启后不保留 |
-| 代码 | `lsp_query` | 语言服务器协议查询 |
-| 多模态 | `image_read` | 默认 CLI 未注册 |
-| 交互 | `ask_user` | 人机协作提问 |
-| 交互 | `/plan enter`/`/plan exit` | 仅由用户控制 Plan Mode；不是模型调用工具 |
-| Agent | `dispatch_subagent` | SubAgent 调度 |
-| Agent | `remote_bash` | 通过 SSH 的远程 Shell |
-
-### 压缩策略
-
-按成本递增自动路由：**Micro → Summary → Truncating**
-
-| 策略 | 机制 | LLM 开销 |
-|---|---|---|
-| Micro | 替换旧工具结果为短占位符 | 无 |
-| Summary | LLM 驱动语义切割 + 摘要 | 有 |
-| Truncating | 从最老条目开始丢弃 | 无 |
-
-**UnifiedCompactor**: 路由层，任何策略失败则升级到下一策略。
-
-**MidTurnCompact**: 溢出自动压缩守卫，token 估算超过阈值比例时触发。
-
-### Session 管理
-
-- **SessionTree**: 核心 API 支持分支 (`Branch`)、移动 (`MoveTo`) 和上下文重建 (`BuildContext`)。默认 CLI 只在配置的 session 目录中按准确的物理 session ID 恢复；不支持 fork、切换分支、snapshot 或 migration。
-- **JSONLSessionStore**: 文件持久化，每条记录一行 JSON，追加写入
-- **BranchSummary**: 离开分支时自动生成摘要
-- **Memory**: `/memory` 管理用户手动录入的记录；默认 CLI 不会自动提取记忆，也不会把已有记录注入模型提示。
-
-### 扩展系统
-
-扩展生命周期：`Init` → 运行 → `Shutdown`
-
-注册构建块：
-- **Hook**: 事件钩子，支持 `pass`/`block`/`terminate`/`replace` 动作
-- **Middleware**: 请求/响应拦截，可包装 Agent 和 Model 调用
-- **Tool / Command / Provider**: 扩展注册
-
-外部 worker 使用实验性的公开 `pkg/extensionapi/v1` JSONL 合约。它是扩展 API，不是通用 Agent SDK 或操作系统沙箱；native `.so` 扩展仍是受信任的进程内代码。详见[运行时指南](docs/runtime-guide.md#know-which-extension-path-you-are-using)。
-
-### 生产弹性
-
-| 组件 | 说明 |
-|---|---|
-| **CircuitBreaker** | 三状态机 (Closed → Open → HalfOpen)，支持 fallback |
-| **RetryPolicy** | 抖动指数退避，错误分类 (Transient/RateLimit/Timeout/Fatal) |
-| **IdempotentCache** | FIFO 幂等去重缓存 |
-| **AuditLog** | JSONL 审计日志，支持时间范围/操作名/工具名过滤 |
-| **OutputGuard** | 输出守卫链：正则阻止 → PII 检测 → 代码注入检测 → 长度截断 |
-
-### 审批与信任
-
-- **ApprovalClassifier**: 工具调用分级 (Allow / Deny / RequireApproval)
-- **ApprovalMiddleware**: deny-first 门控，拒绝的调用不抵达执行器
-- **TrustManager**: 项目级信任门控，SHA-256 指纹 + 过期机制
-
-### ACP (Agent Communication Protocol)
-
-进程间 Agent 通信协议，两种适配器：
-
-| 适配器 | 传输 |
-|---|---|
-| **StdioAdapter** | 换行分隔 JSON (io.Pipe) |
-| **gRPCAdapter** | JSON-over-HTTP |
-
-消息类型：`connect` / `disconnect` / `message` / `response` / `ack` / `error`
-
-### MCP 工具集成
-
-MCP 适配器和目录可以将远端工具 schema 提供给模型。默认 CLI 的 durable 路径目前会在 dispatch 前拒绝远端 `tools/call`；连接成功或 `tools/list` 返回 schema 都不代表远端工具已成功执行。详见[运行时指南](docs/runtime-guide.md#know-which-extension-path-you-are-using)与[MCP 合同复审](docs/iterations/2026-10-25-sol-runtime/mcp-contract-review.md)。
-
-工具名规范化：`mcp__{server}__{tool}`
-
-支持传输：Stdio (子进程)、SSE、StreamableHTTP
-
-### Skill 系统
-
-YAML frontmatter 格式加载：
-
-```yaml
----
-name: my-skill
-description: skill description
-version: 1.0.0
-category: coding
-prompt: |
-  You are a coding assistant.
-tools:
-  - bash
-  - read
-trigger_hint: "fix bug"
-parameters:
-  max_attempts: 3
----
-optional body markdown
-```
-
-- **YAMLSkillLoader**: 纯标准库解析，支持 `.md`/`.yaml`/`.yml`
-- **SkillAdapter**: 将 SkillDefinition 映射到 ToolDefinition
-- **渐进式披露匹配**: 从名称 → 触发提示 → 类别逐层匹配
-
-`edge` runtime profile 会启用渐进式 Skill 加载；可信项目来源仍会为信任检查而捕获。详见[运行时指南](docs/runtime-guide.md#build-tags-and-runtime-profile-are-separate-axes)。
-
-### TUI
-
-Bubbletea 驱动渲染循环，按 ContentType 分派到 Renderer。支持流式渲染器 (替换最后一帧) 和非流式渲染器 (追加)。内置 26 个渲染器。
-
-### 全链路 Tracing
-
-Span 层级贯穿整个执行链：
-
-```
-cli.invocation
-  └─ command.dispatch
-       └─ prompt.run
-            └─ harness.start
-                 └─ agent.run
-                      └─ loop.run
-                           ├─ llm.request
-                           └─ tool.call (tool_name=edit|grep|...)
-```
-
-导出器：`stdout` / `jsonl` (文件) / `otlp` (HTTP) / `kafka`
-
-### 验证框架
-
-| 工具 | 说明 |
-|---|---|
-| **Scanner** | AST 扫描，13 条规则检测 mock 导入、硬编码凭据、测试 URL 等 |
-| **LogCapturer** | 拦截 slog 全局 handler，断言日志条目/序列 |
-| **GoLeakChecker** | goroutine 泄漏检测，2 秒轮询超时 |
-| **VerifyRunner** | 36 条验证规则 (VQ/VT/VS/VC/VH/VP/VG/VE) |
-
-## 配置
-
-### YAML 格式
+可在用户配置 `~/.go-cli/config.yaml` 中启用持久会话：
 
 ```yaml
 provider:
   name: eino
-  base_url: http://localhost:9999
-  temperature: 0.7
-  max_tokens: 4096
+  base_url: https://api.openai.com/v1
 model:
-  name: gpt-4
-  max_tokens: 2048
-tools:
-  builtin:
-    - bash
-    - read
-    - edit
-    - grep
+  name: your-model-id
+session:
+  store_path: .go-cli/sessions
 tracing:
   enabled: true
   exporter: jsonl
-  level: info
-compaction:
-  strategy: micro_first
-  max_tokens: 1000
-approval:
-  mode: deny_first
-session:
-  store: jsonl
-  path: ~/.go-cli/sessions
 ```
 
-### 优先级
+API 密钥应保存在环境变量或已配置的凭据存储中。
 
-升序覆盖：`Default` → `File` → `Env` → `Flag` → `Override`
+## 构建组合
 
-## 端到端测试
+`headless` 与 `no_plugin` 是相互独立的构建标签：
 
-| Phase | 验证范围 |
+| 构建 | Go 标签 | 终端界面 | 原生 Go `.so` 加载器 |
+|---|---|---|---|
+| 完整版 | 无 | 富 TUI | 可用 |
+| 完整版，无原生插件 | `no_plugin` | 富 TUI | 禁用 |
+| Headless | `headless` | 按行交互 | 可用 |
+| Headless，无原生插件 | `headless,no_plugin` | 按行交互 | 禁用 |
+
+```sh
+go build -o ./bin/go-cli ./cmd/cli
+go build -tags no_plugin -o ./bin/go-cli-no-plugin ./cmd/cli
+go build -tags headless -o ./bin/go-cli-headless ./cmd/cli
+go build -tags headless,no_plugin -o ./bin/go-cli-headless-no-plugin ./cmd/cli
+```
+
+四种构建共享 Agent 核心、Skill、MCP 集成和 JSONL worker。Headless 保留多轮输入、最终响应、SIGINT 取消和同步文本审批；全屏布局、主题、模态审批及执行中的键盘引导需要富界面。
+
+### Edge profile
+
+运行时 profile 独立于构建标签，可与上述四种构建任意组合：
+
+```yaml
+runtime:
+  profile: edge
+  # 可选的正数覆盖值：
+  # max_skills: 128
+  # max_mcp_servers: 2
+  # max_prompt_bytes: 131072
+```
+
+`edge` 启用动态能力、渐进式 Skill 和惰性 MCP 加载。限额为零或未设置时，采用默认的 **128 个 Skill、2 个 MCP 服务，以及 128 KiB** 能力提示词/schema 预算。它改变加载方式与资源限额，不会移除二进制中链接的包。
+
+已验证的项目 Skill 来源仍需捕获有界内容以完成信任检查。元数据优先发现不代表完全不读取 Skill 正文。详见[运行时指南](docs/runtime-guide.md#build-tags-and-runtime-profile-are-separate-axes)。
+
+## 常用命令
+
+```sh
+./bin/go-cli --help
+./bin/go-cli --version
+./bin/go-cli doctor
+./bin/go-cli models
+./bin/go-cli prompt --output json "介绍这个项目"
+./bin/go-cli interactive
+./bin/go-cli interactive --resume-session <physical-session-id>
+```
+
+交互会话中的常用命令：
+
+| 命令 | 用途 |
 |---|---|
-| Phase 2 | 100+ 轮长对话稳定、自动压缩、Session 恢复、Trace 链完整性、质量指标 |
-| Phase 3 | 审批门控、MCP 调用、循环检测、熔断降级、重试、幂等去重、审计记录 |
-| Phase 4 | Skill 加载、扩展注册、SubAgent 生成、TUI 渲染、YAML 配置、Provider 组合、ACP 通信、OTLP 导出 |
-| Phase 20+ | REPL、Git 工具、流式输出、Token 估算、中断/Steer、系统提示、跨场景 |
-| Phase 21+ | SubAgent、TUI、生产加固、全能力集成 |
-| Phase 22–26 | 评审驱动 E2E、生产、LSP、完整接线 |
-| Phase 39 | 交互式 REPL 会话 |
-| Phase 46–49 | 安全加固与边界边缘场景 |
+| `/help` | 查看命令与当前能力边界 |
+| `/tools` | 列出当前会话注册的工具 |
+| `/reload` | 在空闲时刷新支持的 Skill、提示词与 hook 计划 |
+| `/mcp list` | 查看配置的 MCP 服务 |
+| `/mcp load <server>` | 在惰性模式下激活服务 |
+| `/mcp reload <server>` | 在惰性模式下于空闲时替换服务目录 |
+| `/session tree`、`/session pending` | 检查持久会话与未决动作 |
+| `/plan enter`、`/plan exit` | 由用户显式切换 Plan Mode |
 
-运行：
+持久会话需要配置 `session.store_path`；启动恢复使用确切的物理会话 ID。持久模式不支持 fork、clone、分支切换、快照和 schema 迁移。`/memory` 管理用户录入的记录，不会自动提取记忆或注入模型提示词。Goal、task 和 todo 状态只保留到当前进程退出。
 
-```bash
-go test -race -count=1 -v -run "TestPhase2|TestPhase3|TestPhase4" ./tests/...
+## 架构与扩展边界
+
+```text
+CLI：配置 → 追踪 → 命令分发
+                   ↓
+            Harness → Agent → AgentLoop
+                       ↓
+               TurnRunner 生命周期
+                   ↓
+          模型 · 工具 · 会话 · 上下文压缩
+                   ↓
+          信任 · 审批 · 追踪 · 扩展
 ```
 
-完整 E2E 套件 (位于 `tests/e2e_20260802/`)：
+- **Harness** 通过事件流暴露异步执行；**Agent** 管理会话状态；**AgentLoop** 执行思考 → 行动 → 观察。**TurnRunner** 管理取消、引导和后续输入。
+- **模型与工具** 使用可注入接口。Provider 按 Extension → Config → Builtin 优先级选择。可用工具取决于当前会话注册表和配置。
+- **会话与上下文** 提供 JSONL 持久化、上下文重建和 Micro → Summary → Truncating 压缩。CLI 的持久会话流程比内部会话树 API 更窄。
+- **执行控制** 包含审批、项目信任、重试、熔断、审计、输出守卫，以及贯穿命令、模型和工具调用的追踪。
 
-```bash
-go test -race -count=1 ./tests/...
+支持的动态变更先准备并校验候选，再于空闲边界发布；候选失败时保留上一有效代。Provider/会话配置、原生代码、运行时 profile、加载模式、活动 MCP 限额及部分信任/来源变化需要重启。
+
+MCP 集成目前为 **tools-only**，提供 Stdio、SSE 和 StreamableHTTP 适配器。发现与 `tools/list` 可以暴露远端 schema，但持久 CLI 当前会在分发前拒绝远端 `tools/call`。连接成功或 schema 可见不代表已支持远端执行。
+
+实验性的 [JSONL 扩展 worker API](pkg/extensionapi/v1/README.md) 支持工具、hook、命令、提示词贡献和完整响应 Provider。Provider 的流式适配只返回一个最终响应，不提供 token 增量。Worker 与用户共享操作系统权限，子进程隔离不等于操作系统沙箱。原生 `.so` 扩展在进程内运行，不能卸载。
+
+信任、刷新和协议边界详见[运行时指南](docs/runtime-guide.md#know-which-extension-path-you-are-using)。
+
+## 开发与维护
+
+```sh
+make test           # 自动化测试，含 race 检测
+make test-e2e       # 带 e2e 构建标签的测试
+make test-no-plugin # extension/CLI 包中的原生加载器桩覆盖
+make test-cov       # 覆盖率报告
+make scan           # AST 规则
+make lint           # golangci-lint
+make fmt            # gofmt 与 goimports
+make check          # 格式、vet、lint、编译、测试
+make verify         # check 加 AST、日志与 goroutine 检查
 ```
 
-## 项目结构
+生产代码位于 `cmd/`、`internal/` 和 `pkg/`。自动化集成测试及必要 fixture 位于 `tests/`；构建与验证任务见 [Makefile](Makefile)。[文档入口](docs/README.md) 汇集当前产品与 API 指南。
 
-```
-go-cli/
-├── cmd/cli/                # CLI 入口
-├── internal/
-│   ├── acp/                # Agent Communication Protocol
-│   ├── approval/           # 审批门控与信任管理
-│   ├── cli/                # CLI 命令解析
-│   ├── compaction/         # 上下文压缩策略
-│   ├── config/             # 配置加载 (YAML/JSON)
-│   ├── core/               # 核心接口与 Agent/Harness/Loop
-│   ├── extension/          # 扩展生命周期
-│   ├── llm/                # LLM 通信与 Provider 组合
-│   ├── mcp/                # MCP 协议集成
-│   ├── mock/               # 测试 Mock (仅测试使用)
-│   ├── production/         # 生产弹性 (熔断/重试/审计/输出守卫)
-│   ├── session/            # 会话树与持久化
-│   ├── skill/              # Skill 加载与匹配
-│   ├── tools/              # 工具注册与内置工具
-│   ├── tracing/            # 全链路追踪
-│   ├── tui/                # 终端 UI
-│   └── verify/             # 验证框架 (Scanner/Leak/Log)
-├── tests/                  # 端到端集成测试
-│   ├── e2e_20260802/       # 完整 E2E 套件 (36 个文件，Phase 1–47)
-│   ├── phase2_e2e_test.go  # 长对话 + 压缩 + Session
-│   ├── phase3_e2e_test.go  # 弹性 + 审批 + MCP
-│   ├── phase4_e2e_test.go  # Skill + 扩展 + SubAgent + TUI + ACP
-│   ├── e2e_phase20_steer_test.go ... e2e_phase49_test.go  # 按 Phase 的 E2E
-│   └── smoke_test.go       # 冒烟测试
-├── .github/workflows/      # CI/CD
-├── Makefile                # 构建/测试/验证
-└── go.mod                  # Go 1.24+, 仅测试依赖
-```
+## 设计参考
 
-## 设计原则
+以下项目为部分设计提供启发，并非必需的运行时依赖：
 
-- **依赖倒置**: `core` 包零向下依赖，仅定义接口；实现由 service 层注入
-- **零外部运行时依赖**: LLM 通信基于标准库 `net/http`，JSON 解析基于标准库
-- **全链路 Tracing**: 每个操作发射 span，trace_id 贯穿整个执行链
-- **生产就绪**: 熔断、重试、幂等、审计、输出守卫开箱即用
-- **扩展优先**: Hook/Middleware/Tool/Command/Provider 均可通过扩展注入
+| 项目 | 借鉴点 |
+|---|---|
+| [Pi Coding Agent](https://github.com/earendil-works/pi) | 共享 Agent/会话核心与渐进式能力暴露 |
+| [OpenCode v2](https://github.com/anomalyco/opencode) | 显式服务所有权、生命周期作用域与刷新失败边界 |
+| [DeepSeek Harness / Cordis](https://github.com/deepseek-ai/deepseek-harness) | Harness 组合、依赖所有权与资源清理 |
+| [Magpie](https://github.com/yetone/magpie) | 插件所有权，以及 hook 与子进程扩展的职责划分 |
+| [HashiCorp go-plugin](https://github.com/hashicorp/go-plugin) | 版本化子进程协议、握手与进程所有权 |
+| [CloudWeGo Eino](https://github.com/cloudwego/eino)、[Google ADK-Go](https://github.com/google/adk-go) | Agent 与模型组合思路 |
 
 ## License
 
-[MIT](LICENSE)
+MIT。
