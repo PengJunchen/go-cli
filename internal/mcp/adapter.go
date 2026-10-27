@@ -894,6 +894,10 @@ func (c *adapterCore) CallTool(ctx context.Context, name string, args map[string
 		"name":      name,
 		"arguments": args,
 	})
+	var result *MCPToolResult
+	if err == nil {
+		result, err = decodeCallToolResult(res)
+	}
 	if err != nil {
 		err = toolCallOutcomeError(name, err)
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
@@ -908,13 +912,6 @@ func (c *adapterCore) CallTool(ctx context.Context, name string, args map[string
 		"duration_ms", time.Since(start).Milliseconds(),
 		"success", true)
 
-	result := &MCPToolResult{
-		Content: res["content"],
-		IsError: boolVal(res["isError"]),
-	}
-	if result.Content == nil {
-		result.Content = ""
-	}
 	return result, nil
 }
 
@@ -1000,12 +997,4 @@ func stringOf(v any) string {
 		return s
 	}
 	return ""
-}
-
-// boolVal returns the bool value of v, or false otherwise.
-func boolVal(v any) bool {
-	if b, ok := v.(bool); ok {
-		return b
-	}
-	return false
 }

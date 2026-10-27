@@ -90,7 +90,9 @@ type DispatchFenceSnapshot struct {
 	Registry uint64
 	Approval uint64
 	Plan     uint64
-	Decision uint64
+	// PlanRestriction is an ancestor-only revocation epoch, never child policy authority.
+	PlanRestriction uint64
+	Decision        uint64
 }
 
 // DispatchFence serializes the short state publications and final dispatch
@@ -98,8 +100,9 @@ type DispatchFenceSnapshot struct {
 // lock while waiting for user input, syncing a journal, queueing work, or
 // invoking a tool.
 type DispatchFence struct {
-	mu          sync.RWMutex
-	generations DispatchFenceSnapshot
+	mu              sync.RWMutex
+	generations     DispatchFenceSnapshot
+	planRestriction atomic.Pointer[DispatchFence]
 }
 
 // NewDispatchFence returns a shared generation fence for one tool runtime.
@@ -107,17 +110,13 @@ func NewDispatchFence() *DispatchFence { return &DispatchFence{} }
 
 // Snapshot returns the current registry, approval, and Plan generations.
 func (f *DispatchFence) Snapshot() DispatchFenceSnapshot {
-	if f == nil {
-		return DispatchFenceSnapshot{}
-	}
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	return f.generations
+	var snapshot DispatchFenceSnapshot
+	_ = f.read(func(current DispatchFenceSnapshot) { snapshot = current })
+	return snapshot
 }
 
-// read runs a short, read-only callback while holding the fence's read lock.
-// Registry implementations use it to capture definition metadata and the
-// matching generation tuple without a check-then-read gap.
+// read captures local registration state and all ancestor Plan restrictions in
+// ancestor-to-child lock order. No foreign registry or approval state is used.
 func (f *DispatchFence) read(callback func(DispatchFenceSnapshot)) error {
 	if f == nil {
 		return ErrDispatchFenceUnavailable
@@ -125,17 +124,16 @@ func (f *DispatchFence) read(callback func(DispatchFenceSnapshot)) error {
 	if callback == nil {
 		return errors.New("tools: dispatch fence reader is nil")
 	}
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	callback(f.generations)
-	return nil
+	return f.withPlanRestriction(func(parentPlan uint64) error {
+		f.mu.RLock()
+		defer f.mu.RUnlock()
+		callback(f.snapshotWithParentPlan(parentPlan))
+		return nil
+	})
 }
 
-// WithSnapshot runs a short callback while holding the fence's read boundary
-// and supplies the matching generation tuple. Callbacks must not invoke a
-// tool or wait for external work. A process-start caller must return as soon
-// as the child is started and wait for or drain it only after the boundary is
-// released.
+// WithSnapshot runs only a short callback under the local fence and inherited
+// Plan restrictions. It must not wait for a process, network response or user.
 func (f *DispatchFence) WithSnapshot(callback func(DispatchFenceSnapshot) error) error {
 	if f == nil {
 		return ErrDispatchFenceUnavailable
@@ -143,16 +141,15 @@ func (f *DispatchFence) WithSnapshot(callback func(DispatchFenceSnapshot) error)
 	if callback == nil {
 		return errors.New("tools: dispatch fence callback is nil")
 	}
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	return callback(f.generations)
+	return f.withPlanRestriction(func(parentPlan uint64) error {
+		f.mu.RLock()
+		defer f.mu.RUnlock()
+		return callback(f.snapshotWithParentPlan(parentPlan))
+	})
 }
 
-// Publish applies a short state update under the fence and advances its
-// generation domain. When expected is non-nil, the complete generation
-// snapshot must still match; this prevents an approval-cache update from
-// overlooking an intervening registry or Plan change. The callback must only
-// publish in-memory state and must not block or perform I/O.
+// Publish advances this runtime's own state while the ancestor Plan boundaries
+// stay stable. A complete captured tuple includes every ancestor Plan epoch.
 func (f *DispatchFence) Publish(domain DispatchFenceDomain, expected *DispatchFenceSnapshot, update func()) (DispatchFenceSnapshot, error) {
 	if f == nil {
 		return DispatchFenceSnapshot{}, ErrDispatchFenceUnavailable
@@ -163,33 +160,33 @@ func (f *DispatchFence) Publish(domain DispatchFenceDomain, expected *DispatchFe
 	if domain != DispatchFenceRegistry && domain != DispatchFenceApproval && domain != DispatchFencePlan && domain != DispatchFenceDecision {
 		return DispatchFenceSnapshot{}, ErrInvalidDispatchFenceDomain
 	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if expected != nil && f.generations != *expected {
-		return f.generations, ErrDispatchFenceChanged
-	}
-
-	update()
-	switch domain {
-	case DispatchFenceRegistry:
-		f.generations.Registry++
-	case DispatchFenceApproval:
-		f.generations.Approval++
-	case DispatchFencePlan:
-		f.generations.Plan++
-	case DispatchFenceDecision:
-		f.generations.Decision++
-	}
-	return f.generations, nil
+	var snapshot DispatchFenceSnapshot
+	err := f.withPlanRestriction(func(parentPlan uint64) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		snapshot = f.snapshotWithParentPlan(parentPlan)
+		if expected != nil && snapshot != *expected {
+			return ErrDispatchFenceChanged
+		}
+		update()
+		switch domain {
+		case DispatchFenceRegistry:
+			f.generations.Registry++
+		case DispatchFenceApproval:
+			f.generations.Approval++
+		case DispatchFencePlan:
+			f.generations.Plan++
+		case DispatchFenceDecision:
+			f.generations.Decision++
+		}
+		snapshot = f.snapshotWithParentPlan(parentPlan)
+		return nil
+	})
+	return snapshot, err
 }
 
-// PublishApprovalGrant publishes a monotonic positive approval-cache grant
-// without invalidating other permits prepared from the same policy snapshot.
-// The complete generation tuple must still match expected. Revocation,
-// replacement, mode changes, and other decisions that can remove authority
-// must use Publish(DispatchFenceApproval, ...) so existing permits become
-// stale.
+// PublishApprovalGrant publishes a monotonic grant without advancing the local
+// approval epoch. Parent Plan transitions still invalidate the captured tuple.
 func (f *DispatchFence) PublishApprovalGrant(expected DispatchFenceSnapshot, update func()) (DispatchFenceSnapshot, error) {
 	if f == nil {
 		return DispatchFenceSnapshot{}, ErrDispatchFenceUnavailable
@@ -197,20 +194,22 @@ func (f *DispatchFence) PublishApprovalGrant(expected DispatchFenceSnapshot, upd
 	if update == nil {
 		return DispatchFenceSnapshot{}, errors.New("tools: approval grant update is nil")
 	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.generations != expected {
-		return f.generations, ErrDispatchFenceChanged
-	}
-	update()
-	return f.generations, nil
+	var snapshot DispatchFenceSnapshot
+	err := f.withPlanRestriction(func(parentPlan uint64) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		snapshot = f.snapshotWithParentPlan(parentPlan)
+		if snapshot != expected {
+			return ErrDispatchFenceChanged
+		}
+		update()
+		return nil
+	})
+	return snapshot, err
 }
 
-// commit performs the final full-snapshot comparison and invokes mark while
-// holding the fence. mark is only for consuming the private one-use permit and
-// recording dispatch linearization; it must not invoke tools, wait, enqueue,
-// sync, or perform other I/O.
+// commit linearizes only a private one-use permit, never executor work. Its
+// ancestor read boundaries make a parent Plan transition atomic with admission.
 func (f *DispatchFence) commit(expected DispatchFenceSnapshot, mark func()) error {
 	if f == nil {
 		return ErrDispatchFenceUnavailable
@@ -218,14 +217,15 @@ func (f *DispatchFence) commit(expected DispatchFenceSnapshot, mark func()) erro
 	if mark == nil {
 		return errors.New("tools: dispatch commit marker is nil")
 	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.generations != expected {
-		return ErrDispatchFenceChanged
-	}
-	mark()
-	return nil
+	return f.withPlanRestriction(func(parentPlan uint64) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.snapshotWithParentPlan(parentPlan) != expected {
+			return ErrDispatchFenceChanged
+		}
+		mark()
+		return nil
+	})
 }
 
 // TrustedToolEffect describes a reviewed effect boundary. A registration
@@ -708,6 +708,7 @@ type preparedInvocationConfig struct {
 	canonicalWorkspaceRoot  string
 	workspaceReadWhitelist  []string
 	scopedReadProofEligible bool
+	managedDelegation       bool
 	schema                  ToolSchemaSnapshot
 	call                    FrozenToolCall
 	execute                 func(context.Context, ToolCall) (*ToolResult, error)
@@ -727,6 +728,7 @@ type preparedInvocation struct {
 	canonicalWorkspaceRoot  string
 	workspaceReadWhitelist  []string
 	scopedReadProofEligible bool
+	managedDelegation       bool
 	schema                  ToolSchemaSnapshot
 	call                    FrozenToolCall
 	execute                 func(context.Context, ToolCall) (*ToolResult, error)
@@ -738,6 +740,7 @@ type preparedInvocation struct {
 	committed               atomic.Bool
 	terminalObserved        atomic.Bool
 	scopedReadProofIssued   atomic.Bool
+	delegationProofIssued   atomic.Bool
 }
 
 var _ PreparedInvocation = (*preparedInvocation)(nil)
@@ -755,6 +758,7 @@ func newPreparedInvocation(config preparedInvocationConfig) *preparedInvocation 
 		canonicalWorkspaceRoot:  config.canonicalWorkspaceRoot,
 		workspaceReadWhitelist:  append([]string(nil), config.workspaceReadWhitelist...),
 		scopedReadProofEligible: config.scopedReadProofEligible,
+		managedDelegation:       config.managedDelegation,
 		schema:                  config.schema,
 		call:                    config.call,
 		execute:                 config.execute,
@@ -987,9 +991,9 @@ func (p *preparedInvocation) commitAndInvoke(ctx context.Context) (*ToolResult, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	executeCtx := ctx
+	executeCtx := p.withEffectStartGuard(ctx)
 	if p.completionProof == CompletionOwnedProcessGroupJoined || p.completionProof == completionScopedSearchJoined || p.completionProof == completionLocalProcessOrPrestartNoProcessJoined {
-		executeCtx = withPreparedCompletionReporter(ctx, func(proof PreparedCompletionProof, done <-chan struct{}) {
+		executeCtx = withPreparedCompletionReporter(executeCtx, func(proof PreparedCompletionProof, done <-chan struct{}) {
 			p.completion.attach(proof, done)
 		})
 		done := p.completion.begin(p.completionProof)
@@ -1006,15 +1010,24 @@ func (p *preparedInvocation) commitAndInvoke(ctx context.Context) (*ToolResult, 
 		completed = true
 		return result, err
 	}
-	if p.completionProof == CompletionInlinePipelineJoined {
-		done := p.completion.begin(CompletionInlinePipelineJoined)
+	if p.completionProof == CompletionInlinePipelineJoined || p.completionProof == CompletionMCPRequestJoined {
+		done := p.completion.begin(p.completionProof)
 		if done == nil {
 			return nil, ErrPreparedInvocationUnavailable
 		}
 		completed := false
-		defer func() { p.completion.finish(done, completed) }()
+		var pendingDone <-chan struct{}
+		defer func() { p.completion.finishAfterPending(done, completed, pendingDone) }()
 		result, err := p.execute(executeCtx, p.call.ToolCall())
-		completed = true
+		completed = completionOutcomeKnown(err)
+		var pending PendingExecutionError
+		if errors.As(err, &pending) {
+			pendingDone = pending.ExecutionDone()
+			if pendingDone != nil && release != nil {
+				p.completion.addDoneCallback(done, release)
+				leaseTransferredToCompletion = true
+			}
+		}
 		return result, err
 	}
 	return p.execute(executeCtx, p.call.ToolCall())
@@ -1137,13 +1150,13 @@ func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sin
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	executeCtx := ctx
+	executeCtx := p.withEffectStartGuard(ctx)
 	completionProof := p.completionProof
 	if p.streamingSink == nil {
 		completionProof = ""
 	}
 	if completionProof == CompletionOwnedProcessGroupJoined || completionProof == completionScopedSearchJoined || completionProof == completionLocalProcessOrPrestartNoProcessJoined {
-		executeCtx = withPreparedCompletionReporter(ctx, func(proof PreparedCompletionProof, done <-chan struct{}) {
+		executeCtx = withPreparedCompletionReporter(executeCtx, func(proof PreparedCompletionProof, done <-chan struct{}) {
 			p.completion.attach(proof, done)
 		})
 		done := p.completion.begin(completionProof)
@@ -1160,15 +1173,24 @@ func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sin
 		completed = true
 		return result, err
 	}
-	if completionProof == CompletionInlinePipelineJoined {
-		done := p.completion.begin(CompletionInlinePipelineJoined)
+	if completionProof == CompletionInlinePipelineJoined || completionProof == CompletionMCPRequestJoined {
+		done := p.completion.begin(completionProof)
 		if done == nil {
 			return nil, ErrPreparedInvocationUnavailable
 		}
 		completed := false
-		defer func() { p.completion.finish(done, completed) }()
+		var pendingDone <-chan struct{}
+		defer func() { p.completion.finishAfterPending(done, completed, pendingDone) }()
 		result, err := p.executeStreaming(executeCtx, p.call.ToolCall(), sink)
-		completed = true
+		completed = completionOutcomeKnown(err)
+		var pending PendingExecutionError
+		if errors.As(err, &pending) {
+			pendingDone = pending.ExecutionDone()
+			if pendingDone != nil && release != nil {
+				p.completion.addDoneCallback(done, release)
+				leaseTransferredToCompletion = true
+			}
+		}
 		return result, err
 	}
 	return p.executeStreaming(executeCtx, p.call.ToolCall(), sink)

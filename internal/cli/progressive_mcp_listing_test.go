@@ -85,8 +85,8 @@ func TestProgressiveMCPListIsSafePreparedLocalMetadata(t *testing.T) {
 	require.Equal(t, []tools.TrustedToolEffect{tools.EffectUnknown}, activation.EffectSet().Values())
 	_, err = activation.Dispatch(ctx)
 	require.NoError(t, err)
-	require.Nil(t, activation.CompletionSignal().Done(), "the mixed activation interface must not inherit listing's proof")
-	require.Empty(t, activation.CompletionSignal().Proof())
+	require.NotNil(t, activation.CompletionSignal().Done())
+	require.Equal(t, tools.CompletionMCPRequestJoined, activation.CompletionSignal().Proof(), "activation has its own action-scoped joined request contract")
 	require.Zero(t, peer.requests.Load())
 	require.Zero(t, peer.lists.Load())
 	require.Zero(t, peer.calls.Load())
@@ -228,13 +228,16 @@ func TestDurableMCPListContinuesAcrossOwnedRunsWithoutConnecting(t *testing.T) {
 	require.Zero(t, peer.calls.Load())
 }
 
-func newMCPListTestConfig(t *testing.T, servers []config.MCPServerConfig) *config.Config {
+func newMCPListTestConfig(t *testing.T, servers []config.MCPServerConfig, setup ...func(string)) *config.Config {
 	t.Helper()
 	base := newAssembleTestConfig(t)
 	root, err := filepath.EvalSymlinks(base.Git.WorkDir)
 	require.NoError(t, err)
 	base.Git.WorkDir = root
 	t.Chdir(root)
+	for _, prepare := range setup {
+		prepare(root)
+	}
 	base.MCP.Loading = "lazy"
 	base.Skill.Dir = filepath.Join(root, ".go-cli", "skills")
 	require.NoError(t, os.MkdirAll(base.Skill.Dir, 0700))

@@ -51,6 +51,7 @@ type loopConfig struct {
 	providerRetryPolicy            llm.RetryPolicy
 	tools                          tools.ToolRegistry
 	maxIterations                  int
+	allowedToolNames               []string
 	modelWrapper                   ModelWrapper
 	executionMode                  ExecutionMode
 	toolInterceptors               []ToolInterceptor
@@ -199,11 +200,13 @@ func WithThinkingConfig(cfg llm.ThinkingConfig) LoopOption {
 // the injected chat model, servicing any tool calls the model requests, and
 // returns the events it fired.
 type LoopAgent struct {
+	postToolActions                PostToolActions
 	model                          llm.BaseChatModel
 	providerAttemptRecorder        func(llm.ProviderAttemptResult) error
 	providerRetryPolicy            llm.RetryPolicy
 	tools                          tools.ToolRegistry
 	maxIterations                  int
+	allowedToolNames               []string
 	modelWrapper                   ModelWrapper
 	executionMode                  ExecutionMode
 	toolInterceptors               []ToolInterceptor
@@ -306,6 +309,7 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		providerRetryPolicy:            cfg.providerRetryPolicy,
 		tools:                          cfg.tools,
 		maxIterations:                  cfg.maxIterations,
+		allowedToolNames:               append([]string(nil), cfg.allowedToolNames...),
 		modelWrapper:                   cfg.modelWrapper,
 		executionMode:                  cfg.executionMode,
 		toolInterceptors:               append([]ToolInterceptor(nil), cfg.toolInterceptors...),
@@ -463,6 +467,9 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, stream ...EventStream) (runResult CanonicalRunResult, runErr error) {
 	ctx = withMaterializedArtifactAudit(ctx)
 	registry := runToolRegistry(ctx, l.tools)
+	if registry != nil && len(l.allowedToolNames) > 0 {
+		registry = newFilteredToolRegistry(registry, l.allowedToolNames)
+	}
 	events := make([]AgentEvent, 0)
 	transcript := []TranscriptEntry{{Message: AgentMessage{
 		Role:      string(llm.RoleUser),
@@ -874,7 +881,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		}
 
 		assistantIndex := uint64(len(transcript))
-		assistantOrdinal := uint64(iter + 1)
+		assistantOrdinal := nextAssistantOrdinal(transcript)
 		iterationCoordinates := agentEventCoordinates{runID: RunIDFromContext(spanCtx)}
 		if iterationCoordinates.runID != "" {
 			iterationCoordinates.canonicalTranscriptIndex = &assistantIndex
@@ -980,6 +987,18 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		if len(resp.ToolCalls) == 0 {
 			logger.Info("core.loop.finish", "iterations", iter+1, "messages", len(messages))
 			return CanonicalRunResult{Events: events, Transcript: transcript}, nil
+		}
+		for _, call := range resp.ToolCalls {
+			if call.Name == "dispatch_subagent" {
+				iterationCtx = withSubagentParentMessages(iterationCtx, messages)
+				break
+			}
+		}
+		postToolSourceStart := len(transcript)
+		if consumer != nil {
+			consumer.completedTools = map[string]completedToolAction{}
+		} else {
+			iterationCtx = withPostToolDispatchTracking(iterationCtx)
 		}
 		if l.executionMode == ExecutionModeParallel && len(resp.ToolCalls) > 1 {
 			// Parallel mode: emit pre-tool-call events, then execute
@@ -1174,6 +1193,16 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			}
 		}
 
+		// Groups that stopped with an unknown tool outcome return before this
+		// boundary; do not add shell side effects while the group is uncertain.
+		if err := l.executePostToolActions(iterationCtx, registry, consumer, resp.ToolCalls, postToolSourceStart, func(event AgentEvent, index, ordinal uint64) {
+			prior := eventCoordinates
+			eventCoordinates = agentEventCoordinates{runID: prior.runID, canonicalTranscriptIndex: &index, assistantTranscriptOrdinal: &ordinal}
+			sendEvent(event)
+			eventCoordinates = prior
+		}, &transcript, &messages); err != nil {
+			return CanonicalRunResult{Events: events, Transcript: transcript}, err
+		}
 	}
 
 	// Iteration budget exhausted.
@@ -2784,4 +2813,10 @@ func systemPrompt(ctx context.Context, tr tools.ToolRegistry) string {
 		return systemPromptFromDefs(nil)
 	}
 	return systemPromptFromDefs(defs)
+}
+
+// WithAllowedToolNames restricts both model visibility and execution after a
+// run generation resolves its registry. An empty list leaves it unrestricted.
+func WithAllowedToolNames(names []string) LoopOption {
+	return func(c *loopConfig) { c.allowedToolNames = append([]string(nil), names...) }
 }

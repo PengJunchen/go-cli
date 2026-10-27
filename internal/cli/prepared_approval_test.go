@@ -21,7 +21,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
-func TestAssembleRejectsConfiguredPostToolUseShellHook(t *testing.T) {
+func TestAssembleAcceptsConfiguredPostToolUseShellHook(t *testing.T) {
 	ctx := context.Background()
 	workDir := t.TempDir()
 	hookDir := filepath.Join(workDir, ".go-cli")
@@ -32,12 +32,12 @@ func TestAssembleRejectsConfiguredPostToolUseShellHook(t *testing.T) {
 
 	cfg := newTrustedProjectHookAssembleTestConfig(t, workDir)
 	assembly, err := AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard)
-	require.Nil(t, assembly)
-	require.ErrorIs(t, err, ErrPreparedPostToolUseHookUnsupported)
-	assert.Contains(t, err.Error(), "hooks.yaml hook 0")
+	require.NoError(t, err)
+	require.NotNil(t, assembly)
+	t.Cleanup(assembly.Cleanup)
 
 	_, err = os.Stat(markerPath)
-	assert.ErrorIs(t, err, os.ErrNotExist, "unsupported PostToolUse command must not execute during assembly")
+	assert.ErrorIs(t, err, os.ErrNotExist, "PostToolUse command must not execute during assembly")
 }
 
 func TestAssembleAcceptsPreAndSessionShellHooksWithoutUnavailableWarning(t *testing.T) {

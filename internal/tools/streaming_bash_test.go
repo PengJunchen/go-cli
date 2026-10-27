@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -281,11 +283,12 @@ func TestStreamingBashDrainsPastMaxOutput(t *testing.T) {
 		WithNoSandbox(),
 	)
 	sink := &mockStreamSink{}
+	command := streamingBashDrainCommand(t, false)
 	started := time.Now()
 	result, err := tool.ExecuteStreaming(context.Background(), ToolCall{
 		ID:   "call-drain",
 		Name: "bash",
-		Args: map[string]any{"command": "printf 'x\\n%.0s' {1..100000}"},
+		Args: map[string]any{"command": command},
 	}, sink)
 	elapsed := time.Since(started)
 
@@ -323,7 +326,7 @@ func TestStreamingBashDrainsConcurrentStdoutStderr(t *testing.T) {
 	result, err := tool.ExecuteStreaming(context.Background(), ToolCall{
 		ID:   "call-drain-both",
 		Name: "bash",
-		Args: map[string]any{"command": "for ((i=0; i<100000; i++)); do printf 'x\\n'; printf 'y\\n' >&2; done"},
+		Args: map[string]any{"command": streamingBashDrainCommand(t, true)},
 	}, sink)
 	require.NoError(t, err)
 	require.NotNil(t, result)
@@ -347,6 +350,20 @@ func TestStreamingBashDrainsConcurrentStdoutStderr(t *testing.T) {
 	}
 	assert.Equal(t, 1, truncationEvents)
 	assert.LessOrEqual(t, streamedBytes, maxOutput+len("\n[output truncated]"))
+}
+
+func streamingBashDrainCommand(t *testing.T, bothStreams bool) string {
+	t.Helper()
+	// Preserve 100,000 lines per pipe, beyond its capacity, without timing
+	// Bash's brace expansion or per-line printf loop. The real managed process
+	// must finish writing the entire file after capture has reached its limit.
+	path := filepath.Join(t.TempDir(), "drain-output")
+	require.NoError(t, os.WriteFile(path, []byte(strings.Repeat("x\n", 100000)), 0o600))
+	command := "cat " + shellQuoteTestArgument(path)
+	if bothStreams {
+		return command + " & stdout_pid=$!; " + command + " >&2 & stderr_pid=$!; wait \"$stdout_pid\" && wait \"$stderr_pid\""
+	}
+	return command
 }
 
 func TestStreamingBashLongLineReportsScannerErrorAndDrains(t *testing.T) {

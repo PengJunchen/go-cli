@@ -188,7 +188,7 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 	// Write the updated content atomically (temp file + rename) so a crash or
 	// write error never leaves the file truncated with partial content. The
 	// original permission bits are preserved by writeAtomic.
-	if _, werr := writeAtomic(abspath, []byte(updated)); werr != nil {
+	if _, werr := writeAtomicContext(ctx, abspath, []byte(updated)); werr != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("edit.write_failed", "path", abspath, "err", werr)
 		return nil, fmt.Errorf("edit: %w", werr)

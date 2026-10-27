@@ -118,6 +118,7 @@ type toolRegistrationMetadata struct {
 	canonicalWorkspaceRoot  string
 	workspaceReadWhitelist  []string
 	scopedReadProofEligible bool
+	managedDelegation       bool
 	schema                  ToolSchemaSnapshot
 	hasParameters           bool
 	description             string
@@ -137,6 +138,7 @@ type registeredToolSnapshot struct {
 	canonicalWorkspaceRoot  string
 	workspaceReadWhitelist  []string
 	scopedReadProofEligible bool
+	managedDelegation       bool
 	schema                  ToolSchemaSnapshot
 	hasParameters           bool
 	description             string
@@ -586,6 +588,9 @@ func (r *DefaultToolRegistry) registerDefinitionWithRuntimeReadScope(
 		workspaceReadWhitelist:  append([]string(nil), workspaceReadWhitelist...),
 		scopedReadProofEligible: scopedReadProofEligible,
 	}
+	if _, owned := def.(*ownedSubagentTool); owned && source == RegistrationSourceTrustedControl && completionProof == CompletionInlinePipelineJoined && onlyControlEffect(effects.Values()) {
+		metadata.managedDelegation = true
+	}
 	if parameterized, ok := def.(Parameterized); ok {
 		metadata.hasParameters = true
 		schema, err := freezeToolSchema(parameterized.Parameters())
@@ -667,6 +672,7 @@ func (r *DefaultToolRegistry) toolRegistrationSnapshot(_ context.Context, name s
 			canonicalWorkspaceRoot:  metadata.canonicalWorkspaceRoot,
 			workspaceReadWhitelist:  append([]string(nil), metadata.workspaceReadWhitelist...),
 			scopedReadProofEligible: metadata.scopedReadProofEligible,
+			managedDelegation:       metadata.managedDelegation,
 			schema:                  metadata.schema,
 			hasParameters:           metadata.hasParameters,
 			description:             metadata.description,

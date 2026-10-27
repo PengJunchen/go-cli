@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -35,6 +36,11 @@ func (s SubAgentState) String() string { return string(s) }
 
 // SubAgentConfig carries the construction-time settings for a SubAgent.
 type SubAgentConfig struct {
+	// ContextMode selects independent (default) or inherited conversation data.
+	ContextMode string
+	// ParentSessionID and ParentRunID are audit lineage, never run authority.
+	ParentSessionID string
+	ParentRunID     string
 	// Name identifies the sub-agent.
 	Name string
 	// SystemPrompt is the system prompt bound to the sub-task harness.
@@ -100,17 +106,19 @@ const defaultSubAgentMaxTurns = 1
 type DefaultSubAgent struct {
 	config SubAgentConfig
 
-	mu            sync.Mutex
-	state         SubAgentState
-	interrupted   bool
-	received      []string
-	events        chan AgentEvent
-	inbox         chan string
-	done          chan struct{}
-	result        AgentMessage
-	doneErr       error
-	cancel        context.CancelFunc
-	runnerFactory SubAgentRunnerFactory
+	mu                sync.Mutex
+	state             SubAgentState
+	interrupted       bool
+	inputSealed       bool
+	physicalSessionID string
+	received          []string
+	events            chan AgentEvent
+	inbox             chan string
+	done              chan struct{}
+	result            AgentMessage
+	doneErr           error
+	cancel            context.CancelFunc
+	runnerFactory     SubAgentRunnerFactory
 }
 
 var _ SubAgent = (*DefaultSubAgent)(nil)
@@ -243,6 +251,12 @@ func (s *DefaultSubAgent) Run(ctx context.Context, prompt string) (<-chan AgentE
 // runAndFinalize drives the runner, streams its events to the out channel, and
 // finalizes state once the runner returns or the context is canceled.
 func (s *DefaultSubAgent) runAndFinalize(ctx context.Context, prompt string, out chan<- AgentEvent, inbox <-chan string) {
+	s.mu.Lock()
+	cancel := s.cancel
+	s.mu.Unlock()
+	if cancel != nil {
+		defer cancel()
+	}
 	// Ensure channels are always closed, even if the runner panics, so that
 	// consumers waiting on out or s.done do not block forever.
 	defer close(s.done)
@@ -276,6 +290,11 @@ func (s *DefaultSubAgent) runAndFinalize(ctx context.Context, prompt string, out
 	}()
 
 	emit := func(ev AgentEvent) {
+		if ev.Kind == "subagent_session" {
+			s.mu.Lock()
+			s.physicalSessionID = ev.Content
+			s.mu.Unlock()
+		}
 		select {
 		case out <- ev:
 		case <-ctx.Done():
@@ -285,6 +304,7 @@ func (s *DefaultSubAgent) runAndFinalize(ctx context.Context, prompt string, out
 	var result AgentMessage
 	var err error
 	runner := s.runnerFactory(s.config)
+	spanCtx = context.WithValue(spanCtx, subagentInputSealKey{}, s.finishInput)
 	result, err = runner.Run(spanCtx, prompt, inbox, emit)
 
 	s.mu.Lock()
@@ -312,6 +332,11 @@ func (s *DefaultSubAgent) finalizeOutcome(err error, interrupted bool) (SubAgent
 	switch {
 	case interrupted:
 		s.setStateLocked(SubAgentInterrupted)
+		var unknown runOutcomeUnknown
+		var pending tools.PendingExecutionError
+		if (errors.As(err, &unknown) && unknown.OutcomeUnknown()) || errors.As(err, &pending) {
+			return SubAgentInterrupted, errors.Join(context.Canceled, err)
+		}
 		return SubAgentInterrupted, context.Canceled
 	case err != nil:
 		s.setStateLocked(SubAgentFailed)
@@ -339,7 +364,7 @@ func (s *DefaultSubAgent) Send(ctx context.Context, msg string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state != SubAgentRunning && s.state != SubAgentWaiting {
+	if s.inputSealed || (s.state != SubAgentRunning && s.state != SubAgentWaiting) {
 		return fmt.Errorf("%w: %q (state %s)", ErrSubAgentNotRunning, s.config.Name, s.state)
 	}
 	inbox := s.inbox
@@ -444,4 +469,28 @@ func pumpInbox(ctx context.Context, inbox <-chan string, emit func(AgentEvent)) 
 			return nil
 		}
 	}
+}
+
+func (s *DefaultSubAgent) finishInput() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var pending []string
+	for {
+		select {
+		case message := <-s.inbox:
+			pending = append(pending, message)
+		default:
+			if len(pending) == 0 {
+				s.inputSealed = true
+			}
+			return pending
+		}
+	}
+}
+
+// PhysicalSessionID returns the managed child's independently resumable session.
+func (s *DefaultSubAgent) PhysicalSessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.physicalSessionID
 }

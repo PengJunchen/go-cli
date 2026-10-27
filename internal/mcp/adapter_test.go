@@ -86,7 +86,7 @@ func runFakeMCPServer(conn net.Conn) {
 				},
 			}
 		case "tools/call":
-			res = map[string]any{"content": "hello"}
+			res = map[string]any{"content": mcpTextContent("hello")}
 		case "initialize":
 			res = map[string]any{
 				"protocolVersion": LatestProtocolVersion,
@@ -139,7 +139,7 @@ func TestAdaptedCallTool(t *testing.T) {
 	require.NoError(t, adapter.Connect(ctx))
 	result, err := adapter.CallTool(ctx, "echo", map[string]any{"msg": "hi"})
 	require.NoError(t, err)
-	assert.Equal(t, "hello", result.Content)
+	assert.Equal(t, mcpTextContent("hello"), result.Content)
 	assert.False(t, result.IsError)
 }
 
@@ -337,14 +337,12 @@ func TestAdapterDisconnectAllowsStdioReconnect(t *testing.T) {
 	_ = adapter.Disconnect(ctx) //nolint:errcheck // best-effort cleanup
 }
 
-func TestAdapterCallToolSurfacesIsErrorAndDefaultsContent(t *testing.T) {
+func TestAdapterCallToolSurfacesIsErrorWithEmptyContent(t *testing.T) {
 	t.Parallel()
 	serverConn, clientConn := net.Pipe()
 	defer closeConn(serverConn)
 
-	// Inline server: every request gets a result with isError=true and no
-	// "content" key, exercising both the IsError propagation and the
-	// nil-content defaulting path in CallTool.
+	// Inline server: isError=true still requires a valid content array.
 	go func() {
 		sc := bufio.NewScanner(serverConn)
 		for sc.Scan() {
@@ -357,7 +355,7 @@ func TestAdapterCallToolSurfacesIsErrorAndDefaultsContent(t *testing.T) {
 			frame := map[string]any{
 				"jsonrpc": "2.0",
 				"id":      req.ID,
-				"result":  map[string]any{"isError": true},
+				"result":  map[string]any{"isError": true, "content": []any{}},
 			}
 			b, err := json.Marshal(frame)
 			if err != nil {
@@ -377,7 +375,7 @@ func TestAdapterCallToolSurfacesIsErrorAndDefaultsContent(t *testing.T) {
 	result, err := adapter.CallTool(context.Background(), "echo", nil)
 	require.NoError(t, err)
 	assert.True(t, result.IsError, "IsError must be propagated to the caller")
-	assert.Equal(t, "", result.Content, "missing content must default to an empty string")
+	assert.Equal(t, []any{}, result.Content)
 }
 
 func TestConcurrentRequestsDoNotCorruptResponses(t *testing.T) {

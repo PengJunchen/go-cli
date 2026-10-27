@@ -19,6 +19,8 @@ var requestIDCounter atomic.Uint64
 // depends on tools), so the tool depends on its own interface and the core
 // package provides an adapter (core.AdaptSubagentDispatcher).
 type SubagentTask struct {
+	// ContextMode selects independent (default) or inherited conversation data.
+	ContextMode string
 	// ID uniquely identifies the task and names the spawned sub-agent.
 	ID string
 	// Prompt is the instruction the sub-agent executes.
@@ -41,6 +43,8 @@ type SubagentTask struct {
 
 // SubagentResult is the outcome of dispatching a SubagentTask.
 type SubagentResult struct {
+	// PhysicalSessionID identifies an independently resumable managed child.
+	PhysicalSessionID string
 	// TaskID links the result back to the originating task.
 	TaskID string
 	// Content is the final message produced by the sub-agent.
@@ -101,8 +105,9 @@ func (t *SubagentTool) Description() string {
 		"- tools ([]string, optional): tool names available to the sub-agent.\n" +
 		"- model (string, optional): model name to override the sub-agent's LLM. When omitted, the sub-agent inherits the parent model.\n" +
 		"- max_turns (int, optional): bound on the sub-agent turn loop.\n" +
+		"- context_mode (string, optional): independent (default) or inherit parent conversation as reference data.\n" +
 		"\n" +
-		"The sub-agent will return its result as content."
+		"The sub-agent will return its result as content. When present, Child physical session ID (physical_session_id) is the child's physical session ID and can be restored with --resume-session <physical_session_id>."
 }
 
 // Parameters returns the OpenAI-compatible JSON Schema describing the tool's
@@ -111,6 +116,7 @@ func (t *SubagentTool) Parameters() any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
+			"context_mode": subagentContextModeSchema(),
 			"prompt": map[string]any{
 				"type":        "string",
 				"description": "A clear, specific task description. Write it so the sub-agent can execute without extra context.",
@@ -143,6 +149,7 @@ func (t *SubagentTool) Parameters() any {
 				"items": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
+						"context_mode": subagentContextModeSchema(),
 						"prompt": map[string]any{
 							"type":        "string",
 							"description": "Task description for this parallel sub-task.",
@@ -177,7 +184,7 @@ func (t *SubagentTool) Parameters() any {
 				"description": "A unique task identifier; generated when omitted.",
 			},
 		},
-		"required":             []string{"prompt"},
+		"required":             []string{},
 		"additionalProperties": false,
 	}
 }
@@ -187,6 +194,7 @@ func (t *SubagentTool) PromptGuidelines() []string {
 	return []string{
 		"Use dispatch_subagent to delegate self-contained tasks to a focused sub-agent (roles: researcher, implementer, reviewer, tester)",
 		"Set parallel=true with a tasks array to run independent sub-tasks concurrently and aggregate their results",
+		"Use the returned Child physical session ID (physical_session_id) with --resume-session <physical_session_id> to restore that sub-agent's physical session",
 		"Avoid dispatching trivial tasks that a single direct tool call can handle",
 	}
 }
@@ -196,6 +204,9 @@ func (t *SubagentTool) PromptGuidelines() []string {
 // parameter is true or a tasks array is provided, it dispatches all tasks
 // concurrently via ParallelDispatch and returns a structured summary.
 func (t *SubagentTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	if err := validateSubagentContextMode(call.Args); err != nil {
+		return nil, err
+	}
 	parallel, _ := call.Args["parallel"].(bool) //nolint:errcheck
 	tasksRaw := call.Args["tasks"]
 
@@ -230,6 +241,7 @@ func (t *SubagentTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		Tools:        toStringSlice(call.Args["tools"]),
 		Model:        model,
 		MaxTurns:     toInt(call.Args["max_turns"]),
+		ContextMode:  getString(call.Args, "context_mode"),
 	}
 
 	slog.Debug("tools.subagent.execute",
@@ -241,26 +253,41 @@ func (t *SubagentTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 
 	res, err := t.dispatcher.Dispatch(ctx, task)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch_subagent: %w", err)
+		return &ToolResult{Output: subagentContentWithSession(res), Metadata: map[string]any{"task_id": res.TaskID, "physical_session_id": res.PhysicalSessionID}}, fmt.Errorf("dispatch_subagent: %w%s", err, subagentSessionLine(res.PhysicalSessionID))
 	}
 
 	metadata := map[string]any{
-		"task_id":  res.TaskID,
-		"duration": res.Duration,
+		"task_id":             res.TaskID,
+		"physical_session_id": res.PhysicalSessionID,
+		"duration":            res.Duration,
 	}
 	if res.Error != nil {
 		metadata["error"] = res.Error.Error()
-		return &ToolResult{Output: res.Content, Metadata: metadata}, fmt.Errorf("dispatch_subagent: %w", res.Error)
+		return &ToolResult{Output: subagentContentWithSession(res), Metadata: metadata}, fmt.Errorf("dispatch_subagent: %w%s", res.Error, subagentSessionLine(res.PhysicalSessionID))
 	}
 
-	return &ToolResult{Output: res.Content, Metadata: metadata}, nil
+	return &ToolResult{Output: subagentContentWithSession(res), Metadata: metadata}, nil
 }
 
 // executeParallel builds tasks from the tasks array (or a single prompt in
 // parallel mode), dispatches them concurrently, and returns a structured
 // summary of the results.
 func (t *SubagentTool) executeParallel(ctx context.Context, call ToolCall, tasksRaw any) (*ToolResult, error) {
+	if raw, ok := toAnySlice(tasksRaw); ok {
+		for _, value := range raw {
+			if item, ok := value.(map[string]any); ok {
+				if err := validateSubagentContextMode(item); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
 	tasks := buildParallelTasks(call, tasksRaw)
+	for i := range tasks {
+		if tasks[i].ContextMode == "" {
+			tasks[i].ContextMode = getString(call.Args, "context_mode")
+		}
+	}
 	if len(tasks) == 0 {
 		return nil, errors.New("dispatch_subagent: parallel mode requires at least one task")
 	}
@@ -269,9 +296,15 @@ func (t *SubagentTool) executeParallel(ctx context.Context, call ToolCall, tasks
 		"task_count", len(tasks),
 	)
 
+	for _, task := range tasks {
+		if task.ContextMode != "" && task.ContextMode != "independent" && task.ContextMode != "inherit" {
+			return nil, fmt.Errorf("dispatch_subagent: invalid context_mode %q", task.ContextMode)
+		}
+	}
 	results, err := t.dispatcher.ParallelDispatch(ctx, tasks)
 	if err != nil {
-		return nil, fmt.Errorf("dispatch_subagent: parallel dispatch: %w", err)
+		sessions := parallelSubagentSessionLines(results)
+		return &ToolResult{Output: sessions, Metadata: map[string]any{"physical_session_ids": subagentResultSessionIDs(results)}}, fmt.Errorf("dispatch_subagent: parallel dispatch: %w%s", err, sessions)
 	}
 
 	// Format results as structured text.
@@ -292,14 +325,16 @@ func (t *SubagentTool) executeParallel(ctx context.Context, call ToolCall, tasks
 		} else {
 			sb.WriteString(res.Content)
 		}
+		sb.WriteString(subagentSessionLine(res.PhysicalSessionID))
 		sb.WriteString("\n")
 		totalDuration += res.Duration
 	}
 
 	metadata := map[string]any{
-		"task_count": len(results),
-		"duration":   totalDuration,
-		"parallel":   true,
+		"task_count":           len(results),
+		"duration":             totalDuration,
+		"parallel":             true,
+		"physical_session_ids": subagentResultSessionIDs(results),
 	}
 	if firstErr != nil {
 		metadata["first_error"] = firstErr.Error()
@@ -333,6 +368,7 @@ func buildParallelTasks(call ToolCall, tasksRaw any) []SubagentTask {
 				Tools:        toStringSlice(m["tools"]),
 				Model:        getString(m, "model"),
 				MaxTurns:     toInt(m["max_turns"]),
+				ContextMode:  getString(m, "context_mode"),
 			})
 		}
 		return tasks
@@ -356,6 +392,7 @@ func buildParallelTasks(call ToolCall, tasksRaw any) []SubagentTask {
 		Tools:        toStringSlice(call.Args["tools"]),
 		Model:        getString(call.Args, "model"),
 		MaxTurns:     toInt(call.Args["max_turns"]),
+		ContextMode:  getString(call.Args, "context_mode"),
 	}}
 }
 
@@ -424,4 +461,47 @@ func toInt(v any) int {
 		return int(n)
 	}
 	return 0
+}
+
+func subagentContextModeSchema() map[string]any {
+	return map[string]any{"type": "string", "enum": []string{"independent", "inherit"}, "description": "Independent task context (default), or inherit parent conversation as reference data without its permissions."}
+}
+
+func validateSubagentContextMode(args map[string]any) error {
+	value, exists := args["context_mode"]
+	if !exists {
+		return nil
+	}
+	mode, ok := value.(string)
+	if !ok || (mode != "independent" && mode != "inherit") {
+		return errors.New("dispatch_subagent: context_mode must be independent or inherit")
+	}
+	return nil
+}
+
+func subagentResultSessionIDs(results []SubagentResult) []string {
+	ids := make([]string, len(results))
+	for i, result := range results {
+		ids[i] = result.PhysicalSessionID
+	}
+	return ids
+}
+
+func subagentSessionLine(id string) string {
+	if id == "" {
+		return ""
+	}
+	return "\nChild physical session ID (physical_session_id): " + id
+}
+func subagentContentWithSession(result SubagentResult) string {
+	return result.Content + subagentSessionLine(result.PhysicalSessionID)
+}
+func parallelSubagentSessionLines(results []SubagentResult) string {
+	var output strings.Builder
+	for i, result := range results {
+		if result.PhysicalSessionID != "" {
+			fmt.Fprintf(&output, "\nTask %d child session ID: %s", i+1, result.PhysicalSessionID)
+		}
+	}
+	return output.String()
 }

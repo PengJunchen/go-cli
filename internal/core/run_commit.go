@@ -288,8 +288,9 @@ type ActionIntent struct {
 	ArgumentDigest [32]byte                  `json:"argument_digest"`
 	// EffectSet is runtime-only trust. A durable sink may persist Values() as
 	// facts, but must not hydrate those labels into an authorization capability.
-	EffectSet       tools.TrustedEffectSet          `json:"-"`
-	ScopedReadProof *tools.ScopedWorkspaceReadProof `json:"-"`
+	EffectSet              tools.TrustedEffectSet          `json:"-"`
+	ScopedReadProof        *tools.ScopedWorkspaceReadProof `json:"-"`
+	ManagedDelegationProof *tools.ManagedDelegationProof   `json:"-"`
 }
 
 // ActionExecution records the dispatch fence and local resource observation

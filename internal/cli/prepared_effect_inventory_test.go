@@ -140,9 +140,10 @@ func assembledToolEffectInventory() map[string]preparedEffectInventoryExpectatio
 	add(tools.RegistrationSourceToolRegistry, tools.EffectUnknown, false,
 		"git_diff", "git_status", "git_commit", "git_log", "git_branch", "git_checkout", "git_blame",
 		"git_push", "git_create_branch", "git_merge", "git_stash", "git_stash_pop", "git_reset",
-		"git_revert", "git_fetch", "git_pull", "git_remote", "git_pr_create", "dispatch_subagent",
+		"git_revert", "git_fetch", "git_pull", "git_remote", "git_pr_create",
 		"todo_write", "task_create", "task_update", "goal_create", "goal_update",
 	)
+	add(tools.RegistrationSourceTrustedControl, tools.EffectControl, false, "dispatch_subagent")
 	add(tools.RegistrationSourceTrustedControl, tools.EffectControl, true,
 		"task_get", "task_list", "goal_list", "goal_get", "ask_user", "tool_search",
 	)

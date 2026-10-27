@@ -89,6 +89,10 @@ func (e *httpOperationPendingError) Unwrap() error { return e.cause }
 // for. It does not claim that a remote tool side effect succeeded or failed.
 func (e *httpOperationPendingError) Done() <-chan struct{} { return e.done }
 
+// ExecutionDone preserves pending local lifecycle ownership through prepared
+// activation errors; returning from a waiter does not establish resource join.
+func (e *httpOperationPendingError) ExecutionDone() <-chan struct{} { return e.done }
+
 func (e *httpOperationPendingError) Is(target error) bool {
 	return target == ErrHTTPOperationPending
 }
@@ -657,12 +661,9 @@ func (a *HTTPClientAdapter) CallTool(ctx context.Context, name string, args map[
 		return nil, fmt.Errorf("mcp: call tool %q: %w", name, toolCallOutcomeError(name, err))
 	}
 
-	result := &MCPToolResult{
-		Content: res["content"],
-		IsError: boolVal(res["isError"]),
-	}
-	if result.Content == nil {
-		result.Content = ""
+	result, err := decodeCallToolResult(res)
+	if err != nil {
+		return nil, fmt.Errorf("mcp: call tool %q: %w", name, toolCallOutcomeError(name, err))
 	}
 	return result, nil
 }

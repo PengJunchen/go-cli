@@ -200,6 +200,7 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		timeout = classifyCommand(command)
 	}
 
+	timeout = runtimeBashTimeout(ctx, timeout)
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := execCtx.Err(); err != nil {
@@ -213,6 +214,9 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	cmd := exec.Command("bash", "-lc", command)
 	cmd.Dir = t.Workdir
 	cmd.Env = filteredEnv(t.Env)
+	if _, supplied := bashRuntimeInputFromContext(ctx); supplied {
+		cmd.Stdin = runtimeBashStdin(ctx)
+	}
 
 	managed, err := startManagedLocalBashCommand(execCtx, cancel, cmd)
 	if err != nil {

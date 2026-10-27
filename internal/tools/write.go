@@ -249,7 +249,7 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 	}
 
 	parent := filepath.Dir(abspath)
-	if err := os.MkdirAll(parent, 0o750); err != nil {
+	if err := startPreparedEffect(ctx, func() error { return os.MkdirAll(parent, 0o750) }); err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("write.mkdir_failed", "dir", parent, "err", err)
 		return nil, fmt.Errorf("write: %w", err)
@@ -292,7 +292,8 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 			logger.Error("write.open_failed", "path", abspath, "err", err)
 			return nil, fmt.Errorf("write: %w", err)
 		}
-		n, werr := f.WriteString(content)
+		var n int
+		werr := startPreparedEffect(ctx, func() error { var err error; n, err = f.WriteString(content); return err })
 		closeErr := f.Close()
 		written = n
 		if werr != nil {
@@ -306,7 +307,7 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 			return nil, fmt.Errorf("write: %w", closeErr)
 		}
 	} else {
-		n, werr := writeAtomic(abspath, []byte(content))
+		n, werr := writeAtomicContext(ctx, abspath, []byte(content))
 		written = n
 		if werr != nil {
 			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
@@ -336,11 +337,12 @@ func (t *WriteTool) PromptGuidelines() []string {
 	return []string{"Use write to create new files or overwrite existing ones"}
 }
 
-// writeAtomic writes data to a temp file in the destination directory and
+// writeAtomicContext writes data to a temp file in the destination directory and
 // renames it into place so a crash never leaves a partially written file. The
 // existing file's permission bits (or 0644 for a new file) are preserved.
-func writeAtomic(dest string, data []byte) (int, error) {
-	tmp, err := os.CreateTemp(filepath.Dir(dest), ".write-*")
+func writeAtomicContext(ctx context.Context, dest string, data []byte) (int, error) {
+	var tmp *os.File
+	err := startPreparedEffect(ctx, func() error { var err error; tmp, err = os.CreateTemp(filepath.Dir(dest), ".write-*"); return err })
 	if err != nil {
 		return 0, err
 	}
@@ -365,7 +367,7 @@ func writeAtomic(dest string, data []byte) (int, error) {
 		}
 	}
 
-	if err := os.Rename(tmpName, dest); err != nil {
+	if err := startPreparedEffect(ctx, func() error { return os.Rename(tmpName, dest) }); err != nil {
 		return 0, err
 	}
 	return n, nil

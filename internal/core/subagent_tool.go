@@ -11,6 +11,8 @@ import (
 
 // SubagentTask describes a unit of work delegated to a sub-agent.
 type SubagentTask struct {
+	// ContextMode selects independent (default) or inherited conversation data.
+	ContextMode string
 	// ID uniquely identifies the task and names the spawned sub-agent.
 	ID string
 	// Prompt is the instruction the sub-agent executes.
@@ -33,6 +35,8 @@ type SubagentTask struct {
 
 // SubagentResult is the outcome of dispatching a SubagentTask.
 type SubagentResult struct {
+	// PhysicalSessionID identifies an independently resumable managed child.
+	PhysicalSessionID string
 	// TaskID links the result back to the originating task.
 	TaskID string
 	// Content is the final message produced by the sub-agent.
@@ -128,7 +132,7 @@ func (d *DefaultSubagentDispatcher) forwardEvents(taskID string, evCh <-chan Age
 // running for the duration of the dispatch.
 func (d *DefaultSubagentDispatcher) Dispatch(ctx context.Context, task SubagentTask) (SubagentResult, error) {
 	start := time.Now()
-	if _, _, bound := RunCommitFromContext(ctx); bound {
+	if _, _, bound := RunCommitFromContext(ctx); bound && !d.managesIndependentChildren() {
 		return SubagentResult{TaskID: task.ID, Error: ErrRunCommitChildUnsupported, Duration: time.Since(start)}, ErrRunCommitChildUnsupported
 	}
 	slog.Debug("core.subagent_dispatcher.dispatch",
@@ -144,6 +148,7 @@ func (d *DefaultSubagentDispatcher) Dispatch(ctx context.Context, task SubagentT
 		Tools:        resolveSubAgentTools(task),
 		Model:        task.Model,
 		MaxTurns:     task.MaxTurns,
+		ContextMode:  task.ContextMode,
 	}
 	sub, err := d.factory.Create(ctx, task.ID, config)
 	if err != nil {
@@ -201,6 +206,9 @@ func (d *DefaultSubagentDispatcher) Dispatch(ctx context.Context, task SubagentT
 
 	final, waitErr := sub.Wait(ctx)
 	wg.Wait() // ensure all forwarded events are processed before returning
+	if d.managesIndependentChildren() {
+		final, waitErr = sub.Wait(context.WithoutCancel(ctx))
+	}
 	duration := time.Since(start)
 
 	slog.Debug("core.subagent_dispatcher.complete",
@@ -210,10 +218,11 @@ func (d *DefaultSubagentDispatcher) Dispatch(ctx context.Context, task SubagentT
 	)
 
 	return SubagentResult{
-		TaskID:   task.ID,
-		Content:  final.Content,
-		Error:    waitErr,
-		Duration: duration,
+		PhysicalSessionID: subagentPhysicalSessionID(sub),
+		TaskID:            task.ID,
+		Content:           final.Content,
+		Error:             waitErr,
+		Duration:          duration,
 	}, waitErr
 }
 
@@ -239,13 +248,14 @@ func (d *DefaultSubagentDispatcher) ParallelDispatch(ctx context.Context, tasks 
 	if len(tasks) == 0 {
 		return []SubagentResult{}, nil
 	}
-	if _, _, bound := RunCommitFromContext(ctx); bound {
+	if _, _, bound := RunCommitFromContext(ctx); bound && !d.managesIndependentChildren() {
 		return nil, ErrRunCommitChildUnsupported
 	}
 
 	// Create sub-agents sequentially for deterministic factory assignment.
 	starts := make([]time.Time, len(tasks))
 	subs := make([]SubAgent, len(tasks))
+	started := make([]bool, len(tasks))
 	createErrs := make([]error, len(tasks))
 	for i, task := range tasks {
 		starts[i] = time.Now()
@@ -255,6 +265,7 @@ func (d *DefaultSubagentDispatcher) ParallelDispatch(ctx context.Context, tasks 
 			Tools:        resolveSubAgentTools(task),
 			Model:        task.Model,
 			MaxTurns:     task.MaxTurns,
+			ContextMode:  task.ContextMode,
 		}
 		subs[i], createErrs[i] = d.factory.Create(ctx, task.ID, config)
 	}
@@ -322,6 +333,7 @@ func (d *DefaultSubagentDispatcher) ParallelDispatch(ctx context.Context, tasks 
 				return
 			}
 
+			started[idx] = true
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -330,10 +342,11 @@ func (d *DefaultSubagentDispatcher) ParallelDispatch(ctx context.Context, tasks 
 
 			final, waitErr := subs[idx].Wait(ctx)
 			results[idx] = SubagentResult{
-				TaskID:   t.ID,
-				Content:  final.Content,
-				Error:    waitErr,
-				Duration: time.Since(starts[idx]),
+				PhysicalSessionID: subagentPhysicalSessionID(subs[idx]),
+				TaskID:            t.ID,
+				Content:           final.Content,
+				Error:             waitErr,
+				Duration:          time.Since(starts[idx]),
 			}
 			if waitErr != nil {
 				errMu.Lock()
@@ -345,6 +358,24 @@ func (d *DefaultSubagentDispatcher) ParallelDispatch(ctx context.Context, tasks 
 		}(i, task)
 	}
 	wg.Wait()
+	if d.managesIndependentChildren() {
+		for i, running := range started {
+			if !running {
+				continue
+			}
+			final, err := subs[i].Wait(context.WithoutCancel(ctx))
+			results[i].Content = final.Content
+			results[i].Error = err
+			results[i].PhysicalSessionID = subagentPhysicalSessionID(subs[i])
+		}
+		firstErr = nil
+		for _, result := range results {
+			if result.Error != nil {
+				firstErr = result.Error
+				break
+			}
+		}
+	}
 	return results, firstErr
 }
 
@@ -375,12 +406,14 @@ func (a *subagentDispatcherAdapter) Dispatch(ctx context.Context, task tools.Sub
 		Tools:        task.Tools,
 		Model:        task.Model,
 		MaxTurns:     task.MaxTurns,
+		ContextMode:  task.ContextMode,
 	})
 	return tools.SubagentResult{
-		TaskID:   res.TaskID,
-		Content:  res.Content,
-		Error:    res.Error,
-		Duration: res.Duration,
+		PhysicalSessionID: res.PhysicalSessionID,
+		TaskID:            res.TaskID,
+		Content:           res.Content,
+		Error:             res.Error,
+		Duration:          res.Duration,
 	}, err
 }
 
@@ -397,22 +430,21 @@ func (a *subagentDispatcherAdapter) ParallelDispatch(ctx context.Context, tasks 
 			Tools:        t.Tools,
 			Model:        t.Model,
 			MaxTurns:     t.MaxTurns,
+			ContextMode:  t.ContextMode,
 		}
 	}
 	results, err := a.d.ParallelDispatch(ctx, coreTasks)
-	if err != nil {
-		return nil, err
-	}
 	out := make([]tools.SubagentResult, len(results))
 	for i, r := range results {
 		out[i] = tools.SubagentResult{
-			TaskID:   r.TaskID,
-			Content:  r.Content,
-			Error:    r.Error,
-			Duration: r.Duration,
+			PhysicalSessionID: r.PhysicalSessionID,
+			TaskID:            r.TaskID,
+			Content:           r.Content,
+			Error:             r.Error,
+			Duration:          r.Duration,
 		}
 	}
-	return out, nil
+	return out, err
 }
 
 // ListRunning converts the core running tasks to the tools-level type.
@@ -428,6 +460,7 @@ func (a *subagentDispatcherAdapter) ListRunning() []tools.SubagentTask {
 			Tools:        t.Tools,
 			Model:        t.Model,
 			MaxTurns:     t.MaxTurns,
+			ContextMode:  t.ContextMode,
 		}
 	}
 	return out
@@ -438,4 +471,16 @@ func (a *subagentDispatcherAdapter) ListRunning() []tools.SubagentTask {
 // core dispatcher and want a registered tool.
 func NewSubagentTool(d SubagentDispatcher) *tools.SubagentTool {
 	return tools.NewSubagentTool(AdaptSubagentDispatcher(d))
+}
+
+func (d *DefaultSubagentDispatcher) managesIndependentChildren() bool {
+	_, ok := d.factory.(*managedSubAgentFactory)
+	return ok
+}
+
+func subagentPhysicalSessionID(sub SubAgent) string {
+	if identified, ok := sub.(interface{ PhysicalSessionID() string }); ok {
+		return identified.PhysicalSessionID()
+	}
+	return ""
 }

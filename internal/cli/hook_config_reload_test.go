@@ -21,6 +21,15 @@ import (
 )
 
 func TestDynamicSkillOnlyReloadKeepsVerifiedJSONHookExecutable(t *testing.T) {
+	runDynamicVerifiedJSONHookReload(t, "pre_tool_use")
+}
+
+func TestDynamicPostToolReloadKeepsVerifiedJSONHookExecutable(t *testing.T) {
+	runDynamicVerifiedJSONHookReload(t, "post_tool_use")
+}
+
+func runDynamicVerifiedJSONHookReload(t *testing.T, event string) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -49,6 +58,7 @@ func TestDynamicSkillOnlyReloadKeepsVerifiedJSONHookExecutable(t *testing.T) {
 	}
 	writeSkill("one")
 	hooks := []byte(" \n" + `{"hooks":[{"event":"pre_tool_use","command":"cat >/dev/null; printf 'HOOK_STABLE\\n' >> hook-events","timeout":"1s"}]}`)
+	hooks = []byte(strings.ReplaceAll(string(hooks), "pre_tool_use", event))
 	hookPath := filepath.Join(root, ".go-cli", "hooks.yaml")
 	require.NoError(t, os.WriteFile(hookPath, hooks, 0600))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "input.txt"), []byte("verified input"), 0600))
@@ -106,13 +116,25 @@ func TestDynamicSkillOnlyReloadKeepsVerifiedJSONHookExecutable(t *testing.T) {
 		plan := runCtx.Value(runtimePlanKey{}).(*runtimePlan)
 		require.NotNil(t, plan.interceptor)
 		require.Len(t, plan.hooks.Hooks(), 1)
-		_, err = assembly.LoopAgent.RunCanonical(runCtx, core.Submission{Content: "read input.txt"})
+		runResult, runErr := assembly.LoopAgent.RunCanonical(runCtx, core.Submission{Content: "read input.txt"})
+		err = runErr
+		if event == "post_tool_use" {
+			for _, entry := range runResult.Transcript {
+				if strings.HasPrefix(entry.Message.ToolCallID, "post-hook-") {
+					require.Equal(t, core.ReceiptOutcomeSuccess, entry.Message.ReceiptOutcome, entry.Message.Content)
+				}
+			}
+		}
 		require.NoError(t, err)
 		metadata, _ := core.RunGenerationMetadataFromContext(runCtx)
 		return metadata.GenerationID
 	}
 	before := run()
 	writeSkill("two")
+	if event == "post_tool_use" {
+		hooks = []byte(strings.ReplaceAll(string(hooks), "HOOK_STABLE", "HOOK_UPDATED"))
+		require.NoError(t, os.WriteFile(hookPath, hooks, 0600))
+	}
 	grant()
 	require.NoError(t, assembly.ReloadCapabilities(ctx), "unchanged verified JSON hooks must remain accepted after a skill-only grant")
 	require.NotEqual(t, before, run())
@@ -124,7 +146,12 @@ func TestDynamicSkillOnlyReloadKeepsVerifiedJSONHookExecutable(t *testing.T) {
 	require.Equal(t, data, actual)
 	actual, err = os.ReadFile(filepath.Join(root, "hook-events"))
 	require.NoError(t, err)
-	require.Equal(t, 2, strings.Count(string(actual), "HOOK_STABLE"))
+	if event == "post_tool_use" {
+		require.Equal(t, 1, strings.Count(string(actual), "HOOK_STABLE"))
+		require.Equal(t, 1, strings.Count(string(actual), "HOOK_UPDATED"))
+	} else {
+		require.Equal(t, 2, strings.Count(string(actual), "HOOK_STABLE"))
+	}
 }
 
 func TestShellHookConfigFormatsKeepRuntimeSemanticGuards(t *testing.T) {
@@ -135,10 +162,10 @@ func TestShellHookConfigFormatsKeepRuntimeSemanticGuards(t *testing.T) {
 		declarations, err := parseShellHooksConfig([]byte(input))
 		require.NoError(t, err)
 		require.Len(t, declarations.Hooks, 1)
+		require.NoError(t, validateRuntimeHooks(&config.Config{Hooks: config.HooksConfig{Hooks: []config.HookConfig{{Event: "post_tool_use", Command: "true"}}}}))
 		require.NoError(t, validateRuntimeHooks(&config.Config{Hooks: declarations}))
 		for _, invalid := range []config.HookConfig{
 			{Event: "unknown", Command: "true"},
-			{Event: "post_tool_use", Command: "true"},
 			{Event: "pre_tool_use", Command: "true", Timeout: "0s"},
 			{Event: "pre_tool_use", Command: "true", Timeout: "61s"},
 		} {

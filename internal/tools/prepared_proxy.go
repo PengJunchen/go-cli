@@ -122,7 +122,9 @@ func (d *preparedToolDefinition) Execute(ctx context.Context, call ToolCall) (*T
 	if err != nil {
 		return nil, err
 	}
-	return invocation.Dispatch(ctx)
+	result, dispatchErr := invocation.Dispatch(ctx)
+	observePreparedDispatch(ctx, invocation, d.def, result, dispatchErr)
+	return result, dispatchErr
 }
 
 type parameterizedCapability struct{ schema ToolSchemaSnapshot }
@@ -155,7 +157,9 @@ func (c streamingCapability) ExecuteStreaming(ctx context.Context, call ToolCall
 	if !ok {
 		return nil, ErrPreparedInvocationUnavailable
 	}
-	return streaming.DispatchStreaming(ctx, sink)
+	result, dispatchErr := streaming.DispatchStreaming(ctx, sink)
+	observePreparedDispatch(ctx, invocation, c.definition, result, dispatchErr)
+	return result, dispatchErr
 }
 
 type topToolsCapability struct {

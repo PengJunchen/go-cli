@@ -320,6 +320,9 @@ func (s *SessionRunCommitSink) BeginIntentBatch(ctx context.Context, batch core.
 				return fmt.Errorf("session: scoped read proof does not match prepared intent %q", intent.ToolCallID)
 			}
 		}
+		if intent.ManagedDelegationProof != nil && !intent.ManagedDelegationProof.MatchesAction(intent.ToolIdentity, intent.EffectSet, intent.SchemaDigest, intent.ArgumentDigest, intent.ToolCallID, batch.CanonicalWorkspaceRoot) {
+			return errors.New("session: managed delegation proof differs from prepared intent")
+		}
 		entryID, err := stableRunCommitEntryID("intent", struct {
 			SessionID string
 			Workspace string
@@ -361,7 +364,8 @@ func (s *SessionRunCommitSink) BeginIntentBatch(ctx context.Context, batch core.
 				ToolCallID: intent.ToolCallID, ActionID: intent.ActionID,
 			},
 			ToolIdentity: &identity, EffectSet: append([]tools.TrustedToolEffect(nil), effects...),
-			ScopedReadProof: intent.ScopedReadProof,
+			ScopedReadProof:        intent.ScopedReadProof,
+			ManagedDelegationProof: intent.ManagedDelegationProof,
 		})
 	}
 	if existingIntentCount != 0 && existingIntentCount != len(batch.Intents) {
