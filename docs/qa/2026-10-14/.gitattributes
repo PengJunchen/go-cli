@@ -1,4 +1,0 @@
-# Captured streams retain terminal control bytes and original line endings.
-terminal/*.pty.ansi binary
-longtask/rawlogs/* binary
-tools/rawlogs/* binary

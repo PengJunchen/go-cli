@@ -1,27 +1,0 @@
-]11;?\[6nInteractive session started. Type 'exit' to quit.
-[?2004h> [J> P[J> PT[J> PTY[J> PTY [J> PTY c[J> PTY ca[J> PTY can[J> PTY canc[J> PTY cance[J> PTY cancel[J> PTY cancel [J> PTY cancel a[J> PTY cancel ac[J> PTY cancel act[J> PTY cancel acti[J> PTY cancel activ[J> PTY cancel active
-[?2004l[?25l[?2004hSession: s_5064783597d6ba5ba4a4948c19b6e38e | Branch: main | Loaded rows: 0 | lo
-pty-review-model | turn #1 | interact | chat[K[A
-[assistant · live][K
-[tool call_cancel_active][K
-write[K
-pty-review-model | turn #1 | interact | chat[K[4A[approval] write[K
-  local interaction #1[K
-  scope: unknown; once only; reuse unavailable[K
-  details 1-7/7[K
-  args:[K
-    content: CANCEL_ACTIVE_MUST_NOT_BE_WRITTEN[K
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-r5-pty-35zmy[K
-xv0/cancel-workspace/cancel-active.txt[K
-  diff:[K
-    +CANCEL_ACTIVE_MUST_NOT_BE_WRITTEN[K
-[K
-  [y] once [n] reject [Esc] cancel [d] diff[K[11A[approval] write[K
-  local interaction 
-scope unknown · resi
-[y] locked [n] no[K[J[3A[K
-pty-review-model | t[J[A
-
-[durable publication[2K[?2004l[?25h[?1002l[?1003l[?1006l[interrupted]
-[?2004h> [J> /[J> /e[J> /ex[J> /exi[J> /exit
-[?2004lSession ended.

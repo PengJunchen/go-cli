@@ -1,9 +1,0 @@
-goos: darwin
-goarch: arm64
-pkg: github.com/pengjunchen/go-cli/internal/tui
-cpu: Apple M5
-BenchmarkBubbleTeaIncrementalTinyChunkUpdateView-10    	       1	  10347000 ns/op	  25.34 MB/s	56441984 B/op	  132945 allocs/op
-BenchmarkBubbleTeaIncrementalTinyChunkUpdateView-10    	       1	   9983625 ns/op	  26.26 MB/s	56441712 B/op	  132943 allocs/op
-BenchmarkBubbleTeaIncrementalTinyChunkUpdateView-10    	       1	  10232334 ns/op	  25.62 MB/s	56441936 B/op	  132944 allocs/op
-PASS
-ok  	github.com/pengjunchen/go-cli/internal/tui	0.049s

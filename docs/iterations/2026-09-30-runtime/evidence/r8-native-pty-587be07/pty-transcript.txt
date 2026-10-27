@@ -1,828 +1,0 @@
-Interactive session started. Type 'exit' to quit.
-> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 0> R8 seed 00
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 2 | lo
-[user]
-R8 seed 00
-[assistant]
-R8-ANSWER-00 durable viewport marker.
-r8-local-fixture | turn #1 | interact | chat
-Tokens: 14/8000 (0%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 0> R8 seed 01
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 4 | lo
-[user]
-R8 seed 00
-[assistant]
-R8-ANSWER-00 durable viewport marker.
-[user]
-R8 seed 01
-[assistant]
-R8-ANSWER-01 durable viewport marker.
-r8-local-fixture | turn #2 | interact | chat
-Tokens: 28/8000 (0%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 0> R8 seed 02
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 6 | lo
-[user]
-R8 seed 00
-[assistant]
-R8-ANSWER-00 durable viewport marker.
-[user]
-R8 seed 01
-[assistant]
-R8-ANSWER-01 durable viewport marker.
-[user]
-R8 seed 02
-[assistant]
-R8-ANSWER-02 durable viewport marker.
-r8-local-fixture | turn #3 | interact | chat
-Tokens: 42/8000 (0%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 0> R8 seed 03
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 8 | lo
-[user]
-R8 seed 00
-[assistant]
-R8-ANSWER-00 durable viewport marker.
-[user]
-R8 seed 01
-[assistant]
-R8-ANSWER-01 durable viewport marker.
-[user]
-R8 seed 02
-[assistant]
-R8-ANSWER-02 durable viewport marker.
-[user]
-R8 seed 03
-[assistant]
-R8-ANSWER-03 durable viewport marker.
-r8-local-fixture | turn #4 | interact | chat
-Tokens: 56/8000 (0%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 0> R8 seed 04
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 10 | l
-R8 seed 00
-[assistant]
-R8-ANSWER-00 durable viewport marker.
-[user]
-R8 seed 01
-[assistant]
-R8-ANSWER-01 durable viewport marker.
-[user]
-R8 seed 02
-[assistant]
-R8-ANSWER-02 durable viewport marker.
-[user]
-R8 seed 03
-[assistant]
-R8-ANSWER-03 durable viewport marker.
-[user]
-R8 seed 04
-[assistant]
-R8-ANSWER-04 durable viewport marker.
-r8-local-fixture | turn #5 | interact | chat
-Tokens: 70/8000 (0%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 0> R8 seed 05
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 12 | l
-R8 seed 01
-[assistant]
-R8-ANSWER-01 durable viewport marker.
-[user]
-R8 seed 02
-[assistant]
-R8-ANSWER-02 durable viewport marker.
-[user]
-R8 seed 03
-[assistant]
-R8-ANSWER-03 durable viewport marker.
-[user]
-R8 seed 04
-[assistant]
-R8-ANSWER-04 durable viewport marker.
-[user]
-R8 seed 05
-[assistant]
-R8-ANSWER-05 durable viewport marker.
-r8-local-fixture | turn #6 | interact | chat
-Tokens: 84/8000 (1%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 0> R8 seed 06
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 14 | l
-R8 seed 02
-[assistant]
-R8-ANSWER-02 durable viewport marker.
-[user]
-R8 seed 03
-[assistant]
-R8-ANSWER-03 durable viewport marker.
-[user]
-R8 seed 04
-[assistant]
-R8-ANSWER-04 durable viewport marker.
-[user]
-R8 seed 05
-[assistant]
-R8-ANSWER-05 durable viewport marker.
-[user]
-R8 seed 06
-[assistant]
-R8-ANSWER-06 durable viewport marker.
-r8-local-fixture | turn #7 | interact | chat
-Tokens: 98/8000 (1%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 0> R8 seed 07
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 16 | l
-R8 seed 03
-[assistant]
-R8-ANSWER-03 durable viewport marker.
-[user]
-R8 seed 04
-[assistant]
-R8-ANSWER-04 durable viewport marker.
-[user]
-R8 seed 05
-[assistant]
-R8-ANSWER-05 durable viewport marker.
-[user]
-R8 seed 06
-[assistant]
-R8-ANSWER-06 durable viewport marker.
-[user]
-R8 seed 07
-[assistant]
-R8-ANSWER-07 durable viewport marker.
-r8-local-fixture | turn #8 | interact | chat
-Tokens: 112/8000 (1%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 0> R8 seed 08
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 18 | l
-R8 seed 04
-[assistant]
-R8-ANSWER-04 durable viewport marker.
-[user]
-R8 seed 05
-[assistant]
-R8-ANSWER-05 durable viewport marker.
-[user]
-R8 seed 06
-[assistant]
-R8-ANSWER-06 durable viewport marker.
-[user]
-R8 seed 07
-[assistant]
-R8-ANSWER-07 durable viewport marker.
-[user]
-R8 seed 08
-[assistant]
-R8-ANSWER-08 durable viewport marker.
-r8-local-fixture | turn #9 | interact | chat
-Tokens: 126/8000 (1%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 0> R8 seed 09
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 20 | l
-R8 seed 05
-[assistant]
-R8-ANSWER-05 durable viewport marker.
-[user]
-R8 seed 06
-[assistant]
-R8-ANSWER-06 durable viewport marker.
-[user]
-R8 seed 07
-[assistant]
-R8-ANSWER-07 durable viewport marker.
-[user]
-R8 seed 08
-[assistant]
-R8-ANSWER-08 durable viewport marker.
-[user]
-R8 seed 09
-[assistant]
-R8-ANSWER-09 durable viewport marker.
-r8-local-fixture | turn #10 | interact | chat
-Tokens: 140/8000 (1%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 1> R8 seed 10
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 22 | l
-R8 seed 06
-[assistant]
-R8-ANSWER-06 durable viewport marker.
-[user]
-R8 seed 07
-[assistant]
-R8-ANSWER-07 durable viewport marker.
-[user]
-R8 seed 08
-[assistant]
-R8-ANSWER-08 durable viewport marker.
-[user]
-R8 seed 09
-[assistant]
-R8-ANSWER-09 durable viewport marker.
-[user]
-R8 seed 10
-[assistant]
-R8-ANSWER-10 durable viewport marker.
-r8-local-fixture | turn #11 | interact | chat
-Tokens: 154/8000 (1%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 1> R8 seed 11
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 24 | l
-R8 seed 07
-[assistant]
-R8-ANSWER-07 durable viewport marker.
-[user]
-R8 seed 08
-[assistant]
-R8-ANSWER-08 durable viewport marker.
-[user]
-R8 seed 09
-[assistant]
-R8-ANSWER-09 durable viewport marker.
-[user]
-R8 seed 10
-[assistant]
-R8-ANSWER-10 durable viewport marker.
-[user]
-R8 seed 11
-[assistant]
-R8-ANSWER-11 durable viewport marker.
-r8-local-fixture | turn #12 | interact | chat
-Tokens: 168/8000 (2%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 t> R8 to> R8 too> R8 tool> R8 tool > R8 tool r> R8 tool re> R8 tool rec> R8 tool rece> R8 tool recei> R8 tool receip> R8 tool receipt
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 24 | l
-[assistant]
-R8-ANSWER-07 durable viewport marker.
-[user]
-R8 seed 08
-[assistant]
-R8-ANSWER-08 durable viewport marker.
-[user]
-R8 seed 09
-[assistant]
-R8-ANSWER-09 durable viewport marker.
-[user]
-R8 seed 10
-[assistant]
-R8-ANSWER-10 durable viewport marker.
-[user]
-R8 seed 11
-[assistant]
-R8-ANSWER-11 durable viewport marker.
-[assistant · live]
-[tool r8-read-call]
-read
-r8-local-fixture | turn #13 | interact | chat
-[user]
-R8 seed 08
-[assistant]
-R8-ANSWER-08 durable viewport marker.
-[user]
-R8 seed 09
-[assistant]
-R8-ANSWER-09 durable viewport marker.
-[user]
-R8 seed 10
-[assistant]
-R8-ANSWER-10 durable viewport marker.
-[user]
-R8 seed 11
-[assistant]
-R8-ANSWER-11 durable viewport marker.
-[assistant · live]
-[tool r8-read-call]
-[receipt: success]
-[assistant · live]
-R8-ANSWER-TOOL final answer after tool receipt.
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 28 | l
-[assistant]
-R8-ANSWER-09 durable viewport marker.
-[user]
-R8 seed 10
-[assistant]
-R8-ANSWER-10 durable viewport marker.
-[user]
-R8 seed 11
-[assistant]
-R8-ANSWER-11 durable viewport marker.
-[user]
-R8 tool receipt
-[assistant]
-[tool: read]
-R8_TOOL_PANE_MARKER structured read output
-
-[receipt: success]
-[assistant]
-R8-ANSWER-TOOL final answer after tool receipt.
-r8-local-fixture | turn #13 | interact | chat
-Tokens: 199/8000 (2%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 1> R8 seed 13
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 30 | l
-[assistant]
-R8-ANSWER-10 durable viewport marker.
-[user]
-R8 seed 11
-[assistant]
-R8-ANSWER-11 durable viewport marker.
-[user]
-R8 tool receipt
-[assistant]
-[tool: read]
-R8_TOOL_PANE_MARKER structured read output
-
-[receipt: success]
-[assistant]
-R8-ANSWER-TOOL final answer after tool receipt.
-[user]
-R8 seed 13
-[assistant]
-R8-ANSWER-13 durable viewport marker.
-r8-local-fixture | turn #14 | interact | chat
-Tokens: 213/8000 (2%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 1> R8 seed 14
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 32 | l
-[assistant]
-R8-ANSWER-11 durable viewport marker.
-[user]
-R8 tool receipt
-[assistant]
-[tool: read]
-R8_TOOL_PANE_MARKER structured read output
-
-[receipt: success]
-[assistant]
-R8-ANSWER-TOOL final answer after tool receipt.
-[user]
-R8 seed 13
-[assistant]
-R8-ANSWER-13 durable viewport marker.
-[user]
-R8 seed 14
-[assistant]
-R8-ANSWER-14 durable viewport marker.
-r8-local-fixture | turn #15 | interact | chat
-Tokens: 227/8000 (2%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 1> R8 seed 15
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 34 | l
-[assistant]
-[tool: read]
-R8_TOOL_PANE_MARKER structured read output
-
-[receipt: success]
-[assistant]
-R8-ANSWER-TOOL final answer after tool receipt.
-[user]
-R8 seed 13
-[assistant]
-R8-ANSWER-13 durable viewport marker.
-[user]
-R8 seed 14
-[assistant]
-R8-ANSWER-14 durable viewport marker.
-[user]
-R8 seed 15
-[assistant]
-R8-ANSWER-15 durable viewport marker.
-r8-local-fixture | turn #16 | interact | chat
-Tokens: 241/8000 (3%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 1> R8 seed 16
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 36 | l
-[receipt: success]
-[assistant]
-R8-ANSWER-TOOL final answer after tool receipt.
-[user]
-R8 seed 13
-[assistant]
-R8-ANSWER-13 durable viewport marker.
-[user]
-R8 seed 14
-[assistant]
-R8-ANSWER-14 durable viewport marker.
-[user]
-R8 seed 15
-[assistant]
-R8-ANSWER-15 durable viewport marker.
-[user]
-R8 seed 16
-[assistant]
-R8-ANSWER-16 durable viewport marker.
-r8-local-fixture | turn #17 | interact | chat
-Tokens: 255/8000 (3%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 1> R8 seed 17
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 38 | l
-R8 seed 13
-[assistant]
-R8-ANSWER-13 durable viewport marker.
-[user]
-R8 seed 14
-[assistant]
-R8-ANSWER-14 durable viewport marker.
-[user]
-R8 seed 15
-[assistant]
-R8-ANSWER-15 durable viewport marker.
-[user]
-R8 seed 16
-[assistant]
-R8-ANSWER-16 durable viewport marker.
-[user]
-R8 seed 17
-[assistant]
-R8-ANSWER-17 durable viewport marker.
-r8-local-fixture | turn #18 | interact | chat
-Tokens: 269/8000 (3%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 1> R8 seed 18
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 38 | l
-[assistant]
-R8-ANSWER-13 durable viewport marker.
-[user]
-R8 seed 14
-[assistant]
-R8-ANSWER-14 durable viewport marker.
-[user]
-R8 seed 15
-[assistant]
-R8-ANSWER-15 durable viewport marker.
-[user]
-R8 seed 16
-[assistant]
-R8-ANSWER-16 durable viewport marker.
-[user]
-R8 seed 17
-[assistant]
-R8-ANSWER-17 durable viewport marker.
-[assistant · live]
-R8-ANSWER-18 durable viewport marker.
-r8-local-fixture | turn #19 | interact | chat
-Tokens: 283/8000 (3%) | Cost: $0.0000Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 40 | l
-R8 seed 14
-[assistant]
-R8-ANSWER-14 durable viewport marker.
-[user]
-R8 seed 15
-[assistant]
-R8-ANSWER-15 durable viewport marker.
-[user]
-R8 seed 16
-[assistant]
-R8-ANSWER-16 durable viewport marker.
-[user]
-R8 seed 17
-[assistant]
-R8-ANSWER-17 durable viewport marker.
-[user]
-R8 seed 18
-[assistant]
-R8-ANSWER-18 durable viewport marker.
-r8-local-fixture | turn #19 | interact | chat
-Tokens: 283/8000 (3%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 1> R8 seed 19
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 40 | l
-R8-ANSWER-13 durable viewport marker.
-[user]
-R8 seed 14
-[assistant]
-R8-ANSWER-14 durable viewport marker.
-[user]
-R8 seed 15
-[assistant]
-R8-ANSWER-15 durable viewport marker.
-[user]
-R8 seed 16
-[assistant]
-R8-ANSWER-16 durable viewport marker.
-[user]
-R8 seed 17
-[assistant]
-R8-ANSWER-17 durable viewport marker.
-[user]
-R8 seed 18
-[assistant]
-R8-ANSWER-18 durable viewport marker.
-r8-local-fixture | turn #20 | interact | chatSession: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 42 | l
-R8 seed 15
-[assistant]
-R8-ANSWER-15 durable viewport marker.
-[user]
-R8 seed 16
-[assistant]
-R8-ANSWER-16 durable viewport marker.
-[user]
-R8 seed 17
-[assistant]
-R8-ANSWER-17 durable viewport marker.
-[user]
-R8 seed 18
-[assistant]
-R8-ANSWER-18 durable viewport marker.
-[user]
-R8 seed 19
-[assistant]
-R8-ANSWER-19 durable viewport marker.
-r8-local-fixture | turn #20 | interact | chat
-Tokens: 297/8000 (3%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 2> R8 seed 20
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 42 | l
-[assistant]
-R8-ANSWER-15 durable viewport marker.
-[user]
-R8 seed 16
-[assistant]
-R8-ANSWER-16 durable viewport marker.
-[user]
-R8 seed 17
-[assistant]
-R8-ANSWER-17 durable viewport marker.
-[user]
-R8 seed 18
-[assistant]
-R8-ANSWER-18 durable viewport marker.
-[user]
-R8 seed 19
-[assistant]
-R8-ANSWER-19 durable viewport marker.
-[assistant · live]
-R8-ANSWER-20 durable viewport marker.
-r8-local-fixture | turn #21 | interact | chat
-Tokens: 311/8000 (3%) | Cost: $0.0000Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 44 | l
-R8 seed 16
-[assistant]
-R8-ANSWER-16 durable viewport marker.
-[user]
-R8 seed 17
-[assistant]
-R8-ANSWER-17 durable viewport marker.
-[user]
-R8 seed 18
-[assistant]
-R8-ANSWER-18 durable viewport marker.
-[user]
-R8 seed 19
-[assistant]
-R8-ANSWER-19 durable viewport marker.
-[user]
-R8 seed 20
-[assistant]
-R8-ANSWER-20 durable viewport marker.
-r8-local-fixture | turn #21 | interact | chat
-Tokens: 311/8000 (3%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 2> R8 seed 21
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 44 | l
-[assistant]
-R8-ANSWER-16 durable viewport marker.
-[user]
-R8 seed 17
-[assistant]
-R8-ANSWER-17 durable viewport marker.
-[user]
-R8 seed 18
-[assistant]
-R8-ANSWER-18 durable viewport marker.
-[user]
-R8 seed 19
-[assistant]
-R8-ANSWER-19 durable viewport marker.
-[user]
-R8 seed 20
-[assistant]
-R8-ANSWER-20 durable viewport marker.
-[assistant · live]
-R8-ANSWER-21 durable viewport marker.
-r8-local-fixture | turn #22 | interact | chat
-Tokens: 325/8000 (4%) | Cost: $0.0000Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 46 | l
-R8 seed 17
-[assistant]
-R8-ANSWER-17 durable viewport marker.
-[user]
-R8 seed 18
-[assistant]
-R8-ANSWER-18 durable viewport marker.
-[user]
-R8 seed 19
-[assistant]
-R8-ANSWER-19 durable viewport marker.
-[user]
-R8 seed 20
-[assistant]
-R8-ANSWER-20 durable viewport marker.
-[user]
-R8 seed 21
-[assistant]
-R8-ANSWER-21 durable viewport marker.
-r8-local-fixture | turn #22 | interact | chat
-Tokens: 325/8000 (4%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 2> R8 seed 22
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 48 | l
-R8 seed 18
-[assistant]
-R8-ANSWER-18 durable viewport marker.
-[user]
-R8 seed 19
-[assistant]
-R8-ANSWER-19 durable viewport marker.
-[user]
-R8 seed 20
-[assistant]
-R8-ANSWER-20 durable viewport marker.
-[user]
-R8 seed 21
-[assistant]
-R8-ANSWER-21 durable viewport marker.
-[user]
-R8 seed 22
-[assistant]
-R8-ANSWER-22 durable viewport marker.
-r8-local-fixture | turn #23 | interact | chat
-Tokens: 339/8000 (4%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 s> R8 se> R8 see> R8 seed> R8 seed > R8 seed 2> R8 seed 23
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 48 | l
-[assistant]
-R8-ANSWER-18 durable viewport marker.
-[user]
-R8 seed 19
-[assistant]
-R8-ANSWER-19 durable viewport marker.
-[user]
-R8 seed 20
-[assistant]
-R8-ANSWER-20 durable viewport marker.
-[user]
-R8 seed 21
-[assistant]
-R8-ANSWER-21 durable viewport marker.
-[user]
-R8 seed 22
-[assistant]
-R8-ANSWER-22 durable viewport marker.
-[assistant · live]
-R8-ANSWER-23 durable viewport marker.
-r8-local-fixture | turn #24 | interact | chat
-Tokens: 353/8000 (4%) | Cost: $0.0000Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 50 | l
-R8 seed 19
-[assistant]
-R8-ANSWER-19 durable viewport marker.
-[user]
-R8 seed 20
-[assistant]
-R8-ANSWER-20 durable viewport marker.
-[user]
-R8 seed 21
-[assistant]
-R8-ANSWER-21 durable viewport marker.
-[user]
-R8 seed 22
-[assistant]
-R8-ANSWER-22 durable viewport marker.
-[user]
-R8 seed 23
-[assistant]
-R8-ANSWER-23 durable viewport marker.
-r8-local-fixture | turn #24 | interact | chat
-Tokens: 353/8000 (4%) | Cost: $0.0000
-[saved: success]> > R> R8> R8 > R8 a> R8 ac> R8 act> R8 acti> R8 activ> R8 active> R8 active > R8 active s> R8 active st> R8 active str> R8 active stre> R8 active strea> R8 active stream
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 50 | l
-R8-ANSWER-18 durable viewport marker.
-[user]
-R8 seed 19
-[assistant]
-R8-ANSWER-19 durable viewport marker.
-[user]
-R8 seed 20
-[assistant]
-R8-ANSWER-20 durable viewport marker.
-[user]
-R8 seed 21
-[assistant]
-R8-ANSWER-21 durable viewport marker.
-[user]
-R8 seed 22
-[assistant]
-R8-ANSWER-22 durable viewport marker.
-[user]
-R8 seed 23
-[assistant]
-R8-ANSWER-23 durable viewport marker.
-r8-local-fixture | turn #25 | interact | chat
-R8-ANSWER-13 durable viewport marker.
-
-R8 seed 14
-
-R8-ANSWER-14 durable viewport marker.
-
-R8 seed 15
-
-R8-ANSWER-15 durable viewport marker.
-
-R8 seed 16
-
-R8-ANSWER-16 durable viewport marker.
-
-R8 seed 17
-
-R8-ANSWER-17 durable viewport marker.
-
-R8 seed 18
-
-R8-ANSWER-18 durable viewport marker.
-Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main |
-R8-ANSWER-13 durable viewport marker.
-[user]
-R8 seed 14
-[assistant]
-R8-ANSWER-14 durable viewport marker.
-[user]
-R8 seed 15
-[assistant]
-R8-ANSWER-15 durable viewport marker.
-[user]
-R8 seed 16
-[assistant]
-R8-ANSWER-16 durable viewport marker.
-[user]
-R8 seed 17
-[assistant]
-R8-ANSWER-17 durable viewport marker.
-[user]
-R8 seed 18
-[assistant]
-R8-ANSWER-18 durable viewport marker.
-r8-local-fixture | turn #25 | interact | chatSession: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 50 | l
-R8-ANSWER-13 durable viewport marker.
-[user]
-R8 seed 14
-[assistant]
-R8-ANSWER-14 durable viewport marker.
-[user]
-R8 seed 15
-[assistant]
-R8-ANSWER-15 durable viewport marker.
-[user]
-R8 seed 16
-[assistant]
-R8-ANSWER-16 durable viewport marker.
-[user]
-R8 seed 17
-[assistant]
-R8-ANSWER-17 durable viewport marker.
-[user]
-R8 seed 18
-[assistant]
-R8-ANSWER-18 durable viewport marker.
-r8-local-fixture | turn #25 | interact | chatSession: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 50 | loaded projection only
-R8-ANSWER-13 durable viewport marker.                       │[tool: read]                                               
-[user]                                                       R8_TOOL_PANE_MARKER structured read output                 
-R8 seed 14                                                                                                              
-[assistant]                                                  [receipt: success]                                         
-R8-ANSWER-14 durable viewport marker.                                                                                   
-[user]                                                                                                                  
-R8 seed 15                                                                                                              
-[assistant]                                                                                                             
-R8-ANSWER-15 durable viewport marker.                                                                                   
-[user]                                                                                                                  
-R8 seed 16                                                                                                              
-[assistant]                                                                                                             
-R8-ANSWER-16 durable viewport marker.                                                                                   
-[user]                                                                                                                  
-R8 seed 17                                                                                                              
-[assistant]                                                                                                             
-R8-ANSWER-17 durable viewport marker.                                                                                   
-[user]                                                                                                                  
-R8 seed 18                                                                                                              
-[assistant]                                                                                                             
-R8-ANSWER-18 durable viewport marker.                                                                                   
-r8-local-fixture | turn #25 | interact | chatSession: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 50 | loaded projection only
-R8-ANSWER-18 durable viewport marker.                                                               │[tool: read]                                                                                       
-[user]                                                                                               R8_TOOL_PANE_MARKER structured read output                                                         
-R8 seed 19                                                                                                                                                                                              
-[assistant]                                                                                          [receipt: success]                                                                                 
-R8-ANSWER-19 durable viewport marker.                                                                                                                                                                   
-[user]                                                                                                                                                                                                  
-R8 seed 20                                                                                                                                                                                              
-[assistant]                                                                                                                                                                                             
-R8-ANSWER-20 durable viewport marker.                                                                                                                                                                   
-[user]                                                                                                                                                                                                  
-R8 seed 21                                                                                                                                                                                              
-[assistant]                                                                                                                                                                                             
-R8-ANSWER-21 durable viewport marker.                                                                                                                                                                   
-[user]                                                                                                                                                                                                  
-R8 seed 22                                                                                                                                                                                              
-[assistant]                                                                                                                                                                                             
-R8-ANSWER-22 durable viewport marker.                                                                                                                                                                   
-[user]                                                                                                                                                                                                  
-R8 seed 23                                                                                                                                                                                              
-[assistant]                                                                                                                                                                                             
-R8-ANSWER-23 durable viewport marker.                                                                                                                                                                   
-r8-local-fixture | turn #25 | interact | chatSession: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 52 | loaded projection only
-[assistant]                                                                                         │[tool: read]                                                                                       
-R8-ANSWER-20 durable viewport marker.                                                                R8_TOOL_PANE_MARKER structured read output                                                         
-[user]                                                                                                                                                                                                  
-R8 seed 21                                                                                           [receipt: success]                                                                                 
-[assistant]                                                                                                                                                                                             
-R8-ANSWER-21 durable viewport marker.                                                                                                                                                                   
-[user]                                                                                                                                                                                                  
-R8 seed 22                                                                                                                                                                                              
-[assistant]                                                                                                                                                                                             
-R8-ANSWER-22 durable viewport marker.                                                                                                                                                                   
-[user]                                                                                                                                                                                                  
-R8 seed 23                                                                                                                                                                                              
-[assistant]                                                                                                                                                                                             
-R8-ANSWER-23 durable viewport marker.                                                                                                                                                                   
-[user]                                                                                                                                                                                                  
-R8 active stream                                                                                                                                                                                        
-[assistant]                                                                                                                                                                                             
-R8-ACTIVE-PARTIAL initial live marker. R8-ANSWER-APPEND newest durable viewport marker. Final stream                                                                                                    
- marker.                                                                                                                                                                                                
-r8-local-fixture | turn #25 | interact | chat
-Tokens: 390/8000 (4%) | Cost: $0.0000
-[saved: success]> > /> /e> /ex> /exi> /exit
-Session ended.

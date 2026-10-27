@@ -1,7 +1,0 @@
-# Private HTTP serve startup review
-
-Verdict: **ACCEPT, startup transaction only**. I independently reviewed builder commit `5d161df78e9114bc0ed4880793143a3b1fea8887` against `bda13f2`, then integrated it as `33739e3`. Before the change, `serveCmd.Run` published or replaced the generated token file before `HTTPServer.Start`, so an occupied port could leave a credential for a service that never started. The change binds the server first, then writes the token, and closes the assembly if publication fails. Neither a failed bind nor token-write failure reports a successful listener.
-
-The new occupied-port test checks absent and existing token-file cases, no disclosed token/success output, and rebinding after the failed command; the token-write failure test checks the address is released; unsupported remote `--tui` and `--approve ask` preflight without assembly/token side effects are covered. The builder's RED and repeated focused race evidence, full ACP package race and vet passed. On the integrated branch, `go test -race -count=1 ./internal/cli -run '^TestServe'` also passed. I found no blocking source issue in this narrow transaction.
-
-The server briefly listens before token-file publication; if writing fails, the owner closes it before returning. The existing token is not accepted because this invocation uses the new in-memory token. This review does not prove a real-binary ACP connect/send/stream/events/disconnect journey, remote approval/TUI support, or full R4/R6 release readiness.

@@ -1,49 +1,0 @@
-startup_prompt=observed
-active_approval_resize=80x24_to_20x4
-> P> PT> PTY> PTY > PTY c> PTY ca> PTY can> PTY canc> PTY cance> PTY cancel> PTY cancel > PTY cancel a> PTY cancel ac> PTY cancel act> PTY cancel acti> PTY cancel activ> PTY cancel active
-Session: s_5064783597d6ba5ba4a4948c19b6e38e | Branch: main | Loaded rows: 0 | lo
-pty-review-model | turn #1 | interact | chat
-[assistant · live]
-[tool call_cancel_active]
-write
-pty-review-model | turn #1 | interact | chat[approval] write
-  local interaction #1
-  scope: unknown; once only; reuse unavailable
-  details 1-7/7
-  args:
-    content: CANCEL_ACTIVE_MUST_NOT_BE_WRITTEN
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-r5-pty-35zmy
-xv0/cancel-workspace/cancel-active.txt
-  diff:
-    +CANCEL_ACTIVE_MUST_NOT_BE_WRITTEN
-
-  [y] once [n] reject [Esc] cancel [d] diff[approval] write
-  local interaction 
-scope unknown · resi
-[y] locked [n] no
-active_approval_cancel=Ctrl+C; same REPL returned to prompt after durable refresh; write file absent
-post-cancel /exit returned status 0
-tty_restore=true; before=392 after=392
---- cancel-modal-20x4 ---
-> P> PT> PTY> PTY > PTY c> PTY ca> PTY can> PTY canc> PTY cance> PTY cancel> PTY cancel > PTY cancel a> PTY cancel ac> PTY cancel act> PTY cancel acti> PTY cancel activ> PTY cancel active
-Session: s_5064783597d6ba5ba4a4948c19b6e38e | Branch: main | Loaded rows: 0 | lo
-pty-review-model | turn #1 | interact | chat
-[assistant · live]
-[tool call_cancel_active]
-write
-pty-review-model | turn #1 | interact | chat[approval] write
-  local interaction #1
-  scope: unknown; once only; reuse unavailable
-  details 1-7/7
-  args:
-    content: CANCEL_ACTIVE_MUST_NOT_BE_WRITTEN
-    path: /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-r5-pty-35zmy
-xv0/cancel-workspace/cancel-active.txt
-  diff:
-    +CANCEL_ACTIVE_MUST_NOT_BE_WRITTEN
-
-  [y] once [n] reject [Esc] cancel [d] diff[approval] write
-  local interaction 
-scope unknown · resi
-[y] locked [n] no
-

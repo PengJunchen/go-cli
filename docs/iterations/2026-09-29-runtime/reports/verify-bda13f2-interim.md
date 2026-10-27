@@ -1,7 +1,0 @@
-# Interim default verification at bda13f2
-
-This is a progress checkpoint, not the final R0–R8 release gate. The product source on `codex/runtime-repair-20260929` was `bda13f2b3162b4425c88b615d1690a5dcae4ef08`; the worktree was clean before and after the run.
-
-Command: `PATH=/tmp/go-cli-runtime-verification-tools:$PATH GOMAXPROCS=2 GOFLAGS='-p=2 -trimpath' make verify` (invoked through `rtk env`). Exit status: 0. `goimports` was present in the pinned tool directory and `make fmt` left no tracked changes. Vet, golangci-lint (0 issues), build, all-package `go test -race -count=1 ./...`, scanner gate, log selection and leak selection completed. The scanner reported 380 files, 0 ERROR and 1,581 WARN. The default race output listed every package as passing, with `internal/term` having no test files. A separate `go test -count=1 ./tests ./tests/e2e_20260802` also exited 0 at the same source snapshot.
-
-The current Makefile still calls raw `go test` for `test`, `test-log`, and `test-leak`. The selected log/leak commands printed several packages with `[no tests to run]`; thus this default gate does not prove positive test selection for every selected package. The prepared `protected-changes-test-gate.patch` would use the repository's JSON test gate, but it has not been approved or applied. This run did not execute coverage threshold, tagged E2E, Docker build, native PTY, final CLI entrypoint matrix, or the later isolated source slices. Re-run all required gates on one final fixed commit after reviewed source integration and any authorized protected patch.
