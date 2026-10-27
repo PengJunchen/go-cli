@@ -157,6 +157,9 @@ func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, inbox <-cha
 		loopOpts = append(loopOpts, WithMaxIterations(r.maxIter))
 	}
 	loopOpts = append(loopOpts, r.opts...)
+	if len(r.allowedTools) > 0 {
+		loopOpts = append(loopOpts, WithAllowedToolNames(r.allowedTools))
+	}
 
 	loop := NewLoopAgent(loopOpts...)
 	agentOpts := []AgentOption{}

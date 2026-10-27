@@ -807,6 +807,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			if listErr != nil {
 				return CanonicalRunResult{Events: events, Transcript: transcript}, listErr
 			}
+			toolDefs = defs
 			toolOpts = buildToolOpts(defs, l.thinkingConfig)
 			toolCatalogVersion = version
 			searchTool, needToolFiltering = nil, false
@@ -869,6 +870,9 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			query := lastUserQuery(messages)
 			if query != "" {
 				filtered, ferr := searchTool.TopTools(spanCtx, query, toolSearchThreshold)
+				if ferr == nil {
+					filtered = restrictToolSearchDefinitions(filtered, toolDefs)
+				}
 				if ferr == nil && len(filtered) > 0 {
 					iterOpts = buildToolOpts(filtered, l.thinkingConfig)
 					logger.Info("core.loop.tool_search_filter",
@@ -1154,7 +1158,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 					}
 					continue
 				}
-				resultText, isErr, execErr := l.executeTool(iterationCtx, toToolsCall(tc), es)
+				resultText, isErr, execErr := executeSingleTool(iterationCtx, registry, toToolsCall(tc), es)
 				isError := isErr
 				if execErr != nil {
 					logger.Warn("core.loop.tool_error", "tool", tc.Name, "err", execErr)
@@ -2763,6 +2767,22 @@ func defsToLLMTools(defs []tools.ToolDefinition) []llm.ToolDefinition {
 		llmTools = append(llmTools, td)
 	}
 	return llmTools
+}
+
+// restrictToolSearchDefinitions preserves ranking while retaining only the
+// authoritative definitions from this run's restricted catalog.
+func restrictToolSearchDefinitions(ranked, catalog []tools.ToolDefinition) []tools.ToolDefinition {
+	byName := make(map[string]tools.ToolDefinition, len(catalog))
+	for _, definition := range catalog {
+		byName[definition.Name()] = definition
+	}
+	filtered := make([]tools.ToolDefinition, 0, len(ranked))
+	for _, definition := range ranked {
+		if allowed, ok := byName[definition.Name()]; ok {
+			filtered = append(filtered, allowed)
+		}
+	}
+	return filtered
 }
 
 // buildToolOpts builds LLM generation options from tool definitions and an
