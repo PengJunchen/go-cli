@@ -102,8 +102,8 @@ func TestMCPStdioOwnedChildHelper(t *testing.T) {
 				}
 				continue
 			case "boundary-line":
-				prefix := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"content":"`, request.ID))
-				suffix := []byte(`"}}` + "\n")
+				prefix := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"`, request.ID))
+				suffix := []byte(`"}]}}` + "\n")
 				paddingSize := maxHTTPResponseSize - len(prefix) - len(suffix)
 				if paddingSize < 0 {
 					t.Fatal("response prefix exceeds the stdio boundary")
@@ -516,9 +516,10 @@ func TestOwnedStdioResponseBudgetAcceptsExactBoundary(t *testing.T) {
 	defer cancelCall()
 	result, err := adapter.CallTool(callCtx, "boundary", nil)
 	require.NoError(t, err, "a complete response at the byte limit should be accepted")
-	content, ok := result.Content.(string)
-	require.True(t, ok, "helper should return its boundary payload as a string")
-	assert.Len(t, content, maxHTTPResponseSize-len(`{"jsonrpc":"2.0","id":1,"result":{"content":""}}`)-1)
+	blocks, ok := result.Content.([]any)
+	require.True(t, ok)
+	content := blocks[0].(map[string]any)["text"].(string)
+	assert.Len(t, content, maxHTTPResponseSize-len(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":""}]}}`)-1)
 	require.NoError(t, adapter.Disconnect(context.Background()))
 }
 

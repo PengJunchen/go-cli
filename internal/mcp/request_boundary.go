@@ -131,6 +131,9 @@ func parseJSONRPCResponse(raw []byte, expectedID int64) (map[string]any, error) 
 		return nil, &rpcResponseError{code: code, message: message}
 	}
 
+	if err := validateCallToolResultFieldEncoding(frame.Result); err != nil {
+		return nil, newRequestBoundaryError(fmt.Errorf("mcp: ambiguous JSON-RPC result: %w", err), true, false)
+	}
 	var result map[string]any
 	if err := json.Unmarshal(frame.Result, &result); err != nil || result == nil {
 		return nil, newRequestBoundaryError(fmt.Errorf("mcp: invalid JSON-RPC result object"), true, false)

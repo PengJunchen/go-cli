@@ -609,10 +609,14 @@ func TestStdioConcurrentFramesAreSerialized(t *testing.T) {
 	}
 	require.Len(t, seen, concurrent+1)
 
-	disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	disconnectErr := client.Disconnect(disconnectCtx)
+	// Cancel before cleanup starts so no disconnect frame races a deadline.
+	// The caller-owned reader still keeps cleanup pending until the peer closes.
+	disconnectCtx, disconnectCancel := context.WithCancel(context.Background())
 	disconnectCancel()
+	disconnectErr := client.Disconnect(disconnectCtx)
+	require.ErrorIs(t, disconnectErr, context.Canceled)
 	disconnectDone := requireStdioPending(t, disconnectErr, false)
+	assert.Equal(t, concurrent+2, writer.callCount(), "canceled Disconnect must not dispatch another frame")
 	require.NoError(t, peerWriter.Close())
 	assertChannelCloses(t, disconnectDone)
 }

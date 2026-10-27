@@ -79,6 +79,7 @@ func TestMCPContractNameRoundTrip(t *testing.T) {
 // It lets an OfficialSDKAdapter connect to the mock server over the same wire
 // protocol the adapters speak.
 func mockServerBridge(conn net.Conn, server *MockMCPServerImpl) {
+	defer closeConn(conn)
 	sc := bufio.NewScanner(conn)
 	for sc.Scan() {
 		var req struct {
@@ -124,9 +125,9 @@ func mockServerBridge(conn net.Conn, server *MockMCPServerImpl) {
 			}
 			result, err := server.CallTool(context.Background(), name, args)
 			if err != nil {
-				res = map[string]any{"isError": true, "content": err.Error()}
+				res = map[string]any{"isError": true, "content": []any{map[string]any{"type": "text", "text": err.Error()}}}
 			} else {
-				res = map[string]any{"content": result.Content}
+				res = map[string]any{"isError": result.IsError, "content": []any{map[string]any{"type": "text", "text": fmt.Sprint(result.Content)}}}
 			}
 		}
 
@@ -137,7 +138,6 @@ func mockServerBridge(conn net.Conn, server *MockMCPServerImpl) {
 			}
 		}
 	}
-	closeConn(conn)
 }
 
 // closeConn best-effort closes a connection during test cleanup.
@@ -155,9 +155,11 @@ func TestMCPContractAdapterConnectsToMockServer(t *testing.T) {
 	})
 
 	serverConn, clientConn := net.Pipe()
-	go mockServerBridge(serverConn, server)
+	bridgeDone := make(chan struct{})
+	go func() { defer close(bridgeDone); mockServerBridge(serverConn, server) }()
 
 	conn := mcp.NewJSONRPCLineTransport(clientConn, clientConn, clientConn.Close)
+	defer func() { closeConn(conn); closeConn(serverConn); <-bridgeDone }()
 
 	cfg := mcp.MCPServerConfig{Name: "github", Transport: mcp.MCPTransportStdio}
 	adapter := mcp.NewOfficialSDKAdapter(cfg, mcp.WithConnection(conn))
@@ -173,7 +175,7 @@ func TestMCPContractAdapterConnectsToMockServer(t *testing.T) {
 
 	result, err := adapter.CallTool(ctx, "list_issues", map[string]any{"repo": "go-cli"})
 	require.NoError(t, err)
-	assert.Equal(t, "issues:go-cli", result.Content)
+	assert.Equal(t, []any{map[string]any{"type": "text", "text": "issues:go-cli"}}, result.Content)
 	assert.False(t, result.IsError)
 
 	require.Len(t, server.CallLog(), 1)

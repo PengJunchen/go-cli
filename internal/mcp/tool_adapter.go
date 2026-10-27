@@ -179,6 +179,26 @@ func (g *MCPClientGeneration) acceptingLeases() bool {
 	return !g.retiring
 }
 
+// supportsOwnedRequestCompletion reports the closed set of built-in adapters
+// whose CallTool returns after its action-local request resources have joined.
+// Wrappers and user-supplied clients retain unproven completion. This contract
+// never grants trusted effects or proves that a remote side effect stopped.
+func (g *MCPClientGeneration) supportsOwnedRequestCompletion() bool {
+	if !g.valid() {
+		return false
+	}
+	switch client := g.client.(type) {
+	case *HTTPClientAdapter:
+		return client != nil
+	case *OfficialSDKAdapter:
+		return client != nil && client.adapterCore != nil && !client.externalConn
+	case *Mark3labsAdapter:
+		return client != nil && client.adapterCore != nil && !client.externalConn
+	default:
+		return false
+	}
+}
+
 // Acquire pins this exact client generation for one prepared dispatch.
 func (g *MCPClientGeneration) Acquire() (func(), error) {
 	if !g.valid() {
@@ -297,7 +317,12 @@ func (a *MCPToolAdapter) MCPGenerationCandidate() (tools.MCPToolCandidate, error
 	if err != nil {
 		return tools.MCPToolCandidate{}, err
 	}
-	handle, err := tools.NewMCPGenerationClientHandle(a.generation)
+	var handle tools.MCPGenerationClientHandle
+	if a.generation.supportsOwnedRequestCompletion() {
+		handle, err = tools.NewOwnedMCPGenerationClientHandle(a.generation)
+	} else {
+		handle, err = tools.NewMCPGenerationClientHandle(a.generation)
+	}
 	if err != nil {
 		return tools.MCPToolCandidate{}, err
 	}

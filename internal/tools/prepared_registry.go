@@ -176,6 +176,7 @@ func (r *MiddlewareToolRegistry) prepareToolCallWithStreamSink(ctx context.Conte
 		canonicalWorkspaceRoot:  snapshot.canonicalWorkspaceRoot,
 		workspaceReadWhitelist:  append([]string(nil), snapshot.workspaceReadWhitelist...),
 		scopedReadProofEligible: snapshot.scopedReadProofEligible,
+		managedDelegation:       snapshot.managedDelegation,
 		schema:                  snapshot.schema,
 		call:                    frozenCall,
 		execute:                 executor,

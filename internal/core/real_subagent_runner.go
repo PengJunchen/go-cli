@@ -157,6 +157,9 @@ func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, inbox <-cha
 		loopOpts = append(loopOpts, WithMaxIterations(r.maxIter))
 	}
 	loopOpts = append(loopOpts, r.opts...)
+	if len(r.allowedTools) > 0 {
+		loopOpts = append(loopOpts, WithAllowedToolNames(r.allowedTools))
+	}
 
 	loop := NewLoopAgent(loopOpts...)
 	agentOpts := []AgentOption{}
@@ -264,18 +267,22 @@ func NewRealSubAgentFactoryWithModelBuilder(parentModel llm.BaseChatModel, build
 // is read-only). It is used by the sub-agent runner to restrict the tool set
 // based on SubAgentConfig.Tools.
 type filteredToolRegistry struct {
+	// Retain the inner sealed preparer capability; this wrapper only narrows it.
+	tools.ToolCallPreparer
 	inner   tools.ToolRegistry
 	allowed map[string]bool
 }
 
 var _ tools.ToolRegistry = (*filteredToolRegistry)(nil)
+var _ tools.ToolCallPreparer = (*filteredToolRegistry)(nil)
 
 func newFilteredToolRegistry(inner tools.ToolRegistry, allowed []string) *filteredToolRegistry {
 	m := make(map[string]bool, len(allowed))
 	for _, name := range allowed {
 		m[name] = true
 	}
-	return &filteredToolRegistry{inner: inner, allowed: m}
+	preparer, _ := inner.(tools.ToolCallPreparer)
+	return &filteredToolRegistry{ToolCallPreparer: preparer, inner: inner, allowed: m}
 }
 
 func (r *filteredToolRegistry) Register(_ context.Context, _ tools.ToolDefinition) error {
@@ -301,4 +308,36 @@ func (r *filteredToolRegistry) List(ctx context.Context) ([]tools.ToolDefinition
 		}
 	}
 	return out, nil
+}
+
+// PrepareToolCall preserves the concrete sealed invocation while enforcing the
+// child whitelist before any approval or executor is reached.
+func (r *filteredToolRegistry) PrepareToolCall(ctx context.Context, call tools.ToolCall) (tools.PreparedInvocation, error) {
+	if !r.allowed[call.Name] {
+		return nil, tools.ErrToolNotFound
+	}
+	preparer, ok := r.inner.(tools.ToolCallPreparer)
+	if !ok {
+		return nil, ErrRunCommitPreparedInvocationUnavailable
+	}
+	return preparer.PrepareToolCall(ctx, call)
+}
+
+func (r *filteredToolRegistry) PrepareStreamingToolCall(ctx context.Context, call tools.ToolCall, sink tools.SynchronousStreamSink) (tools.PreparedStreamingInvocation, error) {
+	if !r.allowed[call.Name] {
+		return nil, tools.ErrToolNotFound
+	}
+	preparer, ok := r.inner.(tools.StreamingToolCallPreparer)
+	if !ok {
+		return nil, ErrRunCommitStreamingUnsupported
+	}
+	return preparer.PrepareStreamingToolCall(ctx, call, sink)
+}
+
+// Version forwards catalog changes so lazy child discovery refreshes the model schemas.
+func (r *filteredToolRegistry) Version() int {
+	if versioned, ok := r.inner.(interface{ Version() int }); ok {
+		return versioned.Version()
+	}
+	return 0
 }

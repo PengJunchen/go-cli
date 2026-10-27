@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -43,16 +44,21 @@ func TestSubagentToolParametersSchema(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, []string{"researcher", "implementer", "reviewer", "tester"}, roleProp["enum"])
 
-	// Verify required includes prompt.
+	// Conditional prompt/tasks requirements are enforced by Execute because the
+	// prepared schema supports no union keywords.
 	required, ok := m["required"].([]string)
 	require.True(t, ok)
-	assert.Contains(t, required, "prompt")
+	assert.Empty(t, required)
 }
 
 func TestSubagentToolPromptGuidelines(t *testing.T) {
 	tool := NewSubagentTool(nil)
 	guidelines := tool.PromptGuidelines()
 	assert.NotEmpty(t, guidelines)
+	assert.Contains(t, tool.Description(), "physical_session_id")
+	assert.Contains(t, tool.Description(), "--resume-session")
+	assert.Contains(t, strings.Join(guidelines, "\n"), "physical_session_id")
+	assert.Contains(t, strings.Join(guidelines, "\n"), "--resume-session")
 	// Each guideline should mention dispatch_subagent or sub-agent.
 	for _, g := range guidelines {
 		assert.NotEmpty(t, g)
@@ -169,4 +175,38 @@ func TestSubagentToolParallelDispatchEmptyTasks(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least one task")
+}
+
+func TestSubagentToolOutputExposesResumableChildSessions(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		for _, failed := range []bool{false, true} {
+			dispatcher := &fakeToolDispatcher{results: []SubagentResult{{TaskID: "first", Content: "first answer", PhysicalSessionID: "s_first"}}}
+			args := map[string]any{"prompt": "task"}
+			if parallel {
+				args = map[string]any{"tasks": []any{map[string]any{"prompt": "first"}, map[string]any{"prompt": "second"}}}
+				dispatcher.results = append(dispatcher.results, SubagentResult{TaskID: "second", Content: "second answer", PhysicalSessionID: "s_second"})
+			}
+			if failed {
+				dispatcher.err = errors.New("child failure")
+			}
+			result, err := NewSubagentTool(dispatcher).Execute(t.Context(), ToolCall{Args: args})
+			require.NotNil(t, result)
+			require.Contains(t, result.Output, "s_first")
+			if parallel {
+				require.Contains(t, result.Output, "s_second")
+				if !failed {
+					require.Contains(t, result.Output, "Task 1 (default): first answer\nChild physical session ID (physical_session_id): s_first")
+					require.Contains(t, result.Output, "Task 2 (default): second answer\nChild physical session ID (physical_session_id): s_second")
+				}
+			}
+			if failed {
+				require.ErrorContains(t, err, "s_first")
+				if parallel {
+					require.ErrorContains(t, err, "s_second")
+				}
+			} else {
+				require.NoError(t, err)
+			}
+		}
+	}
 }

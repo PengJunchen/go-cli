@@ -411,7 +411,7 @@ func TestAssembleRealSubAgentOverrideChildWriteReplacementStalesPendingApproval(
 	assert.NoFileExists(t, provider.writePath, "the frozen approval must not authorize the original or replacement tool")
 }
 
-func TestAssembleRealSubAgentUnknownDispatchRemainsBlockedInPlan(t *testing.T) {
+func TestAssembleRealSubAgentManagedDispatchRemainsBlockedInPlan(t *testing.T) {
 	ctx := context.Background()
 	assembly, err := AssembleAgent(ctx, newAssembleTestConfig(t), "openai", "test-model", io.Discard, WithApproveMode(ApproveAuto))
 	require.NoError(t, err)
@@ -426,11 +426,11 @@ func TestAssembleRealSubAgentUnknownDispatchRemainsBlockedInPlan(t *testing.T) {
 	invocation, err := preparer.PrepareToolCall(ctx, call)
 	require.NoError(t, err)
 	require.NotNil(t, invocation)
-	assert.Equal(t, tools.RegistrationSourceToolRegistry, invocation.ToolIdentity().RegistrationSource())
+	assert.Equal(t, tools.RegistrationSourceTrustedControl, invocation.ToolIdentity().RegistrationSource())
 	assert.Equal(t, "dispatch_subagent", invocation.ToolIdentity().ToolName())
-	assert.Equal(t, []tools.TrustedToolEffect{tools.EffectUnknown}, invocation.EffectSet().Values())
+	assert.Equal(t, []tools.TrustedToolEffect{tools.EffectControl}, invocation.EffectSet().Values())
 
-	require.NoError(t, assembly.PlanCtrl.Enter(ctx, "dispatch_subagent remains unknown"))
+	require.NoError(t, assembly.PlanCtrl.Enter(ctx, "managed delegation remains blocked in Plan"))
 	_, err = preparer.PrepareToolCall(ctx, call)
 	require.ErrorIs(t, err, approval.ErrToolDenied)
 	dispatch, err := assembly.ToolRegistry.Get(ctx, "dispatch_subagent")

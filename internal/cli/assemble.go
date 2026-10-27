@@ -312,13 +312,17 @@ func (a *AgentAssembly) setHTTPServer(server *acp.HTTPServer) error {
 type AssembleOption func(*assembleConfig)
 
 type assembleConfig struct {
-	maxTokens      int
-	resumeFlag     bool
-	enableSession  bool
-	durableSession *durableCLISession
-	agentName      string
-	thinkingLevel  *llm.ThinkingLevel
-	pluginLoader   extension.PluginLoader
+	childToolNames          []string
+	parentPlanCtrl          core.PlanModeController
+	parentRegistryCurrent   func() bool
+	providerAttemptObserver func(llm.ProviderAttemptResult) error
+	maxTokens               int
+	resumeFlag              bool
+	enableSession           bool
+	durableSession          *durableCLISession
+	agentName               string
+	thinkingLevel           *llm.ThinkingLevel
+	pluginLoader            extension.PluginLoader
 	// noSandbox disables bash sandbox enforcement, replacing the default
 	// sandbox with an AllowAllSandbox that permits every command.
 	noSandbox bool
@@ -417,10 +421,6 @@ func AssembleAgent(
 		s.initialSnapshot = snapshot.Clone()
 	}
 	s.loadConfiguredShellHooks()
-	if len(s.unsupportedPostToolUseHooks) > 0 {
-		hook := s.unsupportedPostToolUseHooks[0]
-		return nil, errors.Join(&UnsupportedPostToolUseHookError{Path: hook.Path, Index: hook.Index}, s.runCleanup())
-	}
 
 	// Assemble subsystems in dependency order.
 	if err := s.prepareExtensions(); err != nil {
@@ -728,14 +728,13 @@ type assembleState struct {
 	skillInfos       []core.SkillInfo
 
 	// Extensions section
-	extHooks                    []core.Hook
-	extMiddleware               []core.Middleware
-	pluginLoader                extension.PluginLoader
-	hookChain                   *core.HookChain
-	hookMgr                     *core.HookManager
-	shellHooksLoaded            bool
-	shellHooks                  []core.HookSystem
-	unsupportedPostToolUseHooks []UnsupportedPostToolUseHookError
+	extHooks         []core.Hook
+	extMiddleware    []core.Middleware
+	pluginLoader     extension.PluginLoader
+	hookChain        *core.HookChain
+	hookMgr          *core.HookManager
+	shellHooksLoaded bool
+	shellHooks       []core.HookSystem
 
 	// Approval section
 	modeResolver        approval.PermissionModeResolver
@@ -755,9 +754,10 @@ type assembleState struct {
 	auditLog            production.AuditLog
 
 	// SubAgent section
-	acpAdapter *acp.ACPMiddlewareAdapter
-	acpClient  acp.ACPClient
-	dispatcher *core.DefaultSubagentDispatcher
+	acpAdapter      *acp.ACPMiddlewareAdapter
+	acpClient       acp.ACPClient
+	dispatcher      *core.DefaultSubagentDispatcher
+	managedChildren *managedChildGroup
 
 	// Extra tools section
 	hitlEmitter *cliHITLEmitter
@@ -1319,9 +1319,6 @@ func (s *assembleState) loadShellHooks(path string, data []byte, verified *appro
 			s.logger.Warn("assemble_hook_event_unknown", "index", i, "event", hc.Event, "err", eventErr)
 			continue
 		}
-		if event == core.EventPostToolUse {
-			s.unsupportedPostToolUseHooks = append(s.unsupportedPostToolUseHooks, UnsupportedPostToolUseHookError{Path: path, Index: i})
-		}
 		timeoutStr := hc.Timeout
 		if timeoutStr == "" {
 			timeoutStr = "10s"
@@ -1334,9 +1331,15 @@ func (s *assembleState) loadShellHooks(path string, data []byte, verified *appro
 		name := fmt.Sprintf("shell-hook-%d", i)
 		startGuard := core.ShellHookStartGuard(func(ctx context.Context, start func() error) error {
 			if verified == nil {
+				if guarded, err := tools.StartPreparedEffect(ctx, start); guarded {
+					return err
+				}
 				return planModeShellHookStart(event, s.planCtrl, start)
 			}
 			return verified.CommitIfCurrent(ctx, func() error {
+				if guarded, err := tools.StartPreparedEffect(ctx, start); guarded {
+					return err
+				}
 				return planModeShellHookStart(event, s.planCtrl, start)
 			})
 		})
@@ -1366,6 +1369,16 @@ func (s *assembleState) assembleApproval() error {
 		return fmt.Errorf("assemble: get prepared-dispatch fence: %w", err)
 	}
 	s.planCtrl = core.NewDefaultPlanModeController(fence)
+	if s.ac.parentPlanCtrl != nil {
+		parent, ok := s.ac.parentPlanCtrl.(interface{ DispatchFence() *tools.DispatchFence })
+		if !ok {
+			return errors.New("assemble: parent Plan restriction has no dispatch boundary")
+		}
+		if err := fence.RestrictPlanBy(parent.DispatchFence()); err != nil {
+			return fmt.Errorf("assemble: restrict child by parent Plan: %w", err)
+		}
+		s.planCtrl = &childPlanController{own: s.planCtrl, parent: s.ac.parentPlanCtrl, fence: fence}
+	}
 	s.modeResolver = approval.NewDefaultPermissionModeResolver()
 
 	var classifier approval.ApprovalClassifier
@@ -1570,6 +1583,9 @@ func (s *assembleState) assembleProductionResilience() error {
 		newProductionToolWrapper(nil, s.auditLog, s.telemetry, s.sessionID),
 		tools.NewResultMaskingWrapper(resultMasker),
 	}
+	if s.ac.parentRegistryCurrent != nil {
+		wrappers = append(wrappers, managedChildRegistryFenceWrapper(s.ac.parentRegistryCurrent))
+	}
 	// This attestation applies only to the exact wrappers constructed above.
 	// The production wrapper has no result cache, and its sidecars must be the
 	// synchronous built-in audit/telemetry implementations.
@@ -1644,13 +1660,32 @@ func (s *assembleState) assembleSubAgent() error {
 		tracker := s.costTracker
 		subAgentOpts = append(subAgentOpts, core.WithProviderAttemptRecorder(func(result llm.ProviderAttemptResult) error {
 			_, err := tracker.RecordAttempt(result)
+			if s.ac.providerAttemptObserver != nil {
+				err = errors.Join(err, s.ac.providerAttemptObserver(result))
+			}
 			return err
 		}))
 	}
 	subAgentFactory := core.NewRealSubAgentFactoryWithModelBuilder(s.model, modelBuilder, s.tr, subAgentOpts...)
+	if s.rc != nil && s.modelResolver != nil {
+		s.ownManagedChildren()
+		subAgentFactory = core.NewManagedSubAgentFactory(s.runManagedSubAgent)
+	}
 	dispatcher := core.NewDefaultSubagentDispatcher(subAgentFactory)
 	s.dispatcher = dispatcher
-	if subErr := s.tr.Register(s.ctx, core.NewSubagentTool(dispatcher)); subErr != nil {
+	if s.rc != nil && s.modelResolver != nil {
+		tool, err := core.NewManagedSubagentTool(dispatcher)
+		if err != nil {
+			return err
+		}
+		registrar, ok := s.tr.(tools.TrustedInlineControlRegistrar)
+		if !ok {
+			return errors.New("assemble: managed sub-agent completion registration unavailable")
+		}
+		if err := registrar.RegisterTrustedInlineControl(s.ctx, tool); err != nil {
+			return fmt.Errorf("assemble: register managed sub-agent: %w", err)
+		}
+	} else if subErr := s.tr.Register(s.ctx, core.NewSubagentTool(dispatcher)); subErr != nil {
 		s.logger.Warn("assemble_subagent_tool_failed", "err", subErr)
 	}
 
@@ -1873,6 +1908,7 @@ func (s *assembleState) assembleLoopAgent() {
 	loopOpts := []core.LoopOption{
 		core.WithLLM(s.model),
 		core.WithTools(s.tr),
+		core.WithAllowedToolNames(s.ac.childToolNames),
 		core.WithModelWrapper(newModelWrapperWithChain(s.pw, s.modelChain, s.circuitBreaker, s.guardChain, s.telemetry)),
 		core.WithExecutionMode(core.ExecutionModeParallel),
 		core.WithTracer(s.tracer),
@@ -1887,6 +1923,9 @@ func (s *assembleState) assembleLoopAgent() {
 		tracker := s.costTracker
 		loopOpts = append(loopOpts, core.WithProviderAttemptRecorder(func(result llm.ProviderAttemptResult) error {
 			_, err := tracker.RecordAttempt(result)
+			if s.ac.providerAttemptObserver != nil {
+				err = errors.Join(err, s.ac.providerAttemptObserver(result))
+			}
 			return err
 		}))
 	}
@@ -1986,6 +2025,7 @@ func (s *assembleState) assembleMiddleware() {
 	// refuse opaque project pre-tool shell hooks while Plan Mode is active.
 	s.loopAgent.SetToolInterceptor(core.NewPlanModeToolInterceptor(s.planCtrl))
 	if s.hookMgr != nil {
+		s.loopAgent.SetPostToolActions(s.hookMgr.PreparedPostToolActions)
 		s.loopAgent.SetContextToolInterceptor(planModePreToolShellHookInterceptor(
 			s.planCtrl,
 			s.shellHooks,

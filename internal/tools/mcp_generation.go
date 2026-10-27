@@ -51,16 +51,36 @@ type MCPGenerationClient interface {
 // generation. Its zero value is invalid.
 type MCPGenerationClientHandle struct {
 	client MCPGenerationClient
+	owned  *ownedMCPRequestExecutor
 }
 
-// NewMCPGenerationClientHandle creates a handle for one source-owned MCP
-// client generation. The handle retains the narrow generation caller, never a
-// ToolDefinition or its Execute method value.
+// ownedMCPRequestExecutor is minted only by the explicit host-owned constructor.
+// Capture the exact receiver's method before publication, so embedding a handle
+// cannot replace its executor while retaining request-completion authority.
+type ownedMCPRequestExecutor struct {
+	execute func(context.Context, string, ToolCall) (*ToolResult, error)
+}
+
+// NewMCPGenerationClientHandle creates a generic generation handle. Optional
+// interfaces, names and embedded owned generations never grant completion proof.
 func NewMCPGenerationClientHandle(client MCPGenerationClient) (MCPGenerationClientHandle, error) {
 	if isNilMCPGenerationClient(client) {
 		return MCPGenerationClientHandle{}, fmt.Errorf("%w: missing client generation", ErrMCPGenerationCandidateInvalid)
 	}
 	return MCPGenerationClientHandle{client: client}, nil
+}
+
+// NewOwnedMCPGenerationClientHandle explicitly attests a host-reviewed request
+// adapter's local synchronous lifecycle. The host must supply its exact owned
+// generation, not a remote descriptor or a user-provided wrapper. This captures
+// only completion authority; tool effects and approval remain unchanged.
+func NewOwnedMCPGenerationClientHandle(client MCPGenerationClient) (MCPGenerationClientHandle, error) {
+	handle, err := NewMCPGenerationClientHandle(client)
+	if err != nil {
+		return MCPGenerationClientHandle{}, err
+	}
+	handle.owned = &ownedMCPRequestExecutor{execute: client.ExecuteMCPTool}
+	return handle, nil
 }
 
 func (h MCPGenerationClientHandle) valid() bool {
@@ -70,6 +90,9 @@ func (h MCPGenerationClientHandle) valid() bool {
 func (h MCPGenerationClientHandle) execute(ctx context.Context, remoteToolName string, call ToolCall) (*ToolResult, error) {
 	if !h.valid() {
 		return nil, fmt.Errorf("%w: missing client generation", ErrMCPGenerationCandidateInvalid)
+	}
+	if h.owned != nil {
+		return h.owned.execute(ctx, remoteToolName, call)
 	}
 	return h.client.ExecuteMCPTool(ctx, remoteToolName, call)
 }
@@ -390,6 +413,9 @@ func prepareMCPGenerationCandidate(candidate MCPToolCandidate) (mcpGenerationCan
 		hasParameters: true,
 		schema:        candidate.schema,
 	}
+	if candidate.client.owned != nil {
+		metadata.completionProof = CompletionMCPRequestJoined
+	}
 	if candidate.projectTrustBinding != nil {
 		if !validProjectTrustBinding(candidate.projectTrustBinding) {
 			return mcpGenerationCandidate{}, ErrProjectTrustBindingInvalid
@@ -638,7 +664,11 @@ func (r *DefaultToolRegistry) registerDefaultToolGuarded(ctx context.Context, de
 }
 
 func (r *DefaultToolRegistry) registerDefaultToolGuardedWithBinding(ctx context.Context, def ToolDefinition, binding ProjectTrustBinding) error {
-	metadata, fingerprint, err := prepareRegistrationMetadata(def, unknownTrustedEffects(), "")
+	proof := PreparedCompletionProof("")
+	if discovery, ok := def.(*MCPDiscoveryTool); ok && discovery != nil && discovery.owned != nil {
+		proof = CompletionMCPRequestJoined
+	}
+	metadata, fingerprint, err := prepareRegistrationMetadata(def, unknownTrustedEffects(), proof)
 	if err != nil {
 		return err
 	}
@@ -720,23 +750,29 @@ func (f *DispatchFence) publishChecked(domain DispatchFenceDomain, expected *Dis
 	if domain != DispatchFenceRegistry && domain != DispatchFenceApproval && domain != DispatchFencePlan {
 		return DispatchFenceSnapshot{}, ErrInvalidDispatchFenceDomain
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if expected != nil && f.generations != *expected {
-		return f.generations, ErrDispatchFenceChanged
-	}
-	if err := update(); err != nil {
-		return f.generations, err
-	}
-	switch domain {
-	case DispatchFenceRegistry:
-		f.generations.Registry++
-	case DispatchFenceApproval:
-		f.generations.Approval++
-	case DispatchFencePlan:
-		f.generations.Plan++
-	}
-	return f.generations, nil
+	var snapshot DispatchFenceSnapshot
+	err := f.withPlanRestriction(func(parentPlan uint64) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		snapshot = f.snapshotWithParentPlan(parentPlan)
+		if expected != nil && snapshot != *expected {
+			return ErrDispatchFenceChanged
+		}
+		if err := update(); err != nil {
+			return err
+		}
+		switch domain {
+		case DispatchFenceRegistry:
+			f.generations.Registry++
+		case DispatchFenceApproval:
+			f.generations.Approval++
+		case DispatchFencePlan:
+			f.generations.Plan++
+		}
+		snapshot = f.snapshotWithParentPlan(parentPlan)
+		return nil
+	})
+	return snapshot, err
 }
 
 // PreviewDefinition returns detached model metadata for candidate budget/plan

@@ -57,10 +57,10 @@ type managedLocalResult struct {
 // startManagedLocalCommand starts a command in a fresh process group and owns
 // both pipe ends so leader exit can be observed independently of reader EOF.
 func startManagedLocalCommand(cancel context.CancelFunc, cmd *exec.Cmd) (*managedLocalCommand, error) {
-	return startManagedLocalCommandWithStartHook(cancel, cmd, nil)
+	return startManagedLocalCommandWithStartHook(context.Background(), cancel, cmd, nil)
 }
 
-func startManagedLocalCommandWithStartHook(cancel context.CancelFunc, cmd *exec.Cmd, onStarted func(*exec.Cmd) error) (*managedLocalCommand, error) {
+func startManagedLocalCommandWithStartHook(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd, onStarted func(*exec.Cmd) error) (*managedLocalCommand, error) {
 	scope, err := newLocalProcessScope(cmd)
 	if err != nil {
 		return nil, err
@@ -77,7 +77,7 @@ func startManagedLocalCommandWithStartHook(cancel context.CancelFunc, cmd *exec.
 	}
 	cmd.Stdout = stdoutWrite
 	cmd.Stderr = stderrWrite
-	if err := cmd.Start(); err != nil {
+	if err := startPreparedEffect(ctx, cmd.Start); err != nil {
 		_ = stdoutRead.Close()
 		_ = stdoutWrite.Close()
 		_ = stderrRead.Close()
@@ -111,7 +111,13 @@ func startManagedLocalCommandWithStartHook(cancel context.CancelFunc, cmd *exec.
 func startManagedLocalBashCommand(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd) (*managedLocalCommand, error) {
 	observer := processExecutionIdentityObserverFromContext(ctx)
 	if observer == nil {
-		return startManagedLocalCommand(cancel, cmd)
+		_, capturedStartGuard := ctx.Value(preparedEffectStartKey{}).(preparedEffectStartGuard)
+		input, supplied := bashRuntimeInputFromContext(ctx)
+		if capturedStartGuard || (supplied && input.guard != nil) {
+			observer = func(context.Context, ProcessExecutionIdentity) error { return nil }
+		} else {
+			return startManagedLocalCommand(cancel, cmd)
+		}
 	}
 	return startManagedLocalBashCommandWithIdentityObserver(ctx, cancel, cmd, observer)
 }

@@ -37,9 +37,21 @@ var knownCommandNames = []string{
 // scanExportOnlyUsedByTest detects exported symbols that are only referenced
 // from _test.go files within the same package (SCAN-006).
 func scanExportOnlyUsedByTest(dir string, goFiles []string) []Finding {
-	var findings []Finding
-
 	fset := token.NewFileSet()
+	parsed := make(map[string]*ast.File, len(goFiles))
+	for _, file := range goFiles {
+		node, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
+		if err == nil {
+			parsed[file] = node
+		}
+	}
+	return scanExportOnlyUsedByTestParsed(goFiles, fset, parsed)
+}
+
+// scanExportOnlyUsedByTestParsed reuses this scan's ASTs and indexes references
+// once per file, so exported declarations never trigger reparsing or AST walks.
+func scanExportOnlyUsedByTestParsed(goFiles []string, fset *token.FileSet, parsed map[string]*ast.File) []Finding {
+	var findings []Finding
 
 	// Phase 1: Collect exported function/method names from production files.
 	type exportInfo struct {
@@ -60,8 +72,8 @@ func scanExportOnlyUsedByTest(dir string, goFiles []string) []Finding {
 	}
 
 	for _, file := range prodFiles {
-		node, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
-		if err != nil {
+		node := parsed[file]
+		if node == nil {
 			continue
 		}
 		for _, decl := range node.Decls {
@@ -108,75 +120,43 @@ func scanExportOnlyUsedByTest(dir string, goFiles []string) []Finding {
 		return findings
 	}
 
-	// Phase 2: Build reference sets from production and test files.
-	prodRefs := map[string]bool{}
+	// Phase 2: Index production reference origins and test references by name.
+	// An empty origin means the name occurs in multiple production files.
+	// Preserve the existing syntactic rule: declarations, selectors, imported
+	// names and shadowed identifiers all count; only the declaration file is
+	// excluded when deciding whether a symbol has a production reference.
+	prodRefs := map[string]string{}
 	testRefs := map[string]bool{}
-
-	collectRefs := func(files []string, refSet map[string]bool) {
+	collectRefs := func(files []string, test bool) {
 		for _, file := range files {
-			node, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
-			if err != nil {
+			node := parsed[file]
+			if node == nil {
 				continue
 			}
 			ast.Inspect(node, func(n ast.Node) bool {
-				switch x := n.(type) {
-				case *ast.Ident:
-					if ast.IsExported(x.Name) {
-						refSet[x.Name] = true
-					}
-				case *ast.SelectorExpr:
-					if x.Sel != nil && ast.IsExported(x.Sel.Name) {
-						refSet[x.Sel.Name] = true
-					}
+				ident, ok := n.(*ast.Ident)
+				if !ok || !ast.IsExported(ident.Name) {
+					return true
+				}
+				if test {
+					testRefs[ident.Name] = true
+				} else if origin, exists := prodRefs[ident.Name]; !exists {
+					prodRefs[ident.Name] = file
+				} else if origin != file {
+					prodRefs[ident.Name] = ""
 				}
 				return true
 			})
 		}
 	}
+	collectRefs(prodFiles, false)
+	collectRefs(testFiles, true)
 
-	collectRefs(prodFiles, prodRefs)
-	collectRefs(testFiles, testRefs)
-
-	// Phase 3: Flag exported symbols not referenced in any production file.
+	// Phase 3: Flag exported symbols with test references and no production
+	// reference outside their declaration file.
 	for _, exp := range exports {
-		// Skip the declaration itself (self-reference in the same file).
-		// The reference set includes the declaration file, so we check if
-		// the symbol is used in ANY production file OTHER than where it's declared.
-		// We do this by checking if prodRefs contains it from a file other than
-		// the declaration file.
-		usedInProd := false
-		for _, pf := range prodFiles {
-			if pf == exp.file {
-				continue // Skip declaration file.
-			}
-			node, err := parser.ParseFile(fset, pf, nil, parser.ParseComments)
-			if err != nil {
-				continue
-			}
-			found := false
-			ast.Inspect(node, func(n ast.Node) bool {
-				if found {
-					return false
-				}
-				switch x := n.(type) {
-				case *ast.Ident:
-					if x.Name == exp.name {
-						found = true
-						return false
-					}
-				case *ast.SelectorExpr:
-					if x.Sel != nil && x.Sel.Name == exp.name {
-						found = true
-						return false
-					}
-				}
-				return true
-			})
-			if found {
-				usedInProd = true
-				break
-			}
-		}
+		origin, exists := prodRefs[exp.name]
+		usedInProd := exists && origin != exp.file
 
 		if !usedInProd {
 			// Check if it's at least referenced in test files.

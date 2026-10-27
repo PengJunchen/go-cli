@@ -76,7 +76,7 @@ func (s *assembleState) registerConfiguredMCP(dtr *tools.DeferredToolRegistryAda
 	if err := dtr.RegisterTrustedInlineControl(s.ctx, &mcpListTool{owner: p}); err != nil {
 		return err
 	}
-	return dtr.Register(s.ctx, &mcpDiscoveryTool{owner: p})
+	return dtr.Register(s.ctx, tools.NewOwnedMCPDiscoveryTool(p))
 }
 
 func (p *progressiveMCP) List(query string) []MCPServerStatus {
@@ -270,28 +270,19 @@ func (t *mcpListTool) Execute(ctx context.Context, call tools.ToolCall) (*tools.
 	return &tools.ToolResult{Output: string(data), ToolCallID: call.ID}, nil
 }
 
-type mcpDiscoveryTool struct{ owner *progressiveMCP }
-
-func (t *mcpDiscoveryTool) Name() string { return "mcp_discover" }
-func (t *mcpDiscoveryTool) Description() string {
-	return "Activate one configured MCP server by setting server, exposing its tool schemas for the next model request. Use mcp_list for local metadata without connecting. Calls to discovered tools still require normal approval."
-}
-func (t *mcpDiscoveryTool) Parameters() any {
-	return map[string]any{"type": "object", "properties": map[string]any{"server": map[string]any{"type": "string"}, "query": map[string]any{"type": "string"}}, "additionalProperties": false}
-}
-func (t *mcpDiscoveryTool) Execute(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
-	name, _ := call.Args["server"].(string)
-	query, _ := call.Args["query"].(string)
+// DiscoverMCP joins the activation transaction before exposing its result.
+// Published clients remain assembly-owned; pending failed cleanup is preserved
+// by the returned error and cannot produce positive request completion proof.
+func (p *progressiveMCP) DiscoverMCP(ctx context.Context, name, query string) (string, <-chan struct{}, error) {
+	done := make(chan struct{})
+	defer close(done)
 	if name != "" {
-		if err := t.owner.Activate(ctx, name); err != nil {
-			return nil, err
+		if err := p.Activate(ctx, name); err != nil {
+			return "", done, err
 		}
 	}
-	data, err := json.Marshal(t.owner.List(query))
-	if err != nil {
-		return nil, err
-	}
-	return &tools.ToolResult{Output: string(data)}, nil
+	data, err := json.Marshal(p.List(query))
+	return string(data), done, err
 }
 
 func (p *progressiveMCP) refreshServer(ctx context.Context, name string, fresh *config.Config, runtime *dynamicRuntime) error {

@@ -115,7 +115,7 @@ func newHTTPMCPServer(t *testing.T, sse bool) *httptest.Server {
 					},
 				}
 			case "tools/call":
-				result = map[string]any{"content": "hello"}
+				result = map[string]any{"content": mcpTextContent("hello")}
 			default:
 				http.Error(w, "unsupported method", http.StatusBadRequest)
 				return
@@ -283,7 +283,7 @@ func TestMCP20250618SSEFramesAndResume(t *testing.T) {
 			var id json.RawMessage
 			id = json.RawMessage("2")
 			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = fmt.Fprintf(w, "id: replayed\nevent: message\ndata:{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"content\":\"resumed\"}}\n\n", id)
+			_, _ = fmt.Fprintf(w, "id: replayed\nevent: message\ndata:{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"resumed\"}]}}\n\n", id)
 			return
 		}
 		if r.Method != http.MethodPost {
@@ -349,7 +349,7 @@ func TestMCP20250618SSEFramesAndResume(t *testing.T) {
 
 	result, err := adapter.CallTool(context.Background(), "echo", map[string]any{})
 	require.NoError(t, err)
-	assert.Equal(t, "resumed", result.Content)
+	assert.Equal(t, mcpTextContent("resumed"), result.Content)
 	assert.EqualValues(t, 1, toolCalls.Load(), "resumption must not replay tools/call")
 	assert.EqualValues(t, 1, resumeRequests.Load())
 }
@@ -1025,7 +1025,7 @@ func TestHTTPAdapterCallToolCustomRoundTripperFailureIsUnknownAfterDispatch(t *t
 			result["serverInfo"] = map[string]any{"name": "test", "version": "1.0"}
 		case "tools/call":
 			sideEffects.Add(1)
-			result["content"] = "completed"
+			result["content"] = mcpTextContent("completed")
 		}
 		frame := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}
 		w.Header().Set("Content-Type", "application/json")
@@ -1129,7 +1129,7 @@ func TestHTTPAdapterCallTool(t *testing.T) {
 
 	result, err := adapter.CallTool(ctx, "echo", map[string]any{"msg": "hi"})
 	require.NoError(t, err)
-	assert.Equal(t, "hello", result.Content)
+	assert.Equal(t, mcpTextContent("hello"), result.Content)
 	assert.False(t, result.IsError)
 }
 
@@ -1143,7 +1143,7 @@ func TestHTTPAdapterCallToolSSE(t *testing.T) {
 
 	result, err := adapter.CallTool(ctx, "echo", map[string]any{"msg": "hi"})
 	require.NoError(t, err)
-	assert.Equal(t, "hello", result.Content)
+	assert.Equal(t, mcpTextContent("hello"), result.Content)
 	assert.False(t, result.IsError)
 }
 
@@ -1178,7 +1178,7 @@ func TestHTTPAdapterResponseSizeLimit(t *testing.T) {
 		case "tools/call":
 			// Return a response larger than 10MB to trigger the size limit.
 			big := strings.Repeat("x", 11*1024*1024)
-			result = map[string]any{"content": big}
+			result = map[string]any{"content": mcpTextContent(big)}
 		default:
 			http.Error(w, "unsupported", http.StatusBadRequest)
 			return

@@ -8,6 +8,18 @@ major package and handshake. The host supports tools, existing hook events,
 commands, complete-response providers and prompt contributions. Skill DTOs are
 reserved; this host rejects RPC skill negotiation and uses standard SKILL.md.
 
+## Host execution support
+
+A declared contribution and a registered tool do not by themselves establish
+support for durable tool execution. Generic worker tools currently lack the
+request-completion contract required by the durable CLI and are rejected before
+dispatch in that mode. Ordinary custom tools have the same limitation. This is
+separate from the reviewed completion contracts for the CLI's built-in MCP
+transports and managed child agents. See the [runtime guide](../../../docs/runtime-guide.md)
+for the current loading, approval, execution, and restart boundaries.
+
+## Protocol and descriptor
+
 `Serve` reads newline-delimited requests and writes matched responses. The first
 request must be `initialize` with `{"version":"1.0"}`. Frames including newline
 are at most 1 MiB. Methods are `tool.call`, `hook.handle`, `command.run`, and

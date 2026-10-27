@@ -865,24 +865,18 @@ func TestServeAssemblyFailureDoesNotWriteTokenOrStartListener(t *testing.T) {
 	}
 
 	cfg := newTrustedProjectHookAssembleTestConfig(t, workDir)
+	cfg.Approval.Mode = "invalid-mode"
 	out := &safeBuffer{}
 	c := newServeCmd(out)
 	tokenPath := privateServeTokenPath(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	err := c.Run(ctx, cfg, []string{
-		"--approve", "deny",
 		"--addr", "127.0.0.1:0",
 		"--token-file", tokenPath,
 	})
 	if err == nil {
-		t.Fatal("expected unsupported assembly error")
-	}
-	if !strings.Contains(strings.ToLower(err.Error()), "posttooluse") {
-		t.Errorf("expected error to identify the unsupported hook, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), configPath) || !strings.Contains(err.Error(), "hook 0") {
-		t.Errorf("expected error to identify the configured path and hook index, got: %v", err)
+		t.Fatal("expected invalid approval mode assembly error")
 	}
 	if strings.Contains(err.Error(), commandCanary) {
 		t.Errorf("assembly error must not disclose hook command contents, got: %v", err)

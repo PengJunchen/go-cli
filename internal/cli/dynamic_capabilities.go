@@ -24,17 +24,18 @@ import (
 )
 
 type runtimePlan struct {
-	catalog        *skill.Catalog
-	binding        tools.ProjectTrustBinding
-	bindings       []tools.ProjectTrustBinding
-	registry       tools.ToolRegistry
-	hooks          *core.HookChain
-	skills         []core.SkillInfo
-	promptOptions  core.SystemPromptOptions
-	interceptor    core.ContextToolInterceptor
-	promptBudget   int
-	promptCompiler core.SystemPromptBuilder
-	resources      config.RuntimeConfig
+	catalog         *skill.Catalog
+	binding         tools.ProjectTrustBinding
+	bindings        []tools.ProjectTrustBinding
+	registry        tools.ToolRegistry
+	hooks           *core.HookChain
+	skills          []core.SkillInfo
+	promptOptions   core.SystemPromptOptions
+	interceptor     core.ContextToolInterceptor
+	postToolActions core.PostToolActions
+	promptBudget    int
+	promptCompiler  core.SystemPromptBuilder
+	resources       config.RuntimeConfig
 }
 type runtimePlanKey struct{}
 
@@ -79,6 +80,7 @@ func (d *dynamicRuntime) AcquireRun(ctx context.Context) (context.Context, core.
 	ctx = core.WithRunGenerationMetadata(ctx, core.RunGenerationMetadata{GenerationID: snapshot.ID(), PromptDigest: snapshot.PromptDigest(), CapabilityDigest: snapshot.CapabilityDigest(), PolicyEpoch: snapshot.PolicyEpoch(), TrustEpoch: snapshot.TrustEpoch()})
 	ctx = core.WithRunHookChain(ctx, plan.hooks)
 	ctx = core.WithRunContextToolInterceptor(ctx, plan.interceptor)
+	ctx = core.WithRunPostToolActions(ctx, plan.postToolActions)
 	ctx = core.WithRunToolRegistry(ctx, plan.registry)
 	guard := &runtimeCapabilityGuard{lease: lease, bindings: plan.bindings, plan: plan}
 	if fence, err := tools.DispatchFenceFromRegistry(plan.registry); err == nil {
@@ -243,7 +245,11 @@ func (d *dynamicRuntime) prepare(ctx context.Context, catalog *skill.Catalog, bi
 	if verified := d.state.rc.VerifiedProjectSources(); verified != nil {
 		bindings = append(bindings, verified)
 	}
-	plan := &runtimePlan{bindings: bindings, catalog: catalog, binding: binding, registry: d.state.tr, hooks: d.state.hookChain, skills: infos, promptOptions: options, interceptor: interceptor, promptBudget: d.state.rc.Runtime.MaxPromptBytes, promptCompiler: compiler, resources: d.state.rc.Runtime}
+	var postActions core.PostToolActions
+	if d.state.hookMgr != nil {
+		postActions = d.state.hookMgr.PreparedPostToolActions
+	}
+	plan := &runtimePlan{postToolActions: postActions, bindings: bindings, catalog: catalog, binding: binding, registry: d.state.tr, hooks: d.state.hookChain, skills: infos, promptOptions: options, interceptor: interceptor, promptBudget: d.state.rc.Runtime.MaxPromptBytes, promptCompiler: compiler, resources: d.state.rc.Runtime}
 	return snapshot, plan, nil
 }
 
@@ -319,9 +325,6 @@ func (d *dynamicRuntime) Reload(ctx context.Context) error {
 		return err
 	}
 	temp.loadConfiguredShellHooks()
-	if len(temp.unsupportedPostToolUseHooks) > 0 {
-		return ErrPreparedPostToolUseHookUnsupported
-	}
 	hooks := []core.Hook{}
 	if d.state.extensionManager != nil {
 		for _, registration := range d.state.extensionManager.HookRegistrations() {
@@ -742,12 +745,9 @@ func validateRuntimeHooks(cfg *config.Config) error {
 		}
 	}
 	for _, hook := range declarations {
-		event, err := parseHookEvent(hook.Event)
+		_, err := parseHookEvent(hook.Event)
 		if err != nil {
 			return err
-		}
-		if event == core.EventPostToolUse {
-			return ErrPreparedPostToolUseHookUnsupported
 		}
 		if hook.Timeout != "" {
 			duration, err := time.ParseDuration(hook.Timeout)

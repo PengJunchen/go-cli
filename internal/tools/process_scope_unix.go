@@ -62,7 +62,7 @@ func startManagedLocalBashCommandWithIdentityObserver(ctx context.Context, cance
 	defer gate.closeReadEnd()
 	defer gate.abort()
 
-	return startManagedLocalCommandWithStartHook(cancel, cmd, func(started *exec.Cmd) error {
+	return startManagedLocalCommandWithStartHook(ctx, cancel, cmd, func(started *exec.Cmd) error {
 		if started.Process == nil || started.Process.Pid <= 0 {
 			return errors.New("bash process start returned no child identity")
 		}
@@ -76,7 +76,10 @@ func startManagedLocalBashCommandWithIdentityObserver(ctx context.Context, cance
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("prepared Bash canceled before start-gate release: %w", err)
 		}
-		return gate.release()
+		if input, supplied := bashRuntimeInputFromContext(ctx); supplied && input.guard != nil {
+			return input.guard(ctx, gate.release)
+		}
+		return startPreparedEffect(ctx, gate.release)
 	})
 }
 

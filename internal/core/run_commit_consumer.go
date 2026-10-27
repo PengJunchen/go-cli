@@ -47,19 +47,26 @@ func (err runCommitPersistenceError) Unwrap() error    { return err.cause }
 func (runCommitPersistenceError) OutcomeUnknown() bool { return true }
 
 type runCommitConsumer struct {
-	ctx         context.Context
-	owner       *runOwner
-	sink        RunCommitSink
-	source      *CompactionSourceSnapshot
-	projections []CompactionProjection
-	binding     RunCommitBinding
-	runID       string
-	terminalID  TerminalCheckpointID
-	identityMu  sync.RWMutex
-	identities  map[string]ExecutionIdentity
+	ctx            context.Context
+	owner          *runOwner
+	sink           RunCommitSink
+	source         *CompactionSourceSnapshot
+	projections    []CompactionProjection
+	binding        RunCommitBinding
+	runID          string
+	terminalID     TerminalCheckpointID
+	identityMu     sync.RWMutex
+	identities     map[string]ExecutionIdentity
+	completedTools map[string]completedToolAction
+}
+
+type completedToolAction struct {
+	actionID string
+	metadata map[string]any
 }
 
 type runCommitDispatchResult struct {
+	metadata        map[string]any
 	output          string
 	isError         bool
 	err             error
@@ -139,6 +146,9 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 		toolResult, err = streaming.DispatchStreaming(ctx, streamSink)
 	} else {
 		toolResult, err = invocation.Dispatch(ctx)
+	}
+	if toolResult != nil {
+		result.metadata = cloneStringAnyMap(toolResult.Metadata)
 	}
 	result.returned = true
 	result.committed = invocation.DispatchCommitted()
@@ -475,6 +485,7 @@ func (consumer *runCommitConsumer) commitTerminal(transcript []TranscriptEntry, 
 
 func (consumer *runCommitConsumer) actionIntent(batchID string, ordinal uint64, call llm.ToolCall, invocation tools.PreparedInvocation) ActionIntent {
 	readProof, _ := tools.ScopedWorkspaceReadProofFor(invocation, consumer.binding.CanonicalWorkspaceRoot)
+	delegationProof, _ := tools.ManagedDelegationProofFor(invocation, consumer.binding.CanonicalWorkspaceRoot)
 	return ActionIntent{
 		SessionID:                  consumer.binding.SessionID,
 		WorkspaceID:                consumer.binding.WorkspaceID,
@@ -489,6 +500,7 @@ func (consumer *runCommitConsumer) actionIntent(batchID string, ordinal uint64, 
 		ArgumentDigest:             invocation.ArgumentDigest(),
 		EffectSet:                  invocation.EffectSet(),
 		ScopedReadProof:            readProof,
+		ManagedDelegationProof:     delegationProof,
 	}
 }
 
@@ -560,9 +572,6 @@ func markLatestToolReceiptUnknown(messages *[]llm.Message, transcript *[]Transcr
 }
 
 func (consumer *runCommitConsumer) prepareInvocation(ctx context.Context, registry tools.ToolRegistry, call llm.ToolCall, stream EventStream) (tools.PreparedInvocation, tools.SynchronousStreamSink, error) {
-	if call.Name == "dispatch_subagent" {
-		return nil, nil, ErrRunCommitChildUnsupported
-	}
 	if stream != nil {
 		// Get is used only to determine whether this call has a streaming
 		// capability. The streaming preparer still freezes the actual
@@ -737,7 +746,17 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 		toolResult.isError = true
 		return toolResult, markUnknownToolOutcome(dispatch.err)
 	}
+	if dispatch.committed {
+		consumer.markToolCompleted(call.ID, intent.ActionID, dispatch.metadata)
+	}
 	return toolResult, nil
+}
+
+func (consumer *runCommitConsumer) markToolCompleted(id, actionID string, metadata map[string]any) {
+	if consumer.completedTools == nil {
+		consumer.completedTools = map[string]completedToolAction{}
+	}
+	consumer.completedTools[id] = completedToolAction{actionID: actionID, metadata: cloneStringAnyMap(metadata)}
 }
 
 func (consumer *runCommitConsumer) resolvePreparedTask(ctx context.Context, taskID uint64, intent ActionIntent, firstExecution ActionExecution) (bool, error) {
@@ -1040,6 +1059,13 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 			}
 		}
 	}
+	if runErr == nil {
+		for _, action := range actions {
+			if action.invocation != nil && action.complete && action.result.committed {
+				consumer.markToolCompleted(action.call.ID, action.intent.ActionID, action.result.metadata)
+			}
+		}
+	}
 	return runErr
 }
 
@@ -1113,7 +1139,7 @@ func cloneTranscriptEntries(entries []TranscriptEntry) []TranscriptEntry {
 
 func validRunCompletionProof(proof tools.PreparedCompletionProof) bool {
 	switch proof {
-	case tools.CompletionInlinePipelineJoined, tools.CompletionQueuedJobJoined, tools.CompletionOwnedProcessGroupJoined:
+	case tools.CompletionInlinePipelineJoined, tools.CompletionQueuedJobJoined, tools.CompletionOwnedProcessGroupJoined, tools.CompletionMCPRequestJoined:
 		return true
 	default:
 		return false

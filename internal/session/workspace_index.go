@@ -43,11 +43,14 @@ const (
 // WorkspaceDispatchAction persists action identity and effect facts only. It
 // deliberately has no field for tool arguments or credentials.
 type WorkspaceDispatchAction struct {
-	Action            PendingActionRef                   `json:"action"`
-	ToolIdentity      *tools.TrustedToolIdentitySnapshot `json:"tool_identity,omitempty"`
-	EffectSet         []tools.TrustedToolEffect          `json:"effect_set"`
-	ExecutionIdentity *ExecutionIdentity                 `json:"execution_identity,omitempty"`
-	ScopedReadProof   *tools.ScopedWorkspaceReadProof    `json:"-"`
+	// NonBlockingDelegation is a persisted fact minted from an exact prepared proof.
+	NonBlockingDelegation  bool                               `json:"non_blocking_delegation,omitempty"`
+	ManagedDelegationProof *tools.ManagedDelegationProof      `json:"-"`
+	Action                 PendingActionRef                   `json:"action"`
+	ToolIdentity           *tools.TrustedToolIdentitySnapshot `json:"tool_identity,omitempty"`
+	EffectSet              []tools.TrustedToolEffect          `json:"effect_set"`
+	ExecutionIdentity      *ExecutionIdentity                 `json:"execution_identity,omitempty"`
+	ScopedReadProof        *tools.ScopedWorkspaceReadProof    `json:"-"`
 }
 
 // WorkspaceDispatchBatch is the complete session reservation batch whose
@@ -280,6 +283,11 @@ func (i *WorkspaceQuarantineIndex) BeginDispatchBatch(ctx context.Context, batch
 		}
 		if !claimWorkspaceDispatchReadProofs(normalized) {
 			return ErrWorkspaceQuarantined
+		}
+		for _, action := range normalized.Actions {
+			if action.ManagedDelegationProof != nil && (action.ToolIdentity == nil || !action.ManagedDelegationProof.ClaimWorkspaceAdmission(*action.ToolIdentity, action.EffectSet, action.Action.ToolCallID, normalized.CanonicalWorkspaceRoot)) {
+				return ErrWorkspaceQuarantined
+			}
 		}
 		record := workspaceIndexRecord{
 			Version: 1, RecordID: workspaceDispatchRecordID(persisted),
@@ -684,7 +692,7 @@ func (s *workspaceIndexState) hasConflictingMarkerReference(ref PendingActionRef
 
 func (s *workspaceIndexState) hasUnresolvedMarker() bool {
 	for _, action := range s.actionsByKey {
-		if action.resolution == nil {
+		if action.resolution == nil && !action.action.NonBlockingDelegation {
 			return true
 		}
 	}
@@ -975,6 +983,15 @@ func normalizeWorkspaceDispatchBatch(batch WorkspaceDispatchBatch) (WorkspaceDis
 		if err != nil {
 			return WorkspaceDispatchBatch{}, fmt.Errorf("session: invalid trusted effect facts for action %q: %w", action.Action.ActionID, err)
 		}
+		if action.NonBlockingDelegation {
+			return WorkspaceDispatchBatch{}, errors.New("session: delegation facts require a fresh prepared proof")
+		}
+		if action.ManagedDelegationProof != nil {
+			if action.ToolIdentity == nil || !action.ManagedDelegationProof.MatchesWorkspaceAction(*action.ToolIdentity, effects, action.Action.ToolCallID, batch.CanonicalWorkspaceRoot) {
+				return WorkspaceDispatchBatch{}, errors.New("session: invalid managed delegation proof")
+			}
+			normalized.Actions[n].NonBlockingDelegation = true
+		}
 		normalized.Actions[n].EffectSet = effects
 	}
 	return normalized, nil
@@ -986,6 +1003,7 @@ func stripWorkspaceDispatchRuntime(batch WorkspaceDispatchBatch) WorkspaceDispat
 	for index := range batch.Actions {
 		batch.Actions[index] = cloneWorkspaceDispatchAction(batch.Actions[index])
 		batch.Actions[index].ScopedReadProof = nil
+		batch.Actions[index].ManagedDelegationProof = nil
 	}
 	return batch
 }
@@ -1058,6 +1076,9 @@ func validateWorkspaceDispatchAction(action WorkspaceDispatchAction, workspaceID
 		if identity.RegistrationSource == "" || identity.ToolName == "" || identity.RegistrationGeneration == 0 || !isHexDigest(identity.ExecutorFingerprint) || !isHexDigest(identity.ScopeFingerprint) {
 			return errors.New("action has invalid trusted tool identity facts")
 		}
+	}
+	if action.NonBlockingDelegation && (action.ToolIdentity == nil || action.ToolIdentity.RegistrationSource != tools.RegistrationSourceTrustedControl || action.ToolIdentity.ToolName != "dispatch_subagent" || len(action.EffectSet) != 1 || action.EffectSet[0] != tools.EffectControl) {
+		return errors.New("action has invalid managed delegation facts")
 	}
 	if action.ExecutionIdentity != nil {
 		if err := action.ExecutionIdentity.Validate(); err != nil {

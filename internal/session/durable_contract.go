@@ -396,7 +396,7 @@ func isHexDigest(value string) bool {
 
 func validCompletionProof(proof tools.PreparedCompletionProof) bool {
 	switch proof {
-	case "", tools.CompletionInlinePipelineJoined, tools.CompletionQueuedJobJoined, tools.CompletionOwnedProcessGroupJoined:
+	case "", tools.CompletionInlinePipelineJoined, tools.CompletionQueuedJobJoined, tools.CompletionOwnedProcessGroupJoined, tools.CompletionMCPRequestJoined:
 		return true
 	default:
 		return false

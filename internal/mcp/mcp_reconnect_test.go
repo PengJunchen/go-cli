@@ -36,7 +36,7 @@ func TestMCPNoReconnectWhenConnected(t *testing.T) {
 			frame := map[string]any{
 				"jsonrpc": "2.0",
 				"id":      req.ID,
-				"result":  map[string]any{"content": "ok"},
+				"result":  map[string]any{"content": mcpTextContent("ok")},
 			}
 			b, _ := json.Marshal(frame)
 			fmt.Fprintf(serverConn, "%s\n", b)
@@ -50,7 +50,7 @@ func TestMCPNoReconnectWhenConnected(t *testing.T) {
 
 	result, err := adapter.CallTool(context.Background(), "echo", nil)
 	require.NoError(t, err)
-	assert.Equal(t, "ok", result.Content)
+	assert.Equal(t, mcpTextContent("ok"), result.Content)
 
 	// No reconnection should have been attempted.
 	assert.Equal(t, 0, adapter.adapterCore.reconnectAttempts, "no reconnect attempts expected on success")
@@ -160,7 +160,7 @@ func TestMCPReconnectSucceeds(t *testing.T) {
 			frame := map[string]any{
 				"jsonrpc": "2.0",
 				"id":      req.ID,
-				"result":  map[string]any{"content": "ok"},
+				"result":  map[string]any{"content": mcpTextContent("ok")},
 			}
 			b, _ := json.Marshal(frame)
 			fmt.Fprintf(serverConn1, "%s\n", b)
@@ -260,7 +260,7 @@ func TestMCPCallToolLostResponseIsUnknownAndNotRetried(t *testing.T) {
 			frame := map[string]any{
 				"jsonrpc": "2.0",
 				"id":      req.ID,
-				"result":  map[string]any{"content": "retried"},
+				"result":  map[string]any{"content": mcpTextContent("retried")},
 			}
 			b, _ := json.Marshal(frame)
 			if _, err := fmt.Fprintf(serverConn2, "%s\n", b); err != nil {
@@ -310,7 +310,7 @@ func TestMCPCallToolMalformedMatchingResponseIsUnknown(t *testing.T) {
 			frame := map[string]any{
 				"jsonrpc": "1.0",
 				"id":      req.ID,
-				"result":  map[string]any{"content": "maybe done"},
+				"result":  map[string]any{"content": mcpTextContent("maybe done")},
 			}
 			b, _ := json.Marshal(frame)
 			_, _ = fmt.Fprintf(serverConn, "%s\n", b)

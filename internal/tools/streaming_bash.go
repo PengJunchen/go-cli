@@ -187,6 +187,7 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 		timeout = classifyCommand(command)
 	}
 
+	timeout = runtimeBashTimeout(ctx, timeout)
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := execCtx.Err(); err != nil {
@@ -199,6 +200,9 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 	cmd := exec.Command("bash", "-lc", command)
 	cmd.Dir = t.Workdir
 	cmd.Env = filteredEnv(t.Env)
+	if _, supplied := bashRuntimeInputFromContext(ctx); supplied {
+		cmd.Stdin = runtimeBashStdin(ctx)
+	}
 
 	managed, err := startManagedLocalBashCommand(execCtx, cancel, cmd)
 	if err != nil {

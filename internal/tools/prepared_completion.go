@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"sync"
 )
 
@@ -77,6 +78,10 @@ const (
 	// CompletionInlinePipelineJoined means the complete synchronous prepared
 	// executor pipeline returned.
 	CompletionInlinePipelineJoined PreparedCompletionProof = "inline_pipeline_joined"
+	// CompletionMCPRequestJoined proves the exact local MCP request pipeline joined
+	// after a known response or a known request rejection. It does not attest
+	// remote side-effect containment; unknown transport outcomes never emit it.
+	CompletionMCPRequestJoined PreparedCompletionProof = "mcp_request_joined"
 	// CompletionQueuedJobJoined means the exact accepted prepared queue job's
 	// captured executor returned.
 	CompletionQueuedJobJoined PreparedCompletionProof = "queued_job_joined"
@@ -401,7 +406,7 @@ func (s *preparedCompletionState) invalidateProof() {
 
 func validPreparedCompletionProof(proof PreparedCompletionProof) bool {
 	switch proof {
-	case CompletionInlinePipelineJoined, CompletionQueuedJobJoined, CompletionOwnedProcessGroupJoined:
+	case CompletionInlinePipelineJoined, CompletionQueuedJobJoined, CompletionOwnedProcessGroupJoined, CompletionMCPRequestJoined:
 		return true
 	default:
 		return false
@@ -448,4 +453,33 @@ func reportPreparedNoProcessCompletion(ctx context.Context) {
 	done := make(chan struct{})
 	close(done)
 	reportPreparedCompletion(ctx, CompletionInlinePipelineJoined, done)
+}
+
+// completionOutcomeKnown keeps a synchronous return from resolving an action
+// whose executor still owns pending resources or reports unknown side effects.
+func completionOutcomeKnown(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var unknown interface{ OutcomeUnknown() bool }
+	if errors.As(err, &unknown) && unknown.OutcomeUnknown() {
+		return false
+	}
+	var pending PendingExecutionError
+	return !errors.As(err, &pending)
+}
+
+// finishAfterPending keeps the captured generation pinned until the exact
+// pending resource joins. Its unknown outcome remains unproved even afterwards.
+func (s *preparedCompletionState) finishAfterPending(done chan struct{}, completed bool, pending <-chan struct{}) {
+	if pending == nil {
+		s.finish(done, completed)
+		return
+	}
+	select {
+	case <-pending:
+		s.finish(done, false)
+	default:
+		go func() { <-pending; s.finish(done, false) }()
+	}
 }
