@@ -159,6 +159,9 @@ func Scan(cfg ScanConfig) (*ScanReport, error) {
 	}
 
 	fset := token.NewFileSet()
+	// Keep ASTs local to this Scan so SCAN-006 can reuse production parses
+	// without retaining stale sources between scans.
+	parsed := make(map[string]*ast.File)
 
 	// pkgGroup collects file paths grouped by their parent directory
 	// for package-level scan rules (SCAN-008 through SCAN-013).
@@ -210,6 +213,13 @@ func Scan(cfg ScanConfig) (*ScanReport, error) {
 					}
 					pkgGroups[pkgDir].files = append(pkgGroups[pkgDir].files, path)
 				}
+				if cfg.CheckExportOnlyUsedByTest {
+					// Excluded files historically skip parse diagnostics; invalid
+					// sources still contribute no references to SCAN-006.
+					if node, parseErr := parser.ParseFile(fset, path, nil, parser.ParseComments); parseErr == nil {
+						parsed[path] = node
+					}
+				}
 				return nil
 			}
 		}
@@ -227,6 +237,10 @@ func Scan(cfg ScanConfig) (*ScanReport, error) {
 				Message:  fmt.Sprintf("parse error: %v", err),
 			})
 			return nil
+		}
+
+		if cfg.CheckExportOnlyUsedByTest {
+			parsed[path] = node
 		}
 
 		// Run per-file checks.
@@ -281,7 +295,7 @@ func Scan(cfg ScanConfig) (*ScanReport, error) {
 			report.Findings = append(report.Findings, scanSlogUsage(pkg.dir, pkg.files)...)
 		}
 		if cfg.CheckExportOnlyUsedByTest {
-			report.Findings = append(report.Findings, scanExportOnlyUsedByTest(pkg.dir, pkg.files)...)
+			report.Findings = append(report.Findings, scanExportOnlyUsedByTestParsed(pkg.files, fset, parsed)...)
 		}
 		if cfg.CheckHardcodedDefaults {
 			report.Findings = append(report.Findings, scanHardcodedDefaults(pkg.dir, pkg.files)...)
