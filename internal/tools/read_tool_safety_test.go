@@ -201,6 +201,7 @@ func TestGitReadCommandsKeepHostSelectedRepositoryContext(t *testing.T) {
 	args, err := os.ReadFile(argsPath)
 	require.NoError(t, err)
 	assert.Equal(t, []string{
+		"-c", "maintenance.autoDetach=false", "-c", "gc.autoDetach=false",
 		"--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "diff.external=", "-c", "log.showSignature=false", "log", "--format=%H%x1f%an%x1f%ae%x1f%ad%x1f%s",
 	}, strings.Split(strings.TrimSuffix(string(args), "\n"), "\n"))
 	contextValues, err := os.ReadFile(contextPath)

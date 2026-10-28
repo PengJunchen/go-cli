@@ -702,6 +702,9 @@ func (g *DefaultGitTool) runOwned(ctx context.Context, readOnly bool, args ...st
 	if readOnly {
 		commandArgs = gitReadOnlyArgs(commandArgs)
 	}
+	// Automatic maintenance must finish before this command's process owner
+	// returns. Keep the tasks enabled, but prevent Git from daemonizing them.
+	commandArgs = append([]string{"-c", "maintenance.autoDetach=false", "-c", "gc.autoDetach=false"}, commandArgs...)
 	cmd := exec.Command("git", commandArgs...)
 	cmd.Dir = g.cwd
 	if readOnly {

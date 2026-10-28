@@ -70,7 +70,7 @@ func TestReviewedRuntimeGitUnknownMergeStartsNoProbe(t *testing.T) {
 	installFakeGit(t, bin, `printf '%s\n' "$*" >> '`+trace+`'
 case "$*" in
   *rev-parse*) exit 0 ;;
-  merge*) /bin/sleep 4 ;;
+  *merge*) /bin/sleep 4 ;;
 esac
 `)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -108,7 +108,15 @@ func TestReviewedRuntimeAllGitToolsExecuteAgainstLocalRepository(t *testing.T) {
 	mainBranch := currentBranch(t, git.cwd)
 	bare := t.TempDir()
 	runGitInDir(t, bare, "init", "--bare")
+	// A server's configuration is independent of the client's command-scoped
+	// settings. This owned local remote must also keep its maintenance joined.
+	for _, key := range []string{"maintenance.autoDetach", "gc.autoDetach"} {
+		runGitInDir(t, bare, "config", "--local", key, "false")
+		require.Equal(t, "false", strings.TrimSpace(runGitInDir(t, bare, "config", "--local", "--bool", "--get", key)))
+	}
 	runGitInDir(t, git.cwd, "remote", "add", "origin", bare)
+	tracePath := filepath.Join(t.TempDir(), "trace.jsonl")
+	t.Setenv("GIT_TRACE2_EVENT", tracePath)
 	base := NewDefaultToolRegistry()
 	require.NoError(t, RegisterDefaults(ctx, base, WithRegisteredGitTool(git)))
 	registry := NewMiddlewareToolRegistry(base)
@@ -152,6 +160,7 @@ func TestReviewedRuntimeAllGitToolsExecuteAgainstLocalRepository(t *testing.T) {
 	invoke("git_merge", map[string]any{"branch": "reviewed-feature"})
 	invoke("git_revert", map[string]any{"commit": "HEAD"})
 	require.Len(t, seen, 17)
+	assertGitMaintenanceJoinedInForeground(t, tracePath)
 }
 
 func TestReviewedRuntimeGitChecksFenceBetweenActualCommands(t *testing.T) {
