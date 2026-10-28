@@ -9,7 +9,7 @@
 - Navidrome 首次真实尝试：**B：官方 clean reward 0；Pi：1**。B 运行21.13秒、3个成功HTTP请求后因 `git_status` 缺完成证明退出，未修改业务代码；Pi运行711.9秒、35次调用后交付。独立评分分别224.72/351.17秒，均fresh镜像、官方 patch replay、相同verifier资产。B提前退出不代表效率胜出。
 - C是旧379基线上的Thinking+Git只读生命周期修复变体；无费真实CLI单/并行fixture已有绿结果，**没有真实模型任务评分**。旧本地checkpoint `65cf537`保留调查材料，不作为新main的发布基线，也不推送旧开发历史。
 - PR9已包含更广的受管Git写/读、state、worker、子Agent、MCP、post-tool hook、会话管理与PTY修复。旧“未实现/不受管”判断只对旧版本成立；先复用新main已有测试，不重做已合并能力。来源与重新验收门见[版本迁移说明](version-migration.md)、[当前覆盖盘点](coverage-baseline.md)。
-- 新变体D为**main5736e88+本轮Thinking修复及评测集成**；完整发布commit、dirty diff/binary SHA和无费验收尚待冻结，当前不得称D已评分。后续若有新通用修复，另记E或新版本，不能混用B/C/D成绩。原冻结Flipt/Vuls及额外10题未解封，待D实际门禁通过后才运行。
+- 新变体D已冻结为干净提交**5aa063ee647f753f7f0fc7282a3baf5b6e691932**，完成无费门与Nav开发回归：官方1、CLI exit1、自定义完整交付0，见[第2轮](round-02.md)。后续若有新通用修复，另记E或新版本，不能混用B/C/D成绩。原冻结Flipt/Vuls及额外10题未解封，仍需后续独立门禁和统一调度。
 - 旧单工具复现证实成功receipt不等于prepared completion；该安全原则继续适用，但不将旧缺口移植成新main事实。Nav后续属于开发回归，不能覆盖B首次失败。
 
 公开复现入口为主仓库的[评测源包](../../../scripts/harness_eval/README.md)、[执行约束](../../../scripts/harness_eval/runner/RUNNER.md)、[AA分层核查](../../../scripts/harness_eval/reports/aa-reference.md)与[首轮脱敏报告](round-01.md)。本地完整证据另保留于相邻目录 `go-cli-eval/jobs/nav-pilot-20261028/`，不发布原始日志、题解或密钥。

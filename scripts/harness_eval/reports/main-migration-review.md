@@ -12,7 +12,7 @@
 | Git完成证明 | B在git_status后退出；旧C只修六个只读工具 | 上游已有exact实现的受审注册、受管命令和unknown/pending处理，覆盖更广Git家族；保留上游实现 |
 | 回归测试 | 旧C曾断言owned-process证明与builtin来源 | 只保留单status/并行多轮的通用CLI回归，检查后续回合和pending清空，不绑旧证明类型或来源 |
 | 个人记忆 | 旧profile/旧状态按原工件解释 | 产品默认自动记忆开启；本次受控profile显式关闭自动提取/注入，避免跨任务状态与后台请求影响 |
-| 官方任务成绩 | B/Nav=0，Pi/Nav=1；旧C官方回归not_run | **新main+Thinking尚无官方任务成绩**，不得继承、覆盖或与旧分数混算 |
+| 官方任务成绩 | B/Nav=0，Pi/Nav=1；旧C官方回归not_run | D干净提交5aa063的Nav开发回归官方1、CLI exit1、自定义完整交付0；[第2轮](../../../docs/evaluation/harness-certification-2026-10-28/round-02.md)单列，不与历史Pi作同期pair |
 
 当前相关源码：[HTTP编码](../../../internal/llm/provider.go)、[受审注册](../../../internal/tools/reviewed_runtime_tools.go)、[受管命令](../../../internal/tools/owned_command.go)、[完成状态](../../../internal/tools/prepared_completion.go)。上游工具来源仍可为普通registry，但拥有单独受审的完成能力；不能把来源字符串等同于所有安全权限。Git effect维持unknown，未知/取消/未收尾资源不能因函数返回就获得完成证明。
 
@@ -22,7 +22,7 @@
 
 - 双方使用同一 `codex/gpt-6.1-sol`、high，主输出cap16384；小于该cap的原生内部调用可原样通过。
 - Go设 `memory.enabled=false`。这是**不同于产品默认true的实验选项**：关闭自动提取与记忆注入，显式/memory功能仍属产品能力。fresh容器不挂载用户HOME；原生session、工具、压缩与其阈值不因本次隔离而替换。
-- 不配置独立small model；未据此假设所有后台/子Agent请求都不存在。所有实际请求、原生重试、压缩及子Agent共用80次上游请求上限；未知usage后停止后续请求。没有金额/token硬上限。
+- small_model为空，因此没有LLM摘要器，micro_first需要摘要时采用原生截断降级；不能描述成仍用主模型摘要。原生子Agent仍可能调用主模型，实际D有2个子Agent。所有实际请求及原生重试共用80次上游请求上限；未知usage后停止后续请求。没有金额/token硬上限，详见[辅助策略审计](auxiliary-policy-audit.md)。
 - provider/model配置不显式设置temperature/top_p/seed/parallel_tool_calls。源码presence链支持省略，不代表已证明服务端内部默认。新审计日志逐请求记录这四个安全标量的实际presence/value，保持原始body原样转发；缺失键用空映射区分，不伪造为0或某温度。
 - 共同模型目录声明500000上下文；Go目前没有读取这项容量元数据，其原生CLI压缩预算128000/micro_first、约0.8触发；Pi内部配置500000并保留16384输出余量。**同一模型API不等于内部上下文预算相同**。D保留这些原生差异，未来共同500k另开profile，不能将旧B归因为8k耗尽；详见[上下文审计](../context-budget-audit.md)。
 - 任务继续使用固定官方资产、digest镜像、1 CPU/4 GiB/3000秒、隔离模型relay与fresh官方patch replay；10GiB存储只是声明，未执行overlay硬配额。Linux amd64仿真与其他原生环境不能直接混合比较延迟。
@@ -32,10 +32,10 @@
 ## 当前验证证据
 
 - 新main上的Thinking测试先红：Generate/Stream的high、medium四子例漏字段；none/unset四子例通过。最小实现后，Builder目标race：LLM1.584秒、CLI2.536秒通过。Reviewer独立源审确认只迁入三份Go实现/测试文件，旧C工具生产实现、旧来源期望和QA fixture未迁入。
-- 新profile和采样日志合同先红后绿；最终源包导出到新临时工作区，Reviewer完整 **47项Python合同通过（14.341秒）**，包含15项汇总合同，无模型费用。官方Replay源码的既有ResourceWarning保留，不修改第三方代码。
+- 新profile和采样日志合同先红后绿；源包导出先47项通过，控制profile对齐增补后Reviewer完整 **49项Python合同通过（13.871秒）**，包含15项汇总合同，无模型费用。官方Replay源码的既有ResourceWarning保留，不修改第三方代码。
 - 新main Linux真实CLI的single-status/write-parallel无费fixture：**已独立核验**。一个/五个Go动作各有quiescent、正向proof和durable resolution，后续回合完成，实际high/16k分别两次/三次请求。新Pi无费read回合也通过；两边四个采样标量均实际省略，不能据此证明服务端温度值。
 - 新main完整 `make verify`：首轮仅既有Git启动夹具失败；test-only握手修订后第二轮exit0，主race9666/9657通过/0失败/9跳过，scan/log/leak通过，详见[当前审核](release-review.md)。保持 `GOFLAGS='-trimpath -p=2' GOMAXPROCS=2`、CI同版lint、原15分钟gate时限。另有tag120的2/2通过，但不等于两次压缩/重启与业务记忆验收已完成。旧基线检查不当新main结果。
-- 新main官方模型任务与全工具/长程认证：**not_run / 未完成**。优先复用上游无费Git写链、Linux Bash/取消合同，再按分轮计划安排新模型pair。
+- D单次Nav开发回归：官方reward1/CLI exit1，全部37请求为200/high/16k，最后后台Bash资源仍pending，详见[第2轮](../../../docs/evaluation/harness-certification-2026-10-28/round-02.md)。全工具、跨进程多次压缩与更多未见题仍未完成。
 
 ## 历史证据与发布边界
 

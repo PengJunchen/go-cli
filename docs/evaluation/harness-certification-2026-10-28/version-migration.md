@@ -9,10 +9,10 @@
 | A | 旧`379134d679dcae5c996b730eeae464fdb61fe853` | 无费接入发现Eino漏thinking；未做真实模型任务评分 |
 | B | A+Thinking修复，差异SHA`4fb22ef54bb55d89b22c3e8d415fc0c14eb863d8af3381c1f0d2e0954d43639a`，binary SHA`749416f8a5bc20eb8d875aa54ed413a09e9c4602dbace04b51f3d294bd0777b5` | Nav首attempt官方0，Pi1.4.0官方1；历史永久保留 |
 | C | 旧379+Thinking及Git只读聚合修复，最终payload差异SHA`4682a0ca3f2df258f2b153ac60f79b02a53fa4e70362e043709b9b9a26722f3c`，binary SHA`45776eb15e13dd7621bf218c06f23f1f4909a42666bb0c3b03183001f0288919` | 有无费单status/并行真实CLI与目标测试证据；**没有真实模型任务评分**，不能补造Nav分数 |
-| D | **main5736e88+本轮Thinking修复与评测集成** | 发布commit、最终source diff SHA、binary SHA和新base实际验收pending；当前没有任务成绩 |
+| D | 干净发布提交`5aa063ee647f753f7f0fc7282a3baf5b6e691932`，binary SHA`099f9b687a96737722ec7e0eec9264e00fe8f38488bc4f0e72ad39d76ba71894` | Nav开发回归官方1/CLI exit1/自定义完整交付0；37请求、完整usage；[第2轮报告](round-02.md)；不与历史Pi作同期pair |
 | E/后续 | 如D实际暴露新通用问题，另冻修复版本 | 尚未建立，不预分配成绩 |
 
-旧本地checkpoint为`65cf537`，只用于保留调查/移植来源，不是新发布commit。D必须填入最终40位commit；若build仍有dirty源码，则同时给diff SHA与binary SHA，禁止用base5736e88冒充完整评测身份或给重构建二进制套用旧manifest。
+旧本地checkpoint为`65cf537`，只用于保留调查/移植来源，不是新发布commit。D已绑定最终40位commit、空diff SHA和payload清单；早期dirty构建与e8f候选清单仍独立保留，未回填旧job。后续若有dirty源码，必须同时给diff SHA与binary SHA，不能用base5736e88冒充完整身份。
 
 ## 新main带来的变化
 
@@ -24,7 +24,9 @@
 
 完整覆盖与待运行命令见[coverage baseline](coverage-baseline.md)，Git补验见[R2设计](r2-git-design.md)。这些判断来自只读源码/测试断言，迁移文档本身没有运行tests或模型。
 
-## D进入收费运行前的门
+## D进入收费运行前的门与实际状态
+
+D完整verify、无费真实Linux工具/wire门、单独120轮机制及CI检查已通过；新Nav empty/reference校准分别0/1，随后只做一次Go开发回归与fresh官方评分。详细计数、失败和哈希见[第2轮报告](round-02.md)。以下门槛保留为流程，不能据此宣称全部工具、跨进程长任务或后续题已完成。
 
 1. 新base上确认Thinking有效值，重建并冻结实际Linux payload，不混用B/C二进制。
 2. 先实际运行现有真实二进制工具矩阵/两进程resume、受管local+bare remote journey与unknown资源负例、120轮SSE子项与durable截断重开。日志逐项记录started/pass/fail/skip；不把测试存在或旧C PASS当D通过。

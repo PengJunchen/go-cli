@@ -1,5 +1,7 @@
 # 工具与长任务测试覆盖：新main迁移基线
 
+后续状态：本文保留实施前的源码核查与待办快照；D已冻结并完成一次开发回归，实际门禁、成绩与未完成项见[第2轮](round-02.md)，不将本页待办当作当前结果。
+
 创建：2026-10-28；迁移更新：2026-10-29。**当前基线是PR9合并后的main `5736e8828c80913fd4a32dc7b6e22eb82e5ec2b1`。** 本文件只读核查新main与旧379/C的差异，没有在新工作树运行测试、真实模型或评分。D为main加Thinking修复及本轮评测集成，完整发布commit/diff/binary SHA和实际验收尚待冻结。旧B0/Pi1与C无费未评分见[首轮报告](round-01.md)、[版本迁移说明](version-migration.md)。
 
 PR9已经实现更广的受管工具、state/worker、durable子Agent/MCP、hook、会话管理与PTY修复。旧覆盖文档中“写Git未受管”“只有MCP adapter测试”“post-tool hook不支持”等判断不能沿用为新main事实。现在应先复用已有测试实际验收，只对仍失败或缺断言的环节做TDD增补。

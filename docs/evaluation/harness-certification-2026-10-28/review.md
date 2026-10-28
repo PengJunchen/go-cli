@@ -1,5 +1,7 @@
 # 计划、扩题锁与新main迁移复核
 
+后续状态：本文保留迁移时的文档复核快照；D后续独立验收与单题结果见[第2轮](round-02.md)，原始扩题锁未改变。
+
 创建：2026-10-28；发布迁移复核：2026-10-29。这是Designer产出后的文档/元数据复核，不替代独立Reviewer对D代码、网络、实际测试及付费运行的门禁。
 
 结论：文档已从本地checkpoint `65cf537`迁移到基于main5736e88的发布工作树，按PR9新能力更新；没有把旧base风险当新main事实，没有继承旧PASS为D通过。B0/Pi1保留，C仅无费未评分，D完整commit/diff/binary与新base验收pending，见[版本账本](version-migration.md)。

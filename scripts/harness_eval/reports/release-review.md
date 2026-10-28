@@ -16,9 +16,9 @@
 - 新main首次完整检查：9663 started / 9653 passed / 1 failed / 9 skipped，唯一失败为既有Git夹具1秒内未见子PID；隔离race五次通过。新A/B夹具目标race三次通过（9.321秒），Reviewer源审通过。
 - 第二轮完整 `make verify`：**exit0，通过**。使用CI同版lint、`GOFLAGS='-trimpath -p=2' GOMAXPROCS=2`，保留原15分钟gate时限和规则。主race **9666 started / 9657 passed / 0 failed / 9 skipped，31包**；scan gate通过（允许的WARN保留），log10/10、leak6/6均无失败。fmt/vet/lint/build通过；goimports缺工具按Makefile显式跳过，未声称执行。普通真实二进制工具矩阵17.88秒、durable resume7.09秒通过。
 - 新main真实Linux CLI无费fixture：**已通过并独立复核**。single-status两次请求、一个动作；write-parallel三次请求、五个动作。每个Go动作各有quiescent/正向proof/durable resolution，后续回合完成。新Pi有两次请求及真实read成功。双方均exactmodel/high/16384、四个采样字段实际省略，未调用真实模型。
-- 单独tag120真实二进制测试：**2 started / 2 passed / 0 failed / 0 skipped**。120次真实本地HTTP、各轮当前prompt、最后25条messages、早期turn省略及至少一次compaction日志得到检查。它不是自主120步任务，不含独立进程重启，也不证明至少两次压缩或业务canary保留；R1b仍未实现。
-- 最终评测源包导出合同 **47项通过（14.341秒）**，含15个汇总合同、新profile/采样、镜像pin和write-parallel协议检查。只用本地mock/官方Replay接口，不是模型能力成绩；官方Replay既有ResourceWarning保留未改。
-- 新main收费任务与全工具/长任务认证：**not_run / 未完成**。
+- 单独tag120真实二进制测试：**2 started / 2 passed / 0 failed / 0 skipped**。120次真实本地HTTP、各轮当前prompt、最后25条messages、早期turn省略及至少一次compaction日志得到检查。它不是自主120步任务，不含独立进程重启，也不证明至少两次压缩或业务canary保留；R1b仅在独立工作树开发候选测试，尚无该真实二进制旅程结果。
+- 评测源包导出合同先47项通过（14.341秒），控制profile对齐增补后 **49项通过（13.871秒）**，含15个汇总合同、新profile/采样、镜像pin和write-parallel协议检查。只用本地mock/官方Replay接口，不是模型能力成绩；官方Replay既有ResourceWarning保留未改。
+- D干净提交5aa063的GitHub检查 **13项全部成功**。Nav开发回归已完成：官方reward1、CLI exit1、自定义完整交付0，见[第2轮报告](../../../docs/evaluation/harness-certification-2026-10-28/round-02.md)。更多题与全工具/长任务认证仍未完成；[辅助策略审计](auxiliary-policy-audit.md)明确当前small_model为空，不做LLM摘要。
 
 ## 提交边界
 

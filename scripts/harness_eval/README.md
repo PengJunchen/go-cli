@@ -36,6 +36,6 @@ git -C third_party/swe-bench-pro checkout 66f92766bba642462d4bbe5479e83f91f92118
 
 先拉取 `dataset-lock.json` 中的精确镜像digest，再按 [RUNNER.md](runner/RUNNER.md) 执行网络probe、无费single/parallel fixture、独立评分控制。当前profile显式 `memory.enabled=false`，不同于产品默认true；原生session、工具与压缩保留。镜像缺失先恢复资产，不能降级跟随tag。
 
-**去掉 `--fixture-smoke` 会调用真实模型并可能计费。** 模型批次由协调者统一冻结与调度；CLI退出成功不代表任务通过。官方成绩取fresh clean grader，失败与超时保留。当前main收费成绩、全工具/长任务认证均未完成。
+**去掉 `--fixture-smoke` 会调用真实模型并可能计费。** 模型批次由协调者统一冻结与调度；CLI退出成功不代表任务通过。官方成绩取fresh clean grader，失败与超时保留。[D单题开发回归](../../docs/evaluation/harness-certification-2026-10-28/round-02.md)官方1分但关停失败，完整交付分0；更多未见题与全工具/长任务认证均未完成。[辅助策略审计](reports/auxiliary-policy-audit.md)公开当前无LLM摘要的配置边界。
 
 公开包仅有自有代码、合同、依赖锁、任务/镜像元数据与安全报告。原题、gold、隐藏验收、raw轨迹、镜像、私钥和旧Git历史留在包外；第三方许可仍须遵守。详见 [评测方法](../../docs/evaluation/methodology.md) 和 [AA参考边界](reports/aa-reference.md)。
