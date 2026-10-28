@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,60 +12,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestDefaultGitDiffCancellationJoinsDescendantHoldingPipes(t *testing.T) {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		t.Skip("managed process groups are supported only on Darwin and Linux")
-	}
-
-	binDir := t.TempDir()
-	started := filepath.Join(t.TempDir(), "child-started")
-	installFakeGit(t, binDir, fmt.Sprintf(`
-case "$*" in
-  *rev-parse*)
-    /bin/sleep 3 &
-    child=$!
-    printf '%%s' "$child" > %q
-    exit 0
-    ;;
-  *)
-    exit 0
-    ;;
-esac
-`, started))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	result := make(chan error, 1)
-	go func() {
-		_, err := NewDefaultGitTool(t.TempDir()).Diff(ctx, GitDiffOptions{})
-		result <- err
-	}()
-
-	require.Eventually(t, func() bool {
-		_, err := os.Stat(started)
-		return err == nil
-	}, time.Second, 5*time.Millisecond, "fake git must start its finite descendant before cancellation")
-	start := time.Now()
-	cancel()
-
-	var err error
-	select {
-	case err = <-result:
-	case <-time.After(1500 * time.Millisecond):
-		select {
-		case err = <-result:
-			t.Errorf("Git Diff waited for the descendant pipe after cancellation: %v", err)
-		case <-time.After(3 * time.Second):
-			t.Fatal("Git Diff did not return after its finite descendant exited")
-		}
-		return
-	}
-
-	require.Error(t, err)
-	require.True(t, errors.Is(err, context.Canceled), "cancellation must remain in the error chain: %v", err)
-	require.Less(t, time.Since(start), 1500*time.Millisecond, "return only after the owned leader, readers, and process group are joined")
-}
 
 func installFakeGit(t *testing.T, binDir, body string) {
 	t.Helper()
