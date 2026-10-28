@@ -29,7 +29,55 @@ const (
 	longTaskAPIKey      = "e2e-longtask-fixture-key"
 	longTaskModel       = "e2e-longtask-fixture"
 	longTaskStartMarker = "LONGTASK_STREAM_MARKER"
+	// readLineTTY creates its input owner and sets raw mode before enabling
+	// bracketed paste and printing this prompt. Editor redraws and the TUI's
+	// follow-up prompt are not acknowledgments of the next REPL input owner.
+	longTaskREPLPromptMarker = "\x1b[?2004h> "
 )
+
+func TestLongTaskREPLPromptMarkerExcludesRenderedPrompts(t *testing.T) {
+	firstPrompt := "\x1b[?2004h> "
+	renderedTurn := firstPrompt + "\r\x1b[J> p\r\x1b[J> please run\r\n\x1b[?2004l" +
+		"\x1b[?25l\x1b[?2004h\r\x1b[K\r\n[Assistant response is being generated and checked]" +
+		"\n> followup> queued follow-up\nAI: LONGTASK_FOLLOWUP_COMPLETE\n" +
+		"\x1b[?2004l\x1b[?25h\x1b[?1002l\x1b[?1003l\x1b[?1006l"
+	for _, testCase := range []struct {
+		name   string
+		output string
+		want   int
+	}{
+		{name: "first reader ready", output: firstPrompt, want: 1},
+		{name: "redraw follow-up and completed answer do not acknowledge handoff", output: renderedTurn, want: 1},
+		{name: "partial next prompt is not ready", output: renderedTurn + "\x1b[?2004h>", want: 1},
+		{name: "next reader ready", output: renderedTurn + firstPrompt, want: 2},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.Equal(t, testCase.want, strings.Count(testCase.output, longTaskREPLPromptMarker))
+		})
+	}
+}
+
+func TestLongTaskREPLPromptWaitJoinsSplitMarker(t *testing.T) {
+	reader, writer := io.Pipe()
+	capture := newLongTaskPTYCapture(reader)
+	t.Cleanup(func() {
+		_ = writer.Close()
+		_ = reader.Close()
+		<-capture.done
+	})
+	written := make(chan error, 1)
+	go func() {
+		for _, chunk := range []string{"\x1b[?20", "04h> "} {
+			if _, err := io.WriteString(writer, chunk); err != nil {
+				written <- err
+				return
+			}
+		}
+		written <- nil
+	}()
+	capture.waitREPLPrompt(t, 1, time.Second)
+	require.NoError(t, <-written)
+}
 
 // TestE2EBinaryLongTask runs the real, race-instrumented CLI binary against a
 // local OpenAI-compatible HTTP peer. The first subtest covers a 120-turn
@@ -143,7 +191,7 @@ func testLongTaskPTYFollowUp(t *testing.T, binary string) {
 
 	pty := startLongTaskPTYChild(t, binary, fixture, "--max-tokens=4096")
 	t.Cleanup(func() { cleanupLongTaskBashGroup(t, fixture.workDir, shellPIDFile, shellToken) })
-	pty.capture.waitContains(t, "> ", 15*time.Second)
+	pty.capture.waitREPLPrompt(t, 1, 15*time.Second)
 	pty.write(t, "please run the long task and report the result\r")
 	pty.capture.waitContains(t, "[approval]", 20*time.Second)
 	pty.write(t, "y")
@@ -185,7 +233,7 @@ func testLongTaskPTYFollowUp(t *testing.T, binary string) {
 	require.NoError(t, err, "Bash must create its real side-effect file")
 	require.Equal(t, "FOLLOWUP_SIDE_EFFECT", string(proof))
 	pty.capture.waitContains(t, "LONGTASK_FOLLOWUP_COMPLETE", 20*time.Second)
-	pty.capture.waitOccurrences(t, "> ", 2, 10*time.Second)
+	pty.capture.waitREPLPrompt(t, 2, 10*time.Second)
 	pty.write(t, "exit\r")
 	pty.waitSuccess(t, 20*time.Second)
 	require.NotContains(t, pty.capture.output(), "DATA RACE")
@@ -212,7 +260,7 @@ func testLongTaskPTYCancel(t *testing.T, binary string) {
 
 	pty := startLongTaskPTYChild(t, binary, fixture, "--max-tokens=4096")
 	t.Cleanup(func() { cleanupLongTaskBashGroup(t, fixture.workDir, shellPIDFile, shellToken) })
-	pty.capture.waitContains(t, "> ", 15*time.Second)
+	pty.capture.waitREPLPrompt(t, 1, 15*time.Second)
 	pty.write(t, "run the long task and wait for it\r")
 	pty.capture.waitContains(t, "[approval]", 20*time.Second)
 	pty.write(t, "y")
@@ -224,7 +272,7 @@ func testLongTaskPTYCancel(t *testing.T, binary string) {
 	cancelAt := time.Now()
 	pty.writeBytes(t, []byte{0x1b})
 	pty.capture.waitContains(t, "[interrupted]", 3*time.Second)
-	pty.capture.waitOccurrences(t, "> ", 2, 10*time.Second)
+	pty.capture.waitREPLPrompt(t, 2, 10*time.Second)
 	cancelLatency := time.Since(cancelAt)
 	require.Less(t, cancelLatency, 4*time.Second, "Esc cancellation should return before the delayed shell effect")
 
@@ -236,7 +284,7 @@ func testLongTaskPTYCancel(t *testing.T, binary string) {
 	require.Len(t, peer.requestBodies(), 1, "cancellation must not ask the model to continue the cancelled task")
 	pty.write(t, "start a fresh turn after cancelling\r")
 	pty.capture.waitContains(t, "CANCEL_FLOW_CONTINUED", 20*time.Second)
-	pty.capture.waitOccurrences(t, "> ", 3, 10*time.Second)
+	pty.capture.waitREPLPrompt(t, 3, 10*time.Second)
 	bodies := peer.requestBodies()
 	require.Len(t, bodies, 2, "the prompt after cancellation should start a new provider turn")
 	continuedRequest, err := decodeLongTaskRequest(bodies[1])
@@ -740,8 +788,9 @@ func (capture *longTaskPTYCapture) waitContains(t *testing.T, needle string, tim
 	}
 }
 
-func (capture *longTaskPTYCapture) waitOccurrences(t *testing.T, needle string, want int, timeout time.Duration) string {
+func (capture *longTaskPTYCapture) waitREPLPrompt(t *testing.T, want int, timeout time.Duration) string {
 	t.Helper()
+	needle := longTaskREPLPromptMarker
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	for {
