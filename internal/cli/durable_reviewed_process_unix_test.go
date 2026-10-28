@@ -49,6 +49,13 @@ func TestPromptDurableGitAggregateWaitsForLaterProcessAndRetainsUnknownReader(t 
 	quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 	body := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> %s
+# SnapshotManager performs this separate initialization probe directly.
+if [ "$#" -eq 4 ] && [ "$1" = '-C' ] && [ "$2" = %s ] &&
+  [ "$3" = 'rev-parse' ] && [ "$4" = '--is-inside-work-tree' ]; then exit 0; fi
+# Validate and consume the production command-scoped maintenance settings.
+[ "${1-}" = '-c' ] && [ "${2-}" = 'maintenance.autoDetach=false' ] &&
+  [ "${3-}" = '-c' ] && [ "${4-}" = 'gc.autoDetach=false' ] || exit 91
+shift 4
 case "$*" in
   *--is-inside-work-tree*) exit 0 ;;
   'add -A') exit 0 ;;
@@ -60,7 +67,7 @@ case "$*" in
     exit 0 ;;
   *) printf unexpected-followup; exit 0 ;;
 esac
-`, quote(trace), quote(binary), quote(pidFile), quote(started), quote(release))
+`, quote(trace), quote(root), quote(binary), quote(pidFile), quote(started), quote(release))
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(body), 0o700))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Cleanup(func() {
@@ -122,6 +129,15 @@ esac
 	}
 	commands, err := os.ReadFile(trace)
 	require.NoError(t, err)
+	probeSeen := false
+	for _, command := range strings.Split(strings.TrimSpace(string(commands)), "\n") {
+		if command == "-C "+root+" rev-parse --is-inside-work-tree" {
+			probeSeen = true
+			continue
+		}
+		require.True(t, strings.HasPrefix(command, "-c maintenance.autoDetach=false -c gc.autoDetach=false "), "each owned Git command must keep maintenance in the foreground: %s", command)
+	}
+	require.True(t, probeSeen, "the separate snapshot initialization probe must retain its original behavior")
 	require.Contains(t, string(commands), "add -A")
 	require.Contains(t, string(commands), "commit -m")
 	require.NotContains(t, string(commands), "rev-parse HEAD", "unknown third command must stop the fourth hash probe")
