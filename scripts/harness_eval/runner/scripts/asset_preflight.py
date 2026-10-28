@@ -60,10 +60,14 @@ def control(task, kind):
     report = {'task': task, 'control': kind, 'expected_reward': 1 if kind == 'oracle' else 0,
               'platform': 'linux/amd64', 'image': image(task), 'cpus': 1, 'memory_bytes': 4 * 1024**3,
               'network': 'bridge (official verifier public phase)', 'model_requests': 0,
+              'pids_limit': 512, 'cap_drop': ['ALL'], 'no_new_privileges': True,
+              'working_dir': '/app', 'entrypoint': 'sleep',
               'gold_contents_exposed': False, 'timeout_seconds': 3000}
     cid = call(['docker', 'create', '--name', 'eval-control-' + uuid.uuid4().hex[:10],
                 '--platform', 'linux/amd64', '--network', 'bridge', '--cpus', '1',
-                '--memory', '4g', image(task), 'sleep', 'infinity'],
+                '--memory', '4g', '--pids-limit', '512', '--cap-drop', 'ALL',
+                '--security-opt', 'no-new-privileges', '--workdir', '/app',
+                '--entrypoint', 'sleep', image(task), 'infinity'],
                 capture_output=True, text=True).stdout.strip()
     report['container_id'] = cid
     started = time.monotonic()
@@ -82,9 +86,9 @@ def control(task, kind):
                 report['status'] = 'oracle_apply_environment_error'
                 return
         with (output / 'verifier.log').open('wb') as logs:
-            result = subprocess.run(['docker', 'exec', cid, 'timeout', '-k', '10', '3000',
-                                     'bash', '/tests/test.sh'], stdout=logs,
-                                    stderr=subprocess.STDOUT, timeout=3050)
+            result = subprocess.run(['docker', 'exec', cid, 'timeout', '--signal=TERM', '--kill-after=15s',
+                                     '3000s', '/bin/bash', '/tests/test.sh'], stdout=logs,
+                                    stderr=subprocess.STDOUT, timeout=3045)
         report['verifier_exit'] = result.returncode
         reward = subprocess.run(['docker', 'exec', cid, 'cat', '/logs/verifier/reward.txt'],
                                  capture_output=True, text=True, timeout=20)
@@ -93,13 +97,6 @@ def control(task, kind):
         report['status'] = 'completed'
         subprocess.run(['docker', 'cp', cid + ':/logs/verifier/.', str(output / 'verifier')],
                        capture_output=True, timeout=30)
-        parsed = output / 'verifier/output.json'
-        if parsed.is_file():
-            import collections
-            payload = json.loads(parsed.read_text())
-            tests = payload.get('tests', [])
-            report['parsed_test_count'] = len(tests)
-            report['test_status_counts'] = dict(collections.Counter(t.get('status', 'unknown') for t in tests))
     except subprocess.TimeoutExpired:
         report['status'] = 'control_timeout'
         report['matched_expected'] = False

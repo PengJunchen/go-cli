@@ -15,7 +15,7 @@
     },
     {
       "path": "runner/RUNNER.md",
-      "sha256": "8ed777c42f33bd60a150020c8f55a4b9883bc828ac55480c8c39ec939a5cf6da"
+      "sha256": "7e3938dbec21f2e2208a43ef5f5f9dacbef2699d62a02dba485fc3f0b5f27286"
     },
     {
       "path": "runner/audit_proxy.py",
@@ -55,7 +55,7 @@
     },
     {
       "path": "runner/scripts/asset_preflight.py",
-      "sha256": "1f19e7c5184606c471b0b140908d4a91407675188e16e55ee49d8b59e0d47841"
+      "sha256": "92817b3b6920c44b0a178e2079436c73b5f25be370c354b50ba47b232f8608a6"
     },
     {
       "path": "runner/selected-tasks.txt",
@@ -64,6 +64,10 @@
     {
       "path": "runner/summarize_trials.py",
       "sha256": "5869f706ec7535d2df288894a1d0d656068fd2bb3ac70cf85ebcbcdc243dcf62"
+    },
+    {
+      "path": "runner/tests/test_asset_preflight.py",
+      "sha256": "e90d19f643796de9cff89a3e3db2977e7ba1d024a23b99c31048d3ea5efde905"
     },
     {
       "path": "runner/tests/test_contract.py",

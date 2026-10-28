@@ -28,6 +28,8 @@ fixture 使用本地固定协议服务，经过真实 CLI 和工具，不调用�
 
 网络由独立 internal network 与只接两张网络的固定目标 relay 构成。任务容器没有公网网络、宿主端口挂载或 Docker socket。门禁验证 relay 目录可达，GitHub/PyPI/npm、固定公网 IP、host.docker.internal 网关、本次 internal gateway 均不可直接访问；relay 不实现 CONNECT 或任意 URL 转发。目录 readiness 重试只是基础设施启动等待。
 
+黑箱empty/reference校准使用 `scripts/asset_preflight.py control`。控制容器现在与clean grader对齐1 CPU/4 GiB、pids512、cap-drop ALL、no-new-privileges、/app、sleep entrypoint及bridge网络；验收同为TERM/15秒kill grace/3000秒，外层3045秒。reference与Agent隔离，只读取reward/exit/hash，完整输出留私有文件不解析。每次新校准另存当前源码/镜像/评分资产哈希侧车，旧control缺失字段不回填；source合同通过不等于真实oracle已得1。
+
 ## 真实尝试与评分
 
 省略 `--fixture-smoke` 会调用真实模型并可能计费。项目协调者统一确认无费 gate 后才执行，单题每款 CLI 一次调用，无额外补提示、重启或代写代码。
