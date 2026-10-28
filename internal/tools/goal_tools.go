@@ -67,6 +67,9 @@ func (*GoalCreateTool) Parameters() any {
 // Execute creates a goal using args["title"], args["description"], and
 // args["success_criteria"].
 func (t *GoalCreateTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if t.store == nil {
 		return nil, errors.New("goal_create: nil store")
 	}
@@ -139,6 +142,9 @@ func (*GoalUpdateTool) Parameters() any {
 
 // Execute updates the goal identified by args["id"] with any provided fields.
 func (t *GoalUpdateTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if t.store == nil {
 		return nil, errors.New("goal_update: nil store")
 	}
@@ -225,6 +231,9 @@ func (*GoalListTool) Parameters() any {
 
 // Execute returns a formatted list of all goals.
 func (t *GoalListTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if t.store == nil {
 		return nil, errors.New("goal_list: nil store")
 	}
@@ -303,6 +312,9 @@ func (*GoalGetTool) Parameters() any {
 
 // Execute fetches the goal identified by args["id"] and its tasks.
 func (t *GoalGetTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if t.store == nil {
 		return nil, errors.New("goal_get: nil store")
 	}
@@ -392,6 +404,9 @@ func (*TaskUpdateTool) Parameters() any {
 
 // Execute updates the task identified by args["id"] with any provided fields.
 func (t *TaskUpdateTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if t.store == nil {
 		return nil, errors.New("task_update: nil store")
 	}
@@ -412,7 +427,7 @@ func (t *TaskUpdateTool) Execute(ctx context.Context, call ToolCall) (*ToolResul
 		opts = append(opts, WithTaskDescription(v))
 	}
 
-	if err := t.store.Update(id, opts...); err != nil {
+	if err := t.store.update(ctx, id, opts...); err != nil {
 		return nil, fmt.Errorf("task_update: %w", err)
 	}
 

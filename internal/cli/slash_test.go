@@ -95,12 +95,12 @@ func TestSlashHelp(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Capability boundaries",
-		"Memory: user-managed with /memory only",
-		"no automatic extraction or prompt injection",
+		"Memory: workspace-scoped automatic extraction",
+		"memory.enabled: false disables both",
 		"Goal, Task, and Todo: stored only in memory for this process",
 		"Session storage: without session.store_path, /session is unsupported.",
-		"Durable mode exposes /session tree, branches, pending, and explicit one-action reconciliation; resume uses --resume-session <physical-id> at startup.",
-		"Durable /session resume, fork, clone, and switch are unsupported.",
+		"Durable sessions support saved-state inspection, clear, compact, retry, branch navigation, and exact physical resume; unknown actions remain fenced.",
+		"Use /session resume to list physical IDs; /session entry <entry-id> navigates current history. Legacy files use session inspect-legacy/import-legacy.",
 		"Legacy mutable mode supports /session tree, branches, resume, fork, clone, and switch with a wired mutable tree; resume listing needs a session store.",
 		"Session snapshot and schema migration are unavailable.",
 		"Image reading and Web Agent UI: unavailable",

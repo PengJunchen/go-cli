@@ -518,7 +518,7 @@ type cliRunResult struct {
 // runCLI invokes the CLI framework and preserves its error chain so run can
 // join a real Assembly-close owner before ending the invocation span.
 func runCLI(ctx context.Context, cfg *config.Config, argv []string, stdout, stderr io.Writer, root tracing.TraceSpan, reg cli.CommandRegistry) cliRunResult {
-	if err := cli.RunWithRegistry(ctx, cfg, argv, stdout, reg); err != nil {
+	if err := cli.RunWithRegistry(cli.WithDiagnosticWriter(ctx, stderr), cfg, argv, stdout, reg); err != nil {
 		if errors.Is(err, cli.ErrAssemblyClosePending) {
 			return cliRunResult{exitCode: 1, err: err}
 		}

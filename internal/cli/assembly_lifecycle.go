@@ -579,6 +579,10 @@ func disconnectAssemblyMCPClient(ctx context.Context, client mcp.MCPClient) erro
 }
 
 func (s *assembleState) requestStopSources() {
+	if s.memoryRuntime != nil && s.memoryRuntime.worker != nil {
+		s.memoryRuntime.worker.Stop()
+	}
+	s.closeOwner.finishInteractiveMemory()
 	if s.mcpResources != nil {
 		s.mcpResources.requestStopReloaders()
 	}
@@ -598,6 +602,9 @@ func (s *assembleState) closeResources(ctx context.Context, idle <-chan struct{}
 
 	if idle != nil {
 		<-idle
+	}
+	if err := s.joinMemory(ctx); err != nil {
+		errs = append(errs, err)
 	}
 
 	if s.modelSelector != nil {

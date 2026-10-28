@@ -3,6 +3,7 @@ package compaction
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -21,6 +22,14 @@ var errNoSummarizer = errors.New("compaction: no summarizer configured")
 // ErrSummaryPromptBudgetTooSmall reports that the fixed prompt framing or
 // truncation marker cannot fit the configured summary prompt budget.
 var ErrSummaryPromptBudgetTooSmall = errors.New("compaction: summary prompt budget too small")
+
+// localSummaryBudgetError is created only after the built-in strategy itself
+// determines that its summary cannot fit. Source failures are wrapped separately
+// so a callback cannot reuse this value as permission to truncate another input.
+type localSummaryBudgetError struct{}
+
+func (localSummaryBudgetError) Error() string { return ErrRequiresTruncating.Error() }
+func (localSummaryBudgetError) Unwrap() error { return ErrRequiresTruncating }
 
 // SummaryCompactor performs LLM-driven compaction. It cuts the conversation at
 // message boundaries (findCutPoint), renders the region being summarized in
@@ -204,7 +213,7 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		// Nothing can be summarized without exceeding budget; escalate to the
 		// truncating fallback. Returning the input unchanged primitives the
 		// unified router to escalate.
-		return CompactionResult{Items: normalized}, ErrRequiresTruncating
+		return CompactionResult{Items: normalized}, localSummaryBudgetError{}
 	}
 
 	old := normalized[:cut]
@@ -225,7 +234,7 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 	summary, err := c.summarizer.Summarize(ctx, prompt)
 	if err != nil {
 		logger.Warn("compaction.summary.failed", "err", err)
-		return CompactionResult{Items: normalized}, err
+		return CompactionResult{Items: normalized}, fmt.Errorf("compaction: summary source failed: %w", err)
 	}
 	if summary == "" {
 		summary = summaryPlaceholder
@@ -270,7 +279,7 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 
 	if tokensAfter > maxTokens {
 		logger.Warn("compaction.summary.insufficient", "max_tokens", maxTokens, "tokens_after", tokensAfter)
-		return CompactionResult{Items: result}, ErrRequiresTruncating
+		return CompactionResult{Items: result}, localSummaryBudgetError{}
 	}
 
 	logger.Info("compaction.summary.done",

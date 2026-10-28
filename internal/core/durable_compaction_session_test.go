@@ -374,81 +374,94 @@ func TestDurableCompactionWithoutCutSendsCurrentInputOnceAndReopens(t *testing.T
 }
 
 func TestDurableCompactionCommitFailureBlocksProviderAndPreservesCurrentInput(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", root)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	workspaceID := "workspace-v1-durable-compaction-commit-failure"
-	index, prepared, firstSink := prepareRunCommitSession(t, root, workspaceID, "durable compaction commit failure")
-	preparedOpen := true
-	t.Cleanup(func() {
-		if preparedOpen {
-			_ = prepared.Close()
-		}
-	})
+	for _, strategy := range []string{"summary", "truncating", "unified"} {
+		t.Run(strategy, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("HOME", root)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+			workspaceID := "workspace-v1-durable-compaction-commit-failure"
+			index, prepared, firstSink := prepareRunCommitSession(t, root, workspaceID, "durable compaction commit failure")
+			preparedOpen := true
+			t.Cleanup(func() {
+				if preparedOpen {
+					_ = prepared.Close()
+				}
+			})
 
-	firstModel := runDurableCompactionTurn(t, firstSink, prepared, workspaceID, "repeat text", nil, 0, false)
-	require.Equal(t, 1, firstModel.CallCount())
-	firstSnapshot, err := prepared.Snapshot()
-	require.NoError(t, err)
-	require.Len(t, firstSnapshot.PublishedView.Messages, 2)
-	compactionErr := errors.New("test: compaction projection sync rejected")
-	failingWriter := &failingDurableCompactionWriter{
-		base:          prepared.DurableWriter(),
-		compactionErr: compactionErr,
+			firstModel := runDurableCompactionTurn(t, firstSink, prepared, workspaceID, "repeat text", nil, 0, false)
+			require.Equal(t, 1, firstModel.CallCount())
+			firstSnapshot, err := prepared.Snapshot()
+			require.NoError(t, err)
+			require.Len(t, firstSnapshot.PublishedView.Messages, 2)
+			compactionErr := errors.New("test: compaction projection sync rejected")
+			failingWriter := &failingDurableCompactionWriter{
+				base:          prepared.DurableWriter(),
+				compactionErr: compactionErr,
+			}
+			preparedWithFailingWriter := &durableWriterOverrideSession{PreparedSession: prepared, writer: failingWriter}
+			failingSink, err := session.NewSessionRunCommitSink(preparedWithFailingWriter, index, workspaceID, nil)
+			require.NoError(t, err)
+			sourceSnapshot, err := failingSink.CompactionSourceSnapshot()
+			require.NoError(t, err)
+
+			content := "current turn"
+			summarizer := &recordingDurableCompactionSummarizer{}
+			model := mock.NewMockLLMServer(mock.NewConversationTemplate("durable-compaction-commit-failure", "durable compaction commit failure",
+				mock.ConversationTurn{AssistantContent: "must not be requested"},
+			))
+			loop := core.NewLoopAgent(core.WithLLM(model), core.WithSystemPrompt("s"))
+			var selectedCompactor compaction.Compactor = compaction.NewSummaryCompactor(summarizer, compaction.WithMaxSummaryTokens(1))
+			if strategy == "truncating" {
+				selectedCompactor = compaction.NewTruncatingCompactor()
+			}
+			if strategy == "unified" {
+				selectedCompactor = compaction.NewUnifiedCompactor()
+			}
+			loop.SetMidTurnCompaction(
+				compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
+				selectedCompactor,
+				oneTokenForNonEmptyText{},
+				7,
+			)
+			agent := core.NewAgentImpl("durable-compaction-commit-failure", loop)
+			require.NoError(t, agent.SetHistoryFromSourceSnapshot(sourceSnapshot))
+
+			runErr := runDurableCompactionRun(t, agent, failingSink, prepared, workspaceID, content)
+			require.ErrorIs(t, runErr, compactionErr)
+			expectedSummaryCalls := 0
+			if strategy == "summary" {
+				expectedSummaryCalls = 1
+			}
+			require.Equal(t, expectedSummaryCalls, summarizer.calls, "only the configured summary strategy makes a summary request")
+			require.Equal(t, 1, failingWriter.compactionCalls)
+			require.Zero(t, model.CallCount(), "a failed durable compaction commit must stop provider dispatch")
+
+			live, err := prepared.Snapshot()
+			require.NoError(t, err)
+			for _, entry := range live.DurableEntries {
+				require.NotEqual(t, session.EntryTypeCompaction, entry.Type, "the failing sink must not append a projection")
+			}
+			currentCount := 0
+			for _, message := range live.PublishedView.Messages {
+				if message.Content == content {
+					currentCount++
+				}
+			}
+			require.Equal(t, 1, currentCount)
+			require.Equal(t, content, live.PublishedView.Messages[len(live.PublishedView.Messages)-1].Content)
+
+			sessionID := live.SessionID
+			require.NoError(t, prepared.Close())
+			preparedOpen = false
+			reopened, err := session.NewDurableJSONLSessionPreparer(filepath.Join(root, "durable"), index).PrepareResume(context.Background(), sessionID)
+			require.NoError(t, err)
+			defer reopened.Close()
+			reopenedSnapshot, err := reopened.Snapshot()
+			require.NoError(t, err)
+			require.Equal(t, live.PublishedView, reopenedSnapshot.PublishedView)
+			require.Equal(t, content, reopenedSnapshot.PublishedView.Messages[len(reopenedSnapshot.PublishedView.Messages)-1].Content)
+		})
 	}
-	preparedWithFailingWriter := &durableWriterOverrideSession{PreparedSession: prepared, writer: failingWriter}
-	failingSink, err := session.NewSessionRunCommitSink(preparedWithFailingWriter, index, workspaceID, nil)
-	require.NoError(t, err)
-	sourceSnapshot, err := failingSink.CompactionSourceSnapshot()
-	require.NoError(t, err)
-
-	content := "current turn"
-	summarizer := &recordingDurableCompactionSummarizer{}
-	model := mock.NewMockLLMServer(mock.NewConversationTemplate("durable-compaction-commit-failure", "durable compaction commit failure",
-		mock.ConversationTurn{AssistantContent: "must not be requested"},
-	))
-	loop := core.NewLoopAgent(core.WithLLM(model), core.WithSystemPrompt("s"))
-	loop.SetMidTurnCompaction(
-		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
-		// The one-token estimator charges 1 each for the summary role, prefix,
-		// and body, plus 2 each for the retained system prompt and current user.
-		compaction.NewSummaryCompactor(summarizer, compaction.WithMaxSummaryTokens(1)),
-		oneTokenForNonEmptyText{},
-		7,
-	)
-	agent := core.NewAgentImpl("durable-compaction-commit-failure", loop)
-	require.NoError(t, agent.SetHistoryFromSourceSnapshot(sourceSnapshot))
-
-	runErr := runDurableCompactionRun(t, agent, failingSink, prepared, workspaceID, content)
-	require.ErrorIs(t, runErr, compactionErr)
-	require.Equal(t, 1, summarizer.calls, "the compaction projection must be prepared before its sync failure")
-	require.Equal(t, 1, failingWriter.compactionCalls)
-	require.Zero(t, model.CallCount(), "a failed durable compaction commit must stop provider dispatch")
-
-	live, err := prepared.Snapshot()
-	require.NoError(t, err)
-	for _, entry := range live.DurableEntries {
-		require.NotEqual(t, session.EntryTypeCompaction, entry.Type, "the failing sink must not append a projection")
-	}
-	currentCount := 0
-	for _, message := range live.PublishedView.Messages {
-		if message.Content == content {
-			currentCount++
-		}
-	}
-	require.Equal(t, 1, currentCount)
-	require.Equal(t, content, live.PublishedView.Messages[len(live.PublishedView.Messages)-1].Content)
-
-	sessionID := live.SessionID
-	require.NoError(t, prepared.Close())
-	preparedOpen = false
-	reopened, err := session.NewDurableJSONLSessionPreparer(filepath.Join(root, "durable"), index).PrepareResume(context.Background(), sessionID)
-	require.NoError(t, err)
-	defer reopened.Close()
-	reopenedSnapshot, err := reopened.Snapshot()
-	require.NoError(t, err)
-	require.Equal(t, live.PublishedView, reopenedSnapshot.PublishedView)
-	require.Equal(t, content, reopenedSnapshot.PublishedView.Messages[len(reopenedSnapshot.PublishedView.Messages)-1].Content)
 }
 
 func runDurableCompactionTurn(t *testing.T, sink core.RunCommitSink, prepared session.PreparedSession, workspaceID, content string, model llm.BaseChatModel, maxTokens int, withSummary bool) *mock.MockLLMServer {

@@ -308,13 +308,20 @@ func (consumer *runCommitConsumer) commitCompaction(projection CompactionProject
 	return nil
 }
 
-func (consumer *runCommitConsumer) beginIntentBatch(batch RunIntentBatch) error {
+func (consumer *runCommitConsumer) beginIntentBatch(batch RunIntentBatch, transcript *[]TranscriptEntry, messages *[]llm.Message) error {
 	if consumer == nil {
 		return nil
 	}
 	batch.RunID = consumer.runID
 	batch.CanonicalWorkspaceRoot = consumer.binding.CanonicalWorkspaceRoot
 	if err := consumer.sink.BeginIntentBatch(consumer.commitContext(), batch); err != nil {
+		closed, closeErr := consumer.takeRejectedBatch(batch, transcript, messages)
+		if closeErr != nil {
+			return runCommitPersistenceError{operation: "rejected intent", cause: errors.Join(err, closeErr)}
+		}
+		if closed {
+			return knownRejectedBatchError{cause: err}
+		}
 		return runCommitPersistenceError{operation: "intent batch", cause: err}
 	}
 	return nil
@@ -669,12 +676,21 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 
 	batchID := "batch-" + newClaimID()
 	intent := consumer.actionIntent(batchID, ordinal, call, invocation)
+	rejectionTranscriptStart := len(*transcript)
 	if err := consumer.beginIntentBatch(RunIntentBatch{
 		ActionBatchID:              batchID,
 		AssistantTranscriptOrdinal: ordinal,
 		AssistantMessage:           assistant,
 		Intents:                    []ActionIntent{intent},
-	}); err != nil {
+	}, transcript, messages); err != nil {
+		var known knownRejectedBatchError
+		if errors.As(err, &known) {
+			for _, entry := range (*transcript)[rejectionTranscriptStart:] {
+				if entry.Message.Role == "tool" && entry.Message.ToolCallID == call.ID {
+					return runCommitToolResult{output: entry.Message.Content, isError: true, outcome: entry.Message.ReceiptOutcome}, err
+				}
+			}
+		}
 		return runCommitToolResult{}, err
 	}
 	taskID := registerRunCompletionTask(ctx, intent, invocation.CompletionSignal())
@@ -883,7 +899,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 		batch.Intents = append(batch.Intents, action.intent)
 		actions[index] = action
 	}
-	if err := consumer.beginIntentBatch(batch); err != nil {
+	if err := consumer.beginIntentBatch(batch, transcript, messages); err != nil {
 		return err
 	}
 
@@ -1076,7 +1092,7 @@ func (consumer *runCommitConsumer) commitKnownCall(ordinal uint64, assistant Age
 		AssistantTranscriptOrdinal: ordinal,
 		AssistantMessage:           assistant,
 		KnownReceipts:              []RunToolReceipt{known},
-	}); err != nil {
+	}, transcript, messages); err != nil {
 		return err
 	}
 	appendToolReceipt(messages, transcript, call, output, outcome, consumer)
@@ -1138,10 +1154,5 @@ func cloneTranscriptEntries(entries []TranscriptEntry) []TranscriptEntry {
 }
 
 func validRunCompletionProof(proof tools.PreparedCompletionProof) bool {
-	switch proof {
-	case tools.CompletionInlinePipelineJoined, tools.CompletionQueuedJobJoined, tools.CompletionOwnedProcessGroupJoined, tools.CompletionMCPRequestJoined:
-		return true
-	default:
-		return false
-	}
+	return tools.IsPositiveCompletionProof(proof)
 }

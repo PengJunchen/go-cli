@@ -107,16 +107,17 @@ type durableSessionManager struct {
 }
 
 type managedPreparedSession struct {
-	prepared session.PreparedSession
-	physical string
-	branch   string
-	leases   int
-	admin    bool
-	changed  chan struct{}
-	closeReq bool
-	closed   bool
-	closeErr error
-	poisoned bool
+	prepared         session.PreparedSession
+	physical         string
+	branch           string
+	leases           int
+	admin            bool
+	changed          chan struct{}
+	closeReq         bool
+	closed           bool
+	closeErr         error
+	poisoned         bool
+	historyUncertain bool
 }
 
 // durableSessionRunLease borrows one prepared handle. Its release method only
@@ -438,6 +439,10 @@ func (manager *durableSessionManager) reopenPoisoned(ctx context.Context) error 
 	if slot == nil {
 		manager.mu.Unlock()
 		return ErrNoDurableSessionSelected
+	}
+	if slot.historyUncertain {
+		manager.mu.Unlock()
+		return fmt.Errorf("%w: administrative sync was uncertain; close this invocation and resume exact physical session %s", ErrDurableSessionUnavailable, slot.physical)
 	}
 	if !slot.poisoned {
 		if slot.closed || slot.prepared == nil || slot.closeReq {

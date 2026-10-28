@@ -15,3 +15,9 @@ func terminateRPCProcess(command *exec.Cmd) {
 }
 
 func openRPCArtifactFile(path string) (*os.File, error) { return os.Open(path) }
+
+// The ordinary platform scope is the reaped leader and joined stdio. Request
+// completion never claims a process-tree sandbox on these platforms.
+func rpcProcessGroupStopped(command *exec.Cmd) bool {
+	return command != nil && command.ProcessState != nil
+}

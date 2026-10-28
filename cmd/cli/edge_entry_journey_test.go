@@ -167,7 +167,7 @@ func isolateEntryFixtureStorage(t *testing.T, project string, settings map[strin
 	t.Helper()
 	root := filepath.Join(project, ".go-cli", "test-storage")
 	require.NoError(t, os.MkdirAll(root, 0700))
-	settings["memory"] = map[string]any{"store_path": filepath.Join(root, "memories.jsonl")}
+	settings["memory"] = map[string]any{"enabled": false, "store_path": filepath.Join(root, "memories.jsonl")}
 	settings["history"] = map[string]any{"path": filepath.Join(root, "history.jsonl")}
 	settings["production"] = map[string]any{"audit": map[string]any{"path": filepath.Join(root, "audit.jsonl")}}
 }

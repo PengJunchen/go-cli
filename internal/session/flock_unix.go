@@ -57,3 +57,12 @@ func flockUnlock(f *os.File) error {
 	}
 	return unix.Flock(int(f.Fd()), unix.LOCK_UN)
 }
+
+// trySessionReadLock never waits or changes file contents.
+func trySessionReadLock(file *os.File) (bool, error) {
+	err := unix.Flock(int(file.Fd()), unix.LOCK_SH|unix.LOCK_NB)
+	if err == unix.EWOULDBLOCK || err == unix.EAGAIN {
+		return false, nil
+	}
+	return err == nil, err
+}

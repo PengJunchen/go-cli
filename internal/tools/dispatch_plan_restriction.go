@@ -49,9 +49,6 @@ type preparedEffectStartKey struct{}
 type preparedEffectStartGuard func(func() error) error
 
 func (p *preparedInvocation) withEffectStartGuard(ctx context.Context) context.Context {
-	if p.fence.planRestriction.Load() == nil {
-		return ctx
-	}
 	guard := preparedEffectStartGuard(func(start func() error) error {
 		check := func() error {
 			return p.fence.WithSnapshot(func(current DispatchFenceSnapshot) error {

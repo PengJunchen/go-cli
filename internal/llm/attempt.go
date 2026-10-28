@@ -60,6 +60,8 @@ const (
 	OperationContinuation
 	// OperationSummary is a compaction summary request.
 	OperationSummary
+	// OperationExtraction is an auxiliary workspace-memory request.
+	OperationExtraction
 )
 
 // OriginKind describes how the resolver selected an endpoint without exposing

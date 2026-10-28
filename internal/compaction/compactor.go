@@ -92,7 +92,8 @@ const (
 )
 
 // NewProjection describes the exact source boundary and raw body for a newly
-// created summary. It is nil for strategies that do not create a summary.
+// created summary or explicit omission marker. It is nil for unchanged history
+// and strategies without a durable projection.
 type NewProjection struct {
 	Summary string
 	Through llm.SourceThrough

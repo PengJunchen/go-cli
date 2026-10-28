@@ -15,3 +15,5 @@ func flockExclusiveContext(_ context.Context, _ *os.File) error { return ErrUnsu
 
 // flockUnlock is a no-op on platforms that do not support flock.
 func flockUnlock(_ *os.File) error { return nil }
+
+func trySessionReadLock(_ *os.File) (bool, error) { return false, ErrUnsupportedSessionLock }

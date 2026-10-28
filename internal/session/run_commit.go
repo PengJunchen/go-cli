@@ -39,6 +39,7 @@ type SessionRunCommitSink struct {
 	release                  func()
 	releaseOnce              sync.Once
 	closed                   bool
+	rejectedBatch            *closedRejectedBatch
 }
 
 var _ core.RunCommitSink = (*SessionRunCommitSink)(nil)
@@ -204,6 +205,9 @@ func (s *SessionRunCommitSink) BeginIntentBatch(ctx context.Context, batch core.
 	}
 	if err := s.rejectAfterTerminalLocked(); err != nil {
 		return err
+	}
+	if s.rejectedBatch != nil {
+		return errors.New("session: this run already closed a denied batch")
 	}
 	if batch.AssistantMessage.Role != "assistant" || len(batch.AssistantMessage.ToolCalls) == 0 {
 		return errors.New("session: intent batch requires an assistant message with tool calls")
@@ -387,8 +391,13 @@ func (s *SessionRunCommitSink) BeginIntentBatch(ctx context.Context, batch core.
 		ActionBatchID: batch.ActionBatchID, Actions: dispatchActions,
 		CanonicalWorkspaceRoot: batch.CanonicalWorkspaceRoot,
 	}
-	result, err := s.index.BeginDispatchBatch(ctx, dispatchBatch)
+	result, definiteNoIO, err := s.index.beginDispatchBatch(ctx, dispatchBatch)
 	if err != nil {
+		if definiteNoIO {
+			if closeErr := s.closeRejectedBatchLocked(ctx, batch); closeErr != nil {
+				return errors.Join(fmt.Errorf("session: commit workspace dispatch marker: %w", err), closeErr)
+			}
+		}
 		return fmt.Errorf("session: commit workspace dispatch marker: %w", err)
 	}
 	if result != WorkspaceDispatchCommittedNow {
@@ -504,6 +513,10 @@ func (s *SessionRunCommitSink) RecordReceipt(ctx context.Context, receipt core.R
 	if err := s.validateCallContextLocked(ctx, receipt.RunID); err != nil {
 		return err
 	}
+	return s.recordReceiptLocked(ctx, receipt)
+}
+
+func (s *SessionRunCommitSink) recordReceiptLocked(ctx context.Context, receipt core.RunToolReceipt) error {
 	if err := s.rejectAfterTerminalLocked(); err != nil {
 		return err
 	}

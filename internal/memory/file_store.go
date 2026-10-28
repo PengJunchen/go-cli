@@ -93,6 +93,7 @@ type FileMemoryStore struct {
 	mu             sync.RWMutex
 	items          map[string]Memory
 	file           *os.File
+	lockFile       *os.File
 	fileIO         memoryFileIO
 	closed         bool
 	poisoned       *MemoryStorePoisonedError
@@ -107,6 +108,15 @@ var _ MemoryStore = (*FileMemoryStore)(nil)
 // NewFileMemoryStore opens or creates the JSONL file at path, loads existing
 // entries into memory, and prepares the store for append-only writes.
 func NewFileMemoryStore(path string) (*FileMemoryStore, error) {
+	return NewFileMemoryStoreContext(context.Background(), path)
+}
+
+// NewFileMemoryStoreContext observes cancellation while acquiring the publication lock.
+// It returns no live store or eventual background handle after cancellation.
+func NewFileMemoryStoreContext(ctx context.Context, path string) (*FileMemoryStore, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("memory: open canceled: %w", err)
+	}
 	s := &FileMemoryStore{
 		path:    path,
 		items:   make(map[string]Memory),
@@ -114,11 +124,23 @@ func NewFileMemoryStore(path string) (*FileMemoryStore, error) {
 		docLen:  make(map[string]int),
 		fileIO:  defaultMemoryFileIO(),
 	}
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, memoryFilePerm)
+	if err != nil {
+		return nil, fmt.Errorf("memory: open publication lock: %w", err)
+	}
+	s.lockFile = lock
+	if err := lockMemoryFile(ctx, lock); err != nil {
+		_ = lock.Close()
+		return nil, fmt.Errorf("memory: acquire publication lock: %w", err)
+	}
+	defer unlockMemoryFile(lock)
 	if err := s.load(); err != nil {
+		_ = lock.Close()
 		return nil, fmt.Errorf("memory: load: %w", err)
 	}
 	f, err := s.fileIO.openFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, memoryFilePerm)
 	if err != nil {
+		_ = lock.Close()
 		return nil, fmt.Errorf("memory: open store file: %w", err)
 	}
 	s.file = f
@@ -149,10 +171,17 @@ func (s *FileMemoryStore) load() error {
 		if len(line) == 0 {
 			continue
 		}
-		var m Memory
-		if err := json.Unmarshal(line, &m); err != nil {
+		var decoded extractionRecord
+		if err := json.Unmarshal(line, &decoded); err != nil {
 			slog.Warn("memory.load_skip_corrupt_line", "path", s.path, "err", err)
 			continue // skip corrupt lines, keep the rest
+		}
+		m := decoded.Memory
+		for _, fact := range decoded.Facts {
+			if fact.ID != "" {
+				s.items[fact.ID] = fact
+				s.indexDocument(fact)
+			}
 		}
 		if m.ID == "" {
 			continue
@@ -169,6 +198,7 @@ func (s *FileMemoryStore) load() error {
 // Add stores a memory entry. If mem.ID is empty a unique ID is generated. The
 // entry is appended to the JSONL file and added to the in-memory index.
 func (s *FileMemoryStore) Add(ctx context.Context, mem Memory) error {
+	mem = cloneMemory(mem)
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("memory: add canceled: %w", err)
 	}
@@ -189,10 +219,11 @@ func (s *FileMemoryStore) Add(ctx context.Context, mem Memory) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if err := s.writeAvailabilityErrorLocked(); err != nil {
+	unlock, err := s.acquireFreshLocked(ctx, true)
+	if err != nil {
 		return err
 	}
+	defer unlock()
 
 	if _, exists := s.items[mem.ID]; exists {
 		return fmt.Errorf("memory: entry %q already exists", mem.ID)
@@ -224,27 +255,43 @@ func (s *FileMemoryStore) Add(ctx context.Context, mem Memory) error {
 }
 
 // Get returns the memory with the given ID.
-func (s *FileMemoryStore) Get(_ context.Context, id string) (Memory, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *FileMemoryStore) Get(ctx context.Context, id string) (Memory, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := s.acquireFreshLocked(ctx, false)
+	if err != nil {
+		return Memory{}, err
+	}
+	defer unlock()
 
 	m, ok := s.items[id]
-	if !ok {
+	if !ok || m.ProcessedSource != "" {
 		return Memory{}, ErrMemoryNotFound
 	}
-	return m, nil
+	return cloneMemory(m), nil
 }
 
 // List returns all memories sorted by CreatedAt descending.
-func (s *FileMemoryStore) List(_ context.Context) ([]Memory, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *FileMemoryStore) List(ctx context.Context) ([]Memory, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := s.acquireFreshLocked(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	out := make([]Memory, 0, len(s.items))
 	for _, m := range s.items {
-		out = append(out, m)
+		if m.ProcessedSource != "" {
+			continue
+		}
+		out = append(out, cloneMemory(m))
 	}
 	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
 		return out[i].CreatedAt.After(out[j].CreatedAt)
 	})
 	return out, nil
@@ -257,9 +304,11 @@ func (s *FileMemoryStore) Delete(ctx context.Context, id string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.writeAvailabilityErrorLocked(); err != nil {
+	unlock, err := s.acquireFreshLocked(ctx, true)
+	if err != nil {
 		return err
 	}
+	defer unlock()
 
 	_, ok := s.items[id]
 	if !ok {
@@ -278,7 +327,7 @@ func (s *FileMemoryStore) Delete(ctx context.Context, id string) error {
 // relevance descending. At most limit results are returned. Documents whose
 // TF-IDF score is not positive (e.g. terms that appear in nearly every
 // document are not discriminating) are not returned.
-func (s *FileMemoryStore) Search(_ context.Context, query string, limit int) ([]Memory, error) {
+func (s *FileMemoryStore) Search(ctx context.Context, query string, limit int) ([]Memory, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
@@ -287,8 +336,13 @@ func (s *FileMemoryStore) Search(_ context.Context, query string, limit int) ([]
 		return nil, nil
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := s.acquireFreshLocked(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	n := len(s.items)
 	if n == 0 {
@@ -370,7 +424,7 @@ func (s *FileMemoryStore) Search(_ context.Context, query string, limit int) ([]
 	for i := 0; i < limit; i++ {
 		m := s.items[scored[i].id]
 		m.Relevance = scored[i].score / maxScore
-		out = append(out, m)
+		out = append(out, cloneMemory(m))
 	}
 	return out, nil
 }
@@ -383,12 +437,68 @@ func (s *FileMemoryStore) Close() error {
 		return nil
 	}
 	s.closed = true
+	var lockErr error
+	if s.lockFile != nil {
+		lockErr = s.lockFile.Close()
+		s.lockFile = nil
+	}
 	if s.file == nil {
-		return nil
+		return lockErr
 	}
 	err := s.file.Close()
 	s.file = nil
-	return err
+	return errors.Join(err, lockErr)
+}
+
+// acquireFreshLocked serializes publication with every other process and
+// refreshes the snapshot before reading or rewriting it. The separate lock
+// inode survives atomic replacements of the JSONL inode.
+func (s *FileMemoryStore) acquireFreshLocked(ctx context.Context, write bool) (func(), error) {
+	if write {
+		if err := s.writeAvailabilityErrorLocked(); err != nil {
+			return nil, err
+		}
+	} else if s.closed || s.poisoned != nil || s.unavailableErr != nil {
+		return func() {}, nil
+	}
+	if err := lockMemoryFile(ctx, s.lockFile); err != nil {
+		return nil, fmt.Errorf("memory: lock publication: %w", err)
+	}
+	unlock := func() { unlockMemoryFile(s.lockFile) }
+	if err := ctx.Err(); err != nil {
+		unlock()
+		return nil, err
+	}
+	info, err := os.Stat(s.path)
+	if err != nil {
+		unlock()
+		return nil, fmt.Errorf("memory: inspect current store: %w", err)
+	}
+	opened, err := s.file.Stat()
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	if !os.SameFile(info, opened) {
+		file, openErr := s.fileIO.openFile(s.path, os.O_WRONLY|os.O_APPEND, memoryFilePerm)
+		if openErr != nil {
+			unlock()
+			return nil, fmt.Errorf("memory: reopen replaced store: %w", openErr)
+		}
+		_ = s.file.Close()
+		s.file = file
+	}
+	previous := s.items
+	s.items = make(map[string]Memory)
+	s.termIdx = make(map[string][]string)
+	s.docLen = make(map[string]int)
+	if err := s.load(); err != nil {
+		s.items = previous
+		s.rebuildIndexLocked()
+		unlock()
+		return nil, err
+	}
+	return unlock, nil
 }
 
 // rewriteFileLocked writes candidate to a synced temporary JSONL file and

@@ -285,6 +285,7 @@ func branchMetaFromCheckpoint(checkpoint SessionEntry) BranchMeta {
 		BranchID:   checkpoint.BranchID,
 		ParentID:   checkpoint.BaseLeafEntryID,
 		CreatedAt:  createdAt,
+		GitBranch:  checkpoint.SessionGitBranch,
 		BaseLeafID: checkpoint.BaseLeafEntryID,
 	}
 }

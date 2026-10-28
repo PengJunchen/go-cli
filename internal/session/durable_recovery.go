@@ -101,11 +101,14 @@ func validatedSnapshotActionPlan(snapshot PreparedSessionSnapshot) (*durableReco
 	if err := snapshot.PublishedView.Validate(); err != nil {
 		return nil, fmt.Errorf("session: pending-action inspection has an invalid published view: %w", err)
 	}
-	_, branchRows, err := validateRunCommitSnapshot(snapshot)
+	allRows, _, err := validateRunCommitSnapshot(snapshot)
 	if err != nil {
 		return nil, fmt.Errorf("session: pending-action inspection has an invalid snapshot: %w", err)
 	}
-	return analyzeDurableActionJournal(branchRows, snapshot.SessionID)
+	// Branch selection changes model context, not immutable execution facts.
+	// A branch may end at a receipt whose exact resolution was appended later
+	// on the original path; inspect all physical evidence without replaying it.
+	return analyzeDurableActionJournal(allRows, snapshot.SessionID)
 }
 
 func pendingActionSnapshot(occurrence *durableActionOccurrence) PendingActionSnapshot {

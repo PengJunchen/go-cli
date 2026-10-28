@@ -175,6 +175,15 @@ func estimateContextFiles(ctx context.Context, deps Dependencies, estimator comp
 // estimateMemories lists all memories from the memory store and estimates
 // their combined token count.
 func estimateMemories(ctx context.Context, deps Dependencies, estimator compaction.TokenEstimator) int {
+	if entries, exact := automaticMemoryContext(deps.PromptBuilder()); exact {
+		var text strings.Builder
+		for _, entry := range entries {
+			text.WriteString(entry.Content)
+			text.WriteByte('\n')
+		}
+		tokens, _ := estimator.Estimate(text.String())
+		return tokens
+	}
 	store := deps.MemoryStore()
 	if store == nil {
 		return 0

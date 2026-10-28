@@ -82,6 +82,10 @@ const (
 	// after a known response or a known request rejection. It does not attest
 	// remote side-effect containment; unknown transport outcomes never emit it.
 	CompletionMCPRequestJoined PreparedCompletionProof = "mcp_request_joined"
+	// CompletionWorkerRequestJoined proves an exact owned worker's local request
+	// and cancellation callback joined after a validated result or known rejection.
+	// It never proves worker exit, sandboxing or remote side-effect containment.
+	CompletionWorkerRequestJoined PreparedCompletionProof = "worker_request_joined"
 	// CompletionQueuedJobJoined means the exact accepted prepared queue job's
 	// captured executor returned.
 	CompletionQueuedJobJoined PreparedCompletionProof = "queued_job_joined"
@@ -405,8 +409,17 @@ func (s *preparedCompletionState) invalidateProof() {
 }
 
 func validPreparedCompletionProof(proof PreparedCompletionProof) bool {
+	return IsPositiveCompletionProof(proof)
+}
+
+// IsPositiveCompletionProof recognizes only the closed positive proof enum
+// shared by execution, durable storage and canonical transcript consumers.
+// Recognition does not establish that a particular action completed: callers
+// must still validate its exact invocation, join signal and journal coordinates.
+// Empty observations and internal registration modes are never positive proof.
+func IsPositiveCompletionProof(proof PreparedCompletionProof) bool {
 	switch proof {
-	case CompletionInlinePipelineJoined, CompletionQueuedJobJoined, CompletionOwnedProcessGroupJoined, CompletionMCPRequestJoined:
+	case CompletionInlinePipelineJoined, CompletionQueuedJobJoined, CompletionOwnedProcessGroupJoined, CompletionMCPRequestJoined, CompletionWorkerRequestJoined:
 		return true
 	default:
 		return false

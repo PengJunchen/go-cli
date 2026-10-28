@@ -1,11 +1,12 @@
 package tools
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"sync"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -35,6 +36,12 @@ type CustomCommandTool struct {
 	timeout     time.Duration
 	workingDir  string
 	maxOutput   int
+	executionMu sync.Mutex
+	active      int
+	closing     bool
+	uncertain   bool
+	pending     []<-chan struct{}
+	changed     chan struct{}
 }
 
 var _ ToolDefinition = (*CustomCommandTool)(nil)
@@ -54,12 +61,13 @@ func NewCustomCommandTool(
 	return &CustomCommandTool{
 		name:        name,
 		description: description,
-		command:     command,
-		staticArgs:  staticArgs,
-		env:         env,
+		command:     append([]string(nil), command...),
+		staticArgs:  append([]string(nil), staticArgs...),
+		env:         cloneCommandEnv(env),
 		timeout:     timeout,
 		workingDir:  workingDir,
 		maxOutput:   defaultCustomToolMaxOutput,
+		changed:     make(chan struct{}),
 	}
 }
 
@@ -94,6 +102,13 @@ func (t *CustomCommandTool) Execute(ctx context.Context, call ToolCall) (*ToolRe
 	span, _ := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 
+	if len(t.command) == 0 || t.command[0] == "" {
+		return nil, fmt.Errorf("%s: missing command", t.name)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	input, _ := call.Args["input"].(string) //nolint:errcheck
 
 	// Build the argument list: base command args, then static args, then the
@@ -114,23 +129,20 @@ func (t *CustomCommandTool) Execute(ctx context.Context, call ToolCall) (*ToolRe
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(execCtx, t.command[0], args...) //nolint:gosec // command from trusted config
+	cmd := exec.Command(t.command[0], args...) //nolint:gosec // command from trusted config
 	if t.workingDir != "" {
 		cmd.Dir = t.workingDir
 	}
 	cmd.Env = filteredEnv(t.env)
 
-	var buf bytes.Buffer
-	limited := &limitedWriter{max: t.maxOutput, buf: &buf}
-	cmd.Stdout = limited
-	cmd.Stderr = limited
-
+	if err := t.beginExecution(); err != nil {
+		return nil, err
+	}
 	start := time.Now()
-	runErr := cmd.Run()
+	output, lifecycle, runErr := runOwnedCommand(execCtx, cmd, t.maxOutput)
+	t.finishExecution(lifecycle, runErr)
 	ms := time.Since(start).Milliseconds()
-	limited.truncate()
 
-	output := buf.String()
 	metadata := map[string]any{"duration_ms": ms}
 
 	if execCtx.Err() != nil {
@@ -138,7 +150,7 @@ func (t *CustomCommandTool) Execute(ctx context.Context, call ToolCall) (*ToolRe
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("custom_tool.timeout", "tool", t.name, "duration_ms", ms, "err", execCtx.Err())
 		return &ToolResult{Output: output, Metadata: metadata, ToolCallID: call.ID},
-			fmt.Errorf("%s: timed out after %s: %w", t.name, t.timeout, execCtx.Err())
+			fmt.Errorf("%s: timed out after %s: %w", t.name, t.timeout, errors.Join(runErr, execCtx.Err()))
 	}
 
 	if runErr != nil {
@@ -154,4 +166,81 @@ func (t *CustomCommandTool) Execute(ctx context.Context, call ToolCall) (*ToolRe
 	span.SetAttributes(tracing.Attribute{Key: "success", Value: true})
 	logger.Info("custom_tool.done", "tool", t.name, "duration_ms", ms, "output_bytes", len(output))
 	return &ToolResult{Output: output, Metadata: metadata, ToolCallID: call.ID}, nil
+}
+
+func cloneCommandEnv(env map[string]string) map[string]string {
+	if env == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(env))
+	for key, value := range env {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+// Close prevents new executions and waits for the exact local executions to
+// join. Unproved containment retains the owner's executable artifact; a caller
+// must not delete that artifact merely because Execute returned an error.
+func (t *CustomCommandTool) Close(ctx context.Context) error {
+	for {
+		t.executionMu.Lock()
+		t.closing = true
+		remaining := t.pending[:0]
+		for _, done := range t.pending {
+			select {
+			case <-done:
+			default:
+				remaining = append(remaining, done)
+			}
+		}
+		t.pending = remaining
+		active, uncertain := t.active, t.uncertain
+		var changed <-chan struct{} = t.changed
+		if active == 0 && len(remaining) > 0 {
+			changed = remaining[0]
+		}
+		ready := active == 0 && len(remaining) == 0
+		t.executionMu.Unlock()
+		if ready {
+			if uncertain {
+				return errors.New("custom tool artifact cleanup pending: process containment is unknown")
+			}
+			return nil
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return fmt.Errorf("custom tool artifact cleanup pending: %w", ctx.Err())
+		}
+	}
+}
+
+func (t *CustomCommandTool) beginExecution() error {
+	t.executionMu.Lock()
+	defer t.executionMu.Unlock()
+	if t.closing {
+		return errors.New("custom tool is closed")
+	}
+	t.active++
+	return nil
+}
+
+func (t *CustomCommandTool) finishExecution(lifecycle managedLocalResult, err error) {
+	t.executionMu.Lock()
+	defer t.executionMu.Unlock()
+	var rejected interface{ ExecutionNotDispatched() bool }
+	notStarted := errors.As(err, &rejected) && rejected.ExecutionNotDispatched()
+	if !lifecycle.containmentProven && !lifecycle.ordinaryPipelineJoined && !notStarted {
+		if lifecycle.executionDone != nil && !lifecycle.forcedPipeClose {
+			t.pending = append(t.pending, lifecycle.executionDone)
+		} else {
+			t.uncertain = true
+		}
+	}
+	t.active--
+	if t.changed != nil {
+		close(t.changed)
+	}
+	t.changed = make(chan struct{})
 }

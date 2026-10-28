@@ -304,14 +304,16 @@ func validateProjectedToolGroups(entries []SessionEntry) error {
 	}
 	open := make(map[occurrence]string)
 	for i, entry := range entries {
-		if entry.RecordVersion != 1 {
-			continue
-		}
 		if entry.Type == EntryTypeAssistant && len(entry.ToolCalls) > 0 {
 			if len(open) > 0 {
 				return fmt.Errorf("session: assistant entry %q precedes tool receipts", entry.ID)
 			}
-			ordinal := *entry.AssistantTranscriptOrdinal
+			ordinal := uint64(0)
+			if entry.AssistantTranscriptOrdinal != nil {
+				ordinal = *entry.AssistantTranscriptOrdinal
+			} else if entry.RecordVersion == 1 {
+				return errors.New("session: version-one assistant is missing its occurrence")
+			}
 			for _, call := range entry.ToolCalls {
 				key := occurrence{runID: entry.RunID, ordinal: ordinal, toolCallID: call.ID}
 				if _, exists := open[key]; exists {
@@ -325,10 +327,13 @@ func validateProjectedToolGroups(entries []SessionEntry) error {
 			continue
 		}
 		if entry.Type == EntryTypeTool {
-			if entry.AssistantTranscriptOrdinal == nil {
+			ordinal := uint64(0)
+			if entry.AssistantTranscriptOrdinal != nil {
+				ordinal = *entry.AssistantTranscriptOrdinal
+			} else if entry.RecordVersion == 1 {
 				return fmt.Errorf("session: tool receipt %q has no assistant occurrence ordinal", entry.ID)
 			}
-			key := occurrence{runID: entry.RunID, ordinal: *entry.AssistantTranscriptOrdinal, toolCallID: entry.ToolCallID}
+			key := occurrence{runID: entry.RunID, ordinal: ordinal, toolCallID: entry.ToolCallID}
 			name, exists := open[key]
 			if !exists {
 				return fmt.Errorf("session: tool receipt %q has no matching assistant tool call", entry.ID)
@@ -370,7 +375,7 @@ func sessionEntryToAgentMessage(entry SessionEntry) (core.AgentMessage, bool) {
 	case EntryTypeSystem:
 		message.Role = "system"
 	case EntryTypeTool:
-		if entry.RecordVersion != 1 || entry.ActionState != "" {
+		if entry.ActionState != "" || (entry.RecordVersion == 0 && (entry.ToolCallID == "" || entry.ToolName == "")) {
 			return core.AgentMessage{}, false
 		}
 		message.Role = "tool"

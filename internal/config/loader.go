@@ -314,6 +314,9 @@ func loadFromEnv(prefix string) *Config {
 	if v, ok := parseBoolEnv(envKey(prefix, "SESSION_GIT_AWARE_BRANCH")); ok {
 		cfg.Session.GitAwareBranch = &v
 	}
+	if v, ok := parseBoolEnv(envKey(prefix, "MEMORY_ENABLED")); ok {
+		cfg.Memory.Enabled = &v
+	}
 
 	return cfg
 }

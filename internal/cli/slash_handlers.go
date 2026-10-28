@@ -45,11 +45,11 @@ func (h *HelpHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 	fmt.Fprintln(deps.Out(), "  exit      Exit the interactive session") //nolint:errcheck
 	fmt.Fprintln(deps.Out(), "\nCapability boundaries (default entry):") //nolint:errcheck
 	for _, boundary := range []string{
-		"Memory: user-managed with /memory only; no automatic extraction or prompt injection.",
+		"Memory: workspace-scoped automatic extraction and prompt context are enabled by default; memory.enabled: false disables both. /memory manages stored records.",
 		"Goal, Task, and Todo: stored only in memory for this process; not kept across restarts.",
 		"Session storage: without session.store_path, /session is unsupported.",
-		"Durable mode exposes /session tree, branches, pending, and explicit one-action reconciliation; resume uses --resume-session <physical-id> at startup.",
-		"Durable /session resume, fork, clone, and switch are unsupported.",
+		"Durable sessions support saved-state inspection, clear, compact, retry, branch navigation, and exact physical resume; unknown actions remain fenced.",
+		"Use /session resume to list physical IDs; /session entry <entry-id> navigates current history. Legacy files use session inspect-legacy/import-legacy.",
 		"Legacy mutable mode supports /session tree, branches, resume, fork, clone, and switch with a wired mutable tree; resume listing needs a session store.",
 		"Session snapshot and schema migration are unavailable.",
 		"Image reading and Web Agent UI: unavailable. Web Search requires a configured provider.",
@@ -375,6 +375,7 @@ const (
 // Without sub-arguments it defaults to showing the tree.
 type SessionHandler struct {
 	mode               sessionCommandMode
+	historyAvailable   bool
 	durableSession     *durableCLISession
 	runSlotGuard       core.RunSlotGuard
 	recoveryNewSession func(context.Context) (string, error)
@@ -389,6 +390,9 @@ func (h *SessionHandler) Description() string {
 	}
 	switch h.mode {
 	case sessionCommandModeDurable:
+		if h.historyAvailable && h.recoveryNewSession == nil {
+			return "Durable session commands: tree, branches, resume, entry, fork, clone, switch, pending, and reconcile. Resume at startup with --resume-session <physical-id>."
+		}
 		if h.recoveryNewSession != nil {
 			return "Durable session commands: /session tree, /session branches, /session pending, and /session reconcile; after a quiescent unknown cancellation, /session new starts a fresh session. Resume at startup with --resume-session <physical-id>."
 		}
@@ -411,6 +415,15 @@ func (h *SessionHandler) Subcommands() []Subcommand {
 			{Name: "branches", Description: "List durable session branches"},
 			{Name: "pending", Description: "List unresolved durable actions"},
 			{Name: "reconcile", Description: "Explicitly accept one unknown action outcome"},
+		}
+		if h.historyAvailable && h.recoveryNewSession == nil {
+			commands = append(commands,
+				Subcommand{Name: "resume", Description: "List or resume exact physical sessions"},
+				Subcommand{Name: "entry", Description: "Navigate to a complete history entry"},
+				Subcommand{Name: "fork", Description: "Fork the current durable history"},
+				Subcommand{Name: "clone", Description: "Clone an immutable history prefix"},
+				Subcommand{Name: "switch", Description: "Select the latest branch tip"},
+			)
 		}
 		if h.recoveryNewSession != nil {
 			commands = append(commands, Subcommand{Name: "new", Description: "Start a fresh durable session after an unknown cancellation"})

@@ -113,6 +113,7 @@ func newMemoryTestConfig(t *testing.T, srvURL string) (*config.Config, string) {
 	t.Setenv("HOME", homeDir)
 
 	cfg := &config.Config{
+		Memory: config.MemoryConfig{Enabled: func() *bool { value := false; return &value }()},
 		Provider: config.ProviderConfig{
 			Name:    "test",
 			BaseURL: srvURL,
@@ -189,7 +190,7 @@ func TestExplicitLibraryMemoryExtractorCanBeInjected(t *testing.T) {
 	assert.Equal(t, "explicit library memory", items[0].Content)
 }
 
-func TestInteractiveMemoryIsManualOnlyByDefault(t *testing.T) {
+func TestInteractiveMemoryIsManualOnlyWhenDisabled(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	srv := newMemoryTestServer(t)
@@ -218,7 +219,7 @@ func TestInteractiveMemoryIsManualOnlyByDefault(t *testing.T) {
 	assert.NotContains(t, string(bodies[0]), storedMemoryCanary, "existing memory must not be injected into the model prompt")
 }
 
-func TestInteractiveMultipleTurnsDoNotExtractMemoryByDefault(t *testing.T) {
+func TestInteractiveMultipleTurnsDoNotExtractMemoryWhenDisabled(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	srv := newMemoryTestServer(t)

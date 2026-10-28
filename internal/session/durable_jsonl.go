@@ -323,6 +323,10 @@ func (s *durableJSONLStore) AppendAndSync(ctx context.Context, entries ...Sessio
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.appendAndSyncLocked(ctx, entries...)
+}
+
+func (s *durableJSONLStore) appendAndSyncLocked(ctx context.Context, entries ...SessionEntry) ([]SessionEntry, error) {
 	if s.closed || s.file == nil {
 		return nil, ErrDurableWriterClosed
 	}
@@ -564,6 +568,10 @@ func (s *durableJSONLStore) snapshot() (PreparedSessionSnapshot, error) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.snapshotLocked()
+}
+
+func (s *durableJSONLStore) snapshotLocked() (PreparedSessionSnapshot, error) {
 	if s.closed || s.file == nil {
 		return PreparedSessionSnapshot{}, ErrDurableWriterClosed
 	}

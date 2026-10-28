@@ -147,9 +147,12 @@ func NewDefaultGoalStore(path string) (*DefaultGoalStore, error) {
 }
 
 // Create adds a new goal with Draft status and returns a copy.
-func (s *DefaultGoalStore) Create(_ context.Context, title, description, criteria string) (*Goal, error) {
+func (s *DefaultGoalStore) Create(ctx context.Context, title, description, criteria string) (*Goal, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	s.counter++
 	now := time.Now()
@@ -170,27 +173,33 @@ func (s *DefaultGoalStore) Create(_ context.Context, title, description, criteri
 		return nil, fmt.Errorf("goal_store: save: %w", err)
 	}
 
-	cp := *goal
+	cp := cloneGoal(goal)
 	return &cp, nil
 }
 
 // Get returns a copy of the goal with the given ID.
-func (s *DefaultGoalStore) Get(_ context.Context, id string) (*Goal, error) {
+func (s *DefaultGoalStore) Get(ctx context.Context, id string) (*Goal, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	g, ok := s.goals[id]
 	if !ok {
 		return nil, fmt.Errorf("goal_store: goal %q not found", id)
 	}
-	cp := *g
+	cp := cloneGoal(g)
 	return &cp, nil
 }
 
 // Update applies the given options to the goal with the specified ID.
-func (s *DefaultGoalStore) Update(_ context.Context, id string, opts ...GoalUpdateOption) error {
+func (s *DefaultGoalStore) Update(ctx context.Context, id string, opts ...GoalUpdateOption) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	g, ok := s.goals[id]
 	if !ok {
@@ -212,13 +221,16 @@ func (s *DefaultGoalStore) Update(_ context.Context, id string, opts ...GoalUpda
 }
 
 // List returns all goals sorted by CreatedAt.
-func (s *DefaultGoalStore) List(_ context.Context) ([]*Goal, error) {
+func (s *DefaultGoalStore) List(ctx context.Context) ([]*Goal, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	out := make([]*Goal, 0, len(s.goals))
 	for _, g := range s.goals {
-		cp := *g
+		cp := cloneGoal(g)
 		out = append(out, &cp)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -228,9 +240,12 @@ func (s *DefaultGoalStore) List(_ context.Context) ([]*Goal, error) {
 }
 
 // Delete removes the goal with the given ID.
-func (s *DefaultGoalStore) Delete(_ context.Context, id string) error {
+func (s *DefaultGoalStore) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if _, ok := s.goals[id]; !ok {
 		return fmt.Errorf("goal_store: goal %q not found", id)
@@ -241,9 +256,12 @@ func (s *DefaultGoalStore) Delete(_ context.Context, id string) error {
 
 // AddTask associates a task with the goal. It is a no-op if the task is already
 // associated.
-func (s *DefaultGoalStore) AddTask(_ context.Context, goalID, taskID string) error {
+func (s *DefaultGoalStore) AddTask(ctx context.Context, goalID, taskID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	g, ok := s.goals[goalID]
 	if !ok {
@@ -261,9 +279,12 @@ func (s *DefaultGoalStore) AddTask(_ context.Context, goalID, taskID string) err
 
 // RemoveTask disassociates a task from the goal. It is a no-op if the task is
 // not associated.
-func (s *DefaultGoalStore) RemoveTask(_ context.Context, goalID, taskID string) error {
+func (s *DefaultGoalStore) RemoveTask(ctx context.Context, goalID, taskID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	g, ok := s.goals[goalID]
 	if !ok {
@@ -320,4 +341,14 @@ func (s *DefaultGoalStore) load() error {
 		s.counter++
 	}
 	return nil
+}
+
+func cloneGoal(goal *Goal) Goal {
+	copy := *goal
+	copy.TaskIDs = append([]string(nil), goal.TaskIDs...)
+	if goal.CompletedAt != nil {
+		completed := *goal.CompletedAt
+		copy.CompletedAt = &completed
+	}
+	return copy
 }

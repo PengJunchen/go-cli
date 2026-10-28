@@ -69,6 +69,9 @@ func (*TodoWriteTool) Parameters() any {
 
 // Execute dispatches a todo action based on args["action"].
 func (t *TodoWriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if t.store == nil {
 		return nil, errors.New("todo_write: nil store")
 	}
@@ -83,20 +86,20 @@ func (t *TodoWriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult
 
 	switch action {
 	case "add":
-		return t.doAdd(call)
+		return t.doAdd(ctx, call)
 	case "update":
-		return t.doUpdate(call)
+		return t.doUpdate(ctx, call)
 	case "list":
 		return t.doList(call)
 	case "remove":
-		return t.doRemove(call)
+		return t.doRemove(ctx, call)
 	default:
 		return nil, fmt.Errorf("todo_write: unknown action %q", action)
 	}
 }
 
 // doAdd creates a new todo item.
-func (t *TodoWriteTool) doAdd(call ToolCall) (*ToolResult, error) {
+func (t *TodoWriteTool) doAdd(ctx context.Context, call ToolCall) (*ToolResult, error) {
 	content, _ := call.Args["content"].(string) //nolint:errcheck
 	if strings.TrimSpace(content) == "" {
 		return nil, errors.New("todo_write: 'content' is required for add action")
@@ -115,7 +118,10 @@ func (t *TodoWriteTool) doAdd(call ToolCall) (*ToolResult, error) {
 		Status:   status,
 		Priority: priority,
 	}
-	snapshot := t.store.Add(item)
+	snapshot, err := t.store.add(ctx, item)
+	if err != nil {
+		return nil, err
+	}
 	id := snapshot.Items[len(snapshot.Items)-1].ID
 	t.notifyChange(snapshot)
 
@@ -135,7 +141,7 @@ func (t *TodoWriteTool) doAdd(call ToolCall) (*ToolResult, error) {
 }
 
 // doUpdate changes the status of an existing todo item.
-func (t *TodoWriteTool) doUpdate(call ToolCall) (*ToolResult, error) {
+func (t *TodoWriteTool) doUpdate(ctx context.Context, call ToolCall) (*ToolResult, error) {
 	id, _ := call.Args["id"].(string) //nolint:errcheck
 	if strings.TrimSpace(id) == "" {
 		return nil, errors.New("todo_write: 'id' is required for update action")
@@ -145,7 +151,11 @@ func (t *TodoWriteTool) doUpdate(call ToolCall) (*ToolResult, error) {
 		return nil, errors.New("todo_write: 'status' is required for update action")
 	}
 
-	if snapshot, changed := t.store.Update(id, status); changed {
+	snapshot, changed, err := t.store.update(ctx, id, status)
+	if err != nil {
+		return nil, err
+	}
+	if changed {
 		t.notifyChange(snapshot)
 	}
 
@@ -184,13 +194,17 @@ func (t *TodoWriteTool) doList(call ToolCall) (*ToolResult, error) {
 }
 
 // doRemove deletes a todo item by ID.
-func (t *TodoWriteTool) doRemove(call ToolCall) (*ToolResult, error) {
+func (t *TodoWriteTool) doRemove(ctx context.Context, call ToolCall) (*ToolResult, error) {
 	id, _ := call.Args["id"].(string) //nolint:errcheck
 	if strings.TrimSpace(id) == "" {
 		return nil, errors.New("todo_write: 'id' is required for remove action")
 	}
 
-	if snapshot, changed := t.store.Remove(id); changed {
+	snapshot, changed, err := t.store.remove(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if changed {
 		t.notifyChange(snapshot)
 	}
 

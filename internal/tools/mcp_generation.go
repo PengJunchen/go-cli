@@ -664,7 +664,10 @@ func (r *DefaultToolRegistry) registerDefaultToolGuarded(ctx context.Context, de
 }
 
 func (r *DefaultToolRegistry) registerDefaultToolGuardedWithBinding(ctx context.Context, def ToolDefinition, binding ProjectTrustBinding) error {
-	proof := PreparedCompletionProof("")
+	return r.registerDefaultToolGuardedWithBindingProof(ctx, def, binding, "")
+}
+
+func (r *DefaultToolRegistry) registerDefaultToolGuardedWithBindingProof(ctx context.Context, def ToolDefinition, binding ProjectTrustBinding, proof PreparedCompletionProof) error {
 	if discovery, ok := def.(*MCPDiscoveryTool); ok && discovery != nil && discovery.owned != nil {
 		proof = CompletionMCPRequestJoined
 	}
@@ -673,6 +676,10 @@ func (r *DefaultToolRegistry) registerDefaultToolGuardedWithBinding(ctx context.
 		return err
 	}
 	metadata.projectTrustBinding = binding
+	if worker, owned := def.(*ownedWorkerRequestTool); owned && worker != nil {
+		metadata.completionProof = CompletionWorkerRequestJoined
+		metadata.dispatchLease = worker.lease
+	}
 	name := def.Name()
 	if r == nil || r.fence == nil {
 		return ErrDispatchFenceUnavailable

@@ -231,6 +231,10 @@ func bindDurableSessionRun(
 		lease.CloseRunCommit()
 		return nil, nil, fmt.Errorf("cli: construct durable run-commit sink: %w", err)
 	}
+	if err := sink.ValidateNewTurn(ctx); err != nil {
+		sink.CloseRunCommit()
+		return nil, nil, fmt.Errorf("cli: admit new durable turn: %w", err)
+	}
 	binding := core.RunCommitBinding{
 		SessionID: lease.SessionID(), WorkspaceID: lease.WorkspaceID(),
 		CanonicalWorkspaceRoot: lease.CanonicalWorkspaceRoot(),
