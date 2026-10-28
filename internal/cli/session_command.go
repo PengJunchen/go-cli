@@ -54,32 +54,43 @@ func (c *sessionCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	if err := validateDurableSessionStorePath(store); err != nil {
 		return err
 	}
-	switch args[0] {
-	case "list":
-		entries, err := session.ListSessionCatalog(ctx, store)
-		if err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintln(c.out, "Physical sessions:"); err != nil {
-			return err
-		}
-		for _, entry := range entries {
-			if _, err := fmt.Fprintf(c.out, "  %s [%s] %s\n", entry.SessionID, entry.Status, truncatePreview(entry.Preview)); err != nil {
-				return err
-			}
-		}
-		return nil
-	case "import-legacy":
-		if source == "" {
-			return newUsageError("session import-legacy: --source is required")
-		}
-		physical, err := session.ImportLegacySession(ctx, source, store, id)
-		if err != nil {
-			return newExecutionError("session: import legacy history", err)
-		}
-		_, err = fmt.Fprintf(c.out, "Imported physical session: %s\nResume with interactive --resume-session %s. Original source retained.\n", physical, physical)
-		return err
-	default:
+	handlers := map[string]func(context.Context, sessionCommandOptions) error{
+		"list":          c.listSessions,
+		"import-legacy": c.importLegacy,
+	}
+	handler, ok := handlers[args[0]]
+	if !ok {
 		return errors.New("session: unknown subcommand")
 	}
+	return handler(ctx, sessionCommandOptions{source: source, store: store, id: id})
+}
+
+type sessionCommandOptions struct{ source, store, id string }
+
+func (c *sessionCmd) listSessions(ctx context.Context, options sessionCommandOptions) error {
+	entries, err := session.ListSessionCatalog(ctx, options.store)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(c.out, "Physical sessions:"); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if _, err := fmt.Fprintf(c.out, "  %s [%s] %s\n", entry.SessionID, entry.Status, truncatePreview(entry.Preview)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *sessionCmd) importLegacy(ctx context.Context, options sessionCommandOptions) error {
+	if options.source == "" {
+		return newUsageError("session import-legacy: --source is required")
+	}
+	physical, err := session.ImportLegacySession(ctx, options.source, options.store, options.id)
+	if err != nil {
+		return newExecutionError("session: import legacy history", err)
+	}
+	_, err = fmt.Fprintf(c.out, "Imported physical session: %s\nResume with interactive --resume-session %s. Original source retained.\n", physical, physical)
+	return err
 }

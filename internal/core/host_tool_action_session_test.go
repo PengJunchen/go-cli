@@ -22,6 +22,7 @@ import (
 func TestHostToolActionPersistsRealGitWithoutModelAndRunsHooks(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
 	ctx := context.Background()
 	repo := filepath.Join(root, "repo")
 	require.NoError(t, os.Mkdir(repo, 0o700))
@@ -94,6 +95,7 @@ func TestHostToolActionFailureAndUnknownContracts(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
 			t.Setenv("HOME", root)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			canonical, err := filepath.EvalSymlinks(root)
@@ -164,6 +166,7 @@ func TestHostToolActionFailureAndUnknownContracts(t *testing.T) {
 func TestHostToolActionUsesOriginalRunnerLifecycleStreamAndTurnIDs(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, ".config"))
 	canonical, err := filepath.EvalSymlinks(root)
 	require.NoError(t, err)
 	workspaceID, err := session.WorkspaceIDForCanonicalRoot(canonical)

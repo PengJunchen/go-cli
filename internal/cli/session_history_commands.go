@@ -70,31 +70,43 @@ func (commands *durableHistoryCommands) handle(ctx context.Context, name string,
 		if len(args) == 0 {
 			return "", false, nil
 		}
-		switch args[0] {
-		case "resume", "list":
-			if len(args) == 1 {
-				entries, err := session.ListSessionCatalog(ctx, s.assembly.durableSession.storeDirectory)
-				if err != nil {
-					return "", true, err
-				}
-				if _, err := fmt.Fprintln(s.out, "Physical sessions (exact IDs; busy entries are not opened):"); err != nil {
-					return "", true, err
-				}
-				for _, entry := range entries {
-					if _, err := fmt.Fprintf(s.out, "  %s [%s] %s %s\n", entry.SessionID, entry.Status, entry.Modified.Format(time.RFC3339), truncatePreview(entry.Preview)); err != nil {
-						return "", true, err
-					}
-				}
-				return "", true, nil
-			}
-		case "fork", "clone", "switch", "entry":
-		default:
+		handlers := map[string]func(context.Context, []string) error{
+			"resume": commands.resumeOrCatalog,
+			"list":   commands.resumeOrCatalog,
+			"fork":   s.dispatchHistoryCommand,
+			"clone":  s.dispatchHistoryCommand,
+			"switch": s.dispatchHistoryCommand,
+			"entry":  s.dispatchHistoryCommand,
+		}
+		handler, ok := handlers[args[0]]
+		if !ok {
 			return "", false, nil
 		}
-		err := s.dispatchHistoryCommand(ctx, args)
-		return "", true, err
+		return "", true, handler(ctx, args)
 	}
 	return "", false, nil
+}
+
+// resumeOrCatalog preserves the no-target listing alias while exact targets
+// continue through the normal administrative admission and selection path.
+func (commands *durableHistoryCommands) resumeOrCatalog(ctx context.Context, args []string) error {
+	if len(args) > 1 {
+		return commands.repl.dispatchHistoryCommand(ctx, args)
+	}
+	s := commands.repl
+	entries, err := session.ListSessionCatalog(ctx, s.assembly.durableSession.storeDirectory)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(s.out, "Physical sessions (exact IDs; busy entries are not opened):"); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if _, err := fmt.Fprintf(s.out, "  %s [%s] %s %s\n", entry.SessionID, entry.Status, entry.Modified.Format(time.RFC3339), truncatePreview(entry.Preview)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *REPLSession) withHistoryAdmission(ctx context.Context, fn func() error) error {
