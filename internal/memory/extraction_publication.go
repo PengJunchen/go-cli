@@ -114,5 +114,6 @@ func (s *FileMemoryStore) PublishExtraction(ctx context.Context, source Provenan
 		s.items[fact.ID] = fact
 		s.indexDocument(fact)
 	}
+	s.rememberSnapshotLocked()
 	return true, nil
 }

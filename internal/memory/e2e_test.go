@@ -4,6 +4,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -229,6 +230,7 @@ func TestET_memory_concurrent_access(t *testing.T) {
 	const numReaders = 20
 	const numOps = 50
 
+	errors := make(chan error, numWriters*numOps+2*numReaders*numOps)
 	var wg sync.WaitGroup
 	wg.Add(numWriters + numReaders)
 
@@ -237,11 +239,13 @@ func TestET_memory_concurrent_access(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < numOps; j++ {
-				_ = store.Add(ctx, Memory{
+				if err := store.Add(ctx, Memory{
 					Content:  "concurrent memory content for race testing",
 					Category: "fact",
 					Source:   "auto",
-				})
+				}); err != nil {
+					errors <- fmt.Errorf("concurrent Add: %w", err)
+				}
 			}
 		}()
 	}
@@ -251,13 +255,27 @@ func TestET_memory_concurrent_access(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < numOps; j++ {
-				_, _ = store.Search(ctx, "race", 10)
-				_, _ = store.List(ctx)
+				if _, err := store.Search(ctx, "race", 10); err != nil {
+					errors <- fmt.Errorf("concurrent Search: %w", err)
+				}
+				if _, err := store.List(ctx); err != nil {
+					errors <- fmt.Errorf("concurrent List: %w", err)
+				}
 			}
 		}()
 	}
 
 	wg.Wait()
+	close(errors)
+	failedOperations := 0
+	var firstError error
+	for err := range errors {
+		failedOperations++
+		if firstError == nil {
+			firstError = err
+		}
+	}
+	require.Zero(t, failedOperations, "all original concurrent operations must succeed; first error: %v", firstError)
 
 	// Verify the store is in a consistent state after concurrent access.
 	list, err := store.List(ctx)

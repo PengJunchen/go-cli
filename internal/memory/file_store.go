@@ -94,6 +94,7 @@ type FileMemoryStore struct {
 	items          map[string]Memory
 	file           *os.File
 	lockFile       *os.File
+	snapshotInfo   os.FileInfo // freshness hint under the publication lock, never authority
 	fileIO         memoryFileIO
 	closed         bool
 	poisoned       *MemoryStorePoisonedError
@@ -144,6 +145,7 @@ func NewFileMemoryStoreContext(ctx context.Context, path string) (*FileMemorySto
 		return nil, fmt.Errorf("memory: open store file: %w", err)
 	}
 	s.file = f
+	s.rememberSnapshotLocked()
 	return s, nil
 }
 
@@ -251,6 +253,7 @@ func (s *FileMemoryStore) Add(ctx context.Context, mem Memory) error {
 
 	s.items[mem.ID] = mem
 	s.indexDocument(mem)
+	s.rememberSnapshotLocked()
 	return nil
 }
 
@@ -488,6 +491,13 @@ func (s *FileMemoryStore) acquireFreshLocked(ctx context.Context, write bool) (f
 		_ = s.file.Close()
 		s.file = file
 	}
+	// Cooperating writers append or atomically replace under this same lock.
+	// Unchanged identity, size and mtime let this handle retain its decoded
+	// state after acknowledged own writes and repeated reads. Every observed
+	// external change still takes the complete reload and reopen path.
+	if s.snapshotInfo != nil && os.SameFile(info, s.snapshotInfo) && info.Size() == s.snapshotInfo.Size() && info.ModTime().Equal(s.snapshotInfo.ModTime()) {
+		return unlock, nil
+	}
 	previous := s.items
 	s.items = make(map[string]Memory)
 	s.termIdx = make(map[string][]string)
@@ -498,7 +508,18 @@ func (s *FileMemoryStore) acquireFreshLocked(ctx context.Context, write bool) (f
 		unlock()
 		return nil, err
 	}
+	s.snapshotInfo = info
 	return unlock, nil
+}
+
+// rememberSnapshotLocked follows only an acknowledged write/index update or a
+// complete initial load. A failed stat disables reuse; it never changes write
+// acknowledgement or suppresses the next operation's normal refresh.
+func (s *FileMemoryStore) rememberSnapshotLocked() {
+	s.snapshotInfo = nil
+	if s.file != nil {
+		s.snapshotInfo, _ = s.file.Stat()
+	}
 }
 
 // rewriteFileLocked writes candidate to a synced temporary JSONL file and
@@ -563,6 +584,7 @@ func (s *FileMemoryStore) rewriteFileLocked(candidate map[string]Memory) error {
 		return s.unavailableErr
 	}
 	s.file = f
+	s.rememberSnapshotLocked()
 	return nil
 }
 

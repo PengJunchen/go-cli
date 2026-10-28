@@ -358,7 +358,7 @@ func newLongTaskFixture(t *testing.T, peer *longTaskHTTPPeer, exposeBash bool) *
 		toolsYAML = "  builtin:\n    - bash\n"
 	}
 	configYAML := fmt.Sprintf(
-		"provider:\n  name: openai\n  base_url: %q\n  api_key: %q\n  model: %q\nmodel:\n  name: %q\ntools:\n%sapproval:\n  mode: ask\ncompaction:\n  strategy: truncating\n  max_tokens: 4096\ntracing:\n  enabled: false\n",
+		"provider:\n  name: openai\n  base_url: %q\n  api_key: %q\n  model: %q\nmodel:\n  name: %q\ntools:\n%sapproval:\n  mode: ask\ncompaction:\n  strategy: truncating\n  max_tokens: 4096\ntracing:\n  enabled: false\nmemory:\n  enabled: false\n",
 		server.URL+"/v1", longTaskAPIKey, longTaskModel, longTaskModel, toolsYAML,
 	)
 	configPath := filepath.Join(home, ".go-cli", "config.yaml")
