@@ -55,7 +55,12 @@ func TestDurableWorkerProcess(t *testing.T) {
 			os.Exit(0)
 		case "timeout":
 			<-ctx.Done()
-			return nil, ctx.Err()
+			// Withhold the response until the host terminates this worker. Returning
+			// ctx.Err() lets Serve emit a known callback_failed rejection which can
+			// beat the host's deadline callback and legitimately carry a join proof.
+			select {}
+		case "deadline-rejection":
+			return nil, context.DeadlineExceeded
 		case "wrong-id":
 			frame, _ := json.Marshal(api.Response{ID: request.ID + 100, Result: json.RawMessage(`{"output":"wrong occurrence"}`)})
 			_, _ = os.Stdout.Write(append(frame, '\n'))
@@ -172,15 +177,27 @@ func TestPromptDurableOwnedWorkerUnknownRetainsPendingWithoutReplay(t *testing.T
 			pending, err := session.InspectPendingActions(snapshot)
 			require.NoError(t, err)
 			require.Len(t, pending, 1)
+			intents, receipts := 0, 0
 			for _, row := range snapshot.DurableEntries {
 				if row.ToolCallID == "unknown-worker" {
 					require.Empty(t, row.CompletionProof)
+					require.NotEqual(t, session.CheckpointExecutionResolution, row.CheckpointKind)
+					switch {
+					case row.ActionState == session.ActionStateIntent:
+						intents++
+					case row.Type == session.EntryTypeTool && row.ActionState == "":
+						receipts++
+						require.Equal(t, core.ReceiptOutcomeUnknown, row.ReceiptOutcome)
+						require.Equal(t, core.DispatchStateDispatched, row.DispatchState)
+					}
 				}
 			}
+			require.Equal(t, 1, intents)
+			require.Equal(t, 1, receipts)
 			data, err := os.ReadFile(calls)
 			require.NoError(t, err)
 			require.Equal(t, "call\n", string(data))
-			if mode == "null" {
+			if mode == "null" || mode == "timeout" {
 				require.NoError(t, resumed.requestClose(ctx))
 				runFreshWorkerResumeHost(ctx, t, cfg, id, true)
 				after, err := os.ReadFile(calls)
@@ -190,6 +207,36 @@ func TestPromptDurableOwnedWorkerUnknownRetainsPendingWithoutReplay(t *testing.T
 			require.Len(t, script.requestBodies(), 1)
 		})
 	}
+}
+
+func TestDurableOwnedWorkerKnownDeadlineRejectionHasJoinedProof(t *testing.T) {
+	cfg, calls, starts := durableWorkerConfig(t, "deadline-rejection")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	assembly, err := AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard, WithApproveMode(ApproveAuto))
+	require.NoError(t, err)
+	defer assembly.Cleanup()
+	preparer, ok := assembly.ToolRegistry.(tools.ToolCallPreparer)
+	require.True(t, ok)
+	for _, id := range []string{"first-rejection", "second-rejection"} {
+		invocation, err := preparer.PrepareToolCall(ctx, tools.ToolCall{ID: id, Name: "worker_echo", Args: map[string]any{}})
+		require.NoError(t, err)
+		_, err = invocation.Dispatch(ctx)
+		require.ErrorContains(t, err, "callback_failed")
+		require.NoError(t, ctx.Err(), "the remote rejection precedes the host deadline")
+		select {
+		case <-invocation.CompletionSignal().Done():
+		default:
+			t.Fatal("known rejection returned before its exact request joined")
+		}
+		require.Equal(t, tools.CompletionWorkerRequestJoined, invocation.CompletionSignal().Proof())
+	}
+	data, err := os.ReadFile(calls)
+	require.NoError(t, err)
+	require.Equal(t, "call\ncall\n", string(data))
+	data, err = os.ReadFile(starts)
+	require.NoError(t, err)
+	require.Equal(t, "start\n", string(data), "known rejections keep the initialized worker reusable")
 }
 
 func TestDurableOwnedWorkerDeniedSendsNoToolFrame(t *testing.T) {
