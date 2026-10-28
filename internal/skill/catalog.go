@@ -45,6 +45,7 @@ type catalogEntry struct {
 	descriptor Descriptor
 	metadata   []byte
 	captured   []byte
+	searchText string
 }
 
 // CatalogOptions bounds discovery without depending on the number of references
@@ -282,7 +283,12 @@ func (c *Catalog) add(path string, metadata, captured []byte, opts CatalogOption
 		}
 	}
 	digest := sha256.Sum256(metadata)
-	c.entries = append(c.entries, catalogEntry{descriptor: Descriptor{Name: fields.Name, Description: fields.Description, Category: fields.Category, Path: path, Digest: hex.EncodeToString(digest[:])}, metadata: append([]byte(nil), metadata...), captured: captured})
+	c.entries = append(c.entries, catalogEntry{
+		descriptor: Descriptor{Name: fields.Name, Description: fields.Description, Category: fields.Category, Path: path, Digest: hex.EncodeToString(digest[:])},
+		metadata:   append([]byte(nil), metadata...),
+		captured:   captured,
+		searchText: strings.ToLower(fields.Name + " " + fields.Description + " " + fields.Category),
+	})
 	sort.Slice(c.entries, func(i, j int) bool { return c.entries[i].descriptor.Name < c.entries[j].descriptor.Name })
 	return nil
 }
@@ -298,7 +304,7 @@ func (c *Catalog) Search(query string, limit int) []Descriptor {
 	query = strings.ToLower(strings.TrimSpace(query))
 	var result []Descriptor
 	for _, entry := range c.entries {
-		if query == "" || strings.Contains(strings.ToLower(entry.descriptor.Name+" "+entry.descriptor.Description+" "+entry.descriptor.Category), query) {
+		if query == "" || strings.Contains(entry.searchText, query) {
 			result = append(result, entry.descriptor)
 			if len(result) == limit {
 				break
