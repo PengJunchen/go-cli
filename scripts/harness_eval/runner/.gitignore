@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+third_party/
+artifacts/
+jobs/
+evidence/
+.env
+.DS_Store

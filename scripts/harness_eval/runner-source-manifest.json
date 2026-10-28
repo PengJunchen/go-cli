@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "snapshot_date": "2026-10-29",
+  "scope": "owned runner sources and locks; not task contents or execution evidence",
+  "official_asset_commit": "66f92766bba642462d4bbe5479e83f91f9211862",
+  "model": "codex/gpt-6.1-sol",
+  "reasoning_effort": "high",
+  "primary_max_output_tokens": 16384,
+  "max_upstream_requests": 80,
+  "metadata_portability_change": "dataset-lock task_path values are workspace-relative; task/instruction/image pins unchanged",
+  "files": [
+    {
+      "path": "runner/.gitignore",
+      "sha256": "d7e6697de7a4a160fb5b8dea54a30d13a484cac184db085178c1c541a1bf4b35"
+    },
+    {
+      "path": "runner/RUNNER.md",
+      "sha256": "8ed777c42f33bd60a150020c8f55a4b9883bc828ac55480c8c39ec939a5cf6da"
+    },
+    {
+      "path": "runner/audit_proxy.py",
+      "sha256": "48b9c97161704f2de90aa09e29ceae97367a1e99035e757e7aa742326d2bda0c"
+    },
+    {
+      "path": "runner/dataset-lock.json",
+      "sha256": "0578d097c7c287e9bb9021df546cceb9f63be0314476b4c9596200cb43923cd1"
+    },
+    {
+      "path": "runner/eval_core.py",
+      "sha256": "b64ef5ad8f8fb168d5aec297c3f6cfbb01923bc1b336ce6a3016bc3bf4abfd00"
+    },
+    {
+      "path": "runner/grade_trial.py",
+      "sha256": "3cebd2e8a98df141b5481526a6b7f39345644397f56b313de7c1f6ed3fa12a93"
+    },
+    {
+      "path": "runner/locks/pi/package-lock.json",
+      "sha256": "5d508d747bc5d893fce2d247b845aa3861e188d4b02aedace36b2f6c84988123"
+    },
+    {
+      "path": "runner/locks/pi/package.json",
+      "sha256": "cf3773802a543ee8be76b1023f41bbda52935494811d6bb60bbfe105ffe02d1b"
+    },
+    {
+      "path": "runner/offline_fixture.py",
+      "sha256": "b74607e89df9f999e34dc0e61cfd54a0e4c98c1aed80d75272eb1e64ee62d46b"
+    },
+    {
+      "path": "runner/requirements.lock",
+      "sha256": "44c794641202d85a53273a895d83141d548cf559f7b1de04644686e47eae51a7"
+    },
+    {
+      "path": "runner/run_trial.py",
+      "sha256": "43d9f5e50cdf700258c4b7940e06ae2ca63c21df09881ddba24ad53da454a66e"
+    },
+    {
+      "path": "runner/scripts/asset_preflight.py",
+      "sha256": "1f19e7c5184606c471b0b140908d4a91407675188e16e55ee49d8b59e0d47841"
+    },
+    {
+      "path": "runner/selected-tasks.txt",
+      "sha256": "cff7e28261e8c507205cdeadb871fc4286c9e06e45e9646fa1c8959101836e5b"
+    },
+    {
+      "path": "runner/summarize_trials.py",
+      "sha256": "5869f706ec7535d2df288894a1d0d656068fd2bb3ac70cf85ebcbcdc243dcf62"
+    },
+    {
+      "path": "runner/tests/test_contract.py",
+      "sha256": "734b39d557823e792fb5989667b6dfe1e0fafe1ae353efd460d6adafa7b322b3"
+    },
+    {
+      "path": "runner/tests/test_driver.py",
+      "sha256": "53a9ec22e9a904f5dd2e5cdf67573a13ac3a5a87d66af73a250368e3c70c9c3a"
+    },
+    {
+      "path": "runner/tests/test_grade.py",
+      "sha256": "cc2fad88a1e80e060b16ea983a5aef1245f7c6221e396339ccf995005df3f925"
+    },
+    {
+      "path": "runner/tests/test_image_pin.py",
+      "sha256": "f94cb9bcf5ee8ddb703b2be579d2b9e77d4eeba62a2ab8f2c1e9ae4ee27ecd2b"
+    },
+    {
+      "path": "runner/tests/test_offline_fixture.py",
+      "sha256": "5628ff3b45c85ee60eebe934d76d251ecae63e011b0cd0ac34dde404f7777fd4"
+    },
+    {
+      "path": "runner/tests/test_reviewer_contract.py",
+      "sha256": "202f3ad0b432b17426f78ad7adf5a35498b72be094fa0c9d04fef8be41686d18"
+    },
+    {
+      "path": "runner/tests/test_summarize.py",
+      "sha256": "422cc26b2f554ed7fcf615b9770217588a049b2ec72efc2f6ac628334b50fd20"
+    }
+  ],
+  "source_base_revision": "5736e8828c80913fd4a32dc7b6e22eb82e5ec2b1",
+  "reviewed_go_revision": "42ce22477d900265b186677762ad4eff4aea0e26",
+  "profile_id": "main-5736e88-personal-memory-off-v1",
+  "go_automatic_personal_memory": false
+}
