@@ -51,7 +51,7 @@
     },
     {
       "path": "runner/run_trial.py",
-      "sha256": "43d9f5e50cdf700258c4b7940e06ae2ca63c21df09881ddba24ad53da454a66e"
+      "sha256": "87127d7e8f0fe21c27640385cd8c8e45ebda825d1ed5d45359cd4bd40ac05bc4"
     },
     {
       "path": "runner/scripts/asset_preflight.py",
@@ -75,7 +75,7 @@
     },
     {
       "path": "runner/tests/test_driver.py",
-      "sha256": "53a9ec22e9a904f5dd2e5cdf67573a13ac3a5a87d66af73a250368e3c70c9c3a"
+      "sha256": "96c4df6e9fc20cbf80cb752a83f05e2b071a8d242c9f37627a2aafe02386170d"
     },
     {
       "path": "runner/tests/test_grade.py",

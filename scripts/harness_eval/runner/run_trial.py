@@ -1,6 +1,7 @@
 """One frozen CLI attempt in an internal-only task container. No agent retries."""
 import argparse
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -106,12 +107,54 @@ for label,host,port in [('public_ip','1.1.1.1',443),('internal_host_gateway',sys
 print(json.dumps(results))
 '''
 
-COLLECT=r'''
-import json,os,signal,subprocess,sys,time
+def snapshot_processes(proc_root,excluded_pids):
+    """Read metadata only; an unreadable process is unknown, not absent."""
+    snapshot={'snapshot_unix_time':time.time(),'scope':'owned task PID namespace before cleanup signals',
+              'excluded_pids':sorted(excluded_pids),'enumeration_status':'unknown',
+              'processes':None,'observed_process_count':None,'unknown_process_count':None}
+    try:
+        names=os.listdir(proc_root)
+    except OSError as exc:
+        snapshot['enumeration_error']=type(exc).__name__
+        return snapshot
+    rows=[]
+    for pid in sorted({int(name) for name in names if name.isdigit()}-set(excluded_pids)):
+        row={'pid':pid,'status':'unknown'}
+        try:
+            with open(os.path.join(proc_root,str(pid),'stat'),encoding='utf-8') as source:
+                value=source.read()
+            left,right=value.find('('),value.rfind(')')
+            fields=value[right+2:].split()
+            if left<0 or right<=left or int(value[:left].strip())!=pid or len(fields)<20:
+                raise ValueError('invalid proc stat identity')
+            row={'pid':pid,'status':'observed','comm':value[left+1:right],'state':fields[0],
+                 'ppid':int(fields[1]),'pgid':int(fields[2]),'starttime':int(fields[19])}
+        except FileNotFoundError:row['reason']='process_disappeared'
+        except PermissionError:row['reason']='permission_denied'
+        except (ValueError,UnicodeError):row['reason']='malformed_proc_stat'
+        except OSError:row['reason']='os_error'
+        rows.append(row)
+    snapshot.update(enumeration_status='observed',processes=rows,
+                    observed_process_count=sum(row['status']=='observed' for row in rows),
+                    unknown_process_count=sum(row['status']=='unknown' for row in rows))
+    return snapshot
+
+
+# Embed the same pure helper exercised by fake-procfs tests. Do not execute
+# this signal-sending program on the host; it is for our owned container only.
+COLLECT='import json,os,signal,subprocess,sys,time\n'+inspect.getsource(snapshot_processes)+r'''
 baseline=sys.argv[1]
 # Only this container's PID namespace. Stop then kill every leftover agent/tool
 # process before reading artifacts; PID 1 and this trusted collector survive.
-others=[int(p) for p in os.listdir('/proc') if p.isdigit() and int(p) not in (1,os.getpid())]
+before=snapshot_processes('/proc',[1,os.getpid()])
+os.makedirs('/logs/agent',exist_ok=True)
+with open('/logs/agent/processes-before-cleanup.json','w') as output:
+ json.dump(before,output)
+ output.flush()
+ os.fsync(output.fileno())
+if before['enumeration_status']!='observed':
+ raise RuntimeError('process enumeration unknown; pre-cleanup evidence retained')
+others=[row['pid'] for row in before['processes']]
 for sig in (signal.SIGSTOP,signal.SIGKILL):
  for pid in others:
   try:os.kill(pid,sig)
