@@ -1,22 +1,40 @@
 # go-cli
 
-用 Go 编写的终端 AI 助手。你可以让它阅读仓库、修改代码、运行命令，或把独立任务交给子代理。它连接你配置的模型，通过审批、会话记录和链路追踪展示执行过程。
+用 Go 编写、可按工作方式配置的终端 AI 助手。选择自己的模型、提示词、规则、工具、Skill、Hook 和外部服务，用审批、持久会话与追踪掌握执行过程。
 
-CLI 及公开扩展 worker API 目前均为实验性。可执行文件无需另装虚拟机；模型端点、MCP 服务和 worker 仍有各自的运行要求。
+CLI 与公开扩展 worker API 目前仍处于实验阶段。
 
 [English](README.md) · [运行指南](docs/runtime-guide.md) · [扩展 worker API](pkg/extensionapi/v1/README.md)
 
-## 关于本项目
+## 按你的工作方式配置
 
-架构演进分为三个阶段：
+| 想调整什么 | 可用方式 |
+|---|---|
+| 模型与回答方式 | 选择 OpenAI 兼容端点、模型、采样参数、思考级别与轮数上限 |
+| 工作规则 | 追加或替换系统提示词，把团队要求放进已授权的项目配置 |
+| 可复用流程 | 加载 Markdown/YAML Skill，支持标准 `SKILL.md`；添加自己的 `/命令` 提示词 |
+| 可调用工具 | 选择内置工具，封装本地命令，或接入标准 MCP 工具 |
+| 工作流自动化 | 通过工具执行前后的 Shell Hook 接收事件 JSON、检查或处理结果 |
+| 其他语言的扩展 | 用 JSONL worker 提供工具、Hook、命令、提示词或完整响应的模型提供方 |
+| 执行与记录 | 配置审批、上下文压缩、超时、会话保存与链路追踪 |
 
-1. **基础 CLI：** 以 Harness、Agent、AgentLoop 分层，通过明确接口连接模型、工具、会话和上下文压缩。
-2. **可靠执行：** 加入审批与项目信任、持久会话、取消与资源生命周期、链路追踪和 TUI，使执行过程可检查、可控制。
-3. **动态轻量扩展：** 提供渐进式 Skill、惰性 MCP 发现、空闲边界刷新和公开 JSONL worker API，支持完整、headless 与 `no_plugin` 构建。独立的 `edge` profile 提供能力限额与惰性加载。
+个人设置放在 `~/.go-cli/config.yaml`；项目设置放在 `.go-cli.yaml` 或 `.go-cli.json`，需要先审阅并授权来源。多数配置在启动时加载；动态模式下，支持的 Skill、提示词和 Hook 可在空闲时 `/reload`，命令文件、自定义命令工具和 worker 则需重启。详见[配置与加载方式](docs/runtime-guide.md#choose-an-extension-by-what-you-need)。
 
-相关项目 [go-agent-core-v1](https://github.com/PengJunchen/go-agent-core) 是接口驱动的 Agent 核心 SDK。本仓库是完整 CLI；公开 worker API 面向子进程扩展，内部 Go 接口不是公开嵌入 SDK。
+普通定制从文件与配置开始。[原生 Go `.so`](docs/runtime-guide.md#optional-native-go-plugins) 是高级可选项，适用于确实需要运行时加载、进程内集成的可信代码。
 
-作者主页：[pjcmice.com](https://www.pjcmice.com)
+## 高效使用
+
+- **按需暴露能力。** 渐进式 Skill 先提供简介，选中后再加载操作说明；惰性 MCP 在选中服务时连接，默认 eager 模式则在启动时连接。项目 Skill 正文仍会为信任检查捕获。
+- **接续对话，尝试不同方案。** 保存对话后可按确切物理会话 ID 恢复，分叉或克隆分支，重试已完成回答，或压缩较早上下文。历史会保留；重试不会撤销之前的工具效果。
+- **记住项目习惯。** 默认开启自动记忆，可将明确表达的偏好和事实用于同项目后续对话。提取会增加模型请求，正常退出最多等待 30 秒；队列有界、尽力保存，不保证每轮都留下记忆。设置 `memory.enabled: false` 可关闭自动提取和注入。
+- **委派独立任务。** 可以让一个或多个子代理并行处理任务，分别指定角色、模型、工具和轮数。子代理有独立资源与审批，当前工具会等待完成。
+- **选择轻量界面。** Go 可执行文件无需另装语言虚拟机；`headless` 使用按行交互，`no_plugin` 移除可选原生加载器。外部服务和 worker 仍有各自依赖。
+
+可选 `edge` profile 同时开启动态刷新、渐进式 Skill、惰性 MCP，并提供可配置的能力预算；它与构建标签独立。这些选择控制启动工作量与上下文大小，不代表模型响应或整体性能领先其他 Agent。
+
+Skill 目录复用预处理的检索文本，减少反复搜索时的计算和临时分配，代价是多保留一份检索元数据。
+
+可选 `.so` 可省去子进程通信，但编译进 CLI 的 Go 代码本来就在进程内直接运行，插件并不天然更快。它要求平台、工具链与依赖匹配，共享宿主崩溃风险，不能可靠卸载，更新需要重启。详见[构建选择与取舍](docs/runtime-guide.md#choose-a-build)。
 
 ## 快速开始
 
@@ -26,11 +44,7 @@ CLI 及公开扩展 worker API 目前均为实验性。可执行文件无需另�
 go mod download
 make build
 ./bin/go-cli --help
-```
 
-先配置 OpenAI 兼容模型端点，再开始对话：
-
-```sh
 export GO_CLI_PROVIDER_NAME=eino
 export GO_CLI_PROVIDER_BASE_URL=https://api.openai.com/v1
 export GO_CLI_PROVIDER_API_KEY="your-api-key"
@@ -42,26 +56,21 @@ export GO_CLI_MODEL_NAME=your-model-id
 
 本地 `EinoProvider` 使用 Go 标准库 HTTP 客户端，并未导入 Eino 框架。API 密钥应保存在环境变量或已配置的凭据存储中。
 
-## 配置与项目信任
-
-个人设置放在 `~/.go-cli/config.yaml`。例如，启用对话保存、JSONL 追踪，并补充一条工作习惯：
+在个人配置中保存对话，并补充一条工作规则：
 
 ```yaml
 session:
   store_path: .go-cli/sessions
-tracing:
-  enabled: true
-  exporter: jsonl
 agent:
   append_system_prompt: "修改前先解释重要变更。"
 ```
 
-`agent.append_system_prompt` 会在默认助手提示词后追加要求。只有想替换基础提示词时才使用 `agent.system_prompt`。CLI 不会自动发现 `SYSTEM.md`。
+`append_system_prompt` 在默认提示词后追加要求，`system_prompt` 则替换它。CLI 不会自动发现 `SYSTEM.md`。相对会话路径以当前工作目录为基准，也可使用绝对路径；自动项目记忆与会话保存独立。
 
-项目设置放在 `.go-cli.yaml` 或 `.go-cli.json`。项目配置及捕获的扩展来源，需要先审阅并授权：
+使用项目配置和扩展前，先审阅并授权来源：
 
 ```sh
-# 在项目目录执行，审阅来源后按提示输入 TRUST。
+# 在项目目录执行，审阅摘要后按提示输入 TRUST。
 ./bin/go-cli trust grant
 ./bin/go-cli trust list
 ./bin/go-cli interactive
@@ -69,7 +78,7 @@ agent:
 ./bin/go-cli trust revoke /absolute/project/root
 ```
 
-授权在后续启动或受支持的空闲刷新验证通过后生效，不会直接改变当前运行；它只针对已捕获的来源，不覆盖该目录将来的所有文件。来源变更可能需要重新授权，部分情况还需要重启。没有有效授权时，CLI 继续使用个人配置。信任项目来源与批准具体工具操作是两件事。
+授权绑定审阅过的来源内容，不覆盖该目录将来的所有文件。变更后可能需要重新授权，再重启或执行支持的刷新；来源授权不代替具体操作的审批。
 
 ## 日常使用
 
@@ -77,50 +86,30 @@ agent:
 ./bin/go-cli doctor
 ./bin/go-cli models
 ./bin/go-cli prompt --output json "描述这个项目"
+./bin/go-cli session list --store .go-cli/sessions
 ./bin/go-cli interactive --resume-session <physical-session-id>
 ```
 
-交互模式中的常用命令：
-
-| 命令 | 用途 |
+| 交互命令 | 用途 |
 |---|---|
-| `/help` | 查看命令及当前限制 |
-| `/tools` | 查看本次会话已注册的工具 |
+| `/help`、`/tools` | 查看可用命令与已注册工具 |
 | `/plan enter`、`/plan exit` | 进入或退出 Plan Mode |
-| `/session tree`、`/session pending` | 查看保存的会话和结果未定的操作 |
-| `/reload` | 空闲时刷新支持的 Skill、提示词和 Hook |
-| `/mcp list` | 查看已配置的 MCP 服务 |
-| `/mcp load <server>` | 在惰性模式中连接指定服务 |
-| `/mcp reload <server>` | 惰性模式下，空闲时刷新服务工具列表 |
+| `/session tree`、`/session branches` | 查看对话条目和分支 |
+| `/session resume`、`/session resume <physical-id>` | 列出保存的会话，或打开确切会话 |
+| `/session fork feature`、`/session switch main` | 分叉尝试另一方案，再回到主分支 |
+| `/clear`、`/retry`、`/compact` | 开始新对话、重试已完成回答或压缩较早上下文 |
+| `/session pending` | 检查结果未定的操作 |
+| `/memory list`、`/memory add <text>` | 查看或手工添加记忆 |
+| `/reload` | 空闲时刷新支持的动态来源 |
+| `/mcp list`、`/mcp load docs`、`/mcp reload docs` | 查看、连接或刷新惰性 MCP 服务 |
 
-保存对话需要 `session.store_path`。恢复时使用确切的物理会话 ID，包括子代理返回的 ID。若操作结果是 `unknown`，应先检查待处理记录再决定是否重试；取消或断线并不能证明外部操作已经停止。
+保存历史需要 `session.store_path`。物理会话 ID 对应保存的对话文件，entry ID 对应该文件中的一个位置。`@session:<entry-id>` 引用当前物理会话的可见历史，也可引用其中另一分支，不会恢复会话。克隆分支、prompt 分叉、旧格式导入与 Git 联动示例见[会话与恢复](docs/runtime-guide.md#sessions-and-recovery)。
 
-### 把任务交给子代理
+取消或丢失响应可能让外部操作结果未定。重复执行前应先检查 pending 记录；切换历史不会解决这些记录。
 
-可以让助手委派独立的调查、实现、审查或测试任务。`dispatch_subagent` 工具支持单任务，也支持多个任务并行执行并汇总结果。你可以指定角色、模型、工具列表和轮数上限。
+## 添加工作流或外部工具
 
-每个子代理都有独立对话、工具注册表、审批和执行资源。默认 `context_mode: independent` 只从任务说明开始；`context_mode: inherit` 额外提供派发前的父对话快照作为参考，不复制权限或执行记录。启用会话保存后，文本结果会显示各子代理的物理会话 ID，结构化结果元数据也会保留这些 ID，可用于单独恢复子会话。
-
-当前工具会等待任务完成，不提供后台代理管理界面。父任务取消时，也会取消并等待子资源收尾；无法确定的外部结果仍保留为 `unknown`。详见[任务示例与边界](docs/runtime-guide.md#delegate-work-to-child-agents)。
-
-## 如何扩展
-
-增加工作方法和行为习惯，通常从文件与配置开始。连接外部工具可以用 MCP；需要独立程序和语言依赖时可以用 worker。
-
-| 需求 | 选择 | 加载位置 |
-|---|---|---|
-| 可复用的操作说明或工作流 | Skill 文件 | `skill.dir` 或默认 Skill 目录 |
-| 个人或团队的行为要求 | `agent.append_system_prompt` | 个人配置或已授权项目配置 |
-| 自己输入的快捷提示词 | Markdown 命令 | `commands.dir` 或默认命令目录 |
-| 在指定事件执行动作 | Shell Hook | 主配置或 `.go-cli/hooks.yaml` |
-| 调用其他程序或服务的工具 | MCP 服务 | `mcp.servers` |
-| 自定义工具、Hook、命令、提示词或模型提供方 | JSONL worker | `extensions.plugin_paths` |
-
-若希望不选 edge 也能刷新支持的文件与设置，可开启 `runtime.dynamic: true`；否则重启生效。渐进式 Skill 和惰性 MCP 也会开启动态能力。
-
-### Skill 与快捷命令
-
-Skill 用来教助手完成特定任务。标准文件可以放在 `.go-cli/skills/review/SKILL.md`：
+标准 Skill 文件 `.go-cli/skills/review/SKILL.md`：
 
 ```markdown
 ---
@@ -130,109 +119,41 @@ description: 检查变更的正确性和缺失测试。
 阅读 diff，说明具体风险，并建议有针对性的检查。
 ```
 
-默认使用第一个存在的目录：先 `.go-cli/skills`，再 `~/.config/go-cli/skills`。可通过 `skill.dir` 指定目录。旧的平铺 Markdown 和 YAML Skill 定义继续支持。普通模式在启动时读取 Skill；想先列出简介、使用时再加载说明，可主动开启：
+默认使用第一个存在的 Skill 目录：先 `.go-cli/skills`，再 `~/.config/go-cli/skills`；`skill.dir` 可覆盖。若想先展示简介、使用时再加载说明：
 
 ```yaml
 skill:
-  dir: .go-cli/skills
   progressive: true
 ```
 
-如果只是想自己输入一个快捷提示词，可在 `.go-cli/commands` 或 `~/.config/go-cli/commands` 放置 `review.md`，之后输入 `/review`。文件中的 `$ARGUMENTS` 会替换成命令后面的文字。`commands.dir` 可覆盖默认目录。命令在交互命令表初始化时加载，修改后需要重启。详见[文件示例](docs/runtime-guide.md#skills-prompts-and-custom-commands)。
+其他需求可以选择对应扩展：
 
-### Hook
+| 需求 | 指南 |
+|---|---|
+| 在正文后追加参数的 `/review` 快捷提示词 | [Markdown 命令](docs/runtime-guide.md#markdown-slash-commands) |
+| 配置本地命令的参数、环境变量、目录和超时 | [配置命令工具](docs/runtime-guide.md#configured-command-tools) |
+| 工具执行前检查，或结果确定后处理 | [Shell Hook](docs/runtime-guide.md#shell-hooks) |
+| 调用现有外部服务的工具 | [MCP 配置与真实调用](docs/runtime-guide.md#mcp-setup-and-execution) |
+| Python、JavaScript、Go 等语言的子进程扩展 | [JSONL worker](docs/runtime-guide.md#jsonl-extension-workers) |
+| 单任务或并行子代理 | [子代理](docs/runtime-guide.md#delegate-work-to-child-agents) |
 
-Hook 在 `session_start`、`pre_tool_use`、`post_tool_use` 或 `session_end` 事件执行 Shell 命令。例如，在个人配置中记录已完成的工具事件：
+内建 MCP 连接、宿主管理的 worker，以及 CLI 管理的命令/Git 工具，可在各自支持的完成判定范围内用于持久会话。任意原生回调、替换注册表或普通客户端包装器不会自动获得该支持。出现在 `/tools` 中不代表所有模式都能执行。
 
-先在当前项目创建日志目录：
+## 当前边界
 
-```sh
-mkdir -p .go-cli
-```
+自动记忆按项目隔离，子代理与 Plan Mode 不自动学习。旧的无项目归属记录仍可在使用其存储时手工查看，不会自动跨项目注入。存储与调用成本见[项目记忆](docs/runtime-guide.md#project-memory)。
 
-```yaml
-hooks:
-  hooks:
-    - event: post_tool_use
-      command: "cat >> .go-cli/tool-events.jsonl"
-      timeout: 5s
-```
+Todo、task、goal 状态仅保留在当前进程；保存或恢复对话会保留记录，但不会恢复这些存储。会话快照和通用 schema 迁移仍不支持，旧 JSONL 需要显式严格导入。MCP 目前集成工具，不提供完整 resources/prompts 接口；worker 的模型提供方返回最终响应，不提供逐 token 流式输出，也不能通过 RPC 声明 Skill。
 
-命令从标准输入接收事件 JSON。Post-tool Hook 在原工具批次结果确定后，作为独立 Bash 动作运行，有自己的审批和会话记录。Hook 失败不会重跑原工具。你可以从容阅读审批请求，脚本执行超时从实际执行阶段开始计时。普通 pre-tool Hook 启动错误可能允许工具继续执行；强制限制应使用审批策略。[Hook 指南](docs/runtime-guide.md#shell-hooks)说明了触发时机及项目独立文件的不同格式。
+## 关于本项目
 
-### MCP 工具
+三个阶段概括架构的演进：
 
-MCP 让助手调用另一个程序或服务提供的工具。在个人配置中添加服务：
+1. **可配置核心：** 以 Harness、Agent、AgentLoop 分层，通过明确接口连接模型、工具、压缩、Skill、MCP、审批、会话、原生插件、追踪和 TUI。
+2. **可恢复执行：** 在既有会话能力上强化持久执行记录与确切恢复，以来源绑定的项目信任、受控取消和资源所有权管理操作。
+3. **动态按需扩展：** 能力世代与空闲刷新、渐进式 Skill、惰性 MCP、跨语言 JSONL worker，以及 headless/edge 选择适配不同工作负载；当前会话分支与项目记忆进一步支持日常接续。
 
-```yaml
-mcp:
-  loading: lazy
-  servers:
-    - name: docs
-      url: https://your-mcp-service.example/mcp
-```
-
-将 URL 替换为实际服务地址。省略 `loading` 时默认 `eager`，启动即连接并获取工具列表。`lazy` 模式下，助手通过 `mcp_list` 查看本地服务信息，再用 `mcp_discover` 连接选定服务；你也可以输入 `/mcp load docs`。工具说明会在下一次模型请求中出现。发现工具不等于批准调用。
-
-内建 HTTP 和宿主管理的 stdio 连接支持在持久会话中实际调用工具，仍需经过正常审批。断线、超时或非法响应可能使结果未定，CLI 不会自动重放。普通客户端包装器不会自动获得这项支持。详见[MCP 配置与执行](docs/runtime-guide.md#mcp-setup-and-execution)，包括本地命令和项目来源限制。
-
-### 扩展 worker
-
-需要用独立程序实现功能时，可以注册可信的本地 `.rpc.json` 描述文件：
-
-```yaml
-extensions:
-  enabled: true
-  plugin_paths:
-    - ./plugins/helper.rpc.json
-```
-
-CLI 启动时拉起 worker 并交换 `initialize` 握手，在 Agent 开始前注册功能。修改程序或描述文件后需要重启。[worker API 指南](pkg/extensionapi/v1/README.md)提供完整描述文件和协议。
-
-Worker 可以加载，但它提供的工具目前还不能在持久会话中执行。Worker 与你共享操作系统权限，并不是沙箱；其模型提供方只返回最终响应，不提供逐 token 流式输出。
-
-## 构建选择
-
-普通构建包含富终端界面。`headless` 改为按行交互；`no_plugin` 只移除可选的原生 Go `.so` 加载器。
-
-| 构建 | Go 标签 | 终端界面 | 可选原生 Go 插件加载器 |
-|---|---|---|---|
-| 完整版 | 无 | 富 TUI | 可用 |
-| 完整版，无原生插件 | `no_plugin` | 富 TUI | 禁用 |
-| Headless | `headless` | 按行交互 | 可用 |
-| Headless，无原生插件 | `headless,no_plugin` | 按行交互 | 禁用 |
-
-```sh
-go build -o ./bin/go-cli ./cmd/cli
-go build -tags no_plugin -o ./bin/go-cli-no-plugin ./cmd/cli
-go build -tags headless -o ./bin/go-cli-headless ./cmd/cli
-go build -tags headless,no_plugin -o ./bin/go-cli-headless-no-plugin ./cmd/cli
-```
-
-四种构建共享 Agent 核心、文件扩展、MCP 和 worker，并各自遵守上文限制。Headless 保留多轮输入、最终响应、SIGINT 取消和文本审批；全屏布局和执行中的键盘引导需要富界面。
-
-### 按需加载能力
-
-`edge` 运行时 profile 与构建标签独立：
-
-```yaml
-runtime:
-  profile: edge
-```
-
-它启用动态能力、渐进式 Skill 和惰性 MCP。默认限额为 **128 个 Skill、2 个活跃 MCP 服务、128 KiB** 能力提示词/schema 预算，可用正数 `max_skills`、`max_mcp_servers`、`max_prompt_bytes` 覆盖。它改变加载策略，不改变链接到程序中的包；项目 Skill 正文仍需为信任检查捕获。详见[profile 与刷新](docs/runtime-guide.md#build-tags-and-runtime-profile-are-separate-axes)。
-
-### 高级可选项：原生 Go 插件
-
-编译进宿主的 Go 工具和 Hook 已能在进程内直接调用，不需要 `.so`。原生插件用于运行时加载 Go 代码，普通扩展不依赖它，也不代表它比编译入宿主的代码更快。只有确实需要动态装载，且实测收益值得承担限制时才考虑。
-
-原生插件受平台、工具链和依赖一致性限制，拥有宿主权限，故障可能影响整个进程，不能卸载，更新需要重启。详见[运行指南](docs/runtime-guide.md#optional-native-go-plugins)与 [Go plugin 文档](https://pkg.go.dev/plugin)。
-
-## 当前限制
-
-持久会话支持确切 ID 恢复，但不支持持久化的 fork、clone、分支切换、快照和 schema 迁移。部分历史命令也不可用，以 `/help` 为准。`/memory` 只管理手工记录，不会自动提取或注入提示词。Todo、task、goal 状态仅在当前进程保留。
-
-普通 custom/worker 工具、`git_pr_create` 等部分已注册工具，目前还不能在持久会话中执行。`/tools` 只显示已注册名称，实际执行限制见[运行指南](docs/runtime-guide.md)。MCP 目前只集成工具；worker 不能通过 RPC 协议提供 Skill。
+相关项目 [go-agent-core-v1](https://github.com/PengJunchen/go-agent-core) 是 Agent 核心 SDK。本仓库是完整 CLI，内部 Go 接口不是公开嵌入 SDK。作者主页：[pjcmice.com](https://www.pjcmice.com)。
 
 ## 开发与维护
 
@@ -257,9 +178,9 @@ make verify         # check 加 AST、日志与 goroutine 检查
 | 项目 | 借鉴点 |
 |---|---|
 | [Pi Coding Agent](https://github.com/earendil-works/pi) | 共享 Agent/会话核心与渐进式能力暴露 |
-| [OpenCode v2](https://github.com/anomalyco/opencode) | 显式服务所有权、生命周期作用域与刷新失败边界 |
+| [OpenCode v2](https://github.com/anomalyco/opencode) | 服务所有权与生命周期组织（V2 研究参考） |
 | [DeepSeek Harness / Cordis](https://github.com/deepseek-ai/deepseek-harness) | Harness 组合、依赖所有权与资源清理 |
-| [Magpie](https://github.com/yetone/magpie) | 插件所有权，以及 hook 与子进程扩展的职责划分 |
+| [Magpie](https://github.com/yetone/magpie) | 请求 Hook 与插件扩展的职责划分 |
 | [HashiCorp go-plugin](https://github.com/hashicorp/go-plugin) | 版本化子进程协议、握手与进程所有权 |
 | [CloudWeGo Eino](https://github.com/cloudwego/eino)、[Google ADK-Go](https://github.com/google/adk-go) | Agent 与模型组合思路 |
 

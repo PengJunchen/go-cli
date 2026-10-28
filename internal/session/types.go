@@ -102,6 +102,8 @@ type SessionEntry struct {
 	BranchID string `json:"branch_id,omitempty"`
 	// ParentBranchID identifies the source branch for a branch checkpoint.
 	ParentBranchID string `json:"parent_branch_id,omitempty"`
+	// SessionGitBranch is user-selected Git linkage and grants no execution authority.
+	SessionGitBranch string `json:"session_git_branch,omitempty"`
 	// BaseLeafEntryID identifies the shared prefix leaf when a branch is created.
 	BaseLeafEntryID string `json:"base_leaf_entry_id,omitempty"`
 	// ActiveLeafEntryID is the durable active leaf recorded by a checkpoint.

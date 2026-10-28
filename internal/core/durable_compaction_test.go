@@ -266,7 +266,7 @@ func TestDurableEnvelopePreflightFailsClosedWithoutTypedSummary(t *testing.T) {
 		compactor         compaction.Compactor
 		failingSummarizer *durableCompactionFailingSummarizer
 	}{
-		{name: "no summarizer", compactor: compaction.NewUnifiedCompactor()},
+		{name: "projection-free fallback", compactor: compaction.NewUnifiedCompactor(compaction.WithTruncating(&fixedCompactionResult{}))},
 		{
 			name:              "summarizer failed",
 			compactor:         compaction.NewUnifiedCompactor(compaction.WithSummary(compaction.NewSummaryCompactor(failingSummarizer))),
@@ -472,4 +472,35 @@ func (oneTokenPerNonEmptyText) Estimate(text string) (int, error) {
 		return 0, nil
 	}
 	return 1, nil
+}
+
+func TestDurableTruncatingProjectionRequiresFixedMarkerAndExactSuffix(t *testing.T) {
+	snapshot, messages := durableLargeWriteFixture()
+	input := messagesToTurnItems(messages)
+	result, err := compaction.NewTruncatingCompactor().Compact(t.Context(), input, 6400, durableRuneCountEstimator{})
+	require.NoError(t, err)
+	require.NotNil(t, result.NewProjection)
+	_, err = validateDurableCompactionResult(input, result, snapshot, "run-large-write-envelope")
+	require.NoError(t, err)
+	for _, change := range []func(*compaction.CompactionResult){
+		func(r *compaction.CompactionResult) {
+			r.NewProjection.Summary = "invented factual summary"
+			for i := range r.Items {
+				if r.Items[i].IsCompaction {
+					r.Items[i].Content = r.NewProjection.Summary
+				}
+			}
+		},
+		func(r *compaction.CompactionResult) { r.Items[len(r.Items)-1].Content = "changed current input" },
+		func(r *compaction.CompactionResult) { r.Items = r.Items[:len(r.Items)-1] },
+		func(r *compaction.CompactionResult) { r.NewProjection.Through.PriorHistoryCount-- },
+	} {
+		candidate := result
+		candidate.Items = cloneCompactionTurnItems(result.Items)
+		projection := *result.NewProjection
+		candidate.NewProjection = &projection
+		change(&candidate)
+		_, err = validateDurableCompactionResult(input, candidate, snapshot, "run-large-write-envelope")
+		require.ErrorIs(t, err, errDurableCompactionProjectionInvalid)
+	}
 }

@@ -39,6 +39,8 @@ func newAssembleTestConfig(t *testing.T) *config.Config {
 // isolateCLITestStorage keeps implicit storage consumers inside the fixture
 // without changing HOME, persistence enablement, or workspace authority.
 func isolateCLITestStorage(cfg *config.Config, root string) {
+	disabled := false
+	cfg.Memory.Enabled = &disabled
 	cfg.Memory.StorePath = filepath.Join(root, "memories.jsonl")
 	cfg.History.Path = filepath.Join(root, "history.jsonl")
 	cfg.Production.Audit.Path = filepath.Join(root, "audit.jsonl")

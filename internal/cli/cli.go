@@ -112,7 +112,7 @@ func IsGlobalHelpOrVersion(args []string) bool {
 // has already registered a command with the same name. This lets callers
 // initialize one registry before config loading and reuse it for dispatch.
 func RegisterBuiltinCommands(reg CommandRegistry, out io.Writer) {
-	builtinNames := []string{"version", "help", "prompt", "interactive", "doctor", "serve", "models"}
+	builtinNames := []string{"version", "help", "prompt", "interactive", "doctor", "serve", "models", "session"}
 	allPresent := true
 	for _, name := range builtinNames {
 		if _, exists := reg.Get(name); !exists {
@@ -133,6 +133,7 @@ func RegisterBuiltinCommands(reg CommandRegistry, out io.Writer) {
 		newDoctorCmd(out),
 		newServeCmd(out),
 		newModelsCmd(out),
+		newSessionCmd(out),
 	}
 	for _, cmd := range builtins {
 		if _, exists := reg.Get(cmd.Name()); exists {

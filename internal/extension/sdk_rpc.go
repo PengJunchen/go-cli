@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/tools"
 	api "github.com/pengjunchen/go-cli/pkg/extensionapi/v1"
 )
 
@@ -24,7 +25,10 @@ import (
 var ErrRPCOverloaded = errors.New("extension: RPC inflight budget exhausted")
 
 // RPCOutcomeUnknownError marks a disconnect/deadline after dispatch as non-replayable.
-type RPCOutcomeUnknownError struct{ Cause error }
+type RPCOutcomeUnknownError struct {
+	Cause error
+	done  <-chan struct{}
+}
 
 // Error returns a safe outcome category without request or environment data.
 func (e *RPCOutcomeUnknownError) Error() string {
@@ -36,6 +40,9 @@ func (e *RPCOutcomeUnknownError) Unwrap() error { return e.Cause }
 
 // OutcomeUnknown prevents callers treating a failed connection as a rollback.
 func (e *RPCOutcomeUnknownError) OutcomeUnknown() bool { return true }
+
+// ExecutionDone retains the exact worker owner join receipt after unknown delivery.
+func (e *RPCOutcomeUnknownError) ExecutionDone() <-chan struct{} { return e.done }
 
 // RPCProcessConfig is an explicitly trusted local .rpc.json process descriptor.
 // Env is the complete child environment, never an addition to os.Environ.
@@ -100,18 +107,29 @@ type rpcReply struct {
 	response api.Response
 	err      error
 }
+
+type rpcPending struct {
+	reply    chan rpcReply
+	method   string
+	ctx      context.Context
+	canceled bool
+}
+
 type rpcProcess struct {
-	mu      sync.Mutex
-	writeMu sync.Mutex
-	command *exec.Cmd
-	input   io.WriteCloser
-	pending map[uint64]chan rpcReply
-	next    uint64
-	closed  bool
-	failure error
-	permits chan struct{}
-	timeout time.Duration
-	done    chan struct{}
+	mu       sync.Mutex
+	command  *exec.Cmd
+	input    io.WriteCloser
+	pending  map[uint64]*rpcPending
+	next     uint64
+	closed   bool
+	failure  error
+	permits  chan struct{}
+	writer   chan struct{}
+	timeout  time.Duration
+	done     chan struct{}
+	readDone chan struct{}
+	waitDone chan struct{}
+	leases   int
 }
 
 func startRPCProcess(ctx context.Context, config RPCProcessConfig) (*rpcProcess, api.Manifest, error) {
@@ -201,7 +219,7 @@ func startRPCProcess(ctx context.Context, config RPCProcessConfig) (*rpcProcess,
 		return nil, api.Manifest{}, fmt.Errorf("extension: start RPC worker: %w", err)
 	}
 	artifactTransferred = true
-	process := &rpcProcess{command: command, input: input, pending: make(map[uint64]chan rpcReply), permits: make(chan struct{}, config.MaxInflight), timeout: time.Duration(config.TimeoutMillis) * time.Millisecond, done: make(chan struct{})}
+	process := &rpcProcess{command: command, input: input, pending: make(map[uint64]*rpcPending), permits: make(chan struct{}, config.MaxInflight), writer: make(chan struct{}, 1), timeout: time.Duration(config.TimeoutMillis) * time.Millisecond, done: make(chan struct{}), readDone: make(chan struct{}), waitDone: make(chan struct{})}
 	go process.read(output)
 	go func() {
 		err := command.Wait()
@@ -209,6 +227,18 @@ func startRPCProcess(ctx context.Context, config RPCProcessConfig) (*rpcProcess,
 			err = io.EOF
 		}
 		process.fail(err)
+		close(process.waitDone)
+	}()
+	go func() {
+		<-process.waitDone
+		_ = output.Close()
+		<-process.readDone
+		// fail requested termination. Keep supervising the exact group until
+		// absence is positive; joining the leader alone is not owner completion.
+		for !rpcProcessGroupStopped(command) {
+			terminateRPCProcess(command)
+			time.Sleep(5 * time.Millisecond)
+		}
 		_ = os.RemoveAll(artifactDir)
 		close(process.done)
 	}()
@@ -236,26 +266,42 @@ func startRPCProcess(ctx context.Context, config RPCProcessConfig) (*rpcProcess,
 }
 
 func (p *rpcProcess) read(output io.ReadCloser) {
+	defer close(p.readDone)
 	defer func() { _ = output.Close() }()
 	scanner := bufio.NewScanner(output)
 	scanner.Buffer(make([]byte, 4096), api.MaxFrameBytes)
 	for scanner.Scan() {
-		var response api.Response
-		if err := json.Unmarshal(scanner.Bytes(), &response); err != nil {
-			p.fail(errors.New("extension: malformed RPC response"))
+		response, err := decodeRPCResponse(scanner.Bytes())
+		if err != nil {
+			p.fail(err)
 			return
 		}
 		p.mu.Lock()
 		waiting, known := p.pending[response.ID]
-		if known {
-			delete(p.pending, response.ID)
-		}
-		p.mu.Unlock()
 		if !known {
+			p.mu.Unlock()
 			p.fail(errors.New("extension: unknown or duplicate RPC response id"))
 			return
 		}
-		waiting <- rpcReply{response: response}
+		if response.Error == nil && waiting.method == "tool.call" {
+			err = validateRPCToolResult(response.Result)
+		}
+		if err == nil && (waiting.canceled || waiting.ctx.Err() != nil) {
+			err = waiting.ctx.Err()
+			if err == nil {
+				err = context.Canceled
+			}
+		}
+		if err != nil {
+			p.mu.Unlock()
+			p.fail(err)
+			return
+		}
+		// This removal is the response/cancellation linearization point. A
+		// later callback for this request cannot fail the shared next request.
+		delete(p.pending, response.ID)
+		p.mu.Unlock()
+		waiting.reply <- rpcReply{response: response}
 	}
 	err := scanner.Err()
 	if err == nil {
@@ -270,16 +316,31 @@ func (p *rpcProcess) fail(err error) {
 		p.mu.Unlock()
 		return
 	}
-	p.closed = true
-	p.failure = err
+	p.closed, p.failure = true, err
 	pending := p.pending
-	p.pending = make(map[uint64]chan rpcReply)
+	p.pending = make(map[uint64]*rpcPending)
 	p.mu.Unlock()
 	for _, waiting := range pending {
-		waiting <- rpcReply{err: err}
+		waiting.reply <- rpcReply{err: err}
 	}
 	_ = p.input.Close()
 	terminateRPCProcess(p.command)
+}
+
+func (p *rpcProcess) cancelRequest(id uint64, cause error) {
+	p.mu.Lock()
+	waiting, pending := p.pending[id]
+	if pending {
+		waiting.canceled = true
+	}
+	p.mu.Unlock()
+	if pending {
+		p.fail(cause)
+	}
+}
+
+func (p *rpcProcess) unknown(cause error) error {
+	return &RPCOutcomeUnknownError{Cause: cause, done: p.done}
 }
 
 func (p *rpcProcess) call(ctx context.Context, method string, params any, result any) error {
@@ -309,7 +370,7 @@ func (p *rpcProcess) call(ctx context.Context, method string, params any, result
 	}
 	p.next++
 	id := p.next
-	waiting := make(chan rpcReply, 1)
+	waiting := &rpcPending{reply: make(chan rpcReply, 1), method: method, ctx: callCtx}
 	p.pending[id] = waiting
 	p.mu.Unlock()
 	defer func() { p.mu.Lock(); delete(p.pending, id); p.mu.Unlock() }()
@@ -321,41 +382,81 @@ func (p *rpcProcess) call(ctx context.Context, method string, params any, result
 	if len(frame)+1 > api.MaxFrameBytes {
 		return errors.New("extension: RPC request exceeds frame budget")
 	}
-	stop := context.AfterFunc(callCtx, func() { p.fail(callCtx.Err()) })
-	defer stop()
-	p.writeMu.Lock()
-	_, err = p.input.Write(append(frame, '\n'))
-	p.writeMu.Unlock()
-	if err != nil {
-		p.fail(err)
-		return &RPCOutcomeUnknownError{Cause: err}
-	}
+	frame = append(frame, '\n')
 	select {
-	case reply := <-waiting:
-		if reply.err != nil {
-			return &RPCOutcomeUnknownError{Cause: reply.err}
-		}
-		if err = callCtx.Err(); err != nil {
-			return &RPCOutcomeUnknownError{Cause: err}
-		}
-		if reply.response.Error != nil {
-			if reply.response.Error.Code == "callback_panicked" || reply.response.Error.Code == "outcome_unknown" {
-				return &RPCOutcomeUnknownError{Cause: errors.New("extension: remote callback outcome unknown")}
-			}
-			return fmt.Errorf("extension: RPC %s failed (%s)", method, reply.response.Error.Code)
-		}
-		if result == nil {
-			return nil
-		}
-		if err = json.Unmarshal(reply.response.Result, result); err != nil {
-			p.fail(errors.New("extension: invalid RPC result shape"))
-			return &RPCOutcomeUnknownError{Cause: fmt.Errorf("extension: decode RPC result: %w", err)}
-		}
-		return nil
+	case p.writer <- struct{}{}:
 	case <-callCtx.Done():
-		p.fail(callCtx.Err())
-		return &RPCOutcomeUnknownError{Cause: callCtx.Err()}
+		return callCtx.Err()
 	}
+	p.mu.Lock()
+	if p.closed || callCtx.Err() != nil {
+		failure := p.failure
+		p.mu.Unlock()
+		<-p.writer
+		if callCtx.Err() != nil {
+			return callCtx.Err()
+		}
+		return fmt.Errorf("extension: RPC worker unavailable: %w", failure)
+	}
+	p.mu.Unlock()
+	callbackDone := make(chan struct{})
+	stop := context.AfterFunc(callCtx, func() { defer close(callbackDone); p.cancelRequest(id, callCtx.Err()) })
+	defer func() {
+		if !stop() {
+			<-callbackDone
+		}
+	}()
+	// The queue wait may outlive the prepared Plan/trust generation. Commit
+	// only the actual frame write under the captured final authority guard;
+	// remote response waiting and decoding never hold that guard.
+	written := 0
+	write := func() error {
+		written, err = p.input.Write(frame)
+		return nil
+	}
+	guarded, startErr := tools.StartPreparedEffect(callCtx, write)
+	if !guarded {
+		startErr = write()
+	}
+	<-p.writer
+	if startErr != nil {
+		return startErr // the final guard rejected before Write began
+	}
+	if err != nil || written != len(frame) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		p.fail(err)
+		return p.unknown(err)
+	}
+	var reply rpcReply
+	select {
+	case reply = <-waiting.reply:
+	case <-callCtx.Done():
+		p.cancelRequest(id, callCtx.Err())
+		// A validated response that already won the terminal lock remains
+		// known. Otherwise fail delivers an unknown response on this channel.
+		reply = <-waiting.reply
+	}
+	if reply.err != nil {
+		return p.unknown(reply.err)
+	}
+	if reply.response.Error != nil {
+		if reply.response.Error.Code == "callback_panicked" || reply.response.Error.Code == "outcome_unknown" {
+			cause := errors.New("extension: remote callback outcome unknown")
+			p.fail(cause)
+			return p.unknown(cause)
+		}
+		return fmt.Errorf("extension: RPC %s failed (%s)", method, reply.response.Error.Code)
+	}
+	if result == nil {
+		return nil
+	}
+	if err = json.Unmarshal(reply.response.Result, result); err != nil {
+		p.fail(errors.New("extension: invalid RPC result shape"))
+		return p.unknown(errors.New("extension: invalid RPC result shape"))
+	}
+	return nil
 }
 
 func (p *rpcProcess) close(ctx context.Context) error {
@@ -404,4 +505,18 @@ func (r *rpcArtifactReader) Read(buffer []byte) (int, error) {
 		return 0, err
 	}
 	return r.reader.Read(buffer)
+}
+
+// Acquire pins this exact transport generation for a prepared invocation. A
+// retired/failed process cannot be reconnected or replaced behind its handle.
+func (p *rpcProcess) Acquire() (func(), error) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, errors.New("extension: RPC worker generation is retired")
+	}
+	p.leases++
+	p.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { p.mu.Lock(); p.leases--; p.mu.Unlock() }) }, nil
 }

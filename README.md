@@ -1,22 +1,40 @@
 # go-cli
 
-A terminal assistant written in Go. Ask it to explore a repository, edit code, run commands, or delegate a focused task. It connects to your model endpoint and keeps tool use visible through approval, session records, and tracing.
+A terminal AI assistant written in Go, configurable around the way you work. Choose your model, instructions, tools, Skills, Hooks, and external services; use approval, saved conversations, and tracing to follow its work.
 
-The CLI and public extension worker API are experimental. The executable needs no separately installed VM; model endpoints, MCP servers, and workers have their own requirements.
+The CLI and public extension worker API are experimental.
 
 [中文文档](README.zh-CN.md) · [Runtime guide](docs/runtime-guide.md) · [Extension worker API](pkg/extensionapi/v1/README.md)
 
-## About this project
+## Make it your own
 
-The architecture has evolved through three stages:
+| What you want to change | How |
+|---|---|
+| Model and response style | Choose an OpenAI-compatible endpoint, model, sampling settings, thinking level, and turn limit |
+| Working rules | Append to or replace the system prompt; keep team instructions in trusted project configuration |
+| Reusable workflows | Load Markdown/YAML Skills, including standard `SKILL.md`; add your own reusable `/command` prompts |
+| Tools | Select built-ins, wrap a local command, or connect standard MCP tools |
+| Workflow automation | Run pre/post-tool Shell Hooks, with event JSON on stdin |
+| Features in another language | Register a JSONL worker for tools, Hooks, commands, prompt material, or complete-response providers |
+| Execution and records | Configure approval, compaction, timeouts, session saving, and tracing |
 
-1. **Core CLI:** Harness, Agent, and AgentLoop connect models, tools, sessions, and context compaction through explicit interfaces.
-2. **Reliable execution:** approval and project trust, durable sessions, cancellation and resource ownership, tracing, and the TUI make execution inspectable and controllable.
-3. **Dynamic, lightweight extensions:** progressive Skills, lazy MCP discovery, refresh at idle boundaries, and a public JSONL worker API work across full, headless, and `no_plugin` builds. The separate `edge` profile applies capability limits and lazy loading.
+Personal settings live in `~/.go-cli/config.yaml`; project settings use `.go-cli.yaml` or `.go-cli.json` and require source trust. Most settings load at startup. Supported Skill, prompt, and Hook changes can refresh with idle `/reload` in dynamic mode; command files, custom tools, and workers require restart. See [configuration and loading](docs/runtime-guide.md#choose-an-extension-by-what-you-need).
 
-[go-agent-core-v1](https://github.com/PengJunchen/go-agent-core) is the related interface-driven Agent core SDK. This repository is the complete CLI; its public worker API serves subprocess extensions. Internal Go interfaces are not a public embedding SDK.
+Ordinary customization starts with files and configuration. A [native Go `.so`](docs/runtime-guide.md#optional-native-go-plugins) is an advanced option for trusted code that specifically needs runtime loading and in-process integration.
 
-Author: [pjcmice.com](https://www.pjcmice.com)
+## Work efficiently
+
+- **Expose capabilities as needed.** Progressive Skills present descriptions first and load selected instructions on demand. Lazy MCP connects a server when selected; default eager MCP connects at startup. Project Skill bodies are still captured for trust checks.
+- **Continue and explore alternatives.** Save a conversation, resume its exact physical session, fork or clone a branch, retry a completed answer, or compact older context. These operations retain history; retry does not undo earlier tool effects.
+- **Remember project preferences.** Automatic memory is on by default and can carry explicitly stated preferences and facts into later conversations in the same project. Extraction makes an extra model request; normal exit may wait up to 30 seconds. It uses a bounded best-effort queue, so every turn is not guaranteed to be stored. Set `memory.enabled: false` to disable automatic extraction and injection.
+- **Delegate focused tasks.** Ask for one child agent or several in parallel, with their own roles, models, tools, and turn limits. Each has its own execution resources and approvals; the tool waits for completion.
+- **Choose a smaller interface.** The Go executable needs no separately installed VM. `headless` uses line-oriented interaction; `no_plugin` removes the optional native loader. External services and workers retain their own dependencies.
+
+The optional `edge` profile enables dynamic refresh, progressive Skills, and lazy MCP with configurable capability budgets. It is independent of build tags. These choices control startup work and context size; they are not claims about model latency or overall performance versus other agents.
+
+Skill catalogs reuse preprocessed search text to reduce repeated work and temporary allocations, at the cost of retaining extra search metadata.
+
+Native `.so` calls avoid subprocess communication, but Go code compiled into the CLI already runs directly in process. Plugins are not inherently faster: they require matching platforms/toolchains/dependencies, share the host's crash risk, cannot be reliably unloaded, and need restart for updates. [Build choices and tradeoffs](docs/runtime-guide.md#choose-a-build) explain when to use them.
 
 ## Quick start
 
@@ -26,11 +44,7 @@ Requires Go 1.24+; the exact minimum is declared in [go.mod](go.mod).
 go mod download
 make build
 ./bin/go-cli --help
-```
 
-Configure an OpenAI-compatible model endpoint, then start a conversation:
-
-```sh
 export GO_CLI_PROVIDER_NAME=eino
 export GO_CLI_PROVIDER_BASE_URL=https://api.openai.com/v1
 export GO_CLI_PROVIDER_API_KEY="your-api-key"
@@ -40,36 +54,31 @@ export GO_CLI_MODEL_NAME=your-model-id
 ./bin/go-cli interactive
 ```
 
-The local `EinoProvider` uses Go's standard HTTP client; it does not import the Eino framework. Keep API keys in environment variables or configured credential storage.
+The local `EinoProvider` uses Go's standard HTTP client, without importing the Eino framework. Keep API keys in environment variables or configured credential storage.
 
-## Configuration and project trust
-
-Put personal settings in `~/.go-cli/config.yaml`. For example, save conversations and JSONL traces, and add a working preference:
+To save conversations and add a working rule, put this in personal configuration:
 
 ```yaml
 session:
   store_path: .go-cli/sessions
-tracing:
-  enabled: true
-  exporter: jsonl
 agent:
   append_system_prompt: "Explain meaningful changes before editing."
 ```
 
-`agent.append_system_prompt` adds instructions to the normal assistant prompt. Use `agent.system_prompt` only to replace that base prompt. There is no automatic `SYSTEM.md` discovery.
+`append_system_prompt` adds to the normal prompt; `system_prompt` replaces it. There is no automatic `SYSTEM.md` discovery. Session paths are relative to your working directory unless absolute. Automatic project memory is separate from session saving.
 
-Project settings belong in `.go-cli.yaml` or `.go-cli.json`. Project configuration and captured extension sources take effect only after you review and trust them:
+Review project configuration and extension sources before trusting them:
 
 ```sh
-# Run inside the project; review the sources, then type TRUST when prompted.
+# Run inside the project; review the summary and type TRUST when prompted.
 ./bin/go-cli trust grant
 ./bin/go-cli trust list
 ./bin/go-cli interactive
-# Use the canonical root shown by trust list:
+# Revoke using the canonical root shown by trust list:
 ./bin/go-cli trust revoke /absolute/project/root
 ```
 
-A grant takes effect after verification at a later startup or supported idle refresh; it does not directly change an active run. It authorizes captured sources, not every future file at that path. Changes may require a new grant and, in some cases, restart. Without a valid grant, the CLI continues with personal settings alone. Trusting a source and approving a tool action are separate decisions.
+Trust binds reviewed source content, not every future file at that path. Changed sources may need a new grant and restart or supported refresh. It does not replace approval for individual actions.
 
 ## Everyday use
 
@@ -77,162 +86,74 @@ A grant takes effect after verification at a later startup or supported idle ref
 ./bin/go-cli doctor
 ./bin/go-cli models
 ./bin/go-cli prompt --output json "Describe this project"
+./bin/go-cli session list --store .go-cli/sessions
 ./bin/go-cli interactive --resume-session <physical-session-id>
 ```
 
-In an interactive session:
-
-| Command | Use it to |
+| Interactive command | Purpose |
 |---|---|
-| `/help` | See commands and their current limits |
-| `/tools` | See tools registered for this session |
+| `/help`, `/tools` | See available commands and registered tools |
 | `/plan enter`, `/plan exit` | Enter or leave Plan Mode |
-| `/session tree`, `/session pending` | Inspect saved sessions and unresolved actions |
-| `/reload` | Refresh supported Skills, prompts, and hooks when idle |
-| `/mcp list` | See configured MCP servers |
-| `/mcp load <server>` | Connect a server in lazy mode |
-| `/mcp reload <server>` | Refresh its tool list when idle in lazy mode |
+| `/session tree`, `/session branches` | Inspect conversation entries and branches |
+| `/session resume`, `/session resume <physical-id>` | List saved sessions or open an exact one |
+| `/session fork feature`, `/session switch main` | Explore another branch and return |
+| `/clear`, `/retry`, `/compact` | Start fresh, retry a completed answer, or reduce older context |
+| `/session pending` | Inspect actions whose outcomes are unresolved |
+| `/memory list`, `/memory add <text>` | Inspect or add explicit memories |
+| `/reload` | Refresh supported dynamic sources when idle |
+| `/mcp list`, `/mcp load docs`, `/mcp reload docs` | Inspect, activate, or refresh lazy MCP servers |
 
-Saved conversations require `session.store_path`. Resume uses the exact physical session ID, including an ID returned by a child agent. If an action's outcome is `unknown`, inspect the pending action before repeating it: cancellation or a lost connection does not prove that an external action stopped.
+Saved history requires `session.store_path`. A physical session ID names a saved conversation file; an entry ID names a point inside it. `@session:<entry-id>` quotes visible history from the selected physical session, including another branch; it does not resume that session. See [sessions and recovery](docs/runtime-guide.md#sessions-and-recovery) for clone, prompt fork, legacy import, and Git-aware navigation.
 
-### Delegate a task
+Cancellation or a lost response can leave an external action's outcome unknown. Inspect pending actions before repeating work; history navigation does not resolve them.
 
-Ask the assistant to delegate an investigation, implementation, review, or test task. The `dispatch_subagent` tool runs one task or several tasks in parallel and returns their results. You can request a role, model, tool list, and turn limit.
+## Add a workflow or external tool
 
-Each child has its own conversation, tool registry, approvals, and execution resources. The default `context_mode: independent` starts from the task instructions. `context_mode: inherit` also supplies a snapshot of the parent conversation as reference information; it does not copy permissions or execution records. With session storage enabled, the text result shows each child's physical session ID; structured result metadata also carries the IDs. Use a child ID for separate resume.
-
-The current tool waits for completion; it is not a background-agent management interface. Parent cancellation also cancels and joins child resources; uncertain external results stay `unknown`. See [task examples and boundaries](docs/runtime-guide.md#delegate-work-to-child-agents).
-
-## Extend the assistant
-
-Start with files and configuration for instructions and workflows. Use MCP to connect tools from another service, or a worker when you need a separate program with its own language and dependencies.
-
-| Need | Choose | Where it loads |
-|---|---|---|
-| Reusable instructions or a workflow | Skill files | `skill.dir`, or the default Skill directory |
-| A personal or team rule | `agent.append_system_prompt` | Personal or trusted project configuration |
-| A reusable slash prompt | Markdown command | `commands.dir`, or the default command directory |
-| An action at a lifecycle event | Shell Hook | Main configuration or `.go-cli/hooks.yaml` |
-| Tools supplied by another program/service | MCP server | `mcp.servers` |
-| Custom tools, hooks, commands, prompts, or a provider | JSONL worker | `extensions.plugin_paths` |
-
-To refresh supported files and settings without choosing edge, enable `runtime.dynamic: true`; otherwise restart. Progressive Skills and lazy MCP also enable dynamic operation.
-
-### Skills and slash commands
-
-A Skill teaches the assistant how to perform a task. Put a standard Skill at `.go-cli/skills/review/SKILL.md`:
+A standard `.go-cli/skills/review/SKILL.md`:
 
 ```markdown
 ---
 name: review
-description: Review a change for correctness and missing tests.
+description: Review changes for correctness and missing tests.
 ---
 Read the diff, explain concrete risks, and suggest focused checks.
 ```
 
-The default is the first existing directory: `.go-cli/skills`, then `~/.config/go-cli/skills`. Override it with `skill.dir`. Existing flat Markdown and YAML Skill definitions remain supported. Regular loading reads Skills at startup. To index metadata first and load instructions on demand, opt in:
+The default Skill directory is the first existing directory: `.go-cli/skills`, then `~/.config/go-cli/skills`; `skill.dir` overrides it. To expose descriptions before loading instructions:
 
 ```yaml
 skill:
-  dir: .go-cli/skills
   progressive: true
 ```
 
-For a prompt you want to invoke yourself, put `review.md` in `.go-cli/commands` or `~/.config/go-cli/commands`. It becomes `/review`; `$ARGUMENTS` inserts text after the command. `commands.dir` overrides discovery. Commands load with the interactive command table; restart after editing them. See [file examples](docs/runtime-guide.md#skills-prompts-and-custom-commands).
+For other workflows, choose the smallest extension that fits:
 
-### Hooks
+| Need | Guide |
+|---|---|
+| A `/review` prompt that appends your trailing arguments | [Markdown commands](docs/runtime-guide.md#markdown-slash-commands) |
+| A local executable with arguments, environment, cwd, and timeout | [Configured command tools](docs/runtime-guide.md#configured-command-tools) |
+| Checks before tools or follow-up after known results | [Shell Hooks](docs/runtime-guide.md#shell-hooks) |
+| Tools from an existing service | [MCP setup and real tool calls](docs/runtime-guide.md#mcp-setup-and-execution) |
+| A Python, JavaScript, Go, or other subprocess extension | [JSONL workers](docs/runtime-guide.md#jsonl-extension-workers) |
+| Focused single or parallel child tasks | [Child agents](docs/runtime-guide.md#delegate-work-to-child-agents) |
 
-Hooks run a shell command at `session_start`, `pre_tool_use`, `post_tool_use`, or `session_end`. For example, this personal configuration records completed tool events:
+Built-in MCP transports, host-owned workers, and the CLI's managed command/Git tools can execute in persistent sessions within their supported completion contracts. Arbitrary native callbacks, replacement registries, and generic client wrappers do not automatically gain that support. Being listed in `/tools` is not a promise of execution in every mode.
 
-Create the log directory in your working project first:
+## Current boundaries
 
-```sh
-mkdir -p .go-cli
-```
+Automatic memory is scoped to the project and is not learned by child agents or in Plan Mode. Old unscoped records remain available for manual inspection when using their store, but are not automatically injected across projects. [Memory settings](docs/runtime-guide.md#project-memory) explain storage and costs.
 
-```yaml
-hooks:
-  hooks:
-    - event: post_tool_use
-      command: "cat >> .go-cli/tool-events.jsonl"
-      timeout: 5s
-```
+Todo, task, and goal state is process-local. Saving or resuming a conversation preserves its records, not those stores. Session snapshots and general schema migration remain unsupported; old JSONL uses explicit strict import. MCP integration exposes tools, not the full resources/prompts surface. Workers provide final responses rather than token streaming and cannot declare RPC Skills.
 
-The command receives event JSON on stdin. A post-tool Hook runs as a separate Bash action after the original tool batch has known outcomes, with its own approval and session record. Hook failure does not rerun the original tool. You have time to read the approval request: the script execution timeout starts when execution begins. Ordinary pre-tool Hook startup errors can allow execution to continue; use approval policy for mandatory restrictions. The [Hook guide](docs/runtime-guide.md#shell-hooks) explains timing and the different project-file format.
+## About this project
 
-### MCP tools
+Three stages describe the architecture's evolution:
 
-MCP lets the assistant call tools hosted by another program or service. Add a server to personal configuration:
+1. **Configurable core:** Harness, Agent, and AgentLoop connect models, tools, compaction, Skills, MCP, approval, sessions, native plugins, tracing, and the TUI through explicit interfaces.
+2. **Recoverable execution:** durable execution records and exact resume strengthen existing sessions; source-bound project trust, controlled cancellation, and owned resources make actions easier to inspect and manage.
+3. **Dynamic extensions:** capability generations and idle refresh, progressive Skills, lazy MCP, portable JSONL workers, and headless/edge options support different workloads. Current session branching and project memory extend everyday continuity.
 
-```yaml
-mcp:
-  loading: lazy
-  servers:
-    - name: docs
-      url: https://your-mcp-service.example/mcp
-```
-
-Replace the URL with your service. Omit `loading` for default `eager` behavior: connect and list tools at startup. In `lazy` mode, the assistant uses `mcp_list` for local server metadata and `mcp_discover` to connect a selected server; you can also use `/mcp load docs`. Its schemas appear on the next model request. Discovery does not approve tool execution.
-
-The built-in HTTP and host-owned stdio transports support actual tool calls in persistent sessions. Calls still pass normal approval. A lost connection, timeout, or invalid response can leave an unknown outcome; calls are not automatically replayed. Generic client wrappers do not gain this support automatically. See [MCP setup and execution](docs/runtime-guide.md#mcp-setup-and-execution) for local commands and project source restrictions.
-
-### Extension workers
-
-Register a trusted local `.rpc.json` descriptor to add functionality implemented in a separate program:
-
-```yaml
-extensions:
-  enabled: true
-  plugin_paths:
-    - ./plugins/helper.rpc.json
-```
-
-The CLI starts the worker and exchanges an `initialize` handshake during startup. Contributions are registered before the agent starts; changing the worker or descriptor requires restart. The [worker API guide](pkg/extensionapi/v1/README.md) includes the descriptor and protocol.
-
-A worker can load, but the tools it contributes currently cannot execute in persistent sessions. Workers share your OS permissions; they are not an OS sandbox. Worker providers return a final response rather than token streaming.
-
-## Build choices
-
-The ordinary build includes the rich terminal UI. `headless` provides line-oriented interaction. `no_plugin` removes only the optional native Go `.so` loader.
-
-| Build | Go tags | Terminal UI | Optional native Go plugin loader |
-|---|---|---|---|
-| Full | none | Rich TUI | Available |
-| Full without native plugins | `no_plugin` | Rich TUI | Disabled |
-| Headless | `headless` | Line-oriented | Available |
-| Headless without native plugins | `headless,no_plugin` | Line-oriented | Disabled |
-
-```sh
-go build -o ./bin/go-cli ./cmd/cli
-go build -tags no_plugin -o ./bin/go-cli-no-plugin ./cmd/cli
-go build -tags headless -o ./bin/go-cli-headless ./cmd/cli
-go build -tags headless,no_plugin -o ./bin/go-cli-headless-no-plugin ./cmd/cli
-```
-
-All variants share the Agent core, file extensions, MCP, and workers, with the individual limits described above. Headless retains multi-turn input, final responses, SIGINT cancellation, and text approval; fullscreen rendering and in-flight keyboard steering require the rich UI.
-
-### Load capabilities on demand
-
-Choose the `edge` runtime profile independently of build tags:
-
-```yaml
-runtime:
-  profile: edge
-```
-
-This enables dynamic capabilities, progressive Skills, and lazy MCP. Defaults are **128 Skills, 2 active MCP servers, and 128 KiB** of capability prompt/schema budget; positive `max_skills`, `max_mcp_servers`, and `max_prompt_bytes` override them. It changes loading policy, not linked packages. Project Skill content is still captured for trust checks. See [profiles and refresh](docs/runtime-guide.md#build-tags-and-runtime-profile-are-separate-axes).
-
-### Advanced: native Go plugins
-
-Go code compiled into the host can already call typed tools and Hooks directly in process, without a `.so`. A native plugin is an optional way to load Go code at runtime; ordinary extensions do not require it, and it is not automatically faster than compiled-in code. Consider it only when runtime loading is needed and a measured benefit justifies its constraints.
-
-Native plugins require supported platforms and closely matching toolchains and dependencies. They run with host privileges, can affect the whole process, cannot be unloaded, and need restart for updates. See the [runtime guide](docs/runtime-guide.md#optional-native-go-plugins) and [Go plugin documentation](https://pkg.go.dev/plugin).
-
-## Current limits
-
-Persistent sessions support exact resume, but not durable fork, clone, branch switching, snapshots, or schema migration. Some historical commands are also unavailable; `/help` describes the current surface. `/memory` manages manually entered records without automatic extraction or prompt injection. Todo, task, and goal state is process-local.
-
-Some registered tools, including ordinary custom/worker tools and `git_pr_create`, cannot yet execute in persistent sessions. `/tools` shows registered names, so check the [runtime guide](docs/runtime-guide.md) for execution limits. MCP currently integrates tools only; workers cannot supply Skills through the RPC protocol.
+[go-agent-core-v1](https://github.com/PengJunchen/go-agent-core) is the related Agent core SDK. This repository is the complete CLI; its internal Go interfaces are not a public embedding SDK. Author: [pjcmice.com](https://www.pjcmice.com).
 
 ## Development
 
@@ -257,9 +178,9 @@ These projects informed selected design choices and are not required runtime dep
 | Project | Design input |
 |---|---|
 | [Pi Coding Agent](https://github.com/earendil-works/pi) | Shared Agent/session core and progressive capability exposure |
-| [OpenCode v2](https://github.com/anomalyco/opencode) | Explicit service ownership, lifecycle scopes, and reload failure boundaries |
+| [OpenCode v2](https://github.com/anomalyco/opencode) | Service ownership and lifecycle organization (v2 research reference) |
 | [DeepSeek Harness / Cordis](https://github.com/deepseek-ai/deepseek-harness) | Harness composition, dependency ownership, and cleanup |
-| [Magpie](https://github.com/yetone/magpie) | Plugin ownership and separation of hooks from subprocess extensions |
+| [Magpie](https://github.com/yetone/magpie) | Separation of request Hooks and plugin contributions |
 | [HashiCorp go-plugin](https://github.com/hashicorp/go-plugin) | Versioned subprocess contracts, handshakes, and process ownership |
 | [CloudWeGo Eino](https://github.com/cloudwego/eino), [Google ADK-Go](https://github.com/google/adk-go) | Agent and model composition inspiration |
 

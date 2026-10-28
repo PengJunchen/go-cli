@@ -20,11 +20,11 @@ func TestSDKRPCWorker(t *testing.T) {
 	if os.Getenv("GO_CLI_SDK_TEST_WORKER") != "1" {
 		return
 	}
-	manifest := api.Manifest{ID: "test.worker", Version: "1", HostAPI: api.Version, Capabilities: []string{"tools"}, Tools: []api.Tool{{Name: "sdk_echo", Description: "echo", Parameters: json.RawMessage(`{"type":"object"}`)}}}
+	manifest := api.Manifest{ID: "test.worker", Version: "1", HostAPI: api.Version, Capabilities: []string{"tools"}, Tools: []api.Tool{{Name: "sdk_echo", Description: "echo", Parameters: json.RawMessage(`{"type":"object","properties":{"fail":{"type":"boolean"}},"additionalProperties":false}`)}}}
 	if os.Getenv("GO_CLI_SDK_TEST_MODE") == "bad-version" {
 		manifest.HostAPI = "99"
 	}
-	handler := api.HandlerFunc(func(ctx context.Context, _ api.Request) (json.RawMessage, error) {
+	handler := api.HandlerFunc(func(ctx context.Context, request api.Request) (json.RawMessage, error) {
 		switch os.Getenv("GO_CLI_SDK_TEST_MODE") {
 		case "hang":
 			select {}
@@ -32,10 +32,25 @@ func TestSDKRPCWorker(t *testing.T) {
 			panic("must not expose panic detail")
 		case "bad-shape":
 			return json.RawMessage(`[1,2,3]`), nil
+		case "null-result":
+			return json.RawMessage(`null`), nil
+		case "missing-output":
+			return json.RawMessage(`{}`), nil
+		case "wrong-output":
+			return json.RawMessage(`{"output": 7}`), nil
+		case "duplicate-output":
+			return json.RawMessage(`{"output":"first","output":"second"}`), nil
+		case "error-result":
+			return json.Marshal(api.ToolResult{Output: "known worker failure", IsError: true})
 		case "oversize":
 			return json.Marshal(strings.Repeat("x", api.MaxFrameBytes))
 		case "disconnect":
 			os.Exit(0)
+		}
+		var call api.ToolCall
+		_ = json.Unmarshal(request.Params, &call)
+		if fail, _ := call.Args["fail"].(bool); fail {
+			return json.Marshal(api.ToolResult{Output: "known worker failure", IsError: true})
 		}
 		_, leaked := os.LookupEnv("GO_CLI_SDK_HOST_SECRET")
 		return json.Marshal(api.ToolResult{Output: "worker-result", Metadata: map[string]any{"host_secret_leaked": leaked}})
@@ -103,4 +118,20 @@ func TestExtensionHandshakeAndChecksumRejectFailedCandidate(t *testing.T) {
 	require.ErrorContains(t, err, "digest mismatch")
 	_, _, err = startRPCProcess(ctx, sdkProcessConfig(t, "bad-version"))
 	require.Error(t, err)
+}
+
+func TestRPCToolResultRequiresTypedOutput(t *testing.T) {
+	for _, mode := range []string{"null-result", "missing-output", "wrong-output", "duplicate-output"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			process, _, err := startRPCProcess(ctx, sdkProcessConfig(t, mode))
+			require.NoError(t, err)
+			defer func() { require.NoError(t, process.close(ctx)) }()
+			var result api.ToolResult
+			err = process.call(ctx, "tool.call", api.ToolCall{Name: "sdk_echo"}, &result)
+			var unknown *RPCOutcomeUnknownError
+			require.ErrorAs(t, err, &unknown)
+		})
+	}
 }

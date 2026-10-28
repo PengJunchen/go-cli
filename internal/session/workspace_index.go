@@ -78,9 +78,10 @@ const (
 )
 
 type workspaceIndexIO struct {
-	write   func(*os.File, []byte) (int, error)
-	sync    func(*os.File) error
-	dirSync func(string) error
+	write     func(*os.File, []byte) (int, error)
+	sync      func(*os.File) error
+	dirSync   func(string) error
+	closeLock func(*os.File) error
 }
 
 // WorkspaceQuarantineIndex stores cross-session dispatch markers and recovery
@@ -241,16 +242,25 @@ func (i *WorkspaceQuarantineIndex) EnsureWorkspace(ctx context.Context, workspac
 // have left a visible marker, only a later locked retry can observe it, and
 // that retry returns AlreadyExists without authorizing execution.
 func (i *WorkspaceQuarantineIndex) BeginDispatchBatch(ctx context.Context, batch WorkspaceDispatchBatch) (WorkspaceDispatchResult, error) {
+	result, _, err := i.beginDispatchBatch(ctx, batch)
+	return result, err
+}
+
+// beginDispatchBatch exposes a same-call no-I/O fact only to the default sink.
+// It never infers this fact from an error type or a persisted receipt.
+func (i *WorkspaceQuarantineIndex) beginDispatchBatch(ctx context.Context, batch WorkspaceDispatchBatch) (WorkspaceDispatchResult, bool, error) {
 	if err := contextErr(ctx); err != nil {
-		return WorkspaceDispatchNotCommitted, err
+		return WorkspaceDispatchNotCommitted, false, err
 	}
 	normalized, err := normalizeWorkspaceDispatchBatch(batch)
 	if err != nil {
-		return WorkspaceDispatchNotCommitted, err
+		return WorkspaceDispatchNotCommitted, false, err
 	}
 	var result WorkspaceDispatchResult
+	deniedBeforeAppend := false
+	var cleanupErr error
 	persisted := stripWorkspaceDispatchRuntime(normalized)
-	err = i.withLockedIndex(ctx, normalized.WorkspaceID, func(handle *workspaceIndexHandle) error {
+	err = i.withLockedIndexObserved(ctx, normalized.WorkspaceID, func(handle *workspaceIndexHandle) error {
 		// A prior append may have become visible before Sync reported an error.
 		// Confirm the current bytes before using any resolution row to release
 		// quarantine or using this operation as an admission check.
@@ -279,6 +289,7 @@ func (i *WorkspaceQuarantineIndex) BeginDispatchBatch(ctx context.Context, batch
 		}
 		hasUnresolved := handle.state.hasUnresolvedMarker()
 		if hasUnresolved && !workspaceDispatchBatchHasScopedReadProofs(normalized, true) {
+			deniedBeforeAppend = true
 			return ErrWorkspaceQuarantined
 		}
 		if !claimWorkspaceDispatchReadProofs(normalized) {
@@ -299,14 +310,14 @@ func (i *WorkspaceQuarantineIndex) BeginDispatchBatch(ctx context.Context, batch
 			return err
 		}
 		return handle.appendRecords(record)
-	})
+	}, &cleanupErr)
 	if err != nil {
-		return WorkspaceDispatchNotCommitted, err
+		return WorkspaceDispatchNotCommitted, deniedBeforeAppend && cleanupErr == nil && contextErr(ctx) == nil, err
 	}
 	if result == WorkspaceDispatchAlreadyExists {
-		return result, nil
+		return result, false, nil
 	}
-	return WorkspaceDispatchCommittedNow, nil
+	return WorkspaceDispatchCommittedNow, false, nil
 }
 
 // ApplyDurableResolutions mirrors only checkpoints already validated by the
@@ -453,7 +464,11 @@ func (i *WorkspaceQuarantineIndex) openWorkspaceLock(ctx context.Context, direct
 	return file, created, nil
 }
 
-func (i *WorkspaceQuarantineIndex) withLockedIndex(ctx context.Context, workspaceID string, fn func(*workspaceIndexHandle) error) (retErr error) {
+func (i *WorkspaceQuarantineIndex) withLockedIndex(ctx context.Context, workspaceID string, fn func(*workspaceIndexHandle) error) error {
+	return i.withLockedIndexObserved(ctx, workspaceID, fn, nil)
+}
+
+func (i *WorkspaceQuarantineIndex) withLockedIndexObserved(ctx context.Context, workspaceID string, fn func(*workspaceIndexHandle) error, cleanupErr *error) (retErr error) {
 	if err := contextErr(ctx); err != nil {
 		return err
 	}
@@ -477,7 +492,18 @@ func (i *WorkspaceQuarantineIndex) withLockedIndex(ctx context.Context, workspac
 	if err != nil {
 		return workspaceIndexUnavailable("open workspace lock", err)
 	}
-	defer func() { retErr = errors.Join(retErr, closeWorkspaceLock(lock)) }()
+	defer func() {
+		var err error
+		if i.io.closeLock != nil {
+			err = i.io.closeLock(lock)
+		} else {
+			err = closeWorkspaceLock(lock)
+		}
+		if cleanupErr != nil {
+			*cleanupErr = errors.Join(*cleanupErr, err)
+		}
+		retErr = errors.Join(retErr, err)
+	}()
 	if err := contextErr(ctx); err != nil {
 		return err
 	}
@@ -486,7 +512,13 @@ func (i *WorkspaceQuarantineIndex) withLockedIndex(ctx context.Context, workspac
 	if err != nil {
 		return err
 	}
-	defer func() { retErr = errors.Join(retErr, file.Close()) }()
+	defer func() {
+		err := file.Close()
+		if cleanupErr != nil {
+			*cleanupErr = errors.Join(*cleanupErr, err)
+		}
+		retErr = errors.Join(retErr, err)
+	}()
 	if err := contextErr(ctx); err != nil {
 		return err
 	}

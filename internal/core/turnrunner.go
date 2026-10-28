@@ -83,7 +83,14 @@ func (r *EinoTurnRunner) newID() string {
 
 // RunTurn executes one turn from the submission and returns its result. It
 // creates a cancellable turn, drives the loop, and records the terminal state.
-func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (result Result, returnErr error) {
+func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Result, error) {
+	return r.runTurn(ctx, submission, nil)
+}
+
+// runTurn keeps one runner lifecycle for both ordinary turns and an explicit
+// host loop. The override is local to this invocation; it never replaces the
+// configured Agent/loop or copies maps protected by this runner's mutex.
+func (r *EinoTurnRunner) runTurn(ctx context.Context, submission Submission, hostLoop AgentLoop) (result Result, returnErr error) {
 	leaseGuard, leaseCapturePanic := captureRunCommitLeaseGuard(ctx)
 	leaseTransferred := false
 	defer func() {
@@ -91,9 +98,6 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (re
 			returnErr = errors.Join(returnErr, ErrRunCommitLeaseClosePanicked)
 		}
 	}()
-	if r.loop == nil {
-		return Result{}, errNilModel
-	}
 	submission = cloneSubmission(submission)
 	id := r.newID()
 	turn := &Turn{
@@ -107,10 +111,17 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (re
 	runSlot := r.runSlot
 	cleanupTimeout := r.cleanupTimeout
 	agent := r.agent
+	loop := r.loop
+	if hostLoop != nil {
+		loop, agent = hostLoop, nil
+	}
 	stream := r.stream
 	lifetimeCtx := r.lifetimeCtx
 	generationProvider := r.generationProvider
 	r.mu.Unlock()
+	if loop == nil {
+		return Result{}, errNilModel
+	}
 
 	if runSlot == nil {
 		runSlot = defaultRunSlotGuard
@@ -264,7 +275,7 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (re
 			}
 			return agent.Run(runCtx, submission)
 		}
-		if canonical, ok := r.loop.(CanonicalLoop); ok {
+		if canonical, ok := loop.(CanonicalLoop); ok {
 			var canonicalResult CanonicalRunResult
 			var err error
 			if stream != nil {
@@ -277,9 +288,9 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (re
 		var events []AgentEvent
 		var err error
 		if stream != nil {
-			events, err = r.loop.Run(runCtx, submission, stream)
+			events, err = loop.Run(runCtx, submission, stream)
 		} else {
-			events, err = r.loop.Run(runCtx, submission)
+			events, err = loop.Run(runCtx, submission)
 		}
 		if hasToolCallEvent(events) {
 			markRunOutcomeUnknown(runCtx)

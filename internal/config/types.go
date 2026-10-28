@@ -258,7 +258,13 @@ type ApprovalConfig struct {
 // default user store; a trusted project can choose its own workspace path.
 type MemoryConfig struct {
 	StorePath string `json:"store_path"`
+	// Enabled defaults to true. False disables automatic extraction and prompt
+	// injection while preserving explicit /memory operations.
+	Enabled *bool `json:"enabled"`
 }
+
+// AutomaticEnabled reports whether automatic workspace memory is enabled.
+func (cfg MemoryConfig) AutomaticEnabled() bool { return cfg.Enabled == nil || *cfg.Enabled }
 
 // SessionConfig controls the active session and its persistence location.
 type SessionConfig struct {

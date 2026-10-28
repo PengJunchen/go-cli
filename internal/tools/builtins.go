@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 )
@@ -241,6 +242,14 @@ func registerDefaultTool(ctx context.Context, reg ToolRegistry, def ToolDefiniti
 		if registrar, ok := reg.(trustedLocalProcessRegistrar); ok {
 			return registrar.registerTrustedLocalProcess(ctx, def)
 		}
+	}
+	if reviewedRuntimeDefinition(def) {
+		if err := RegisterReviewedTool(ctx, reg, def, nil); !errors.Is(err, ErrPreparedRegistrationUnavailable) {
+			return err
+		}
+		// Older ordinary registries (including middleware/deferred forwarding
+		// to one) retain RegisterDefaults support without completion proof.
+		// Actual registrar validation/binding failures remain fatal.
 	}
 	return reg.Register(ctx, def)
 }

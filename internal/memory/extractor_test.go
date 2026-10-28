@@ -130,7 +130,7 @@ func TestExtract_JSONParseFailure(t *testing.T) {
 	// swallowed.
 	logOutput := buf.String()
 	assert.Contains(t, logOutput, "failed to parse extraction response")
-	assert.Contains(t, logOutput, "This is not JSON at all")
+	assert.NotContains(t, logOutput, "This is not JSON at all")
 }
 
 func TestExtract_EmptyResponse(t *testing.T) {

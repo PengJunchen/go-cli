@@ -82,8 +82,11 @@ func validateDurableCompactionResult(input []compaction.TurnItem, result compact
 	if err := snapshot.Validate(); err != nil {
 		return unsupported(err.Error())
 	}
-	if result.Strategy != compaction.StrategySummary || result.NewProjection == nil {
-		return unsupported("the winning strategy did not produce a typed summary projection")
+	if (result.Strategy != compaction.StrategySummary && result.Strategy != compaction.StrategyTruncating) || result.NewProjection == nil {
+		return unsupported("the winning strategy did not produce a typed context projection")
+	}
+	if result.Strategy == compaction.StrategyTruncating && result.NewProjection.Summary != compaction.DurableTruncationMarker {
+		return unsupported("a truncating projection must use the fixed omission marker")
 	}
 	through := result.NewProjection.Through
 	if through == (llm.SourceThrough{}) || through.PriorHistoryCount > uint64(len(snapshot.SourceEntryIDs)) || (through.TranscriptCount > 0 && through.PriorHistoryCount != uint64(len(snapshot.SourceEntryIDs))) {

@@ -113,15 +113,16 @@ type Dependencies interface {
 // handler invocation. It implements the Dependencies interface via getter
 // methods so handlers never access its fields directly.
 type slashContext struct {
-	agent          *core.AgentImpl
-	costTracker    *production.CostTracker
-	statsRegistry  *production.StatsRegistry
-	sessionID      string
-	durableMode    bool
-	toolRegistry   tools.ToolRegistry
-	modelName      string
-	sessionHandler *session.SessionSlashHandler
-	out            io.Writer
+	agent           *core.AgentImpl
+	costTracker     *production.CostTracker
+	statsRegistry   *production.StatsRegistry
+	sessionID       string
+	durableMode     bool
+	historyCommands *durableHistoryCommands
+	toolRegistry    tools.ToolRegistry
+	modelName       string
+	sessionHandler  *session.SessionSlashHandler
+	out             io.Writer
 
 	// Dependencies for the extended slash commands. Any of these may be nil
 	// when the corresponding subsystem is not wired; handlers print a helpful
@@ -257,6 +258,15 @@ func (c *interactiveCmd) handleSlashCommand(ctx context.Context, cmd session.Sla
 		return ""
 	}
 	if slashDeps, ok := deps.(*slashContext); ok && slashDeps.durableMode {
+		if slashDeps.historyCommands != nil {
+			pending, handled, err := slashDeps.historyCommands.handle(spanCtx, handler.Name(), cmd.Args)
+			if handled {
+				if err != nil {
+					_, _ = fmt.Fprintf(deps.Out(), "Error: %v\n", err) // Best-effort diagnostic after the command has already failed.
+				}
+				return pending
+			}
+		}
 		if err := durableHistoryMutationUnsupported(handler.Name()); err != nil {
 			fmt.Fprintf(deps.Out(), "Error: %v\n", err) //nolint:errcheck
 			return ""

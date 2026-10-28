@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"context"
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tui"
@@ -10,11 +13,36 @@ import (
 type assemblyTodoState struct {
 	store   *tools.TodoStore
 	mu      sync.RWMutex
-	handler tools.TodoWriteChangeHandler
+	handler func(context.Context, tools.TodoSnapshot) error
+	cancel  context.CancelFunc
+	done    chan struct{}
 }
 
-func newAssemblyTodoState(store *tools.TodoStore) *assemblyTodoState {
-	return &assemblyTodoState{store: store}
+func newAssemblyTodoState(ctx context.Context, store *tools.TodoStore) *assemblyTodoState {
+	observerCtx, cancel := context.WithCancel(ctx)
+	state := &assemblyTodoState{store: store, cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(state.done)
+		for {
+			select {
+			case <-observerCtx.Done():
+				return
+			case snapshot := <-store.Updates():
+				_ = state.notify(observerCtx, snapshot)
+			}
+		}
+	}()
+	return state
+}
+
+func (s *assemblyTodoState) close(ctx context.Context) error {
+	s.cancel()
+	select {
+	case <-s.done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("todo observer close pending: %w", ctx.Err())
+	}
 }
 
 func (s *assemblyTodoState) snapshot() tools.TodoSnapshot {
@@ -24,7 +52,7 @@ func (s *assemblyTodoState) snapshot() tools.TodoSnapshot {
 	return s.store.Snapshot()
 }
 
-func (s *assemblyTodoState) setHandler(handler tools.TodoWriteChangeHandler) {
+func (s *assemblyTodoState) setHandler(handler func(context.Context, tools.TodoSnapshot) error) {
 	if s == nil {
 		return
 	}
@@ -33,7 +61,7 @@ func (s *assemblyTodoState) setHandler(handler tools.TodoWriteChangeHandler) {
 	s.mu.Unlock()
 }
 
-func (s *assemblyTodoState) notify(snapshot tools.TodoSnapshot) error {
+func (s *assemblyTodoState) notify(ctx context.Context, snapshot tools.TodoSnapshot) error {
 	if s == nil {
 		return nil
 	}
@@ -43,7 +71,7 @@ func (s *assemblyTodoState) notify(snapshot tools.TodoSnapshot) error {
 	if handler == nil {
 		return nil
 	}
-	return handler(snapshot)
+	return handler(ctx, snapshot)
 }
 
 func (a *AgentAssembly) todoSnapshot() (tools.TodoSnapshot, bool) {
@@ -53,7 +81,7 @@ func (a *AgentAssembly) todoSnapshot() (tools.TodoSnapshot, bool) {
 	return a.todoState.snapshot(), true
 }
 
-func (a *AgentAssembly) bindTodoUpdateHandler(handler tools.TodoWriteChangeHandler) {
+func (a *AgentAssembly) bindTodoUpdateHandler(handler func(context.Context, tools.TodoSnapshot) error) {
 	if a != nil && a.todoState != nil {
 		a.todoState.setHandler(handler)
 	}
@@ -82,15 +110,19 @@ func (s *REPLSession) bindTodoUpdates() {
 	}
 	app := s.app
 	uiCtx := s.uiCtx
-	handler := func(snapshot tools.TodoSnapshot) error {
-		return app.CriticalSendContext(uiCtx, todoUpdateMsg(snapshot))
+	handler := func(ctx context.Context, snapshot tools.TodoSnapshot) error {
+		bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		stop := context.AfterFunc(uiCtx, cancel)
+		defer stop()
+		return app.CriticalSendContext(bounded, todoUpdateMsg(snapshot))
 	}
 	s.assembly.bindTodoUpdateHandler(handler)
 	// renderTUI seeds the app before this handler is installed. Re-read after
 	// binding so a mutation in that interval is not lost; revision checks make
 	// this safe if a concurrent callback has already delivered a newer snapshot.
 	if snapshot, ok := s.assembly.todoSnapshot(); ok {
-		if err := handler(snapshot); err != nil && s.logger != nil {
+		if err := handler(uiCtx, snapshot); err != nil && s.logger != nil {
 			s.logger.Warn("cli_todo_initial_snapshot_send_failed", "err", err)
 		}
 	}

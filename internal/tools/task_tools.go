@@ -45,6 +45,9 @@ func (*TaskCreateTool) Parameters() any {
 
 // Execute creates a task using args["title"] and args["description"].
 func (t *TaskCreateTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if t.store == nil {
 		return nil, errors.New("task_create: nil store")
 	}
@@ -56,7 +59,10 @@ func (t *TaskCreateTool) Execute(ctx context.Context, call ToolCall) (*ToolResul
 	}
 	description, _ := call.Args["description"].(string) //nolint:errcheck
 
-	task := t.store.Create(title, description)
+	task, err := t.store.create(ctx, title, description)
+	if err != nil {
+		return nil, err
+	}
 
 	slog.Debug("task_create.done", "id", task.ID, "title", title)
 
@@ -108,6 +114,9 @@ func (*TaskGetTool) Parameters() any {
 
 // Execute fetches the task identified by args["id"].
 func (t *TaskGetTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if t.store == nil {
 		return nil, errors.New("task_get: nil store")
 	}
@@ -177,6 +186,9 @@ func (*TaskListTool) Parameters() any {
 
 // Execute returns a formatted list of all tasks.
 func (t *TaskListTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if t.store == nil {
 		return nil, errors.New("task_list: nil store")
 	}

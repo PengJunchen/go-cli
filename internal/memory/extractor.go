@@ -26,7 +26,8 @@ type LLMMemoryExtractor struct {
 }
 
 // NewLLMMemoryExtractor creates an LLMMemoryExtractor backed by the given model
-// and store. The store is used only for deduplication during extraction.
+// and store. An optional store is used only for deduplication during extraction;
+// nil leaves deduplication to the caller's atomic publication step.
 func NewLLMMemoryExtractor(model llm.BaseChatModel, store MemoryStore) *LLMMemoryExtractor {
 	return &LLMMemoryExtractor{model: model, store: store}
 }
@@ -79,6 +80,9 @@ func (e *LLMMemoryExtractor) Extract(ctx context.Context, messages []llm.Message
 	if resp == nil {
 		return []Memory{}, nil
 	}
+	if len(resp.Content) > 64<<10 {
+		return nil, fmt.Errorf("memory: extraction response exceeds byte budget")
+	}
 
 	facts, err := parseExtractionResponse(resp.Content)
 	if err != nil {
@@ -86,14 +90,16 @@ func (e *LLMMemoryExtractor) Extract(ctx context.Context, messages []llm.Message
 		// Log the failure so it is not silently swallowed.
 		slog.Warn("memory: failed to parse extraction response as JSON",
 			"err", err,
-			"response", resp.Content,
 		)
 		return []Memory{}, nil
 	}
 
-	existing, err := e.store.List(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("memory: list existing: %w", err)
+	var existing []Memory
+	if e.store != nil {
+		existing, err = e.store.List(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("memory: list existing: %w", err)
+		}
 	}
 
 	seen := make(map[string]struct{}, len(existing))

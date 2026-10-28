@@ -37,6 +37,24 @@ Source trust does not replace tool approval, Plan Mode, or execution policy. A c
 
 Existing Markdown/YAML Skills and ordinary configuration remain supported. Neither a worker nor a native plugin is required to add instructions, prompts, commands, or Shell Hooks. Internal typed Go interfaces are implementation extension points, not a public embedding SDK.
 
+## Model settings and working rules
+
+Select an OpenAI-compatible endpoint with `provider.name: eino`, `provider.base_url`, and `provider.api_key` (prefer the API-key environment variable shown in the README). Set `model.name` for the model, and use `model.temperature` and `model.max_tokens` for sampling and output limits. These are provider-dependent controls, not a guarantee that every model accepts every value. `agent.thinking` selects the supported reasoning level; `agent.max_iterations` bounds the Agent loop, defaulting to 200 (`-1` removes that bound).
+
+For example, personal configuration can add a rule without replacing the normal assistant prompt:
+
+```yaml
+model:
+  name: your-model-id
+  temperature: 0.2
+  max_tokens: 4096
+agent:
+  append_system_prompt: "Explain meaningful changes before editing."
+  max_iterations: 100
+```
+
+Provider/model setup loads at startup. Prompt-only changes can use the supported dynamic refresh path described below. Prompt rules guide the model; approval and execution policy enforce action restrictions.
+
 ## Skills, prompts, and custom commands
 
 ### Skill files
@@ -96,11 +114,38 @@ The default command directory is `.go-cli/commands`, falling back to `~/.config/
 name: review
 description: Review selected changes.
 ---
-Review these changes and explain concrete risks:
-$ARGUMENTS
+Review the changes described below and explain concrete risks.
 ```
 
-Type `/review the authentication changes` to submit the expanded prompt. These files define prompt templates, not standalone shell commands. They load when the interactive command table is built; edit them and restart to refresh the table. Project command files require source trust.
+Type `/review the authentication changes` to submit the Markdown body followed by a blank line and `the authentication changes`. Trailing arguments are joined with spaces and appended; the command does not interpolate placeholders. These files store reusable prompts, not standalone shell commands. They load when the interactive command table is built; edit them and restart to refresh the table. Project command files require source trust.
+
+## Configured command tools
+
+Use `tools.custom_tools` when an existing executable can do the job. This avoids writing a plugin or worker protocol. The executable receives the model's `input` as **one literal argument**, appended after configured command arguments and `args`; it is not automatically expanded by a shell.
+
+For a project tool, create an executable `scripts/inspect-project` inside the workspace, then add this to `.go-cli.yaml`:
+
+```yaml
+tools:
+  custom_tools:
+    - name: inspect_project
+      description: Inspect a project using the supplied request.
+      command:
+        - ./scripts/inspect-project
+      args:
+        - ./assets/schema.json
+      env:
+        INSPECT_MODE: "summary"
+        OPTIONAL_PREFIX: ""
+      working_dir: .
+      timeout: 20
+```
+
+Replace the script and asset with your own files, and make the script executable before granting project trust. This example uses block lists and a string-valued environment map, supported by the configuration loader. `timeout` is in seconds; zero means no configured command timeout. `working_dir` defaults to the host working directory. Only `PATH`, `HOME`, `USER`, `SHELL`, `LANG`, `LC_ALL`, `LC_CTYPE`, and `TERM` are inherited. Non-sensitive configured environment entries overlay that allowed set. Configured names ending in `_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD`, or `_CREDENTIAL` are filtered case-insensitively (including `_API_KEY`), so values such as `API_TOKEN` are not passed to the command. Quote values such as numbers or booleans when they should be strings.
+
+Custom tools register at startup and require a trusted project even when configured personally. Project-owned entrypoint bytes are captured and executed from a private host path, so later replacement at the original path cannot silently replace the reviewed executable. Consequently `$0`, `__file__`, or sibling lookup relative to the executable can refer to that private path. Pass assets explicitly and resolve them from the working directory, as above. Interpreters, dependencies, and assets are not recursively pinned. Personal configuration can use an installed executable at its normal path.
+
+The CLI's managed command implementation supports persistent execution on Darwin/Linux, with normal approval, Plan Mode, source trust, and cancellation checks. Other platforms retain ordinary command execution but do not automatically gain the same persistent completion support. Change the command definition, environment, executable, or arguments and restart; `/reload` does not replace these tools.
 
 ## Shell Hooks
 
@@ -160,7 +205,6 @@ mcp:
   servers:
     - name: docs
       command: /absolute/path/to/docs-mcp
-      args: []
 ```
 
 For a **project-owned stdio server**, the entrypoint must be an executable source that can be captured inside the workspace. For example, `.go-cli.yaml` can name an existing executable workspace wrapper:
@@ -171,7 +215,6 @@ mcp:
   servers:
     - name: docs
       command: ./scripts/docs-mcp
-      args: []
 ```
 
 Grant project trust after creating the wrapper. An outside binary such as `/opt/...` or an externally resolved `npx` command in project configuration can fail source capture. Use personal configuration for external installed commands, or an explicit workspace wrapper. Capturing a wrapper does not pin every interpreter, dependency, or asset it invokes.
@@ -245,7 +288,9 @@ The `.rpc.json` descriptor names a command and pins the executable bytes with SH
 
 The public package imports only the standard library. Workers may use any language that implements the JSONL contract. Providers return complete responses; the Stream adapter emits a final response, not token deltas. RPC Skill DTO negotiation is unsupported; use standard Skill files instead.
 
-Registration and durable execution are separate capabilities. Generic worker tools currently lack the request-completion contract required by the durable CLI, so those calls are rejected before dispatch in that mode. Ordinary custom tools and generic extension/client wrappers are also not automatically covered. The worker protocol remains available for its supported surfaces; do not assume every registered tool runs in every mode.
+Registration and persistent execution are separate capabilities. The CLI's host-owned JSONL process adapter supports tool calls in persistent sessions: a valid response matched to the request establishes a known request result, including a known tool error. It does not prove every remote side effect succeeded, mean the worker exited, or grant permission to replay. The worker can remain alive for later requests.
+
+Malformed replies, a lost process/connection, partial writes, or cancellation after dispatch can leave the result unknown. Such calls remain pending until inspected through the existing session recovery path. The host owns process and reader cleanup; a later cleanup does not turn an unknown result into success. Darwin/Linux have runtime process-ownership coverage; Windows has cross-build coverage, not equivalent runtime verification. Generic adapters, arbitrary native callbacks, or a tool with the same name do not acquire completion support merely by declaring it.
 
 Workers share the user's OS permissions. Process separation imposes no filesystem, network, CPU, or RSS sandbox. Hash pinning checks entrypoint bytes, not the publisher's identity or separate interpreters and assets. Workers must reserve stdout for protocol frames and honor deadlines. The host does not automatically replay failed calls; loss after dispatch may leave the external outcome unknown.
 
@@ -283,7 +328,7 @@ A cross-build establishes compilation for that target, not execution or resource
 
 Compiled-in Go tools and Hooks already use direct in-process calls and do not require `.so` files. They are often simpler when changing and rebuilding the host is acceptable. Native Go plugins provide **runtime loading of Go code**, not an automatic performance advantage over compiled-in code. Prefer ordinary file/configuration or portable process-based extensions unless dynamic Go loading is required and a measured benefit justifies it.
 
-The optional loader accepts local shared objects exposing a `New` or `LoadExtensions` factory with signature `func() ([]Extension, error)`. A native path uses the same `extensions.enabled` and `extensions.plugin_paths` configuration. Native updates require restart; Go plugins cannot be unloaded.
+Native loading is most useful in a controlled toolchain for trusted Go code that needs low communication overhead or direct registration through host interfaces. The optional loader accepts local shared objects exposing a `New` or `LoadExtensions` factory with signature `func() ([]Extension, error)`. A native path uses the same `extensions.enabled` and `extensions.plugin_paths` configuration. Native updates require restart; Go plugins cannot be unloaded. Loading an arbitrary `.so` or callback does not establish the completion contract required for persistent tool execution; ordinary execution and persistent completion support remain separate.
 
 Go supports this mechanism on Linux, FreeBSD, and macOS. The host and plugin need matching Go toolchains, build flags, and common dependency versions. Code runs with host privileges, and faults can affect the entire process. Consult the [official Go plugin documentation](https://pkg.go.dev/plugin) before choosing it.
 
@@ -308,14 +353,14 @@ To enable refresh without choosing edge, set `runtime.dynamic: true`. Opting int
 
 ## Refresh and restart
 
-Dynamic refresh prepares and validates a complete candidate at an idle boundary before publishing it. A failed candidate retains the last valid generation. An active run uses its admitted capability view, while authorization still checks current trust and policy; old views cannot retain revoked grants.
+Dynamic refresh prepares and validates a complete replacement while idle. If loading fails, the last valid set remains available. A running task keeps the capability descriptions it started with, while each action still checks current trust and policy; revoked permissions cannot survive through an old description. Skill catalogs also retain preprocessed search text to avoid repeated normalization during lookup. This trades extra retained metadata for less repeated computation and temporary allocation; multiple active catalog generations can temporarily retain multiple copies.
 
 | Change | Apply through |
 |---|---|
 | Supported Skill, agent prompt, and configured Hook changes in dynamic mode | `/reload` when idle |
 | Lazy MCP activation | `mcp_discover` during a run, or `/mcp load <server>` when idle |
 | Lazy MCP catalog replacement | `/mcp reload <server>` when idle |
-| Markdown command files | Restart |
+| Markdown command files and configured command tools | Restart |
 | Worker descriptor, executable, or declarations | Restart |
 | Compiled-in Go/native plugin code | Rebuild as needed, then restart |
 | Provider/session setup, runtime profile, loading mode, active MCP limits | Restart |
@@ -325,11 +370,103 @@ Dynamic refresh prepares and validates a complete candidate at an idle boundary 
 
 Refresh does not roll back completed external side effects. A late callback, cancellation, or lost response can leave an outcome unknown. Inspect durable pending actions before repeating an operation.
 
-## Sessions and remaining boundaries
+## Sessions and recovery
 
-Persistent sessions require `session.store_path`. Startup `--resume-session` opens an exact physical session ID. Durable fork, clone, branch switching, snapshots, and schema migration are unsupported. `/session tree` and `/session pending` inspect state; `/help` describes available commands and reconciliation limits. Some historical session commands remain unavailable.
+Set `session.store_path` to save conversation and execution records. An absolute path gives a stable store location across working directories. Saving is automatic; `/save` acknowledges already synced records, while `/load` inspects persisted records. Neither resolves an unknown action or replays a tool.
 
-`/memory` stores user-entered records without automatic extraction or prompt injection. Todo, task, and goal stores are process-local; some associated tool paths do not have durable completion support. Ordinary custom/worker tools and `git_pr_create` also lack that support. A tool's presence in `/tools` means registration, not universal execution availability.
+A **physical session ID** names one saved file. An **entry ID** identifies a history position inside it, and a **branch ID** names an alternative conversation path within the same physical session. Fork and clone create conversation branches, not copied workspaces or independent physical files.
+
+```sh
+./bin/go-cli session list --store .go-cli/sessions
+./bin/go-cli interactive --resume-session <physical-session-id>
+# Choose the latest saved session only if its catalog status is ready:
+./bin/go-cli interactive --resume
+# Fork at an exact entry in a named saved session, then ask a new question:
+./bin/go-cli prompt --resume-session <physical-session-id> --fork <entry-id> "Try another approach"
+```
+
+Bare `prompt --fork <entry-id>` can locate its source only when the entry is unique and the relevant catalog is fully inspectable; busy or ambiguous sources are rejected. `--resume-session` is the unambiguous physical-file selection. Interactive `--resume` and `--resume-session` cannot be combined.
+
+While idle in an interactive conversation:
+
+| Command | Effect |
+|---|---|
+| `/session tree`, `/session branches` | Inspect entries and branches |
+| `/session resume` or `/session list` | List physical sessions without opening busy files |
+| `/session resume <physical-id>` | Open an exact saved physical session |
+| `/session entry <entry-id>` | Select a position inside the current physical session |
+| `/session fork feature` | Branch at the selected history point |
+| `/session clone feature experiment` | Create and select a new branch from an existing branch tip; an entry ID can replace `feature` |
+| `/session switch main` | Select that branch's latest tip |
+| `/clear` | Select a new physical session, retaining the previous file |
+| `/retry` | Resubmit the latest genuine user prompt from a successfully completed run on a fresh branch (or new file for an empty prefix) |
+| `/compact` | Use the configured compactor to reduce older context, retaining the required recent suffix |
+
+For compatibility, `/session resume <current-entry-id>` also selects an entry in the current file; prefer `/session entry` (or `/session resume --entry <id>`) to make that intent clear. `@session:<entry-id>` quotes a visible transcript entry from the selected physical session, including another branch. It does not navigate, execute recorded tools, or expose execution-only journal entries.
+
+`/retry` preserves previous effects and uses fresh execution identities; it is not rollback. `/compact` may make an auxiliary model request when summary compaction is configured, preferring the configured small model. It reports when the conversation already fits. Stored summaries are historical context, not new instructions or execution authority. History operations cannot hide an unresolved run or bypass its pending-action checks. Session snapshots and general schema migration remain unsupported.
+
+For persistent sessions, `compaction.strategy: truncating` replaces an older prefix in the model context with a fixed omission notice, then retains an exact, unchanged recent suffix. It makes no factual summary; the complete older records remain saved. The default `micro_first`/`unified` strategy can use this same truncation when no summarizer is configured, or when the built-in summarizer's own local sizing checks determine that its summary cannot fit. Without a summarizer there is no summary-model request; the truncation fallback itself never requests another summary. Provider errors, cancellation, denied requests, unresolved resource cleanup, and persistence failures still return errors rather than trigger fallback. If the budget cannot accommodate the omission notice while preserving required system instructions, the current input, and complete tool exchanges, compaction fails explicitly. Choose summary compaction when you want a semantic account of older context, or truncation when an honest omission is sufficient.
+
+### Git-aware conversation branches
+
+Ordinary navigation does not change Git branches. To explicitly link a new conversation branch to Git:
+
+```text
+/session fork feature --git topic
+/session switch feature --git
+```
+
+The CLI performs the Git action through its normal managed tool path, with approval, Plan Mode, Hooks, and execution records, without asking the model. The session selection changes only after known successful Git completion. These are two operations rather than one atomic transaction: if Git succeeds but session selection fails, the CLI reports partial completion and does not automatically repeat or roll back Git. `session.git_aware_branch: true` can enable linked Git checkout on later switches; it does not invent links for ordinary branches.
+
+### Import old JSONL explicitly
+
+Old session files are never silently treated as current execution receipts. Inspect first, then import into a new physical file:
+
+```sh
+./bin/go-cli session inspect-legacy /absolute/path/old-session.jsonl
+./bin/go-cli session import-legacy \
+  --source /absolute/path/old-session.jsonl \
+  --store .go-cli/sessions
+```
+
+Use the returned physical ID with `interactive --resume-session`. Optional `--id <new-physical-id>` chooses the destination name. Import is strict: unknown fields/versions, malformed or partial rows, invalid branches, and unclosed tool groups are rejected. The original file is retained, and an existing destination is not overwritten. Imported closed tool exchanges are conversation history, not proof that this host performed or approved them.
+
+### Unknown outcomes
+
+A tool timeout, cancellation, or broken transport can leave an external outcome unknown. New turns and history mutations remain blocked where the session has unresolved execution. `/session pending` shows the affected records and available recovery instructions. Do not repeat an operation merely because its response was lost. `/clear`, fork, clone, import, or a later process cleanup does not manufacture completion or clear workspace quarantine.
+
+## Project memory
+
+Automatic memory is **enabled by default**, independently of `session.store_path`. After a successfully completed root conversation turn, a background model request can extract explicitly stated project facts and preferences. Later root turns in the same canonical project, including in another process, receive a bounded snapshot of its scoped memories as reference context. Memories are not higher-priority instructions and do not authorize tool actions.
+
+```yaml
+memory:
+  enabled: false
+```
+
+This disables both automatic extraction and prompt injection; explicit `/memory` commands remain available. The setting loads at startup. With automatic memory enabled, the default file is `~/.go-cli/memories/<workspace-id>.jsonl`. `memory.store_path` can select a file; records in a shared explicit file still retain workspace attribution. Disabling automatic memory uses the manual store path (default `~/.go-cli/memories.jsonl`), so choose an explicit path if you want to inspect a particular existing store.
+
+```text
+/memory list
+/memory add Prefer focused changes and explain their purpose.
+/memory search focused
+/memory delete <memory-id>
+```
+
+Automatic extraction uses `small_model` when configured, otherwise the primary model. This adds model requests, tokens, and possible cost. One extraction runs at a time with only the latest pending turn retained; under load an older pending turn can be skipped. Normal prompt exit or interactive EOF allows up to 30 seconds for graceful completion before cancellation and cleanup. Cancellation or the deadline can discard unfinished extraction. This is best-effort memory, not a guarantee to store every turn.
+
+Only completed user/assistant text is eligible. Tool output, historical imports, compaction summaries, failed/interrupted turns, child agents, and Plan Mode are not automatic learning sources. Children do not receive automatic project-memory injection through their own runtime; explicitly inherited parent conversation remains reference material. Previously stored project memories can still be referenced in root Plan Mode, which does not automatically learn new ones.
+
+Legacy records without workspace attribution remain unchanged and manually visible when that store is selected, but are never automatically injected into another project's prompt. A newly stated fact can be learned with proper project attribution even if an old unscoped record contains the same text. If the optional store is busy or unavailable, the CLI reports the issue and continues without memory for that invocation; JSON output remains separate from diagnostics.
+
+## Execution and platform boundaries
+
+The CLI's managed command/Git/PR tools, state tools, built-in MCP transports, and host-owned worker requests support persistent execution through their specific completion contracts. A generic callback, custom registry replacement, or substituted client does not inherit that contract. A registered name in `/tools` establishes availability for discovery, not universal execution support. A known local process result is not a guarantee that every remote effect was rolled back or completed; uncertain remote results stay unknown.
+
+Darwin and Linux have runtime coverage for managed process ownership. Windows has production cross-build coverage; ordinary-mode fallback execution does not establish equivalent persistent completion support. Native plugin platform support is separately constrained by Go's plugin mechanism.
+
+Todo, task, and goal stores remain process-local, including separate child stores. Their execution records can survive restart, but resuming conversation history does not reconstruct those stores or replay mutations. A Todo receipt also does not promise the terminal has already rendered its latest snapshot.
 
 The `serve` command exposes the private `go-cli-acp-json/1` profile. Its `grpc` setting uses JSON-over-HTTP rather than the official ACP wire protocol. It requires explicit `--approve auto` or `--approve deny`; remote ask approvals and remote TUI are unavailable.
 
@@ -340,9 +477,9 @@ These references describe selected design inputs, not feature parity, performanc
 | Project | Design input |
 |---|---|
 | [Pi Coding Agent](https://github.com/earendil-works/pi) | Shared Agent/session core and progressive capability exposure |
-| [OpenCode v2](https://github.com/anomalyco/opencode) | Explicit dependency ownership, scoped lifecycle, and reload failure behavior |
+| [OpenCode v2](https://github.com/anomalyco/opencode) | Service ownership and lifecycle organization (v2 research reference) |
 | [DeepSeek Harness / Cordis](https://github.com/deepseek-ai/deepseek-harness) | Harness composition, service ownership, and cleanup |
-| [Magpie](https://github.com/yetone/magpie) | Plugin owners/disposers and separation of in-process hooks from subprocess plugins |
+| [Magpie](https://github.com/yetone/magpie) | Separation of request Hooks and plugin contributions |
 | [HashiCorp go-plugin](https://github.com/hashicorp/go-plugin) | Versioned subprocess contracts, startup handshakes, and process ownership |
 | [CloudWeGo Eino](https://github.com/cloudwego/eino), [Google ADK-Go](https://github.com/google/adk-go) | Agent and model composition inspiration |
 

@@ -80,7 +80,7 @@ func TestMemoryManualCRUDSurvivesRealCLIRestarts(t *testing.T) {
 	for _, dir := range []string{home, configDir, filepath.Join(home, "xdg"), filepath.Join(home, "cache")} {
 		require.NoError(t, os.MkdirAll(dir, 0o700))
 	}
-	configYAML := fmt.Sprintf("provider:\n  name: openai\n  base_url: %s/v1\n  api_key: local-test-key\n  model: gpt-4o-mini\nmodel:\n  name: gpt-4o-mini\ntracing:\n  enabled: false\n", server.URL)
+	configYAML := fmt.Sprintf("provider:\n  name: openai\n  base_url: %s/v1\n  api_key: local-test-key\n  model: gpt-4o-mini\nmodel:\n  name: gpt-4o-mini\ntracing:\n  enabled: false\nmemory:\n  enabled: false\n", server.URL)
 	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(configYAML), 0o600))
 
 	memoryPath := filepath.Join(configDir, "memories.jsonl")
@@ -124,7 +124,7 @@ func TestMemoryManualCRUDSurvivesRealCLIRestarts(t *testing.T) {
 	manualIDMatch := regexp.MustCompile(`Added memory (\S+):`).FindStringSubmatch(firstOutput)
 	require.Len(t, manualIDMatch, 2, "manual add should report its persisted ID")
 	manualID := manualIDMatch[1]
-	require.Equal(t, int32(0), extractionRequests.Load(), "the default CLI must not send an extraction request")
+	require.Equal(t, int32(0), extractionRequests.Load(), "manual-only mode must not send an extraction request")
 
 	requestMu.Lock()
 	firstRequests := make([][]byte, len(requestBodies))

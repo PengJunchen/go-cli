@@ -141,7 +141,7 @@ func TestPromptDurableTwoInvocationsResumeExactPhysicalSession(t *testing.T) {
 	require.NoError(t, resumed.requestClose(t.Context()))
 }
 
-func TestPromptDurableForkRejectsBeforeInitializingWorkspace(t *testing.T) {
+func TestPromptDurableForkWithoutSourceRejectsBeforeInitializingWorkspace(t *testing.T) {
 	configureDurableCLISessionTest(t)
 	server, script := newDurablePromptServer(t, `{"choices":[{"message":{"content":"unused"}}]}`)
 	defer server.Close()
@@ -151,10 +151,9 @@ func TestPromptDurableForkRejectsBeforeInitializingWorkspace(t *testing.T) {
 	cmd := newPromptCmd(io.Discard)
 	err := cmd.Run(t.Context(), durablePromptConfig(t, server.URL, storeDirectory), []string{"--fork", "entry-1", "hello"})
 	require.Error(t, err)
-	var unsupported *UnsupportedDurableCLIError
-	require.ErrorAs(t, err, &unsupported)
-	require.ErrorIs(t, err, ErrDurableCLIUnsupported)
-	require.Contains(t, err.Error(), "durable prompt fork is unsupported")
+	var usageErr *UsageError
+	require.ErrorAs(t, err, &usageErr)
+	require.Contains(t, err.Error(), "fork source entry not found")
 	_, statErr := os.Stat(storeDirectory)
 	require.True(t, os.IsNotExist(statErr), "unsupported fork must not create a durable session")
 	_, statErr = os.Stat(filepath.Join(configRoot, "go-cli", "workspace-quarantine"))
@@ -264,8 +263,8 @@ func TestInteractiveDurableSessionKeepsOnePhysicalSessionAcrossTurns(t *testing.
 	require.Nil(t, repl.flushTicker, "durable mode must not start the legacy flush ticker")
 	require.Contains(t, out.String(), "Session tree", "read-only slash view must use the selected canonical snapshot")
 	require.Contains(t, out.String(), "No branches in session tree.", "branch listing remains available in durable mode")
-	require.Contains(t, out.String(), "durable session command is unsupported", "branch and resume mutations must fail before changing state")
-	require.Contains(t, out.String(), "Durable session commands: /session tree, /session branches, /session pending, and /session reconcile; resume at startup with --resume-session <physical-id>.")
+	require.Contains(t, out.String(), "Selected physical session", "administration publishes canonical selection")
+	require.Contains(t, out.String(), "Durable session commands: tree, branches, resume, entry, fork, clone, switch, pending, and reconcile.")
 	sessionHandler, ok := repl.slashReg.Lookup("session")
 	require.True(t, ok)
 	sessionCompletions, ok := sessionHandler.(SubcommandProvider)
@@ -275,8 +274,13 @@ func TestInteractiveDurableSessionKeepsOnePhysicalSessionAcrossTurns(t *testing.
 		{Name: "branches", Description: "List durable session branches"},
 		{Name: "pending", Description: "List unresolved durable actions"},
 		{Name: "reconcile", Description: "Explicitly accept one unknown action outcome"},
-	}, sessionCompletions.Subcommands(), "durable completion must not offer slash mutations")
-	require.Empty(t, repl.sessionTree.ListBranches(), "rejected slash mutations must not change the selected tree")
+		{Name: "resume", Description: "List or resume exact physical sessions"},
+		{Name: "entry", Description: "Navigate to a complete history entry"},
+		{Name: "fork", Description: "Fork the current durable history"},
+		{Name: "clone", Description: "Clone an immutable history prefix"},
+		{Name: "switch", Description: "Select the latest branch tip"},
+	}, sessionCompletions.Subcommands(), "durable completion describes the actual administrative route")
+	require.Len(t, repl.sessionTree.ListBranches(), 2, "fork and clone retain immutable branch checkpoints")
 	_, slashErr := repl.sessionHandler.Handle(context.Background(), session.SlashCommand{Name: "fork", Args: []string{"rejected"}})
 	var unsupportedSlash *session.UnsupportedDurableSessionCommandError
 	require.ErrorAs(t, slashErr, &unsupportedSlash)
@@ -395,7 +399,7 @@ func TestInteractiveDurableResumeUsesExactPhysicalSessionAfterRestart(t *testing
 	require.NoError(t, resumed.requestClose(t.Context()))
 }
 
-func TestInteractiveDurableHistoryMutatorsAreUnsupportedAndReadOnlySlashStillWorks(t *testing.T) {
+func TestInteractiveDurableHistoryAdministrationAndReadOnlySlashStillWork(t *testing.T) {
 	for _, command := range []string{"compact", "clear", "retry"} {
 		err := durableHistoryMutationUnsupported(command)
 		var unsupported *UnsupportedDurableCLIError
@@ -438,22 +442,22 @@ func TestInteractiveDurableHistoryMutatorsAreUnsupportedAndReadOnlySlashStillWor
 		}
 		turnBodies = append(turnBodies, body)
 	}
-	require.Len(t, turnBodies, 2, "durable history mutators must not replay a provider turn")
-	require.Contains(t, turnBodies[1], `"content":"first turn"`, "local history must remain aligned with the published transcript")
-	require.Contains(t, turnBodies[1], `"content":"canonical first reply"`)
-	require.Contains(t, turnBodies[1], `"content":"second turn"`)
-	require.NotContains(t, out.String(), "unexpected retry reply")
-	require.Equal(t, 3, strings.Count(out.String(), "durable /"), "compact, retry, and clear each explain the durable boundary")
+	require.Len(t, turnBodies, 3, "explicit retry submits exactly one new provider turn")
+	require.Contains(t, turnBodies[1], `"content":"first turn"`)
+	require.NotContains(t, turnBodies[1], `"content":"canonical first reply"`)
+	require.Contains(t, turnBodies[2], `"content":"second turn"`)
+	require.NotContains(t, turnBodies[2], `"content":"first turn"`, "clear hydrates a fresh physical session")
+	require.Contains(t, out.String(), "Previous session retained")
 	require.Contains(t, out.String(), "Known cost subtotal:", "read-only commands remain available")
 	require.Contains(t, out.String(), "Provider attempts:", "the read-only report distinguishes provider attempts")
-	require.Contains(t, out.String(), "Session tree", "durable published history remains readable")
+	require.Contains(t, out.String(), "empty session tree", "clear publishes a fresh canonical empty tree")
 	physicalID := repl.assembly.PhysicalSessionID
 	require.NotEmpty(t, physicalID)
 	readback, err := newDurableCLISession(t.Context(), storeDirectory, "readback", physicalID, "")
 	require.NoError(t, err)
 	snapshot, err := readback.snapshotSelected()
 	require.NoError(t, err)
-	requirePublishedMessages(t, snapshot, "first turn", "canonical first reply", "second turn", "canonical second reply")
+	requirePublishedMessages(t, snapshot, "second turn", "unexpected retry reply")
 	require.NoError(t, readback.requestClose(t.Context()))
 }
 

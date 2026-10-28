@@ -1,18 +1,14 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -264,9 +260,7 @@ func (g *DefaultGitTool) Commit(ctx context.Context, opts GitCommitOptions) (str
 
 	hash, err := g.run(ctx, "rev-parse", "HEAD")
 	if err != nil {
-		// Commit succeeded but hash lookup failed; return a generic success.
-		slog.Warn("git.commit.hash_lookup_failed", "err", err)
-		return "commit created", nil
+		return "", fmt.Errorf("git: commit completed but hash lookup failed: %w", err)
 	}
 	slog.Debug("git.commit", "hash", strings.TrimSpace(hash))
 	return strings.TrimSpace(hash), nil
@@ -509,23 +503,27 @@ func (g *DefaultGitTool) Merge(ctx context.Context, branch string) (*MergeResult
 
 	out, err := g.run(ctx, "merge", branch)
 	if err != nil {
+		if unresolvedExecutionError(err) {
+			return nil, fmt.Errorf("git: merge %s: %w", branch, err)
+		}
 		// Merge conflicts cause git merge to exit non-zero. Check whether
 		// there are unmerged files to distinguish conflicts from other errors.
 		conflictOut, cErr := g.runReadOnly(ctx, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "--diff-filter=U")
-		if cErr == nil {
-			var conflicts []string
-			for _, line := range strings.Split(conflictOut, "\n") {
-				if f := strings.TrimSpace(line); f != "" {
-					conflicts = append(conflicts, f)
-				}
+		if cErr != nil {
+			return nil, fmt.Errorf("git: merge %s: %w", branch, errors.Join(err, cErr))
+		}
+		var conflicts []string
+		for _, line := range strings.Split(conflictOut, "\n") {
+			if f := strings.TrimSpace(line); f != "" {
+				conflicts = append(conflicts, f)
 			}
-			if len(conflicts) > 0 {
-				return &MergeResult{
-					Success:   false,
-					Conflicts: conflicts,
-					Message:   fmt.Sprintf("merge conflicts in %d file(s)", len(conflicts)),
-				}, nil
-			}
+		}
+		if len(conflicts) > 0 {
+			return &MergeResult{
+				Success:   false,
+				Conflicts: conflicts,
+				Message:   fmt.Sprintf("merge conflicts in %d file(s)", len(conflicts)),
+			}, nil
 		}
 		return nil, fmt.Errorf("git: merge %s: %w", branch, err)
 	}
@@ -686,88 +684,41 @@ func (g *DefaultGitTool) Remote(ctx context.Context) ([]RemoteInfo, error) {
 
 // run executes a git command in cwd and returns its combined stdout+stderr.
 func (g *DefaultGitTool) run(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = g.cwd
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("%s", strings.TrimSpace(string(out)))
-	}
-	return string(out), nil
+	return g.runOwned(ctx, false, args...)
 }
 
-// runReadOnly executes a fixed Git read invocation with known helper paths
-// disabled and optional index writes suppressed. Repository-defined clean
-// filters can still execute during status/diff; callers must not infer a
-// trusted read effect from this runner alone.
+// runReadOnly suppresses known optional Git side effects, but repository
+// filters may still execute. It grants no trusted workspace-read effect.
 func (g *DefaultGitTool) runReadOnly(ctx context.Context, args ...string) (string, error) {
-	readArgs := gitReadOnlyArgs(args)
-
-	cmd := exec.CommandContext(ctx, "git", readArgs...)
-	cmd.Dir = g.cwd
-	cmd.Env = gitReadOnlyEnvironment(os.Environ())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		commandErr := err
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			commandErr = errors.Join(err, ctxErr)
-		}
-		if diagnostic := strings.TrimSpace(string(out)); diagnostic != "" {
-			return string(out), fmt.Errorf("git read-only command failed (%s): %w", diagnostic, commandErr)
-		}
-		return string(out), fmt.Errorf("git read-only command failed: %w", commandErr)
-	}
-	return string(out), nil
+	return g.runOwned(ctx, true, args...)
 }
 
-// runReadOnlyManaged runs the Git helper used by diff previews under the
-// existing process-group owner. It deliberately uses exec.Command rather than
-// CommandContext: collect owns cancellation, process-group cleanup, and pipe
-// reader joining as one lifecycle.
 func (g *DefaultGitTool) runReadOnlyManaged(ctx context.Context, args ...string) (string, error) {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		return "", newUnknownExecutionError(errors.Join(
-			errProcessContainmentUnconfirmed,
-			errors.New("managed Git diff process groups are unsupported on this operating system"),
-		))
-	}
-	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("git read-only command failed: %w", err)
-	}
+	return g.runOwned(ctx, true, args...)
+}
 
-	execCtx, cancel := context.WithCancel(ctx)
-	cmd := exec.Command("git", gitReadOnlyArgs(args)...)
+func (g *DefaultGitTool) runOwned(ctx context.Context, readOnly bool, args ...string) (string, error) {
+	commandArgs := append([]string(nil), args...)
+	if readOnly {
+		commandArgs = gitReadOnlyArgs(commandArgs)
+	}
+	// Automatic maintenance must finish before this command's process owner
+	// returns. Keep the tasks enabled, but prevent Git from daemonizing them.
+	commandArgs = append([]string{"-c", "maintenance.autoDetach=false", "-c", "gc.autoDetach=false"}, commandArgs...)
+	cmd := exec.Command("git", commandArgs...)
 	cmd.Dir = g.cwd
-	cmd.Env = gitReadOnlyEnvironment(os.Environ())
-	managed, err := startManagedLocalCommand(cancel, cmd)
+	if readOnly {
+		cmd.Env = gitReadOnlyEnvironment(os.Environ())
+	}
+	out, lifecycle, err := runOwnedCommand(ctx, cmd, defaultCustomToolMaxOutput)
+	// A failed network command cannot establish whether the remote applied it.
+	if err != nil && len(args) > 0 && (args[0] == "push" || args[0] == "fetch" || args[0] == "pull") && lifecycle.quiescent && !unresolvedExecutionError(err) {
+		err = newUnknownExecutionError(err)
+	}
 	if err != nil {
-		cancel()
-		return "", gitReadOnlyCommandFailure("", err)
+		return out, gitCommandFailure(out, err)
 	}
-
-	var output gitDiffCombinedOutput
-	lifecycle := managed.collect(execCtx, func(reader io.Reader, _ string) (bool, error) {
-		_, readErr := io.Copy(&output, reader)
-		return readErr == nil, readErr
-	})
-	cancel()
-
-	combined := output.String()
-	commandErr := errors.Join(lifecycle.runErr, lifecycle.readerErr, lifecycle.cleanupErr)
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		commandErr = errors.Join(commandErr, ctxErr)
-	}
-	if !lifecycle.containmentProven {
-		cause := errors.Join(commandErr, errProcessContainmentUnconfirmed)
-		failure := gitReadOnlyCommandFailure(combined, cause)
-		if lifecycle.executionDone != nil {
-			return combined, pendingProcessErrorWithDone(failure, true, lifecycle.executionDone)
-		}
-		return combined, newUnknownExecutionError(failure)
-	}
-	if commandErr != nil {
-		return combined, gitReadOnlyCommandFailure(combined, commandErr)
-	}
-	return combined, nil
+	return out, nil
 }
 
 func gitReadOnlyArgs(args []string) []string {
@@ -781,28 +732,11 @@ func gitReadOnlyArgs(args []string) []string {
 	return append(readArgs, args...)
 }
 
-func gitReadOnlyCommandFailure(output string, cause error) error {
+func gitCommandFailure(output string, cause error) error {
 	if diagnostic := strings.TrimSpace(output); diagnostic != "" {
-		return fmt.Errorf("git read-only command failed (%s): %w", diagnostic, cause)
+		return fmt.Errorf("git command failed (%s): %w", diagnostic, cause)
 	}
-	return fmt.Errorf("git read-only command failed: %w", cause)
-}
-
-type gitDiffCombinedOutput struct {
-	mu     sync.Mutex
-	buffer bytes.Buffer
-}
-
-func (w *gitDiffCombinedOutput) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buffer.Write(p)
-}
-
-func (w *gitDiffCombinedOutput) String() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buffer.String()
+	return fmt.Errorf("git command failed: %w", cause)
 }
 
 func gitReadOnlyEnvironment(environment []string) []string {

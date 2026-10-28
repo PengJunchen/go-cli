@@ -135,18 +135,19 @@ type SessionManagement struct {
 	// PhysicalSessionID is set when this Assembly uses the prepared durable CLI
 	// session protocol. SessionID remains the configured logical label.
 	PhysicalSessionID string
-	// MemoryStore persists memories for user-managed /memory commands.
-	MemoryStore *memory.FileMemoryStore
+	// MemoryStore exposes workspace records for explicit /memory commands.
+	MemoryStore memory.MemoryStore
 	// MemoryExtractor is optional. The default CLI leaves it nil; a library
 	// caller may set an extractor explicitly for a custom interactive workflow.
 	MemoryExtractor memory.MemoryExtractor
 	// MemoryWG tracks explicitly configured memory extraction goroutines so
 	// Cleanup can wait for them before closing the MemoryStore.
-	MemoryWG  *sync.WaitGroup
-	Compactor compaction.Compactor
-	Estimator compaction.TokenEstimator
-	MidTurn   *compaction.MidTurnCompact
-	MaxTokens int
+	MemoryWG      *sync.WaitGroup
+	memoryRuntime *automaticMemoryRuntime
+	Compactor     compaction.Compactor
+	Estimator     compaction.TokenEstimator
+	MidTurn       *compaction.MidTurnCompact
+	MaxTokens     int
 }
 
 // GitIntegration holds Git-related tools and managers.
@@ -447,6 +448,9 @@ func AssembleAgent(
 		return nil, errors.Join(err, s.runCleanup())
 	}
 	s.assembleLoopAgent()
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(err, s.runCleanup())
+	}
 	if err := s.assembleCompactor(); err != nil {
 		return nil, errors.Join(err, s.runCleanup())
 	}
@@ -543,7 +547,8 @@ func AssembleAgent(
 			SessionStore:      s.sessionStore,
 			SessionID:         s.sessionID,
 			PhysicalSessionID: s.initialSnapshot.SessionID,
-			MemoryStore:       s.memStore,
+			MemoryStore:       s.memoryCommandStore(),
+			memoryRuntime:     s.memoryRuntime,
 			MemoryWG:          &s.memWG,
 			Compactor:         s.compactor,
 			Estimator:         s.estimator,
@@ -769,6 +774,7 @@ type assembleState struct {
 	loopAgent     *core.LoopAgent
 	loop          core.AgentLoop
 	memStore      *memory.FileMemoryStore
+	memoryRuntime *automaticMemoryRuntime
 	memWG         sync.WaitGroup
 	promptBuilder core.SystemPromptBuilder
 	contextLoader core.ProjectContextLoader
@@ -1106,7 +1112,13 @@ func (s *assembleState) assembleTools() error {
 	}
 
 	// Register config-driven custom command tools.
-	registerCustomTools(s.ctx, s.rc, s.tr, s.logger)
+	customCleanup, customErr := registerCustomTools(s.ctx, s.rc, s.tr, s.logger)
+	if customCleanup != nil {
+		s.cleanupList = append(s.cleanupList, customCleanup)
+	}
+	if customErr != nil {
+		return customErr
+	}
 
 	// Register MCP tools.
 	if mcpErr := s.registerConfiguredMCP(dtr); mcpErr != nil {
@@ -1821,7 +1833,8 @@ func (s *assembleState) newACPStdioProcessOwner() (*acp.StdioProcessOwner, *appr
 // assembleExtraTools registers remaining tools (todo, task, goal, web, plan_mode, etc.).
 func (s *assembleState) assembleExtraTools() error {
 	todoStore := tools.NewTodoStore()
-	s.todoState = newAssemblyTodoState(todoStore)
+	s.todoState = newAssemblyTodoState(s.ctx, todoStore)
+	s.cleanupList = append(s.cleanupList, s.todoState.close)
 	taskStore := tools.NewTaskStore()
 	goalStore, _ := tools.NewDefaultGoalStore("") //nolint:errcheck
 	s.hitlEmitter = &cliHITLEmitter{out: s.out}
@@ -1852,7 +1865,7 @@ func (s *assembleState) assembleExtraTools() error {
 	webFetchTool := tools.NewWebFetchTool(tools.WithHTMLConverter(s.htmlConverter))
 
 	extraTools := []tools.ToolDefinition{
-		tools.NewTodoWriteTool(todoStore, tools.WithTodoWriteChangeHandler(s.todoState.notify)),
+		tools.NewTodoWriteTool(todoStore),
 		tools.NewTaskCreateTool(taskStore),
 		tools.NewTaskUpdateTool(taskStore),
 		tools.NewGoalCreateTool(goalStore),
@@ -1860,8 +1873,8 @@ func (s *assembleState) assembleExtraTools() error {
 		tools.NewGitPRCreateTool(s.gitCwd),
 	}
 	for _, t := range extraTools {
-		if regErr := s.tr.Register(s.ctx, t); regErr != nil {
-			s.logger.Warn("assemble_tool_register_failed", "tool", t.Name(), "err", regErr)
+		if regErr := tools.RegisterReviewedTool(s.ctx, s.tr, t, nil); regErr != nil {
+			return fmt.Errorf("assemble: register reviewed tool %q: %w", t.Name(), regErr)
 		}
 	}
 	// Plan Mode transitions remain user-controlled through /plan enter|exit;
@@ -1936,24 +1949,12 @@ func (s *assembleState) assembleLoopAgent() {
 		loopOpts = append(loopOpts, core.WithExecutionMode(core.ExecutionModeSequential))
 	}
 
-	// Explicit project/user configuration selects only that memory file; it
-	// never falls back to the personal store if opening the selected file fails.
-	memoryPath := memoryStorePath(s.rc)
-	if memoryPath != "" {
-		if mkErr := os.MkdirAll(filepath.Dir(memoryPath), 0o755); mkErr != nil {
-			s.logger.Warn("assemble_memory_mkdir_failed", "err", mkErr)
-		}
-		ms, msErr := memory.NewFileMemoryStore(memoryPath)
-		if msErr != nil {
-			s.logger.Warn("assemble_memory_store_failed", "err", msErr)
-		} else {
-			s.memStore = ms
-		}
-	}
+	s.assembleMemorySupport()
 
 	// Wire dynamic system prompt builder with project context.
 	s.contextLoader = core.NewDefaultProjectContextLoader()
 	s.promptBuilder = core.NewDefaultSystemPromptBuilder()
+	s.promptBuilder = &memoryPromptBuilder{inner: s.promptBuilder, runtime: s.memoryRuntime}
 	if s.rc != nil && (s.rc.Runtime.Dynamic || progressiveSkillsEnabled(s.rc) || s.rc.MCP.Loading == "lazy") {
 		s.promptBuilder = &runtimePromptBuilder{inner: s.promptBuilder, maxBytes: s.rc.Runtime.MaxPromptBytes}
 	}
@@ -1982,7 +1983,7 @@ func (s *assembleState) assembleLoopAgent() {
 			appendPrompt += "\n" + prompt.Text
 		}
 	}
-	s.runtimePromptOptions = core.SystemPromptOptions{Cwd: cwd, ContextFiles: contextFiles, Skills: s.skillInfos, CustomPrompt: customPrompt, AppendPrompt: appendPrompt}
+	s.runtimePromptOptions = core.SystemPromptOptions{Cwd: cwd, ContextFiles: contextFiles, Skills: s.skillInfos, CustomPrompt: customPrompt, AppendPrompt: appendPrompt, Memories: s.memoryRuntime.memories()}
 	loopOpts = append(loopOpts, core.WithSystemPromptBuilder(s.promptBuilder), core.WithSystemPromptOptions(s.runtimePromptOptions))
 
 	s.loop = core.NewLoopAgent(loopOpts...)
@@ -3151,9 +3152,9 @@ func discoverSkillDir() string {
 // rc.Tools.CustomTools. They are registered after the builtins so they extend
 // the available toolset. A custom tool with an empty name or command, or whose
 // name collides with an already-registered tool, is skipped with a warning.
-func registerCustomTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry, logger *slog.Logger) {
+func registerCustomTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry, logger *slog.Logger) (func(context.Context) error, error) {
 	if rc == nil || len(rc.Tools.CustomTools) == 0 {
-		return
+		return nil, nil
 	}
 
 	// Trust check: skip custom tools if project is not trusted. Custom tools
@@ -3162,7 +3163,7 @@ func registerCustomTools(ctx context.Context, rc *config.Config, tr tools.ToolRe
 	cwd, err := canonicalCurrentDirectory()
 	if err != nil {
 		logger.Warn("assemble_custom_tools_skip_unavailable", "reason", "project root unavailable")
-		return
+		return nil, nil
 	}
 	manager := rc.ProjectTrustManager()
 	if manager == nil {
@@ -3170,14 +3171,14 @@ func registerCustomTools(ctx context.Context, rc *config.Config, tr tools.ToolRe
 	}
 	if !manager.IsTrusted(ctx, cwd) {
 		logger.Warn("assemble_custom_tools_skip_untrusted", "reason", "project not trusted")
-		return
+		return nil, nil
 	}
 	var projectBinding tools.ProjectTrustBinding
 	if projectOverlay := rc.ProjectOverlayForVerifiedSources(); projectOverlay != nil && len(projectOverlay.Tools.CustomTools) > 0 {
 		verified := rc.VerifiedProjectSources()
 		if verified == nil || !reflect.DeepEqual(projectOverlay.Tools.CustomTools, rc.Tools.CustomTools) {
 			logger.Warn("assemble_custom_tools_skip_unknown_provenance", "reason", "merged definitions no longer match the verified project overlay")
-			return
+			return nil, nil
 		}
 		projectBinding = verified
 	}
@@ -3185,13 +3186,21 @@ func registerCustomTools(ctx context.Context, rc *config.Config, tr tools.ToolRe
 	existing, err := tr.List(ctx)
 	if err != nil {
 		logger.Warn("assemble_custom_tools_list_failed", "err", err)
-		return
+		return nil, nil
 	}
 	existingNames := make(map[string]bool, len(existing))
 	for _, t := range existing {
 		existingNames[t.Name()] = true
 	}
 
+	var cleanupSteps []func(context.Context) error
+	cleanup := func(ctx context.Context) error {
+		var result error
+		for _, closeArtifact := range cleanupSteps {
+			result = errors.Join(result, closeArtifact(ctx))
+		}
+		return result
+	}
 	for _, cfg := range rc.Tools.CustomTools {
 		if cfg.Name == "" {
 			logger.Warn("assemble_custom_tool_skipped", "reason", "empty name")
@@ -3209,18 +3218,26 @@ func registerCustomTools(ctx context.Context, rc *config.Config, tr tools.ToolRe
 		if cfg.Timeout > 0 {
 			timeout = time.Duration(cfg.Timeout) * time.Second
 		}
-		definition := tools.NewCustomCommandTool(cfg.Name, cfg.Description, cfg.Command, cfg.Args, cfg.Env, timeout, cfg.WorkingDir)
-		var regErr error
+		command := append([]string(nil), cfg.Command...)
+		var artifactDirectory string
 		if projectBinding != nil {
-			registrar, ok := tr.(tools.ProjectSourcedToolRegistrar)
-			if !ok {
-				regErr = tools.ErrProjectSourcedRegistrationUnavailable
-			} else {
-				regErr = registrar.RegisterProjectSourced(ctx, definition, projectBinding)
+			var stageErr error
+			command[0], artifactDirectory, stageErr = materializeProjectCustomCommand(rc, cfg)
+			if stageErr != nil {
+				return cleanup, fmt.Errorf("assemble: capture project custom tool %q: %w", cfg.Name, stageErr)
 			}
-		} else {
-			regErr = tr.Register(ctx, definition)
 		}
+		definition := tools.NewCustomCommandTool(cfg.Name, cfg.Description, command, cfg.Args, cfg.Env, timeout, cfg.WorkingDir)
+		if artifactDirectory != "" {
+			directory := artifactDirectory
+			cleanupSteps = append(cleanupSteps, func(ctx context.Context) error {
+				if err := definition.Close(ctx); err != nil {
+					return fmt.Errorf("retain custom tool artifact %s: %w", directory, err)
+				}
+				return os.RemoveAll(directory)
+			})
+		}
+		regErr := tools.RegisterReviewedTool(ctx, tr, definition, projectBinding)
 		if regErr != nil {
 			logger.Warn("assemble_custom_tool_register_failed", "name", cfg.Name, "err", regErr)
 			continue
@@ -3228,6 +3245,7 @@ func registerCustomTools(ctx context.Context, rc *config.Config, tr tools.ToolRe
 		existingNames[cfg.Name] = true
 		logger.Info("assemble_custom_tool_registered", "name", cfg.Name)
 	}
+	return cleanup, nil
 }
 
 // loopDetectorMiddleware wraps an AgentLoop, feeding returned events to a

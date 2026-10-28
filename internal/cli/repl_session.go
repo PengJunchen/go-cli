@@ -52,6 +52,7 @@ type REPLSession struct {
 	// unknownCancelRecovery is set only after an explicit TUI cancellation has
 	// joined a quiescent owner and its exact unknown terminal checkpoint.
 	unknownCancelRecovery *durableUnknownCancelRecovery
+	historyAdmissionError error
 
 	// I/O
 	out io.Writer
@@ -169,6 +170,9 @@ func (s *REPLSession) Run(ctx context.Context, cfg Config, args []string) (runEr
 	s.args = args
 	sessionStarted := false
 	defer func() {
+		if sessionStarted && runErr == nil && ctx.Err() == nil && s.assembly != nil {
+			s.assembly.DrainMemory(ctx)
+		}
 		closeErr := closeAssemblyForCommand(context.Background(), s.assembly, "interactive")
 		if sessionStarted {
 			s.cleanup()
@@ -276,8 +280,8 @@ func (s *REPLSession) parseFlags() error {
 		return err
 	}
 	s.approveMode = resolvedApproval
-	if s.rc != nil && s.rc.Session.StorePath != "" && resumeFlag {
-		return newUsageError("interactive: durable sessions require --resume-session <physical-id>; --resume is ambiguous")
+	if resumeFlag && resumeSessionID != "" {
+		return newUsageError("interactive: choose --resume or --resume-session, not both")
 	}
 	if resumeSessionID != "" && (s.rc == nil || s.rc.Session.StorePath == "") {
 		return newUsageError("interactive: --resume-session requires session.store_path")
@@ -342,6 +346,12 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 	var durableSession *durableCLISession
 	if s.rc != nil && s.rc.Session.StorePath != "" {
 		var err error
+		if s.resumeFlag {
+			s.resumeSessionID, err = session.LatestPhysicalSession(s.spanCtx, s.rc.Session.StorePath)
+			if err != nil {
+				return newUsageError("interactive: %v", err)
+			}
+		}
 		durableSession, err = newDurableCLISession(s.spanCtx, s.rc.Session.StorePath, "interactive", s.resumeSessionID, "")
 		if err != nil {
 			return newExecutionError("interactive: prepare durable session", err)
@@ -447,6 +457,7 @@ func (s *REPLSession) setupSlashContext() error {
 				switch {
 				case s.assembly.durableSession != nil:
 					handler.mode = sessionCommandModeDurable
+					handler.historyAvailable = true
 					handler.durableSession = s.assembly.durableSession
 					handler.runSlotGuard = s.assembly.runSlotGuard
 				case s.assembly.SessionStore != nil:
@@ -486,6 +497,9 @@ func (s *REPLSession) setupSlashContext() error {
 	}
 	if s.assembly.PhysicalSessionID != "" {
 		s.slashCtx.sessionID = s.assembly.PhysicalSessionID
+	}
+	if s.assembly.durableSession != nil {
+		s.slashCtx.historyCommands = &durableHistoryCommands{repl: s}
 	}
 
 	// Create a shared ThemeManager so /theme can switch themes at runtime
@@ -583,7 +597,11 @@ func (s *REPLSession) setupEditors() {
 		// Wire typed mention resolvers from the assembled components.
 		s.mentionExpander.SetResolver("symbol", NewSymbolMentionResolver(s.assembly.LSPClient, s.assembly.LSPWorkspaceRoot, cwd))
 		s.mentionExpander.SetResolver("url", NewURLMentionResolver())
-		if s.assembly.SessionStore != nil {
+		if s.assembly.durableSession != nil {
+			s.mentionExpander.SetResolver("session", &selectedSessionMentionResolver{snapshot: func() (session.PreparedSessionSnapshot, error) {
+				return s.assembly.durableSession.snapshotSelected()
+			}})
+		} else if s.assembly.SessionStore != nil {
 			s.mentionExpander.SetResolver("session", NewSessionMentionResolver(s.assembly.SessionStore))
 		}
 	}
@@ -777,7 +795,11 @@ func (s *REPLSession) handleInterrupt(err error) bool {
 // launches the agent goroutine, renders the TUI, waits for completion, then
 // persists the session and extracts memories.
 func (s *REPLSession) executeTurn() error {
+	if s.historyAdmissionError != nil {
+		return s.historyAdmissionError
+	}
 	s.setupTurn()
+	s.assembly.RefreshMemoryContext(s.turnCtx)
 	runCtx, preparedSnapshot, initialTranscript, runSink, err := s.prepareDurableTurn()
 	if err != nil {
 		s.finishTurnSetupFailure(err)
@@ -852,9 +874,6 @@ func (s *REPLSession) executeTurn() error {
 		} else {
 			fmt.Fprintf(s.out, "Error: %v\n", s.turnErr) //nolint:errcheck
 		}
-		if s.assembly.durableSession != nil {
-			s.extractMemory()
-		}
 		return nil
 	}
 
@@ -870,6 +889,9 @@ func (s *REPLSession) executeTurn() error {
 		fmt.Fprintf(s.out, "AI: %s\n", s.turnResult.Message) //nolint:errcheck
 	}
 
+	if !interrupted && s.turnErr == nil {
+		s.assembly.RecordCompletedMemory(s.spanCtx, s.turnResult, preparedSnapshot, s.line)
+	}
 	if s.assembly.durableSession != nil {
 		s.extractMemory()
 	} else {

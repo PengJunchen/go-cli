@@ -868,6 +868,25 @@ func assignValue(dst reflect.Value, src any) error {
 			return fmt.Errorf("cannot assign %T to a slice", src)
 		}
 	}
+	if dst.Kind() == reflect.Map {
+		if dst.Type() != reflect.TypeOf(map[string]string{}) {
+			return fmt.Errorf("unsupported mapping destination %v", dst.Type())
+		}
+		values, ok := src.(map[string]any)
+		if !ok {
+			return fmt.Errorf("cannot assign %T to string mapping", src)
+		}
+		out := reflect.MakeMapWithSize(dst.Type(), len(values))
+		for key, value := range values {
+			text, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("string mapping key %q has non-string value %T", key, value)
+			}
+			out.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(text))
+		}
+		dst.Set(out)
+		return nil
+	}
 	return assignScalar(dst, src)
 }
 

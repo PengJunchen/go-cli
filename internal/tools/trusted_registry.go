@@ -294,6 +294,9 @@ func (r *DefaultToolRegistry) preparedToolPipeline() (*preparedToolPipelineState
 
 func (r *DefaultToolRegistry) RegisterTrustedControl(ctx context.Context, def ToolDefinition) error {
 	completionProof := PreparedCompletionProof("")
+	if reviewedStateDefinition(def) {
+		completionProof = CompletionInlinePipelineJoined
+	}
 	if askUser, ok := def.(*AskUserQuestionTool); ok {
 		if askUser == nil {
 			return errors.New("tools: trusted ask_user control must be non-nil")

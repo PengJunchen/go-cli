@@ -129,21 +129,48 @@ func (b *DefaultSessionTreeBuilder) BuildFromSnapshot(ctx context.Context, snaps
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]*SessionEntry, len(snapshot.DurableEntries))
-	for index := range snapshot.DurableEntries {
-		entries[index] = &snapshot.DurableEntries[index]
+	legacyUnsequenced := true
+	for _, row := range snapshot.DurableEntries {
+		if row.RecordVersion != 0 || row.Seq != 0 {
+			legacyUnsequenced = false
+			break
+		}
 	}
-	tree, err := b.buildFromEntries(ctx, entries)
-	if err != nil {
+	if legacyUnsequenced {
+		entries := make([]*SessionEntry, len(snapshot.DurableEntries))
+		for index := range snapshot.DurableEntries {
+			entries[index] = snapshot.DurableEntries[index].clone()
+		}
+		tree, err := b.buildFromEntries(ctx, entries)
+		if err != nil {
+			return nil, err
+		}
+		if snapshot.ActiveLeafEntryID != "" {
+			if err := tree.MoveTo(ctx, snapshot.ActiveLeafEntryID); err != nil {
+				return nil, err
+			}
+		}
+		return tree, nil
+	}
+	// A prepared snapshot already carries canonical physical order. Replaying
+	// it through the tolerant legacy builder would assign virtual sequences
+	// to version-zero rows and can then discard later canonical checkpoints.
+	if _, _, _, _, _, err := validateLoadedDurableEntries(snapshot.DurableEntries, snapshot.SessionID); err != nil {
 		return nil, err
 	}
+	tree := &DefaultSessionTree{entries: make(map[string]*SessionEntry), branches: make(map[string]BranchMeta)}
+	entries := make([]*SessionEntry, len(snapshot.DurableEntries))
+	for index, row := range snapshot.DurableEntries {
+		entries[index] = row.clone()
+		tree.entries[row.ID] = row.clone()
+	}
+	tree.seqCounter.Store(snapshot.MaxSeq)
+	tree.restoreBranchMetadataFromCheckpoints(entries)
 	if snapshot.ActiveLeafEntryID != "" {
 		if _, exists := entriesByID[snapshot.ActiveLeafEntryID]; !exists {
 			return nil, fmt.Errorf("session: snapshot active leaf %q is not in durable entries", snapshot.ActiveLeafEntryID)
 		}
-		if err := tree.MoveTo(ctx, snapshot.ActiveLeafEntryID); err != nil {
-			return nil, fmt.Errorf("session: restore snapshot active leaf %q: %w", snapshot.ActiveLeafEntryID, err)
-		}
+		tree.leafID = snapshot.ActiveLeafEntryID
 	}
 	return tree, nil
 }

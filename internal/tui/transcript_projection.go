@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 var (
@@ -294,12 +295,7 @@ func validTranscriptResourceState(state core.RunExecutionState) bool {
 }
 
 func validTranscriptCompletionProof(proof string) bool {
-	switch proof {
-	case "inline_pipeline_joined", "queued_job_joined", "owned_process_group_joined":
-		return true
-	default:
-		return false
-	}
+	return tools.IsPositiveCompletionProof(tools.PreparedCompletionProof(proof))
 }
 
 // ValidateTranscriptRefresh checks the same durable publication identity for

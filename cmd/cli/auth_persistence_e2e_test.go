@@ -52,7 +52,7 @@ func TestAuthPersistenceRealCLIOnboardingThenRestartedPrompt(t *testing.T) {
 	for _, dir := range []string{home, workDir, configDir, xdgDir, cacheDir} {
 		require.NoError(t, os.MkdirAll(dir, 0o700))
 	}
-	configYAML := fmt.Sprintf("provider:\n  name: openai\n  base_url: %s/v1\n  model: gpt-4o-mini\nmodel:\n  name: gpt-4o-mini\ntracing:\n  enabled: false\n", server.URL)
+	configYAML := fmt.Sprintf("provider:\n  name: openai\n  base_url: %s/v1\n  model: gpt-4o-mini\nmodel:\n  name: gpt-4o-mini\ntracing:\n  enabled: false\nmemory:\n  enabled: false\n", server.URL)
 	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(configYAML), 0o600))
 
 	securityDir := filepath.Join(t.TempDir(), "security-bin")
@@ -252,6 +252,7 @@ exit 0
 				"FAKE_SECURITY_STATE":      statePath,
 				"FAKE_SECURITY_LOG":        logPath,
 				"PATH":                     securityDir,
+				"GO_CLI_MEMORY_ENABLED":    "false",
 				"GO_CLI_PROVIDER_NAME":     "openai",
 				"GO_CLI_PROVIDER_MODEL":    "gpt-4o-mini",
 				"GO_CLI_PROVIDER_BASE_URL": server.URL + "/v1",

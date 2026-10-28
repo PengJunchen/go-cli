@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,7 +26,7 @@ type projectionStatusHandle struct{ status core.RunStatus }
 func (h projectionStatusHandle) Snapshot() core.RunStatus { return h.status }
 
 func TestTranscriptProjectionUsesPublishedSourceIDs(t *testing.T) {
-	snapshot := validReceiptProjectionSnapshot()
+	snapshot := validReceiptProjectionSnapshot(t)
 
 	got, err := ProjectPreparedTranscript(context.Background(), snapshot)
 	require.NoError(t, err)
@@ -41,6 +43,7 @@ func TestTranscriptProjectionUsesPublishedSourceIDs(t *testing.T) {
 	legacy.DurableEntries[1].RecordVersion = 0
 	legacy.DurableEntries[1].TranscriptIndex = nil
 	legacy.DurableEntries[1].RunID = ""
+	legacy.DurableEntries[1] = canonicalProjectionFixtureEntry(t, legacy.DurableEntries[1])
 	legacyProjection, err := ProjectPreparedTranscript(context.Background(), legacy)
 	require.NoError(t, err)
 	require.Nil(t, legacyProjection.Rows[1].AssistantOccurrence, "legacy rows without producer coordinates stay uncorrelated")
@@ -51,9 +54,9 @@ func TestTranscriptProjectionUsesPublishedSourceIDs(t *testing.T) {
 	require.Error(t, err, "a missing positional source ID must reject the whole projection")
 
 	duplicateSource := snapshot.Clone()
-	duplicateSource.PublishedView.SourceEntryIDs[2] = "assistant-source"
+	duplicateSource.PublishedView.SourceEntryIDs[2] = "receipt-assistant"
 	_, err = ProjectPreparedTranscript(context.Background(), duplicateSource)
-	require.Error(t, err, "a repeated source ID must reject the whole projection")
+	require.ErrorContains(t, err, "view source entry ID \"receipt-assistant\" is repeated", "a repeated source ID must reject the whole projection")
 }
 
 func TestTranscriptProjectionAfterDurableReopenKeepsSourceTruncationUnknown(t *testing.T) {
@@ -188,7 +191,7 @@ func TestTranscriptProjectionRejectsSourceMessageMismatch(t *testing.T) {
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
-			snapshot := validReceiptProjectionSnapshot()
+			snapshot := validReceiptProjectionSnapshot(t)
 			mutate(&snapshot)
 			_, err := ProjectPreparedTranscript(context.Background(), snapshot)
 			require.Error(t, err)
@@ -388,7 +391,8 @@ func projectionSnapshot(entries []session.SessionEntry, messages []core.AgentMes
 	}
 }
 
-func validReceiptProjectionSnapshot() session.PreparedSessionSnapshot {
+func validReceiptProjectionSnapshot(t *testing.T) session.PreparedSessionSnapshot {
+	t.Helper()
 	zero, one, two := uint64(0), uint64(1), uint64(2)
 	ordinal := uint64(0)
 	entries := []session.SessionEntry{
@@ -415,6 +419,7 @@ func validReceiptProjectionSnapshot() session.PreparedSessionSnapshot {
 		entries[index].SessionID = "physical-1"
 		entries[index].BranchID = "main"
 		entries[index].Seq = uint64(index + 1)
+		entries[index] = canonicalProjectionFixtureEntry(t, entries[index])
 	}
 	messages := []core.AgentMessage{
 		{Role: "user", Content: "read"},
@@ -440,4 +445,18 @@ func journalEntryIDs(facts []tui.ActionJournalFact) []string {
 		ids[index] = facts[index].EntryID
 	}
 	return ids
+}
+
+// Match the durable writer's canonical payload: Seq and PayloadDigest are
+// excluded from the JSON hash. Fixtures still pass the strict snapshot builder;
+// changing a row's content later without recomputing this digest remains invalid.
+func canonicalProjectionFixtureEntry(t *testing.T, entry session.SessionEntry) session.SessionEntry {
+	t.Helper()
+	seq := entry.Seq
+	entry.Seq, entry.PayloadDigest = 0, ""
+	encoded, err := json.Marshal(entry)
+	require.NoError(t, err)
+	entry.PayloadDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(encoded))
+	entry.Seq = seq
+	return entry
 }

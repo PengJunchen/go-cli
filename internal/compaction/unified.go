@@ -15,15 +15,15 @@ import (
 const defaultTriggerReason = "unknown"
 
 // ErrDurableSummaryProjectionRequired reports that source-backed history
-// exceeded its budget but no typed summary projection was produced. Durable
-// callers cannot commit a projection-free micro or truncating result.
-var ErrDurableSummaryProjectionRequired = errors.New("compaction: durable history requires a typed summary projection")
+// exceeded its budget but no typed summary or omission projection was produced.
+// The historical name is retained; projection-free results remain unsupported.
+var ErrDurableSummaryProjectionRequired = errors.New("compaction: durable history requires a typed context projection")
 
 // UnifiedCompactor is the routing layer of the compaction package. For legacy
 // history it tries strategies in order of increasing cost — micro, then summary,
 // then truncating — and falls through when a strategy cannot satisfy the
-// budget. Source-backed durable history over budget requires a typed summary
-// projection, so projection-free micro/truncating winners are not eligible.
+// budget. Source-backed durable history requires a typed summary or explicit
+// omission projection; projection-free micro/truncating winners are ineligible.
 // Truncating keeps mandatory system instructions; if those alone exceed the
 // budget, the router returns an explicit error instead of an over-budget result.
 //
@@ -113,9 +113,9 @@ func (u *UnifiedCompactor) setLastStrategy(s Strategy) {
 }
 
 // Compact routes compaction across the configured strategies. Source-backed
-// history that exceeds its budget is sent directly to the summary strategy so
-// the result can carry a durable projection; other history remains cheapest
-// first. It emits one `compaction` span and exposes the selected strategy.
+// history first tries a typed summary, then a typed omission only when no
+// summarizer was configured or the built-in summary hit a local output limit.
+// Provider failures are not fallback permission. Other history is cheapest first. It emits one `compaction` span and exposes the selected strategy.
 func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) (CompactionResult, error) {
 	span, sctx := tracing.SpanFromContext(ctx, "compaction", tracing.SpanKindInternal)
 	defer span.End()
@@ -164,18 +164,48 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 	)
 
 	if durable && current > maxTokens {
-		span.AddEvent("trying_summary")
-		if u.summary == nil {
+		builtin, isBuiltin := u.summary.(*SummaryCompactor)
+		missing := u.summary == nil
+		if isBuiltin {
+			_, missing = builtin.summarizer.(noopSummarizer)
+		}
+		if !missing {
+			span.AddEvent("trying_summary")
+			result, err := u.summary.Compact(sctx, items, maxTokens, estimator)
+			if err == nil {
+				if result.NewProjection == nil {
+					return CompactionResult{Items: items}, ErrDurableSummaryProjectionRequired
+				}
+				return u.finish(sctx, logger, span, originalItems, current, maxTokens, estimator, result, StrategySummary), nil
+			}
+			// Do not traverse wrapped source errors or trust a foreign strategy's
+			// self-reported sentinel. Provider/authority/persistence failures keep
+			// their original error; only this built-in's local result may fall back.
+			if _, local := err.(localSummaryBudgetError); !isBuiltin || !local {
+				return CompactionResult{}, err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return CompactionResult{Items: items}, err
+		}
+		if u.truncating == nil {
 			return CompactionResult{Items: items}, ErrDurableSummaryProjectionRequired
 		}
-		result, err := u.summary.Compact(sctx, items, maxTokens, estimator)
+		span.AddEvent("trying_truncating")
+		result, err := u.truncating.Compact(sctx, items, maxTokens, estimator)
 		if err != nil {
 			return CompactionResult{}, err
 		}
-		if result.NewProjection == nil {
+		if result.Strategy != StrategyTruncating || result.NewProjection == nil || result.NewProjection.Summary != DurableTruncationMarker {
 			return CompactionResult{Items: items}, ErrDurableSummaryProjectionRequired
 		}
-		return u.finish(sctx, logger, span, originalItems, current, maxTokens, estimator, result, StrategySummary), nil
+		if err := ValidateRunRequestIntegrity(result.Items); err != nil {
+			return CompactionResult{Items: items}, err
+		}
+		if estimateTokens(result.Items, estimator) > maxTokens {
+			return CompactionResult{Items: items}, ErrRequiresTruncating
+		}
+		return u.finish(sctx, logger, span, originalItems, current, maxTokens, estimator, result, StrategyTruncating), nil
 	}
 
 	// Micro: cheapest, zero-LLM. Any failure (including ErrRequiresTruncating)

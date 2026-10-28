@@ -205,7 +205,7 @@ func TestUnifiedCompactorDoesNotTruncateOverBudgetDurableHistoryWithoutSummary(t
 
 	_, err := compactor.Compact(ctx, items, 100, runeCountEstimator{})
 	require.Error(t, err, "durable source cannot use a projection-free truncating winner")
-	assert.Empty(t, truncating.Called(), "durable history must fail closed when no summary strategy exists")
+	assert.Equal(t, []string{"truncating"}, truncating.Called(), "a projection-free fallback must still fail closed")
 }
 
 func TestUnifiedCompactorDoesNotFallBackAfterDurableSummaryFailure(t *testing.T) {

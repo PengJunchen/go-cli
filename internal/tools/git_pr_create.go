@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os/exec"
 	"strings"
 
@@ -92,21 +93,29 @@ func (t *GitPRCreateTool) Execute(ctx context.Context, call ToolCall) (*ToolResu
 		return nil, errors.New("git_pr_create: gh CLI is not installed. Install it from https://cli.github.com/")
 	}
 
-	args := []string{"pr", "create", "--title", title, "--base", base, "--head", head}
+	args := []string{"pr", "create", "--title=" + title, "--base=" + base, "--head=" + head}
 	if strings.TrimSpace(body) != "" {
-		args = append(args, "--body", body)
+		args = append(args, "--body="+body)
 	}
 
-	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd := exec.Command("gh", args...)
 	cmd.Dir = t.cwd
-	out, err := cmd.CombinedOutput()
+	out, lifecycle, err := runOwnedCommand(ctx, cmd, defaultCustomToolMaxOutput)
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		logger.Error("git_pr_create.failed", "title", title, "base", base, "head", head, "err", err, "output", string(out))
-		return nil, fmt.Errorf("git_pr_create: %w: %s", err, strings.TrimSpace(string(out)))
+		logger.Error("git_pr_create.failed", "error_class", "execution_failed")
+		if !unresolvedExecutionError(err) && lifecycle.quiescent {
+			err = newUnknownExecutionError(err)
+		}
+		return nil, fmt.Errorf("git_pr_create: %w", err)
 	}
 
-	prURL := strings.TrimSpace(string(out))
+	prURL := strings.TrimSpace(out)
+	parsed, parseErr := url.Parse(prURL)
+	parts := strings.Split(strings.Trim(parsedPath(parsed), "/"), "/")
+	if parseErr != nil || parsed == nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || len(parts) != 4 || parts[2] != "pull" || !validPRNumber(parts[3]) || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, newUnknownExecutionError(errors.New("git_pr_create: command returned no valid pull request URL"))
+	}
 
 	span.SetAttributes(tracing.Attribute{Key: "success", Value: true})
 	logger.Info("git_pr_create.done", "title", title, "base", base, "head", head, "url", prURL)
@@ -121,4 +130,23 @@ func (t *GitPRCreateTool) Execute(ctx context.Context, call ToolCall) (*ToolResu
 			"url":   prURL,
 		},
 	}, nil
+}
+
+func parsedPath(parsed *url.URL) string {
+	if parsed == nil {
+		return ""
+	}
+	return parsed.Path
+}
+
+func validPRNumber(value string) bool {
+	if value == "" || value[0] == '0' {
+		return false
+	}
+	for _, digit := range value {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }

@@ -26,7 +26,7 @@ func (f *providerOperationFactory) NewOperation(_ context.Context, kind llm.Prov
 	if maxAttempts > defaultProviderOperationAttempts {
 		maxAttempts = defaultProviderOperationAttempts
 	}
-	if kind < llm.OperationMainRequest || kind > llm.OperationSummary {
+	if kind < llm.OperationMainRequest || kind > llm.OperationExtraction {
 		return nil, errors.New("core: invalid provider operation kind")
 	}
 	if len(candidates) == 0 {

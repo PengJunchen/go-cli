@@ -34,7 +34,15 @@ func (e *sdkExtension) Init(ctx context.Context, registry ExtensionRegistry) err
 		return err
 	}
 	for _, declaration := range e.manifest.Tools {
-		if err := registry.RegisterTool(ctx, &sdkTool{declaration: declaration, caller: e.caller}); err != nil {
+		var definition tools.ToolDefinition = &sdkTool{declaration: declaration, caller: e.caller}
+		if process, owned := e.caller.(*rpcProcess); owned && process != nil {
+			var err error
+			definition, err = tools.NewOwnedWorkerRequestTool(definition, ownedSDKToolExecutor{process: process, name: declaration.Name}, process)
+			if err != nil {
+				return err
+			}
+		}
+		if err := registry.RegisterTool(ctx, definition); err != nil {
 			return err
 		}
 	}
@@ -252,4 +260,19 @@ func convertSDK(input, output any) error {
 		return fmt.Errorf("extension: decode SDK value: %w", err)
 	}
 	return nil
+}
+
+// ownedSDKToolExecutor captures the concrete receiver, not sdkTool's generic
+// caller interface, so later wrapper substitutions cannot keep host authority.
+type ownedSDKToolExecutor struct {
+	process *rpcProcess
+	name    string
+}
+
+func (e ownedSDKToolExecutor) ExecuteWorkerTool(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+	var result api.ToolResult
+	if err := e.process.call(ctx, "tool.call", api.ToolCall{ID: call.ID, Name: e.name, Args: call.Args}, &result); err != nil {
+		return nil, err
+	}
+	return &tools.ToolResult{Output: result.Output, Metadata: result.Metadata, IsError: result.IsError, ToolCallID: call.ID}, nil
 }

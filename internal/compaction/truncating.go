@@ -25,6 +25,9 @@ func NewTruncatingCompactor() *TruncatingCompactor {
 // Compact keeps all system entries and the newest non-system entries that fit
 // the budget.
 func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) (CompactionResult, error) {
+	if err := ctx.Err(); err != nil {
+		return CompactionResult{Items: items}, err
+	}
 	span, _ := tracing.SpanFromContext(ctx, "compaction.truncating", tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, slog.Default())
@@ -44,6 +47,10 @@ func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, max
 		tracing.Attribute{Key: "items_in", Value: len(normalized)},
 		tracing.Attribute{Key: "tokens_before", Value: tokensBefore},
 	)
+
+	if hasDurableSource(normalized) {
+		return truncateDurablePrefix(normalized, groups, maxTokens, estimator)
+	}
 
 	result := make([]TurnItem, 0, len(normalized))
 	system := make([]TurnItem, 0, 4)

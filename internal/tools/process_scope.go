@@ -42,16 +42,17 @@ type managedLocalCommand struct {
 }
 
 type managedLocalResult struct {
-	runErr            error
-	readerErr         error
-	readersJoined     bool
-	forcedPipeClose   bool
-	interrupted       bool
-	quiescent         bool // owned group, leader, and local readers have joined
-	containmentProven bool
-	escalated         bool
-	cleanupErr        error
-	executionDone     <-chan struct{}
+	runErr                 error
+	readerErr              error
+	readersJoined          bool
+	ordinaryPipelineJoined bool // legacy leader and stdio join; never durable containment proof
+	forcedPipeClose        bool
+	interrupted            bool
+	quiescent              bool // owned group, leader, and local readers have joined
+	containmentProven      bool
+	escalated              bool
+	cleanupErr             error
+	executionDone          <-chan struct{}
 }
 
 // startManagedLocalCommand starts a command in a fresh process group and owns

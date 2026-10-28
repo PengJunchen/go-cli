@@ -11,12 +11,17 @@ reserved; this host rejects RPC skill negotiation and uses standard SKILL.md.
 ## Host execution support
 
 A declared contribution and a registered tool do not by themselves establish
-support for durable tool execution. Generic worker tools currently lack the
-request-completion contract required by the durable CLI and are rejected before
-dispatch in that mode. Ordinary custom tools have the same limitation. This is
-separate from the reviewed completion contracts for the CLI's built-in MCP
-transports and managed child agents. See the [runtime guide](../../../docs/runtime-guide.md)
-for the current loading, approval, execution, and restart boundaries.
+support for persistent tool execution. The CLI's host-owned JSONL process adapter
+supports matched, validated tool responses in persistent sessions. A known result
+(including a tool error) proves request completion, not every external effect or
+worker exit. Lost or malformed replies after dispatch can remain unknown; the
+host does not replay the request.
+
+Generic clients, native callbacks, and substituted adapters do not inherit this
+contract. Darwin/Linux have runtime process-ownership coverage; Windows cross-build
+coverage does not establish equivalent runtime behavior. See the
+[runtime guide](../../../docs/runtime-guide.md#jsonl-extension-workers) for loading,
+approval, execution, cleanup, and restart boundaries.
 
 ## Protocol and descriptor
 

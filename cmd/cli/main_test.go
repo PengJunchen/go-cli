@@ -561,6 +561,7 @@ func TestRunStdoutTracingStructuredOutputPreflightPreservesOtherModes(t *testing
 				},
 				Tracing: config.TracingConfig{Enabled: boolPtr(tt.enabled), Exporter: tt.exporter},
 			}
+			cfg.Memory.Enabled = boolPtr(false)
 			var stdout synchronizedBuffer
 			var stderr bytes.Buffer
 			code := run(tt.args, &stdout, &stderr, func() (*config.Config, error) { return cfg, nil })
@@ -1071,6 +1072,8 @@ func TestDefaultTraceContainsNoPrompt(t *testing.T) {
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"todo_write","arguments":"{\"action\":\"add\",\"content\":\"` + toolCanary + `\"}"}}]}}]}`)) //nolint:errcheck
 		case 2:
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_2","type":"function","function":{"name":"enter_plan_mode","arguments":"{\"reason\":\"` + promptCanary + `\"}"}}]}}]}`)) //nolint:errcheck
+		case 4:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"[]"}}]}`)) //nolint:errcheck
 		default:
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)) //nolint:errcheck
 		}
@@ -1103,7 +1106,7 @@ func TestDefaultTraceContainsNoPrompt(t *testing.T) {
 		return cfg, nil
 	})
 	require.Equal(t, 0, code, "stderr: %s", stderr.String())
-	require.Equal(t, 3, requestCount, "expected two tool calls and a final response")
+	require.Equal(t, 4, requestCount, "expected two tool calls, a final response, and default automatic extraction")
 
 	files, err := filepath.Glob(filepath.Join(traceDir, "*.jsonl"))
 	require.NoError(t, err)

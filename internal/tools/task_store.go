@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -77,8 +78,16 @@ func NewTaskStore() *TaskStore {
 // Create adds a new task with the given title and description, returning the
 // created Task. The ID is auto-generated as "task-N".
 func (s *TaskStore) Create(title, description string) Task {
+	task, _ := s.create(context.Background(), title, description)
+	return task
+}
+
+func (s *TaskStore) create(ctx context.Context, title, description string) (Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Task{}, err
+	}
 
 	s.counter++
 	id := fmt.Sprintf("task-%d", s.counter)
@@ -95,7 +104,7 @@ func (s *TaskStore) Create(title, description string) Task {
 	s.order = append(s.order, id)
 
 	slog.Debug("task_store.create", "id", id, "title", title)
-	return task
+	return task, nil
 }
 
 // Get returns the task with the given ID and whether it was found.
@@ -124,8 +133,15 @@ func (s *TaskStore) List() []Task {
 // Update applies the given options to the task with the specified ID. It
 // returns an error when the ID is unknown.
 func (s *TaskStore) Update(id string, opts ...TaskUpdateOption) error {
+	return s.update(context.Background(), id, opts...)
+}
+
+func (s *TaskStore) update(ctx context.Context, id string, opts ...TaskUpdateOption) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	task, ok := s.tasks[id]
 	if !ok {

@@ -1010,7 +1010,7 @@ func (p *preparedInvocation) commitAndInvoke(ctx context.Context) (*ToolResult, 
 		completed = true
 		return result, err
 	}
-	if p.completionProof == CompletionInlinePipelineJoined || p.completionProof == CompletionMCPRequestJoined {
+	if p.completionProof == CompletionInlinePipelineJoined || p.completionProof == CompletionMCPRequestJoined || p.completionProof == CompletionWorkerRequestJoined {
 		done := p.completion.begin(p.completionProof)
 		if done == nil {
 			return nil, ErrPreparedInvocationUnavailable
@@ -1173,7 +1173,7 @@ func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sin
 		completed = true
 		return result, err
 	}
-	if completionProof == CompletionInlinePipelineJoined || completionProof == CompletionMCPRequestJoined {
+	if completionProof == CompletionInlinePipelineJoined || completionProof == CompletionMCPRequestJoined || completionProof == CompletionWorkerRequestJoined {
 		done := p.completion.begin(completionProof)
 		if done == nil {
 			return nil, ErrPreparedInvocationUnavailable

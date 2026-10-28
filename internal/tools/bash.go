@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -447,33 +446,4 @@ func processExitCode(err error) (int, bool) {
 		return ee.ExitCode(), true
 	}
 	return 0, false
-}
-
-// limitedWriter buffers output up to max bytes and discards anything beyond it.
-type limitedWriter struct {
-	max  int
-	buf  *bytes.Buffer
-	over bool
-}
-
-func (w *limitedWriter) Write(p []byte) (int, error) {
-	remaining := w.max - w.buf.Len()
-	if remaining <= 0 {
-		w.over = true
-		return len(p), nil
-	}
-	if len(p) > remaining {
-		w.buf.Write(p[:remaining])
-		w.over = true
-		return len(p), nil
-	}
-	w.buf.Write(p)
-	return len(p), nil
-}
-
-// truncate appends a marker when output was truncated.
-func (w *limitedWriter) truncate() {
-	if w.over {
-		w.buf.WriteString("\n[output truncated]")
-	}
 }

@@ -165,8 +165,11 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 	if err != nil {
 		return err
 	}
-	if rc != nil && rc.Session.StorePath != "" && forkFlag != "" {
-		return &UnsupportedDurableCLIError{Feature: "durable prompt fork"}
+	if rc != nil && rc.Session.StorePath != "" && forkFlag != "" && resumeSessionID == "" {
+		resumeSessionID, err = session.PhysicalSessionForEntry(ctx, rc.Session.StorePath, forkFlag)
+		if err != nil {
+			return newUsageError("prompt: %v", err)
+		}
 	}
 	if resumeSessionID != "" && (rc == nil || rc.Session.StorePath == "") {
 		return newUsageError("prompt: --resume-session requires session.store_path")
@@ -217,6 +220,11 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 		if err != nil {
 			return newExecutionError("prompt: prepare durable session", err)
 		}
+		if forkFlag != "" {
+			if err := forkDurablePromptSession(dispatchCtx, durableSession, forkFlag); err != nil {
+				return errors.Join(newExecutionError("prompt: fork durable history", err), durableSession.requestClose(context.WithoutCancel(dispatchCtx)))
+			}
+		}
 		assembleOpts = append(assembleOpts, withDurableCLISession(durableSession))
 	} else if forkFlag != "" {
 		// --fork requires a session store to build the tree from.
@@ -248,7 +256,7 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 	// Fork from an existing session: build a SessionTree from the store,
 	// zero-copy branch at the requested entry, rebuild context, and inject
 	// the resulting history into the agent.
-	if forkFlag != "" {
+	if forkFlag != "" && assembly.durableSession == nil {
 		if err := c.forkSession(dispatchCtx, assembly, forkFlag); err != nil {
 			dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
 			dispatchSpan.End()
@@ -256,6 +264,8 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 		}
 	}
 
+	assembly.RefreshMemoryContext(dispatchCtx)
+	var initialMemorySnapshot *session.PreparedSessionSnapshot
 	runCtx, cancelRun := context.WithCancel(dispatchCtx)
 	defer cancelRun()
 	if assembly.durableSession != nil {
@@ -272,6 +282,12 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 			dispatchSpan.End()
 			return newExecutionError("prompt: hydrate durable history", err)
 		}
+		prepared, snapshotErr := assembly.durableSession.snapshotSelected()
+		if snapshotErr != nil {
+			sink.CloseRunCommit()
+			return newExecutionError("prompt: capture memory source history", snapshotErr)
+		}
+		initialMemorySnapshot = &prepared
 	}
 	stream, err := assembly.Harness.Submit(runCtx, prompt)
 	if err != nil {
@@ -305,6 +321,15 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 	if len(runErrors) > 0 {
 		return errors.Join(runErrors...)
 	}
+	memoryResult := core.Result{Message: result.Content}
+	if source, ok := stream.(core.RunStatusSource); ok {
+		memoryResult.StatusHandle = source.RunStatusHandle()
+		if memoryResult.StatusHandle != nil {
+			memoryResult.RunID = memoryResult.StatusHandle.Snapshot().RunID
+		}
+	}
+	assembly.RecordCompletedMemory(dispatchCtx, memoryResult, initialMemorySnapshot, prompt)
+	assembly.DrainMemory(dispatchCtx)
 	if result.Content != "" {
 		slog.Info("cli_prompt_complete",
 			"op", "cli.prompt.complete",

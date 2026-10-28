@@ -241,7 +241,6 @@ func TestDurableCLIBinaryQuarantinesLiveOrphanedBashAndNeverReplays(t *testing.T
 	})
 	fixture.peer.setResponsePlan(
 		durableCLIToolCall("call-live-orphan-bash", "bash", map[string]string{"command": orphan.command()}),
-		durableCLIFinal("exact resume after live orphan"),
 		durableCLIToolCall("call-blocked-fresh-write", "write", map[string]string{
 			"path":    "fresh-session-effect.txt",
 			"content": "must-not-dispatch",
@@ -292,20 +291,21 @@ func TestDurableCLIBinaryQuarantinesLiveOrphanedBashAndNeverReplays(t *testing.T
 
 	resumed := fixture.run(t,
 		"prompt", "-provider=openai", "-output=text", "-approve=auto", "-no-sandbox", "-resume-session", physicalID, "resume exact orphaned session")
-	requireCLIChildExit(t, resumed, 0)
+	requireCLIChildFailure(t, resumed, 1)
 	require.Equal(t, physicalID, durableCLIPhysicalSessionIDFromOutput(t, resumed.stdout), "restart must select the same physical session")
-	require.Contains(t, resumed.stdout, "exact resume after live orphan")
+	require.Contains(t, resumed.stderr, "pending actions prevent a new turn")
+	require.Len(t, fixture.peer.requestBodies(), 1, "pending same-session resume must make zero new provider requests")
 	requireOrphanLedgerCounts(t, orphan, 1, 1, "after exact resume")
 	rows = fixture.readRows(t, physicalID)
 	requireDurableSourceIDsUnique(t, rows, physicalID)
 	recoveredReceipt := requireRecoveredUnknownBashReceipt(t, rows, physicalID, action)
-	terminals := requireRunTerminals(t, rows, physicalID, 1)
+	terminals := requireRunTerminals(t, rows, physicalID, 0)
+	for _, row := range rows {
+		require.NotEqual(t, "resume exact orphaned session", row.Content, "new input must not persist before pending-session admission")
+	}
 	logDurableFileEvidence(t, "live-orphan exact resume", physicalID, rows, action, terminals)
-	requests = fixture.assertPeerRequests(t, 2)
-	resumedRequest := string(requests[1])
-	require.Contains(t, resumedRequest, `"content":"create durable orphan marker"`)
-	require.Contains(t, resumedRequest, `"tool_call_id":"call-live-orphan-bash"`)
-	require.Contains(t, resumedRequest, recoveredReceipt.Content, "the recovered exact-session request must expose the durable unknown receipt")
+	requests = fixture.assertPeerRequests(t, 1)
+	require.NotEmpty(t, recoveredReceipt.Content, "opening the selected file must retain the real unknown recovery receipt")
 	require.Equal(t, action.actionID, recoveredReceipt.ActionID)
 	indexRows = fixture.readWorkspaceIndex(t, action.workspaceID)
 	requireWorkspaceActionLifecycleForCall(t, indexRows, physicalID, action.actionID, action.toolCallID, 1, 0)
@@ -317,24 +317,24 @@ func TestDurableCLIBinaryQuarantinesLiveOrphanedBashAndNeverReplays(t *testing.T
 	freshPhysicalID := durableCLIPhysicalSessionIDFromOutput(t, blocked.stdout)
 	require.NotEqual(t, physicalID, freshPhysicalID, "a new CLI prompt must have a distinct physical session")
 	require.Contains(t, blocked.stderr, "workspace is quarantined by unresolved actions")
-	require.Contains(t, blocked.stderr, "unreceipted tool calls")
+	require.NotContains(t, blocked.stderr, "unreceipted tool calls", "the known denial must close its canonical tool group")
 	require.NoFileExists(t, filepath.Join(fixture.workDir, "fresh-session-effect.txt"), "the second physical session cannot dispatch a conflicting mutation while the orphan remains unresolved")
 	requireOrphanLedgerCounts(t, orphan, 1, 1, "after distinct-session mutation rejection; that session has zero effects")
 	blockedRows := fixture.readRows(t, freshPhysicalID)
 	requireDurableSourceIDsUnique(t, blockedRows, freshPhysicalID)
-	blockedAction := requirePendingWriteAttempt(t, blockedRows, freshPhysicalID, "call-blocked-fresh-write")
+	blockedAction := requireWriteIntentAttempt(t, blockedRows, freshPhysicalID, "call-blocked-fresh-write")
 	require.NotEqual(t, action.actionID, blockedAction.actionID, "the fresh session must have its own action identity")
 	require.Equal(t, action.workspaceID, blockedAction.workspaceID, "both physical sessions must share the exact captured workspace authority")
-	require.Empty(t, receiptsForCall(blockedRows, "call-blocked-fresh-write"), "the failed pre-dispatch commit must not be fabricated as a durable receipt")
-	require.Empty(t, requireRunTerminals(t, blockedRows, freshPhysicalID, 0), "the failing fresh-session run has no durable terminal")
-	requests = fixture.assertPeerRequests(t, 3)
-	require.Contains(t, string(requests[2]), `"content":"attempt conflicting mutation from a new session"`)
+	requireKnownDeniedWriteReceipt(t, blockedRows, freshPhysicalID, blockedAction)
+	requireRunTerminalOutcomes(t, blockedRows, freshPhysicalID, "error")
+	requests = fixture.assertPeerRequests(t, 2)
+	require.Contains(t, string(requests[1]), `"content":"attempt conflicting mutation from a new session"`)
 	requireOrphanLedgerCounts(t, orphan, 1, 1, "after distinct-session mutation rejection")
 	indexRows = fixture.readWorkspaceIndex(t, action.workspaceID)
 	requireWorkspaceActionLifecycleForCall(t, indexRows, physicalID, action.actionID, action.toolCallID, 1, 0)
 	requireWorkspaceActionLifecycleForCall(t, indexRows, freshPhysicalID, blockedAction.actionID, blockedAction.toolCallID, 0, 0)
 	heartbeat = waitForOrphanHeartbeatAdvance(t, orphan, heartbeat)
-	t.Logf("fresh-session conflict denied physical_id=%s intent_action_id=%s receipt=absent terminal=absent old_action_id=%s old_dispatches=1 old_resolutions=0 heartbeat=%d provider_requests=%d exit=%d", freshPhysicalID, blockedAction.actionID, action.actionID, heartbeat, len(requests), blocked.exitCode)
+	t.Logf("fresh-session conflict denied physical_id=%s intent_action_id=%s receipt=known_not_dispatched terminal=known_error old_action_id=%s old_dispatches=1 old_resolutions=0 heartbeat=%d provider_requests=%d exit=%d", freshPhysicalID, blockedAction.actionID, action.actionID, heartbeat, len(requests), blocked.exitCode)
 
 	blockedResume := fixture.run(t,
 		"prompt", "-provider=openai", "-output=text", "-approve=auto", "-no-sandbox", "-resume-session", freshPhysicalID, "resume after denied mutation")
@@ -343,12 +343,12 @@ func TestDurableCLIBinaryQuarantinesLiveOrphanedBashAndNeverReplays(t *testing.T
 	require.Contains(t, blockedResume.stdout, "recovered denied fresh-session mutation")
 	blockedRows = fixture.readRows(t, freshPhysicalID)
 	requireDurableSourceIDsUnique(t, blockedRows, freshPhysicalID)
-	interruptedReceipt := requireRecoveredInterruptedWriteReceipt(t, blockedRows, freshPhysicalID, blockedAction)
-	blockedTerminals := requireRunTerminals(t, blockedRows, freshPhysicalID, 1)
+	knownDeniedReceipt := requireKnownDeniedWriteReceipt(t, blockedRows, freshPhysicalID, blockedAction)
+	blockedTerminals := requireRunTerminalOutcomes(t, blockedRows, freshPhysicalID, "error", "success")
 	logDurableFileEvidence(t, "fresh-session exact resume after denial", freshPhysicalID, blockedRows, blockedAction, blockedTerminals)
-	requests = fixture.assertPeerRequests(t, 4)
-	require.Contains(t, string(requests[3]), `"tool_call_id":"call-blocked-fresh-write"`)
-	require.Contains(t, string(requests[3]), interruptedReceipt.Content, "the resumed request uses real marker-absent recovery evidence")
+	requests = fixture.assertPeerRequests(t, 3)
+	require.Contains(t, string(requests[2]), `"tool_call_id":"call-blocked-fresh-write"`)
+	require.Contains(t, string(requests[2]), knownDeniedReceipt.Content, "the resumed request uses the exact synced known-denial evidence")
 	indexRows = fixture.readWorkspaceIndex(t, action.workspaceID)
 	requireWorkspaceActionLifecycleForCall(t, indexRows, physicalID, action.actionID, action.toolCallID, 1, 0)
 	requireWorkspaceActionLifecycleForCall(t, indexRows, freshPhysicalID, blockedAction.actionID, blockedAction.toolCallID, 0, 0)
@@ -364,9 +364,9 @@ func TestDurableCLIBinaryQuarantinesLiveOrphanedBashAndNeverReplays(t *testing.T
 	require.Equal(t, "unknown", recoveredAgain.ReceiptOutcome)
 	indexRows = fixture.readWorkspaceIndex(t, action.workspaceID)
 	requireWorkspaceActionLifecycleForCall(t, indexRows, physicalID, action.actionID, action.toolCallID, 1, 0)
-	require.Equal(t, "interrupted", interruptedReceipt.ReceiptOutcome)
-	require.Equal(t, "not_dispatched", string(interruptedReceipt.DispatchState))
-	t.Logf("orphan released physical_id=%s action_id=%s exit_proof=%s receipt_id=%s receipt_outcome=%s dispatches=1 resolutions=0 fresh_write_receipt_id=%s fresh_write_outcome=%s fresh_write_dispatch_state=%s", physicalID, action.actionID, orphan.exitPath, recoveredAgain.ID, recoveredAgain.ReceiptOutcome, interruptedReceipt.ID, interruptedReceipt.ReceiptOutcome, interruptedReceipt.DispatchState)
+	require.Equal(t, "error", knownDeniedReceipt.ReceiptOutcome)
+	require.Equal(t, "not_dispatched", string(knownDeniedReceipt.DispatchState))
+	t.Logf("orphan released physical_id=%s action_id=%s exit_proof=%s receipt_id=%s receipt_outcome=%s dispatches=1 resolutions=0 fresh_write_receipt_id=%s fresh_write_outcome=%s fresh_write_dispatch_state=%s", physicalID, action.actionID, orphan.exitPath, recoveredAgain.ID, recoveredAgain.ReceiptOutcome, knownDeniedReceipt.ID, knownDeniedReceipt.ReceiptOutcome, knownDeniedReceipt.DispatchState)
 }
 
 func TestDurableCLIBinaryAllowsScopedReadersDuringLiveOrphanAndRetainsMutationQuarantine(t *testing.T) {
@@ -400,7 +400,6 @@ func TestDurableCLIBinaryAllowsScopedReadersDuringLiveOrphanAndRetainsMutationQu
 			"path":    "fresh-session-effect.txt",
 			"content": "must-not-dispatch",
 		}),
-		durableCLIFinal("exact old session resumed after safe reads"),
 	)
 
 	command, stdout, stderr, wait := fixture.start(t,
@@ -495,14 +494,14 @@ func TestDurableCLIBinaryAllowsScopedReadersDuringLiveOrphanAndRetainsMutationQu
 	require.NotEqual(t, readPhysicalID, blockedPhysicalID)
 	require.NotEqual(t, lsPhysicalID, blockedPhysicalID)
 	require.Contains(t, blocked.stderr, "workspace is quarantined by unresolved actions")
-	require.Contains(t, blocked.stderr, "unreceipted tool calls")
+	require.NotContains(t, blocked.stderr, "unreceipted tool calls", "the known denial must close its canonical tool group")
 	require.NoFileExists(t, filepath.Join(fixture.workDir, "fresh-session-effect.txt"), "the fresh physical session's Write has no visible effect")
 	blockedRows := fixture.readRows(t, blockedPhysicalID)
 	requireDurableSourceIDsUnique(t, blockedRows, blockedPhysicalID)
-	blockedAction := requirePendingWriteAttempt(t, blockedRows, blockedPhysicalID, "call-blocked-quarantined-write")
+	blockedAction := requireWriteIntentAttempt(t, blockedRows, blockedPhysicalID, "call-blocked-quarantined-write")
 	require.Equal(t, orphanAction.workspaceID, blockedAction.workspaceID)
-	require.Empty(t, receiptsForCall(blockedRows, blockedAction.toolCallID), "a rejected pre-dispatch Write does not receive a fabricated receipt")
-	require.Empty(t, requireRunTerminals(t, blockedRows, blockedPhysicalID, 0), "the baseline CLI leaves this rejected tool-call group uncommitted")
+	requireKnownDeniedWriteReceipt(t, blockedRows, blockedPhysicalID, blockedAction)
+	requireRunTerminalOutcomes(t, blockedRows, blockedPhysicalID, "error")
 	requests = fixture.assertPeerRequests(t, 6)
 	require.Contains(t, string(requests[5]), `"content":"attempt write during unresolved mutation quarantine"`)
 	indexRows = fixture.readWorkspaceIndex(t, orphanAction.workspaceID)
@@ -519,19 +518,20 @@ func TestDurableCLIBinaryAllowsScopedReadersDuringLiveOrphanAndRetainsMutationQu
 
 	resumed := fixture.run(t,
 		"prompt", "-provider=openai", "-output=text", "-approve=auto", "-no-sandbox", "-resume-session", orphanPhysicalID, "resume original session after safe reads")
-	requireCLIChildExit(t, resumed, 0)
+	requireCLIChildFailure(t, resumed, 1)
 	require.Equal(t, orphanPhysicalID, durableCLIPhysicalSessionIDFromOutput(t, resumed.stdout), "only the exact old physical session is resumed")
-	require.Contains(t, resumed.stdout, "exact old session resumed after safe reads")
+	require.Contains(t, resumed.stderr, "pending actions prevent a new turn")
+	require.Len(t, fixture.peer.requestBodies(), 6, "resuming the unresolved original session makes zero new provider requests")
 	orphanRows = fixture.readRows(t, orphanPhysicalID)
 	requireDurableSourceIDsUnique(t, orphanRows, orphanPhysicalID)
 	recoveredReceipt := requireRecoveredUnknownBashReceipt(t, orphanRows, orphanPhysicalID, orphanAction)
-	orphanTerminals := requireRunTerminals(t, orphanRows, orphanPhysicalID, 1)
+	orphanTerminals := requireRunTerminals(t, orphanRows, orphanPhysicalID, 0)
+	for _, row := range orphanRows {
+		require.NotEqual(t, "resume original session after safe reads", row.Content, "pending new input must not be persisted")
+	}
 	logDurableFileEvidence(t, "exact old-session resume after scoped reads", orphanPhysicalID, orphanRows, orphanAction, orphanTerminals)
-	requests = fixture.assertPeerRequests(t, 7)
-	resumedRequest := string(requests[6])
-	require.Contains(t, resumedRequest, `"content":"resume original session after safe reads"`)
-	require.Contains(t, resumedRequest, `"tool_call_id":"call-live-orphan-bash"`)
-	require.Contains(t, resumedRequest, recoveredReceipt.Content, "the resumed exact session carries its real unknown receipt")
+	requests = fixture.assertPeerRequests(t, 6)
+	require.NotEmpty(t, recoveredReceipt.Content, "opening the selected physical session retains the real unknown receipt")
 	indexRows = fixture.readWorkspaceIndex(t, orphanAction.workspaceID)
 	requireWorkspaceActionLifecycleForCall(t, indexRows, orphanPhysicalID, orphanAction.actionID, orphanAction.toolCallID, 1, 0)
 	requireWorkspaceActionLifecycleForCall(t, indexRows, readPhysicalID, readAction.actionID, readAction.toolCallID, 1, 1)
@@ -852,7 +852,7 @@ func newDurableCLIBinaryFixtureWithTools(t *testing.T, binary string, blockAfter
 	configPath := filepath.Join(fixture.home, ".go-cli", "config.yaml")
 	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o700))
 	builtinYAML := strings.Join(builtins, "\n    - ")
-	configYAML := fmt.Sprintf("provider:\n  name: openai\n  base_url: %q\n  model: durable-cli-fixture\nmodel:\n  name: durable-cli-fixture\nsession:\n  store_path: %q\ntools:\n  builtin:\n    - %s\ntracing:\n  enabled: false\n", server.URL+"/v1", fixture.storeDir, builtinYAML)
+	configYAML := fmt.Sprintf("provider:\n  name: openai\n  base_url: %q\n  model: durable-cli-fixture\nmodel:\n  name: durable-cli-fixture\nsession:\n  store_path: %q\ntools:\n  builtin:\n    - %s\ntracing:\n  enabled: false\nmemory:\n  enabled: false\n", server.URL+"/v1", fixture.storeDir, builtinYAML)
 	require.NoError(t, os.WriteFile(configPath, []byte(configYAML), 0o600))
 	fixture.childEnv = []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -1177,7 +1177,7 @@ func durableActionForCall(rows []session.SessionEntry, physicalID, toolCallID, t
 	return durableCLIAction{actionID: intent.ActionID, toolCallID: intent.ToolCallID, workspaceID: intent.WorkspaceID}, true
 }
 
-func requirePendingWriteAttempt(t *testing.T, rows []session.SessionEntry, physicalID, toolCallID string) durableCLIAction {
+func requireWriteIntentAttempt(t *testing.T, rows []session.SessionEntry, physicalID, toolCallID string) durableCLIAction {
 	t.Helper()
 	action, ok := durableActionForCall(rows, physicalID, toolCallID, "write")
 	require.True(t, ok, "the fresh session must durably record the write call and its intent before the workspace rejects dispatch")
@@ -1186,19 +1186,36 @@ func requirePendingWriteAttempt(t *testing.T, rows []session.SessionEntry, physi
 	return action
 }
 
-func requireRecoveredInterruptedWriteReceipt(t *testing.T, rows []session.SessionEntry, physicalID string, action durableCLIAction) session.SessionEntry {
+func requireKnownDeniedWriteReceipt(t *testing.T, rows []session.SessionEntry, physicalID string, action durableCLIAction) session.SessionEntry {
 	t.Helper()
 	receipts := receiptsForCall(rows, action.toolCallID)
-	require.Len(t, receipts, 1, "exact reopen must record one receipt based on the absent global dispatch marker")
+	require.Len(t, receipts, 1, "the trusted producer records exactly one synced pre-dispatch denial receipt")
 	receipt := receipts[0]
 	require.Equal(t, physicalID, receipt.SessionID)
 	require.NotEmpty(t, receipt.ID)
 	require.Equal(t, "write", receipt.ToolName)
-	require.Equal(t, "interrupted", receipt.ReceiptOutcome)
+	require.Equal(t, "error", receipt.ReceiptOutcome)
 	require.Equal(t, "not_dispatched", string(receipt.DispatchState))
 	require.Equal(t, action.actionID, receipt.ActionID)
 	require.Equal(t, action.workspaceID, receipt.WorkspaceID)
 	require.NotEmpty(t, receipt.RunID)
+	var resolutions []session.SessionEntry
+	for _, row := range rows {
+		if row.CheckpointKind == session.CheckpointExecutionResolution && row.ActionID == action.actionID {
+			resolutions = append(resolutions, row)
+		}
+	}
+	require.Len(t, resolutions, 1, "known pre-dispatch denial must include its own typed NoIO resolution")
+	resolution := resolutions[0]
+	require.Equal(t, receipt.RunID, resolution.RunID)
+	require.Equal(t, receipt.OwnerGeneration, resolution.OwnerGeneration)
+	require.Equal(t, receipt.ToolCallID, resolution.ToolCallID)
+	require.Equal(t, receipt.WorkspaceID, resolution.WorkspaceID)
+	require.NotNil(t, resolution.ExecutionResolution)
+	require.Equal(t, "never_dispatched", string(resolution.ExecutionResolution.Evidence))
+	require.Equal(t, receipt.ID, resolution.ExecutionResolution.EvidenceRef)
+	require.Greater(t, resolution.Seq, receipt.Seq)
+
 	return receipt
 }
 
@@ -1333,6 +1350,15 @@ func requireDurableSourceIDsUnique(t *testing.T, rows []session.SessionEntry, ph
 
 func requireRunTerminals(t *testing.T, rows []session.SessionEntry, physicalID string, want int) []session.SessionEntry {
 	t.Helper()
+	outcomes := make([]string, want)
+	for index := range outcomes {
+		outcomes[index] = "success"
+	}
+	return requireRunTerminalOutcomes(t, rows, physicalID, outcomes...)
+}
+
+func requireRunTerminalOutcomes(t *testing.T, rows []session.SessionEntry, physicalID string, outcomes ...string) []session.SessionEntry {
+	t.Helper()
 	terminals := make([]session.SessionEntry, 0)
 	seenRuns := make(map[string]struct{})
 	seenIDs := make(map[string]struct{})
@@ -1344,7 +1370,8 @@ func requireRunTerminals(t *testing.T, rows []session.SessionEntry, physicalID s
 		require.NotEmpty(t, row.ID)
 		require.NotEmpty(t, row.RunID)
 		require.NotEmpty(t, row.WorkspaceID)
-		require.Equal(t, "success", string(row.RunOutcome))
+		require.Less(t, len(terminals), len(outcomes), "unexpected extra terminal checkpoint")
+		require.Equal(t, outcomes[len(terminals)], string(row.RunOutcome))
 		if _, duplicate := seenRuns[row.RunID]; duplicate {
 			t.Fatalf("physical JSONL has more than one run terminal for run %q", row.RunID)
 		}
@@ -1362,7 +1389,7 @@ func requireRunTerminals(t *testing.T, rows []session.SessionEntry, physicalID s
 		require.Greater(t, row.Seq, lastTranscriptSeq, "terminal checkpoint follows the completed transcript for its run")
 		terminals = append(terminals, row)
 	}
-	require.Len(t, terminals, want, "assert the actual on-disk terminal checkpoints for completed child runs")
+	require.Len(t, terminals, len(outcomes), "assert the actual on-disk terminal checkpoints for completed child runs")
 	return terminals
 }
 
