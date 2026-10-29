@@ -14,6 +14,8 @@ import subprocess
 import time
 import tomllib
 import uuid
+from audit_proxy import OBSERVE_POLICY, STRICT_POLICY, ledger_observations, resolve_audit_policy
+from native_terminal import observe_native_terminal
 from eval_core import MODEL,GO_REVISION,PROFILE_ID,PROFILE_IDS,PI_VERSION,resolve_profile,go_config,pi_config,cli_argv,usage_totals
 
 ROOT=Path(__file__).resolve().parent
@@ -95,8 +97,35 @@ def final_record(result,rows):
     stop_class=('budget_stop' if 'request_cap' in reasons else
                 'measurement_stop' if 'unknown_usage_stop' in reasons or opened else
                 'api_contract_stop' if reasons else None)
-    return result|{'task_passed':None,'usage':totals,'open_attempts':len(opened),
+    record=result|{'task_passed':None,'usage':totals,'open_attempts':len(opened),
                    'wire_contract_rejections':len(reasons),'stop_class':stop_class}
+    if result.get('audit_policy_id')==OBSERVE_POLICY or any(r.get('policy_id')==OBSERVE_POLICY for r in rows):
+        observed=ledger_observations(rows)
+        policies={r.get('policy_id')for r in rows if r.get('phase')in ('start','finish')}
+        fingerprints={r.get('served_alias_fingerprint')for r in rows if r.get('served_alias_fingerprint')}
+        declared=result.get('audit_policy_fingerprint')
+        if not fingerprints and isinstance(declared,str):fingerprints={declared}
+        policy_invalid=(bool(policies)and policies!={OBSERVE_POLICY})or len(fingerprints)!=1 or(bool(declared)and fingerprints!={declared})
+        ends=[r for r in rows if r.get('phase')=='finish']
+        last=ends[-1]if ends else{}
+        usable=(type(last.get('http_status'))is int and 200<=last['http_status']<300
+                and not last.get('error')and not last.get('api_error_envelope')and not last.get('response_contract_error')
+                and last.get('transport_eof')is True and(last.get('json_parse_complete')is True or last.get('sse_done_seen')is True or bool(last.get('finish_reasons'))))
+        controls={r.get('control_stop_reason')for r in ends if r.get('control_stop_reason')}
+        native_terminal=result.get('native_terminal_status')
+        api_terminal=(result.get('api_terminal_error')is True or native_terminal=='api_error'
+                      or bool(controls & {'api_access_error','api_terminal_error'}))
+        completion_unknown=(type(result.get('exit_code'))is int and result['exit_code']==0)and not api_terminal and not result.get('native_terminal_failure')and (native_terminal=='unknown'or(bool(ends)and not usable and native_terminal!='success'))
+        stop=('budget_stop'if any(r in ('request_cap','wall_clock_cap')for r in reasons)else
+              'api_contract_stop'if reasons or policy_invalid or bool(controls-{'api_access_error','api_terminal_error'})else'api_terminal_error'if api_terminal else
+              'measurement_stop'if observed['ledger_status']!='complete'else None)
+        record.update(audit_policy_id=OBSERVE_POLICY,audit_policy_fingerprint=next(iter(fingerprints))if len(fingerprints)==1 else None,
+                      audit_measurement=observed,usage=observed['usage'],
+                      api_terminal_error=api_terminal,api_completion_unknown=completion_unknown,
+                      api_control_stop_reasons=sorted(controls),stop_class=stop,
+                      unknown_usage_policy='observe null/coverage/lower bound; native retries retain common budgets')
+    return record
+
 
 PROBE=r'''
 import json,urllib.request,time,socket,sys
@@ -311,10 +340,34 @@ def install_native_configs(cid,configs,*,profile_id=PROFILE_ID):
 
 
 
-def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario="parallel",*,profile_id=PROFILE_ID):
-    profile=resolve_profile(profile_id)
+FUTURE_PROFILE_ID='main-bash300-personal-memory-off-usage-observe-v3'
+RUNNER_PROFILE_IDS=(*PROFILE_IDS,FUTURE_PROFILE_ID)
+
+
+def resolve_runner_profile(profile_id,served_alias_manifest):
+    if profile_id!=FUTURE_PROFILE_ID:
+        profile=resolve_profile(profile_id)
+        if served_alias_manifest is not None:raise ValueError('legacy strict profile cannot opt in through aliases')
+        return profile|{'native_config_profile_id':profile_id},resolve_audit_policy(STRICT_POLICY),None
+    if served_alias_manifest is None:raise ValueError('future profile requires its frozen served alias manifest')
+    path=Path(served_alias_manifest)
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    with os.fdopen(fd,'rb')as source:
+        info=os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode)or info.st_nlink!=1 or info.st_size>65536:raise ValueError('alias manifest is not a bounded ordinary file')
+        raw=source.read(65537)
+    if len(raw)>65536:raise ValueError('alias manifest exceeds bound')
+    document=json.loads(raw)
+    audit=resolve_audit_policy(OBSERVE_POLICY,document)
+    base='main-bash300-personal-memory-off-v2'
+    return resolve_profile(base)|{'profile_id':profile_id,'native_config_profile_id':base},audit,hashlib.sha256(raw).hexdigest()
+
+
+def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario="parallel",*,profile_id=PROFILE_ID,served_alias_manifest=None):
+    profile,audit,alias_manifest_sha256=resolve_runner_profile(profile_id,served_alias_manifest)
     out.mkdir(parents=True,exist_ok=False)
     cfg=tomllib.loads((task/'task.toml').read_text())
+    if audit['policy_id']==OBSERVE_POLICY and cfg['agent']['timeout_sec']!=3000:raise ValueError('future profile requires the fixed3000s task window')
     prompt=(task/'instruction.md').read_text()
     lock=json.loads((ROOT/'dataset-lock.json').read_text())
     entry=next(t for t in lock['tasks'] if t['task_id']==task.name)
@@ -326,7 +379,9 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
     token=uuid.uuid4().hex[:12];network='go-cli-eval-'+token
     task_cid=None;relay_cid=None
     record={'driver':'custom Docker driver using Harbor task assets','task_name':cfg['task']['name'],
-            'profile_id':profile['profile_id'],'go_automatic_personal_memory':False,
+            'profile_id':profile['profile_id'],'native_config_profile_id':profile['native_config_profile_id'],
+            'audit_policy_id':audit['policy_id'],'audit_policy_fingerprint':audit['fingerprint'],
+            'served_alias_manifest_sha256':alias_manifest_sha256,'go_automatic_personal_memory':False,
             'configured_go_bash_execution_window_seconds':profile['configured_go_bash_execution_window_seconds'],
             'go_bash_execution_window_source':'host_profile_declaration','go_supervisor_mode':profile['go_supervisor_mode'],
             'go_supervisor_mode_source':'host_profile_declaration',
@@ -341,7 +396,7 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
             'native_tools_preserved':True,'auxiliary_model_configured':False,'offline_fixture':fixture_smoke,'fixture_scenario':fixture_scenario if fixture_smoke else None,
             'compaction':'native default, not replaced or aligned','task_passed':None,
             'max_upstream_requests':80,'whole_task_token_cost_hard_limit_enforced':False,
-            'unknown_usage_policy':'block all subsequent upstream calls; preserve missing usage as unknown'}
+            'unknown_usage_policy':('observe null/coverage/lower bound; native retries retain common budgets'if audit['policy_id']==OBSERVE_POLICY else'block all subsequent upstream calls; preserve missing usage as unknown')}
     (out/'agent').mkdir();(out/'wire').mkdir()
     try:
         docker('network','create','--internal',network)
@@ -355,9 +410,10 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
             '--mount',f'type=bind,src={ROOT / "eval_core.py"},dst=/proxy/eval_core.py,readonly',
             '--mount',f'type=bind,src={ROOT / "offline_fixture.py"},dst=/proxy/offline_fixture.py,readonly',
             '--mount',f'type=bind,src={out / "wire"},dst=/wire',
-            relay_image,'python','/proxy/audit_proxy.py','--upstream','http://host.docker.internal:3425',
+            relay_image,'python','/proxy/audit_proxy.py','--upstream',('http://127.0.0.1:1'if fixture_smoke else'http://host.docker.internal:3425'),
             '--journal','/wire/wire.jsonl','--session','go-cli-eval-'+token,
-            *(['--fixture'] if fixture_smoke else [])).stdout.strip()
+            *(['--fixture'] if fixture_smoke else []),
+            *(['--policy',OBSERVE_POLICY,'--served-alias-json',json.dumps({'aliases':audit['aliases'],'evidence_sha256':audit['evidence_sha256']},sort_keys=True,separators=(',',':'))]if audit['policy_id']==OBSERVE_POLICY else [])).stdout.strip()
         docker('network','connect','--alias','relay',network,relay_cid)
         docker('start',relay_cid)
         task_cid=docker('create','--platform','linux/amd64','--network',network,
@@ -395,12 +451,16 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
         docker('exec',task_cid,'mkdir','-p','/opt/eval','/logs/agent')
         docker('cp',str(payload)+'/.',task_cid+':/opt/eval',timeout=180)
         configs=out/'configs'
-        record['native_config_installation']=install_native_configs(task_cid,configs,profile_id=profile['profile_id'])
+        record['native_config_installation']=install_native_configs(task_cid,configs,profile_id=profile['native_config_profile_id'])
         record['config_sha256']=dict(record['native_config_installation']['host_config_sha256'])
         actual_argv=cli_argv(arm,prompt)
         record['argv_sha256']=hashlib.sha256(json.dumps(actual_argv).encode()).hexdigest()
         result=run_cli_once(task_cid,actual_argv,out,int(cfg['agent']['timeout_sec']))
         record.update(result)
+        if audit['policy_id']==OBSERVE_POLICY:
+            terminal=observe_native_terminal(arm,out/'stdout.jsonl',result.get('exit_code'))
+            record.update(native_terminal=terminal,native_terminal_status=terminal['status'],
+                          native_terminal_failure=terminal['status']in ('runtime_error','aborted','output_truncated'))
         if not result.get('outer_kill'):
             cleanup=docker('exec',task_cid,'python3','-c',COLLECT,baseline,check=False,timeout=120)
             record['artifact_collection_exit_code']=cleanup.returncode
@@ -438,8 +498,9 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
 def main():
     p=argparse.ArgumentParser();p.add_argument('--task',required=True,type=Path)
     p.add_argument('--arm',choices=['go','pi'],required=True);p.add_argument('--out',required=True,type=Path)
-    p.add_argument('--profile',choices=PROFILE_IDS,default=PROFILE_ID)
-    p.add_argument('--probe-only',action='store_true');p.add_argument('--fixture-smoke',action='store_true');p.add_argument('--fixture-scenario',choices=['parallel','single-status','write-parallel'],default='parallel');args=p.parse_args()
-    run_trial(args.task.resolve(),args.arm,args.out.resolve(),args.probe_only,args.fixture_smoke,args.fixture_scenario,profile_id=args.profile)
+    p.add_argument('--profile',choices=RUNNER_PROFILE_IDS,default=PROFILE_ID)
+    p.add_argument('--served-alias-manifest',type=Path)
+    p.add_argument('--probe-only',action='store_true');p.add_argument('--fixture-smoke',action='store_true');p.add_argument('--fixture-scenario',choices=['parallel','single-status','write-parallel','recover-once','fail-always'],default='parallel');args=p.parse_args()
+    run_trial(args.task.resolve(),args.arm,args.out.resolve(),args.probe_only,args.fixture_smoke,args.fixture_scenario,profile_id=args.profile,served_alias_manifest=args.served_alias_manifest)
 
 if __name__=='__main__':main()

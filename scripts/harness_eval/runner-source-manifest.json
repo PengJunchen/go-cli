@@ -15,7 +15,7 @@
     },
     {
       "path": "runner/audit_proxy.py",
-      "sha256": "f2ab1639924e9a4edd9de1399ac1d5c3ff8bef4372b806813b1ef05f43230e68"
+      "sha256": "8227686e5f9a21154e153b4b7dfb089cb31ae8097d589ac53d3502143c1491d5"
     },
     {
       "path": "runner/dataset-lock.json",
@@ -27,7 +27,7 @@
     },
     {
       "path": "runner/grade_trial.py",
-      "sha256": "3cebd2e8a98df141b5481526a6b7f39345644397f56b313de7c1f6ed3fa12a93"
+      "sha256": "dd4e8dbbfabff3a354e1980b62bbb8c8a0148584425b3262b3ed5345766ff793"
     },
     {
       "path": "runner/locks/pi/package-lock.json",
@@ -38,8 +38,12 @@
       "sha256": "cf3773802a543ee8be76b1023f41bbda52935494811d6bb60bbfe105ffe02d1b"
     },
     {
+      "path": "runner/native_terminal.py",
+      "sha256": "07925afe2c398c8fe614f82117a928b1a27937dba9a04d18cb48fa67e9daed8e"
+    },
+    {
       "path": "runner/offline_fixture.py",
-      "sha256": "b74607e89df9f999e34dc0e61cfd54a0e4c98c1aed80d75272eb1e64ee62d46b"
+      "sha256": "8f58fe92240525f8ac020e72fc32aaa4365736e4144714641ec6d5fec427b471"
     },
     {
       "path": "runner/requirements.lock",
@@ -47,7 +51,7 @@
     },
     {
       "path": "runner/run_trial.py",
-      "sha256": "f532b85f281f35173bf7a9d8412df19912720908f978486a11967090bd1c8cc7"
+      "sha256": "7b18ab827d5d5715f7d7ac29ee52b2c1a8855db03ad533d0575a0b4ba9ed1686"
     },
     {
       "path": "runner/scripts/asset_preflight.py",
@@ -59,11 +63,19 @@
     },
     {
       "path": "runner/summarize_trials.py",
-      "sha256": "5869f706ec7535d2df288894a1d0d656068fd2bb3ac70cf85ebcbcdc243dcf62"
+      "sha256": "3b5f905ccb74c2ad316b99eab8fe90fcf2bef99a259a2fcbb0ef1a1ff4670498"
     },
     {
       "path": "runner/tests/fixtures/profile-v1.json",
       "sha256": "9204a910f87694eede2890158a1086e957b8ce7aa2e9a9d78922aa756dd689ba"
+    },
+    {
+      "path": "runner/tests/fixtures/swe_pro_patch_replay.LICENSE",
+      "sha256": "03a44b2f703779d3f34c18e056da5b893537ca61588e6b15b615a4a612e77fb9"
+    },
+    {
+      "path": "runner/tests/fixtures/swe_pro_patch_replay.py",
+      "sha256": "5c8b344de37164e9723f1724c2573013957fb644c3913a64c12c1718c737d876"
     },
     {
       "path": "runner/tests/test_asset_preflight.py",
@@ -90,16 +102,28 @@
       "sha256": "6bcfbb0cdc2842de7ec78e27658c9a51fad49fff1ea3939c0b155df19b38029b"
     },
     {
+      "path": "runner/tests/test_native_terminal.py",
+      "sha256": "a27a8304644ef92dc1e505892542a4f70f946eb7abec2e4ab6030f65147aba0d"
+    },
+    {
       "path": "runner/tests/test_offline_fixture.py",
-      "sha256": "5628ff3b45c85ee60eebe934d76d251ecae63e011b0cd0ac34dde404f7777fd4"
+      "sha256": "87dc877ebe931fab2327d3a7abe72c5c78b4abf95d8526b789e4df36e2e5f3dd"
+    },
+    {
+      "path": "runner/tests/test_patch_transfer.py",
+      "sha256": "390a1a3bbe2aa6fbee06bda127db7abb1e1b88356ec0a2d717281042784d6ace"
+    },
+    {
+      "path": "runner/tests/test_policy_driver.py",
+      "sha256": "706cd854cdc9d32cdff952ecf601dd7eb340830fb6a658582785076fbcacba74"
     },
     {
       "path": "runner/tests/test_profiles.py",
-      "sha256": "c3e4bbc453f338552cb4130405468d876b250e5c353a6b504b80e09405e7f551"
+      "sha256": "ac738ec0c5d34a6dec781a50cbdd8c4760b4e5a0ee0943f870040a026f1453d9"
     },
     {
       "path": "runner/tests/test_reviewer_contract.py",
-      "sha256": "202f3ad0b432b17426f78ad7adf5a35498b72be094fa0c9d04fef8be41686d18"
+      "sha256": "f14def7edfff389bd6109d3d3ed9509bfaa68158506cedc3511d61a59a0066ae"
     },
     {
       "path": "runner/tests/test_summarize.py",
@@ -108,15 +132,20 @@
     {
       "path": "runner/tests/test_tool_metadata.py",
       "sha256": "0f1e2f705890e8f91c527b793d4dc100f67efa17d351b70eab9ff5cb09721dc6"
+    },
+    {
+      "path": "runner/tests/test_usage_policy.py",
+      "sha256": "00e73ba493fafd4236205a3339b3c8b395b0ac11a2d1e86b8ba9c585a40bff7c"
     }
   ],
-  "source_base_revision": "e9c438a42f40070272f90ddd866b116f3b22cdbf",
+  "source_base_revision": "3d5919074bb14e8118feaf4e6d13eebcc215342d",
   "reviewed_go_revision": "e9c438a42f40070272f90ddd866b116f3b22cdbf",
   "profile_id": "main-5736e88-personal-memory-off-v1",
   "go_automatic_personal_memory": false,
   "supported_profile_ids": [
     "main-5736e88-personal-memory-off-v1",
-    "main-bash300-personal-memory-off-v2"
+    "main-bash300-personal-memory-off-v2",
+    "main-bash300-personal-memory-off-usage-observe-v3"
   ],
   "profile_host_declarations": {
     "main-5736e88-personal-memory-off-v1": {
@@ -128,6 +157,13 @@
       "configured_go_bash_execution_window_seconds": 300,
       "go_supervisor_mode": "off",
       "fixed_container_environment": "GO_CLI_LINUX_SUBREAPER=0; inspected before start"
+    },
+    "main-bash300-personal-memory-off-usage-observe-v3": {
+      "configured_go_bash_execution_window_seconds": 300,
+      "go_supervisor_mode": "off",
+      "fixed_container_environment": "GO_CLI_LINUX_SUBREAPER=0; inspected before start",
+      "audit_policy": "usage-observe-native-retry-v1",
+      "frozen_served_alias_required": true
     }
   },
   "profile_observation_boundary": "Source declarations only; setup identity/readability and effective tool observations are recorded in private per-run evidence.",
@@ -152,5 +188,49 @@
     "container_file_mode": "0600",
     "pre_native_gate": "same-identity O_NOFOLLOW open, fstat ownership/mode and exact byte SHA256",
     "capabilities_unchanged": true
+  },
+  "audit_request_policy": {
+    "default": "strict-unknown-usage-stop-v1",
+    "explicit_opt_in": "usage-observe-native-retry-v1",
+    "native_retry_only": true,
+    "relay_auto_retry": false,
+    "same_max_upstream_slots": 80,
+    "same_task_seconds": 3000,
+    "usage_missing": "unknown coverage and known lower bound; no synthetic zero",
+    "served_alias": "closed explicit mapping and evidence SHA256; missing provenance stays unknown",
+    "raw_payload_persistence": false
+  },
+  "native_terminal_observation": {
+    "supported_schemas": [
+      "go-agent-event-e9-v1",
+      "pi-json-event-1.4.0-v1"
+    ],
+    "scope": "single prompt from pinned versions; no universal multi-session claim",
+    "go": "final typed done/error",
+    "pi": "final agent_end with willRetry=false followed by settled; final assistant stopReason",
+    "cli_zero_is_not_sufficient": true,
+    "unknown_preserved": true,
+    "task_scoring_unchanged": true
+  },
+  "official_replay_test_fixture": {
+    "upstream": "https://github.com/scaleapi/SWE-bench_Pro-os",
+    "commit": "66f92766bba642462d4bbe5479e83f91f9211862",
+    "upstream_path": "v2/tooling/patch_replay.py",
+    "fixture_path": "runner/tests/fixtures/swe_pro_patch_replay.py",
+    "sha256": "5c8b344de37164e9723f1724c2573013957fb644c3913a64c12c1718c737d876",
+    "license": "MIT",
+    "license_path": "runner/tests/fixtures/swe_pro_patch_replay.LICENSE",
+    "license_sha256": "03a44b2f703779d3f34c18e056da5b893537ca61588e6b15b615a4a612e77fb9",
+    "test_only": true,
+    "production_official_asset_path_unchanged": true
+  },
+  "replay_patch_transport_contract": {
+    "target": "/tmp/replay.patch",
+    "canonical_source_sha256_required": true,
+    "canonical_source_metadata_and_bytes_preserved": true,
+    "private_staging_parent_mode": "0700",
+    "independent_staging_file_mode": "0644",
+    "copy_success_is_not_readback_or_apply_success": true,
+    "official_replay_and_verifier_unchanged": true
   }
 }

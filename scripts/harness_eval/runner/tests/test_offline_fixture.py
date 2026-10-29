@@ -3,6 +3,7 @@ import threading
 import unittest
 from unittest.mock import patch
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from offline_fixture import server
 
 class FixtureContract(unittest.TestCase):
@@ -25,3 +26,20 @@ class FixtureContract(unittest.TestCase):
                 self.assertEqual(final['content'],'OFFLINE_FIXTURE_DONE')
             finally:
                 fixture.shutdown();fixture.server_close();worker.join()
+
+
+class FaultFixtureContract(unittest.TestCase):
+    def test_finite_recovery_and_exhaustion_scenarios_are_loopback_and_no_model(self):
+        for scenario,expected in [('recover-once',[502,200,200]),('fail-always',[502,502,502])]:
+            with self.subTest(scenario=scenario):
+                fixture=server(scenario);worker=threading.Thread(target=fixture.serve_forever);worker.start()
+                try:
+                    statuses=[]
+                    for _ in range(3):
+                        req=Request(f'http://127.0.0.1:{fixture.server_port}/v1/chat/completions',data=b'{"messages":[],"tools":[]}',headers={'Content-Type':'application/json'})
+                        try:
+                            with urlopen(req,timeout=5)as response:statuses.append(response.status)
+                        except HTTPError as error:
+                            statuses.append(error.code);self.assertNotIn('usage',json.loads(error.read()))
+                    self.assertEqual(statuses,expected);self.assertEqual(fixture.request_count,3)
+                finally:fixture.shutdown();fixture.server_close();worker.join()

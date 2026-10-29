@@ -81,7 +81,7 @@ class ProfileContract(unittest.TestCase):
 
 
 class ProfileDriverContract(unittest.TestCase):
-    def run_fake_trial(self, arm, profile, environment=None):
+    def run_fake_trial(self, arm, profile, environment=None, alias_manifest=None):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -119,10 +119,15 @@ class ProfileDriverContract(unittest.TestCase):
             elif args[:4] == ('exec', 'task', 'git', 'rev-parse'):
                 stdout = 'b' * 40
             return subprocess.CompletedProcess(['docker', *args], 0, stdout, '')
-        with patch.object(run_trial, 'copy_native_config_archive'), patch.object(run_trial, 'ROOT', runner), patch.object(run_trial, 'docker', side_effect=docker), patch.object(run_trial, 'resolve_locked_image', return_value=('repo@sha256:' + '1' * 64, {'Id': 'sha256:' + '1' * 64})), patch.object(run_trial, 'run_cli_once', return_value={'exit_code': 0, 'elapsed_seconds': 0.0, 'cli_invocations': 1}) as execute, contextlib.redirect_stdout(io.StringIO()):
+        def native(cid,argv,out,timeout):
+            rows=([{'kind':'done','content':'synthetic','timestamp':'2026-10-29T00:00:00Z'}]if arm=='go'else
+                  [{'type':'agent_end','willRetry':False,'messages':[{'role':'assistant','stopReason':'stop'}]},{'type':'agent_settled','aborted':False}])
+            (out/'stdout.jsonl').write_text(''.join(json.dumps(row)+'\n'for row in rows))
+            return {'exit_code':0,'elapsed_seconds':0.0,'cli_invocations':1}
+        with patch.object(run_trial, 'copy_native_config_archive'), patch.object(run_trial, 'ROOT', runner), patch.object(run_trial, 'docker', side_effect=docker), patch.object(run_trial, 'resolve_locked_image', return_value=('repo@sha256:' + '1' * 64, {'Id': 'sha256:' + '1' * 64})), patch.object(run_trial, 'run_cli_once', side_effect=native) as execute, contextlib.redirect_stdout(io.StringIO()):
             error = None
             try:
-                run_trial.run_trial(task, arm, output, profile_id=profile)
+                run_trial.run_trial(task, arm, output, profile_id=profile,served_alias_manifest=alias_manifest)
             except ValueError as rejected:
                 error = rejected
         result = json.loads((output / 'result.json').read_text())

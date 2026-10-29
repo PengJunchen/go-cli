@@ -10,7 +10,7 @@ PROFILE_FIELDS = (
     'profile_id', 'model', 'reasoning_effort', 'max_output_tokens',
     'task_timeout_seconds', 'max_upstream_requests', 'cpus', 'memory_bytes',
     'network', 'storage_hard_limit_enforced', 'go_automatic_personal_memory',
-    'compaction',
+    'compaction','audit_policy_id','audit_policy_fingerprint',
 )
 METRICS = ('input_tokens', 'output_tokens', 'cached_input_tokens',
            'reasoning_tokens', 'total_tokens', 'known_total_tokens_lower_bound',
@@ -42,6 +42,7 @@ def normalized_usage(record):
     source = source if isinstance(source, dict) else {}
     attempts = count(source.get('attempts'))
     complete = attempts is not None and count(source.get('unknown_usage_attempts')) == 0
+    independent_fields='unknown_input_attempts'in source and'unknown_output_attempts'in source
     result = {'attempts': attempts, 'cost_usd': number(source.get('cost_usd'))}
     for target, known, unknown in (
         ('input_tokens', 'known_input_tokens', 'unknown_usage_attempts'),
@@ -51,7 +52,9 @@ def normalized_usage(record):
     ):
         value = count(source.get(known))
         result[known] = value  # Preserve partial observations separately.
-        result[target] = value if complete and count(source.get(unknown)) == 0 else None
+        key=({'input_tokens':'unknown_input_attempts','output_tokens':'unknown_output_attempts'}.get(target,unknown)if independent_fields else unknown)
+        field_complete=(attempts is not None and source.get('ledger_complete')is not False and count(source.get(key))==0)if independent_fields else(complete and count(source.get(unknown))==0)
+        result[target] = value if field_complete else None
     result['unknown_usage_attempts'] = count(source.get('unknown_usage_attempts'))
     result['total_tokens'] = (result['input_tokens'] + result['output_tokens']
                               if result['input_tokens'] is not None and result['output_tokens'] is not None else None)
@@ -126,18 +129,21 @@ def load_trial(result_path, grade_path, trial_id):
     budget = 'budget_stop' in tags or result.get('timed_out') is True
     measurement = ('measurement_stop' in tags or bool(result.get('open_attempts')) or
                    usage['input_tokens'] is None or usage['output_tokens'] is None)
+    completion_unknown=result.get('api_completion_unknown')is True
+    api_terminal=result.get('api_terminal_error')is True or 'api_terminal_error' in tags
     api_contract = ('api_contract_stop' in tags or
                     (bool(result.get('wire_contract_rejections')) and not budget and not measurement))
     infrastructure |= bool(tags & {'infrastructure_error', 'infrastructure_failure', 'infra_error'})
-    runtime = bool(tags & {'harness_error', 'runtime_error', 'runtime_unclassified'})
+    runtime = result.get('native_terminal_failure')is True or bool(tags & {'harness_error', 'runtime_error', 'runtime_unclassified'})
     normal_exit = type(result.get('exit_code')) is int and result['exit_code'] == 0
-    if not normal_exit and not any((infrastructure, budget, measurement, api_contract)):
+    completion_unknown=completion_unknown and normal_exit and not any((infrastructure,budget,api_contract,api_terminal,runtime))
+    if not normal_exit and not any((infrastructure, budget, measurement, api_contract,api_terminal)):
         runtime = True
     grade_valid = (type(score) is int and grade.get('clean_image') is True and
                    grade.get('only_model_patch_replayed') is True and
                    not grade.get('ungradable_reason') and not grade.get('infrastructure_error'))
     flags = {'infrastructure': bool(infrastructure), 'budget': budget,
-             'measurement': measurement, 'api_contract': bool(api_contract),
+             'measurement': measurement, 'api_contract': bool(api_contract),'api_terminal':api_terminal,'completion_unknown':completion_unknown,
              'runtime': runtime, 'fixture': result.get('offline_fixture') is True,
              'ungraded': score is None, 'invalid_grade': score is not None and not grade_valid}
     eligible = grade_valid and not any(flags.values()) and normal_exit
@@ -150,7 +156,9 @@ def load_trial(result_path, grade_path, trial_id):
     elif not grade_valid:
         delivery = None
         delivery_status = 'unknown_ungraded' if score is None else 'unknown_invalid_grade'
-    elif not normal_exit or runtime or budget or api_contract or 'measurement_stop' in tags:
+    elif completion_unknown:
+        delivery,delivery_status=None,'unknown_native_completion'
+    elif not normal_exit or runtime or budget or api_contract or api_terminal or 'measurement_stop' in tags:
         delivery, delivery_status = 0, 'failed'
     else:
         delivery = score
@@ -160,6 +168,12 @@ def load_trial(result_path, grade_path, trial_id):
         category = 'infrastructure_failure'
     elif budget:
         category = 'budget_stop'
+    elif completion_unknown:
+        category='unknown_native_completion'
+    elif api_terminal:
+        category='api_terminal_error'
+    elif runtime and result.get('native_terminal_failure')is True:
+        category='native_runtime_error'
     elif measurement:
         category = 'measurement_failure'
     elif api_contract:

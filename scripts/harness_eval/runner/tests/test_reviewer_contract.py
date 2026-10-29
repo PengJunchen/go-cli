@@ -1,5 +1,6 @@
 """Independent, local-only reviewer checks. Never contact a model endpoint."""
 import http.client
+import hashlib
 import asyncio
 import importlib.util
 import json
@@ -100,7 +101,8 @@ class ReviewerOfficialReplay(unittest.TestCase):
                 self.commands.append(command)
                 return SimpleNamespace(return_code=0, stdout='', stderr='')
 
-        official = ROOT / 'third_party/swe-bench-pro/v2/tooling/patch_replay.py'
+        official = Path(__file__).parent / 'fixtures/swe_pro_patch_replay.py'
+        self.assertEqual(hashlib.sha256(official.read_bytes()).hexdigest(), '5c8b344de37164e9723f1724c2573013957fb644c3913a64c12c1718c737d876')
         spec = importlib.util.spec_from_file_location('reviewer_official_replay', official)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
