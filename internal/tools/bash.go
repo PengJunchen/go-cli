@@ -214,7 +214,7 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	// process is affected, not the Go runtime.
 	command = wrapCommandWithLimits(command, t.ResourceLimits)
 
-	cmd := exec.Command("bash", "-lc", command)
+	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = t.Workdir
 	cmd.Env = filteredEnv(t.Env)
 	if _, supplied := bashRuntimeInputFromContext(ctx); supplied {
@@ -337,14 +337,17 @@ func envSlice(env map[string]string) []string {
 // any matching *_API_KEY, *_TOKEN, or *_SECRET — are dropped to prevent
 // accidental secret leakage to child processes (AC-1).
 var envWhitelist = map[string]bool{
-	"PATH":     true,
-	"HOME":     true,
-	"USER":     true,
-	"SHELL":    true,
-	"LANG":     true,
-	"LC_ALL":   true,
-	"LC_CTYPE": true,
-	"TERM":     true,
+	"PATH":       true,
+	"GOPATH":     true,
+	"GOCACHE":    true,
+	"GOMODCACHE": true,
+	"HOME":       true,
+	"USER":       true,
+	"SHELL":      true,
+	"LANG":       true,
+	"LC_ALL":     true,
+	"LC_CTYPE":   true,
+	"TERM":       true,
 }
 
 // sensitiveEnvSuffixes lists the case-insensitive name suffixes that mark an

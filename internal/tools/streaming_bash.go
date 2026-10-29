@@ -197,7 +197,7 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 	// Wrap the command with resource limits.
 	command = wrapCommandWithLimits(command, t.ResourceLimits)
 
-	cmd := exec.Command("bash", "-lc", command)
+	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = t.Workdir
 	cmd.Env = filteredEnv(t.Env)
 	if _, supplied := bashRuntimeInputFromContext(ctx); supplied {

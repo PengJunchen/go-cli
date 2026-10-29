@@ -91,8 +91,8 @@ type bashProcessStartGate struct {
 }
 
 func installBashProcessStartGate(cmd *exec.Cmd) (*bashProcessStartGate, error) {
-	if cmd == nil || cmd.Path == "" || cmd.Env == nil || len(cmd.Args) != 3 || cmd.Args[1] != "-lc" || len(cmd.ExtraFiles) != 0 {
-		return nil, errors.New("managed Bash start gate requires the exact local bash -lc invocation")
+	if cmd == nil || cmd.Path == "" || cmd.Env == nil || len(cmd.Args) != 3 || cmd.Args[1] != "-c" || len(cmd.ExtraFiles) != 0 {
+		return nil, errors.New("managed Bash start gate requires the exact local bash -c invocation")
 	}
 	trustedBashPath, err := validateTrustedManagedBashPath(cmd.Path)
 	if err != nil {
@@ -263,7 +263,7 @@ while IFS= builtin read -r -d '' gate_entry <&__GATE_FD__; do
 	esac
 done
 exec __GATE_FD__<&-
-builtin exec -a "$0" "$2" -lc "$1"`
+builtin exec -a "$0" "$2" -c "$1"`
 	return strings.ReplaceAll(script, "__GATE_FD__", strconv.Itoa(fd))
 }
 
