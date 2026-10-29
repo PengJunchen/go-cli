@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "snapshot_date": "2026-10-29",
+  "snapshot_date": "2026-10-30",
   "scope": "owned runner sources and locks; not task contents or execution evidence",
   "official_asset_commit": "66f92766bba642462d4bbe5479e83f91f9211862",
   "model": "codex/gpt-6.1-sol",
@@ -51,7 +51,7 @@
     },
     {
       "path": "runner/run_trial.py",
-      "sha256": "7b18ab827d5d5715f7d7ac29ee52b2c1a8855db03ad533d0575a0b4ba9ed1686"
+      "sha256": "afeea138ab9053e6c5e6b874d2c67c29fed9ce92c09538ea10c4253f7c832c6f"
     },
     {
       "path": "runner/scripts/asset_preflight.py",
@@ -119,7 +119,7 @@
     },
     {
       "path": "runner/tests/test_profiles.py",
-      "sha256": "ac738ec0c5d34a6dec781a50cbdd8c4760b4e5a0ee0943f870040a026f1453d9"
+      "sha256": "6d534a649e1c23c80890ad4c7e534971411d3cf940c11b95052909d45f370e6b"
     },
     {
       "path": "runner/tests/test_reviewer_contract.py",
@@ -128,6 +128,10 @@
     {
       "path": "runner/tests/test_summarize.py",
       "sha256": "422cc26b2f554ed7fcf615b9770217588a049b2ec72efc2f6ac628334b50fd20"
+    },
+    {
+      "path": "runner/tests/test_task_init_profile.py",
+      "sha256": "ebf44e54a38c809f7ae92e3aa24ce4344f706ecbd422d2c560cbc5df6132e474"
     },
     {
       "path": "runner/tests/test_tool_metadata.py",
@@ -145,7 +149,8 @@
   "supported_profile_ids": [
     "main-5736e88-personal-memory-off-v1",
     "main-bash300-personal-memory-off-v2",
-    "main-bash300-personal-memory-off-usage-observe-v3"
+    "main-bash300-personal-memory-off-usage-observe-v3",
+    "main-bash300-personal-memory-off-usage-observe-init-v4"
   ],
   "profile_host_declarations": {
     "main-5736e88-personal-memory-off-v1": {
@@ -232,5 +237,17 @@
     "independent_staging_file_mode": "0644",
     "copy_success_is_not_readback_or_apply_success": true,
     "official_replay_and_verifier_unchanged": true
+  },
+  "explicit_task_init_profile": {
+    "profile_id": "main-bash300-personal-memory-off-usage-observe-init-v4",
+    "task_only": true,
+    "requested_flag": "--init",
+    "observed_field": "docker inspect HostConfig.Init",
+    "must_be_true_before_start": true,
+    "relay_and_grader_changed": false,
+    "native_config_profile_id": "main-bash300-personal-memory-off-v2",
+    "same_closed_alias_gate_as": "main-bash300-personal-memory-off-usage-observe-v3",
+    "legacy_profiles_create_and_native_argv_unchanged": true,
+    "environment_change_not_product_timeout_fix": true
   }
 }

@@ -81,7 +81,7 @@ class ProfileContract(unittest.TestCase):
 
 
 class ProfileDriverContract(unittest.TestCase):
-    def run_fake_trial(self, arm, profile, environment=None, alias_manifest=None):
+    def run_fake_trial(self, arm, profile, environment=None, alias_manifest=None, task_init=None):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -109,7 +109,7 @@ class ProfileDriverContract(unittest.TestCase):
             elif args[0] == 'create':
                 stdout = 'relay' if '--name' in args else 'task'
             elif args[0] == 'inspect':
-                stdout = json.dumps([{'Config': {'Env': environment if environment is not None else ['GO_CLI_LINUX_SUBREAPER=0']}}])
+                stdout = json.dumps([{'Config': {'Env': environment if environment is not None else ['GO_CLI_LINUX_SUBREAPER=0']},'HostConfig':{'Init':task_init}}])
             elif args[:3] == ('exec', 'task', 'python3') and args[4] == run_trial.PROBE:
                 stdout = json.dumps({'relay': True, 'github': False, 'pypi': False, 'npm': False, 'host_gateway': False, 'public_ip': False, 'internal_host_gateway': False})
             elif args[:3] == ('exec','task','python3') and args[4] == run_trial.CONFIG_IDENTITY_PROBE:
@@ -130,7 +130,7 @@ class ProfileDriverContract(unittest.TestCase):
                 run_trial.run_trial(task, arm, output, profile_id=profile,served_alias_manifest=alias_manifest)
             except ValueError as rejected:
                 error = rejected
-        result = json.loads((output / 'result.json').read_text())
+        result = json.loads((output / 'result.json').read_text()) if (output / 'result.json').is_file() else {}
         return output, result, calls, execute, error
 
     def test_both_arms_share_profile_but_pi_configuration_and_budget_stay_native(self):

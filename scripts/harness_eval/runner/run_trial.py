@@ -341,11 +341,12 @@ def install_native_configs(cid,configs,*,profile_id=PROFILE_ID):
 
 
 FUTURE_PROFILE_ID='main-bash300-personal-memory-off-usage-observe-v3'
-RUNNER_PROFILE_IDS=(*PROFILE_IDS,FUTURE_PROFILE_ID)
+FUTURE_INIT_PROFILE_ID='main-bash300-personal-memory-off-usage-observe-init-v4'
+RUNNER_PROFILE_IDS=(*PROFILE_IDS,FUTURE_PROFILE_ID,FUTURE_INIT_PROFILE_ID)
 
 
 def resolve_runner_profile(profile_id,served_alias_manifest):
-    if profile_id!=FUTURE_PROFILE_ID:
+    if profile_id not in (FUTURE_PROFILE_ID,FUTURE_INIT_PROFILE_ID):
         profile=resolve_profile(profile_id)
         if served_alias_manifest is not None:raise ValueError('legacy strict profile cannot opt in through aliases')
         return profile|{'native_config_profile_id':profile_id},resolve_audit_policy(STRICT_POLICY),None
@@ -360,11 +361,19 @@ def resolve_runner_profile(profile_id,served_alias_manifest):
     document=json.loads(raw)
     audit=resolve_audit_policy(OBSERVE_POLICY,document)
     base='main-bash300-personal-memory-off-v2'
-    return resolve_profile(base)|{'profile_id':profile_id,'native_config_profile_id':base},audit,hashlib.sha256(raw).hexdigest()
+    return resolve_profile(base)|{'profile_id':profile_id,'native_config_profile_id':base,'task_docker_init_requested':profile_id==FUTURE_INIT_PROFILE_ID},audit,hashlib.sha256(raw).hexdigest()
+
+
+def observe_task_docker_init(host_config,requested):
+    """Observe actual task init only; no caller env or profile default is evidence."""
+    actual=host_config.get('Init') if isinstance(host_config,dict) else None
+    return {'requested':requested,'observed_init':actual if type(actual)is bool else None,
+            'source':'docker_inspect_HostConfig.Init','before_container_start':True}
 
 
 def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario="parallel",*,profile_id=PROFILE_ID,served_alias_manifest=None):
     profile,audit,alias_manifest_sha256=resolve_runner_profile(profile_id,served_alias_manifest)
+    task_init_requested=profile.get('task_docker_init_requested',False)
     out.mkdir(parents=True,exist_ok=False)
     cfg=tomllib.loads((task/'task.toml').read_text())
     if audit['policy_id']==OBSERVE_POLICY and cfg['agent']['timeout_sec']!=3000:raise ValueError('future profile requires the fixed3000s task window')
@@ -386,6 +395,7 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
             'go_bash_execution_window_source':'host_profile_declaration','go_supervisor_mode':profile['go_supervisor_mode'],
             'go_supervisor_mode_source':'host_profile_declaration',
             'go_supervisor_environment_validation':None,
+            'task_docker_init_requested':task_init_requested,'task_docker_init_observation':None,
             'go_memory_setting_differs_from_product_default':True,
             'task_id':task.name,'arm':arm,'go_cli_revision':GO_REVISION,'pi_version':PI_VERSION,
             'model':MODEL,'reasoning_effort':'high','max_output_tokens':16384,
@@ -416,7 +426,7 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
             *(['--policy',OBSERVE_POLICY,'--served-alias-json',json.dumps({'aliases':audit['aliases'],'evidence_sha256':audit['evidence_sha256']},sort_keys=True,separators=(',',':'))]if audit['policy_id']==OBSERVE_POLICY else [])).stdout.strip()
         docker('network','connect','--alias','relay',network,relay_cid)
         docker('start',relay_cid)
-        task_cid=docker('create','--platform','linux/amd64','--network',network,
+        task_cid=docker('create',*(['--init']if task_init_requested else[]),'--platform','linux/amd64','--network',network,
             '--cpus','1','--memory','4g','--pids-limit','512','--cap-drop','ALL',
             '--security-opt','no-new-privileges','--workdir','/app',
             '--env','GO_CLI_PROVIDER_API_KEY=eval-local','--env','EVAL_GATEWAY_KEY=eval-local',
@@ -429,6 +439,9 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
             if not isinstance(inspected,list) or len(inspected)!=1 or not isinstance(inspected[0],dict) or not isinstance(inspected[0].get('Config'),dict):
                 raise ValueError('container supervisor environment inspection is unknown')
             record['go_supervisor_environment_validation']=validate_go_supervisor_environment(inspected[0]['Config'].get('Env'))
+            record['task_docker_init_observation']=observe_task_docker_init(inspected[0].get('HostConfig'),task_init_requested)
+            if task_init_requested and record['task_docker_init_observation']['observed_init']is not True:
+                raise ValueError('task Docker init must be observed true before start')
         docker('start',task_cid)
         record['network_probe']=json.loads(docker('exec',task_cid,'python3','-c',PROBE,gateway_ip,timeout=60).stdout)
         if record['network_probe']!={'relay':True,'github':False,'pypi':False,'npm':False,'host_gateway':False,'public_ip':False,'internal_host_gateway':False}:
