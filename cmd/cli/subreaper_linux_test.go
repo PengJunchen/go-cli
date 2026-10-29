@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -33,6 +34,85 @@ func init() {
 	runtime.KeepAlive(&configured)
 	data := fmt.Sprintf("pid=%d tid=%d pdeath=%d error=%v", os.Getpid(), unix.Gettid(), configured, err)
 	_ = os.WriteFile(os.Getenv("GO_CLI_REAPER_TEST_PID")+".leader-bootstrap", []byte(data), 0o600)
+}
+
+const subreaperStdioOnlyFixtureEnvironment = "GO_CLI_REAPER_TEST_STDIO_ONLY"
+
+// prepareSubreaperStdioOnlyFixture is an explicit test-fixture boundary, not a
+// production descriptor allowlist. Raw/private/default-off helpers never opt in.
+func prepareSubreaperStdioOnlyFixture() error {
+	value, present := os.LookupEnv(subreaperStdioOnlyFixtureEnvironment)
+	if !present {
+		return nil
+	}
+	if err := os.Unsetenv(subreaperStdioOnlyFixtureEnvironment); err != nil {
+		return err
+	}
+	if value != "1" || os.Getenv(subreaperEnvironment) != "1" || os.Getenv(subreaperPrivatePrefix+"ROLE") != "" {
+		return errors.New("stdio-only fixture requires an explicit standalone outer")
+	}
+	directory, err := os.Open("/proc/self/fd")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = directory.Close() }()
+	names, err := directory.Readdirnames(-1)
+	if err != nil {
+		return err
+	}
+	var stderr unix.Stat_t
+	if err := unix.Fstat(2, &stderr); err != nil {
+		return err
+	}
+	type observation struct {
+		FD            int    `json:"fd"`
+		TargetClass   string `json:"target_class"`
+		BeforeCLOEXEC bool   `json:"before_cloexec"`
+		AfterCLOEXEC  bool   `json:"after_cloexec"`
+	}
+	observations := []observation{}
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
+		if err != nil {
+			return err
+		}
+		if fd <= 2 {
+			continue
+		}
+		before, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if err != nil {
+			return err
+		}
+		var info unix.Stat_t
+		if err := unix.Fstat(fd, &info); err != nil {
+			return err
+		}
+		targetClass := "other"
+		switch {
+		case info.Dev == stderr.Dev && info.Ino == stderr.Ino:
+			targetClass = "stderr"
+		case info.Mode&unix.S_IFMT == unix.S_IFREG:
+			targetClass = "regular"
+		case info.Mode&unix.S_IFMT == unix.S_IFIFO:
+			targetClass = "pipe"
+		case info.Mode&unix.S_IFMT == unix.S_IFSOCK:
+			targetClass = "socket"
+		case info.Mode&unix.S_IFMT == unix.S_IFDIR:
+			targetClass = "directory"
+		}
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, before|unix.FD_CLOEXEC); err != nil {
+			return err
+		}
+		after, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if err != nil {
+			return err
+		}
+		if after != before|unix.FD_CLOEXEC {
+			return errors.New("stdio-only fixture descriptor readback mismatch")
+		}
+		observations = append(observations, observation{fd, targetClass, before&unix.FD_CLOEXEC != 0, after&unix.FD_CLOEXEC != 0})
+	}
+	return json.NewEncoder(os.Stderr).Encode(map[string]any{"stdio_only_fixture_fds": observations})
 }
 
 // Each helper is a distinct executable process. The Go test host never enables
@@ -105,6 +185,10 @@ func TestStandaloneSubreaperLinuxHelper(t *testing.T) {
 			os.Exit(93)
 		}
 	}
+	if err := prepareSubreaperStdioOnlyFixture(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "stdio-only fixture preparation: %v\n", err)
+		os.Exit(101)
+	}
 	if code, handled := standaloneSubreaperDispatch(); handled {
 		if mode == "preexisting-check" {
 			pid, _ := strconv.Atoi(os.Getenv("GO_CLI_REAPER_TEST_CHILD"))
@@ -116,6 +200,10 @@ func TestStandaloneSubreaperLinuxHelper(t *testing.T) {
 		}
 		os.Exit(code)
 	}
+	if _, exists := os.LookupEnv(subreaperStdioOnlyFixtureEnvironment); exists {
+		os.Exit(102) // The private fixture flag must never reach the actual inner.
+	}
+
 	switch mode {
 	case "exit":
 		os.Exit(37)
@@ -211,6 +299,39 @@ func TestStandaloneSubreaperLinuxHelper(t *testing.T) {
 	}
 }
 
+func TestStandaloneSubreaperLinuxFixtureStdioOnlyPreservesOwnerFD(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "owner-fd")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = file.Close() })
+	for _, clean := range []bool{false, true} {
+		command := exec.Command(os.Args[0], "-test.run=^TestStandaloneSubreaperLinuxHelper$")
+		command.Env = append(stripSubreaperPrivateEnvironment(os.Environ()), subreaperEnvironment+"=1", "GO_CLI_REAPER_TEST_HELPER=exit")
+		if clean {
+			command.Env = append(command.Env, "GO_CLI_REAPER_TEST_STDIO_ONLY=1")
+		}
+		command.ExtraFiles = []*os.File{file}
+		output, runErr := command.CombinedOutput()
+		var exitError *exec.ExitError
+		require.ErrorAs(t, runErr, &exitError, "%s", output)
+		if clean {
+			require.Equal(t, 37, exitError.ExitCode(), "%s", output)
+			require.Contains(t, string(output), `"before_cloexec":false`)
+			require.Contains(t, string(output), `"after_cloexec":true`)
+		} else {
+			require.Equal(t, 125, exitError.ExitCode(), "%s", output)
+			require.Contains(t, string(output), "unsupported inherited descriptor")
+		}
+		_, err = file.Stat()
+		require.NoError(t, err, "the parent owns the original descriptor")
+		_, err = file.WriteAt([]byte("owned"), 0)
+		require.NoError(t, err)
+		data := make([]byte, 5)
+		_, err = file.ReadAt(data, 0)
+		require.NoError(t, err)
+		require.Equal(t, "owned", string(data))
+	}
+}
+
 func TestStandaloneSubreaperLinuxExitAndWaitOwnership(t *testing.T) {
 	for _, scenario := range []struct {
 		name string
@@ -223,7 +344,7 @@ func TestStandaloneSubreaperLinuxExitAndWaitOwnership(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			command := exec.Command(os.Args[0], "-test.run=^TestStandaloneSubreaperLinuxHelper$")
 			pidFile := filepath.Join(t.TempDir(), "pid")
-			command.Env = append(stripSubreaperPrivateEnvironment(os.Environ()), subreaperEnvironment+"=1", "GO_CLI_REAPER_TEST_HELPER="+scenario.name, "GO_CLI_REAPER_TEST_PID="+pidFile)
+			command.Env = append(stripSubreaperPrivateEnvironment(os.Environ()), subreaperEnvironment+"=1", "GO_CLI_REAPER_TEST_HELPER="+scenario.name, "GO_CLI_REAPER_TEST_PID="+pidFile, subreaperStdioOnlyFixtureEnvironment+"=1")
 			// Go's exec pipe descriptors are CLOEXEC in the supervisor itself.
 			output, err := command.CombinedOutput()
 			code := 0
@@ -233,6 +354,18 @@ func TestStandaloneSubreaperLinuxExitAndWaitOwnership(t *testing.T) {
 				code = exitError.ExitCode()
 			}
 			require.Equal(t, scenario.code, code, "%s", output)
+			causes := map[string]string{
+				"preexisting-start-live":   "preexisting children prevent isolated supervisor startup",
+				"preexisting-start-zombie": "preexisting children prevent isolated supervisor startup",
+				"deny-pidfd":               "pidfd capability unavailable:",
+				"deny-prctl":               "enable outer subreaper:",
+				"deny-waitid-probe":        "non-consuming actual CLI waitid capability probe:",
+			}
+			if cause := causes[scenario.name]; cause != "" {
+				require.Contains(t, string(output), cause)
+				require.NotContains(t, string(output), "unsupported inherited descriptor")
+			}
+
 			if strings.HasPrefix(scenario.name, "live-orphan") {
 				data, readErr := os.ReadFile(pidFile)
 				require.NoError(t, readErr)
@@ -249,7 +382,7 @@ func TestStandaloneSubreaperLinuxForwardsSignalsOnce(t *testing.T) {
 		t.Run(sent.String(), func(t *testing.T) {
 			file := filepath.Join(t.TempDir(), "ready")
 			command := exec.Command(os.Args[0], "-test.run=^TestStandaloneSubreaperLinuxHelper$")
-			command.Env = append(stripSubreaperPrivateEnvironment(os.Environ()), subreaperEnvironment+"=1", "GO_CLI_REAPER_TEST_HELPER=signal", "GO_CLI_REAPER_TEST_PID="+file)
+			command.Env = append(stripSubreaperPrivateEnvironment(os.Environ()), subreaperEnvironment+"=1", "GO_CLI_REAPER_TEST_HELPER=signal", "GO_CLI_REAPER_TEST_PID="+file, subreaperStdioOnlyFixtureEnvironment+"=1")
 			require.NoError(t, command.Start())
 			done := make(chan error, 1)
 			go func() { done <- command.Wait() }()
@@ -285,7 +418,7 @@ func TestStandaloneSubreaperLinuxForwardsSignalsOnce(t *testing.T) {
 func TestStandaloneSubreaperLinuxParentDeathCancelsInner(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "ready")
 	command := exec.Command(os.Args[0], "-test.run=^TestStandaloneSubreaperLinuxHelper$")
-	command.Env = append(stripSubreaperPrivateEnvironment(os.Environ()), subreaperEnvironment+"=1", "GO_CLI_REAPER_TEST_HELPER=signal", "GO_CLI_REAPER_TEST_PID="+file)
+	command.Env = append(stripSubreaperPrivateEnvironment(os.Environ()), subreaperEnvironment+"=1", "GO_CLI_REAPER_TEST_HELPER=signal", "GO_CLI_REAPER_TEST_PID="+file, subreaperStdioOnlyFixtureEnvironment+"=1")
 	require.NoError(t, command.Start())
 	done := make(chan error, 1)
 	go func() { done <- command.Wait() }()
