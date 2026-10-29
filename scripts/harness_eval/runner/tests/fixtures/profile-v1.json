@@ -1,0 +1,105 @@
+{
+  "source_revision": "098c350",
+  "endpoint": "http://relay:8000/v1",
+  "prompt": "Original task prompt.\nSecond line.",
+  "profile_id": "main-5736e88-personal-memory-off-v1",
+  "go_config": {
+    "provider": {
+      "name": "openai",
+      "base_url": "http://relay:8000/v1"
+    },
+    "model": {
+      "name": "codex/gpt-6.1-sol",
+      "max_tokens": 16384
+    },
+    "agent": {
+      "thinking": "high"
+    },
+    "small_model": {
+      "model": ""
+    },
+    "memory": {
+      "enabled": false
+    },
+    "git": {
+      "enabled": false
+    },
+    "extensions": {
+      "enabled": false
+    },
+    "model_cycler": {
+      "enabled": false
+    },
+    "session": {
+      "store_path": "/logs/agent/go-session"
+    },
+    "tracing": {
+      "enabled": true,
+      "exporter": "jsonl",
+      "file_path": "/logs/agent/go-trace.jsonl"
+    },
+    "production": {
+      "model_timeout": {
+        "total": "5m",
+        "stream_idle": "2m"
+      }
+    }
+  },
+  "pi_config": {
+    "providers": {
+      "eval": {
+        "baseUrl": "http://relay:8000/v1",
+        "api": "openai-completions",
+        "apiKey": "${EVAL_GATEWAY_KEY}",
+        "authHeader": true,
+        "models": [
+          {
+            "id": "codex/gpt-6.1-sol",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "contextWindow": 500000,
+            "maxTokens": 16384
+          }
+        ]
+      }
+    }
+  },
+  "go_argv": [
+    "/opt/eval/go-cli",
+    "prompt",
+    "--provider",
+    "openai",
+    "--model",
+    "codex/gpt-6.1-sol",
+    "--approve",
+    "auto",
+    "--no-sandbox",
+    "--output",
+    "json",
+    "Original task prompt.\nSecond line."
+  ],
+  "pi_argv": [
+    "/opt/eval/node/bin/node",
+    "/opt/eval/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+    "--print",
+    "--mode",
+    "json",
+    "--provider",
+    "eval",
+    "--model",
+    "codex/gpt-6.1-sol",
+    "--thinking",
+    "high",
+    "--no-extensions",
+    "--no-skills",
+    "--no-mcp",
+    "--no-prompt-templates",
+    "--no-approve",
+    "--offline",
+    "--session-dir",
+    "/logs/agent/pi-sessions",
+    "Original task prompt.\nSecond line."
+  ]
+}

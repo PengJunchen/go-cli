@@ -11,7 +11,7 @@ import subprocess
 import time
 import tomllib
 import uuid
-from eval_core import MODEL,GO_REVISION,PROFILE_ID,PI_VERSION,go_config,pi_config,cli_argv,usage_totals
+from eval_core import MODEL,GO_REVISION,PROFILE_ID,PROFILE_IDS,PI_VERSION,resolve_profile,go_config,pi_config,cli_argv,usage_totals
 
 ROOT=Path(__file__).resolve().parent
 
@@ -20,6 +20,19 @@ def dump(path,value):
     path.write_text(json.dumps(value,indent=2,ensure_ascii=False)+'\n')
 
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+def validate_go_supervisor_environment(environment):
+    """Validate only the fixed opt-out key; never return raw container env."""
+    if not isinstance(environment,list) or any(not isinstance(entry,str) for entry in environment):
+        raise ValueError('container supervisor environment is unknown')
+    values=[]
+    for entry in environment:
+        key,separator,value=entry.partition('=')
+        if key=='GO_CLI_LINUX_SUBREAPER':values.append(value if separator else None)
+    if values!=['0']:
+        raise ValueError('container supervisor environment must contain exactly one explicit opt-out')
+    return {'source':'docker_inspect_Config.Env','effective_value':'0','matching_entry_count':1,
+            'validated_before_container_start':True}
 
 def load_payload_manifest(payload):
     metadata=json.loads((payload/'manifest.json').read_text())
@@ -168,7 +181,8 @@ open('/logs/agent/process-cleanup.json','w').write(json.dumps({'other_pids_stopp
 '''
 
 
-def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario="parallel"):
+def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario="parallel",*,profile_id=PROFILE_ID):
+    profile=resolve_profile(profile_id)
     out.mkdir(parents=True,exist_ok=False)
     cfg=tomllib.loads((task/'task.toml').read_text())
     prompt=(task/'instruction.md').read_text()
@@ -182,7 +196,11 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
     token=uuid.uuid4().hex[:12];network='go-cli-eval-'+token
     task_cid=None;relay_cid=None
     record={'driver':'custom Docker driver using Harbor task assets','task_name':cfg['task']['name'],
-            'profile_id':PROFILE_ID,'go_automatic_personal_memory':False,
+            'profile_id':profile['profile_id'],'go_automatic_personal_memory':False,
+            'configured_go_bash_execution_window_seconds':profile['configured_go_bash_execution_window_seconds'],
+            'go_bash_execution_window_source':'host_profile_declaration','go_supervisor_mode':profile['go_supervisor_mode'],
+            'go_supervisor_mode_source':'host_profile_declaration',
+            'go_supervisor_environment_validation':None,
             'go_memory_setting_differs_from_product_default':True,
             'task_id':task.name,'arm':arm,'go_cli_revision':GO_REVISION,'pi_version':PI_VERSION,
             'model':MODEL,'reasoning_effort':'high','max_output_tokens':16384,
@@ -216,9 +234,15 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
             '--cpus','1','--memory','4g','--pids-limit','512','--cap-drop','ALL',
             '--security-opt','no-new-privileges','--workdir','/app',
             '--env','GO_CLI_PROVIDER_API_KEY=eval-local','--env','EVAL_GATEWAY_KEY=eval-local',
+            *(['--env','GO_CLI_LINUX_SUBREAPER=0'] if profile['force_go_supervisor_off'] else []),
             '--env','PI_CODING_AGENT_DIR=/root/.pi/agent','--env','NO_COLOR=1',
             '--env','PI_TELEMETRY=0','--entrypoint','sleep',image_id,'infinity').stdout.strip()
         record['container_id']=task_cid
+        if profile['force_go_supervisor_off']:
+            inspected=json.loads(docker('inspect',task_cid).stdout)
+            if not isinstance(inspected,list) or len(inspected)!=1 or not isinstance(inspected[0],dict) or not isinstance(inspected[0].get('Config'),dict):
+                raise ValueError('container supervisor environment inspection is unknown')
+            record['go_supervisor_environment_validation']=validate_go_supervisor_environment(inspected[0]['Config'].get('Env'))
         docker('start',task_cid)
         record['network_probe']=json.loads(docker('exec',task_cid,'python3','-c',PROBE,gateway_ip,timeout=60).stdout)
         if record['network_probe']!={'relay':True,'github':False,'pypi':False,'npm':False,'host_gateway':False,'public_ip':False,'internal_host_gateway':False}:
@@ -241,7 +265,7 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
         docker('exec',task_cid,'mkdir','-p','/opt/eval','/logs/agent','/root/.go-cli','/root/.pi/agent')
         docker('cp',str(payload)+'/.',task_cid+':/opt/eval',timeout=180)
         configs=out/'configs'
-        dump(configs/'go.json',go_config('http://relay:8000/v1'))
+        dump(configs/'go.json',go_config('http://relay:8000/v1',profile_id=profile['profile_id']))
         dump(configs/'models.json',pi_config('http://relay:8000/v1'))
         dump(configs/'pi-settings.json',{'cacheWarming':'off','telemetry':False})
         for source,destination in [('go.json','/root/.go-cli/config.json'),('models.json','/root/.pi/agent/models.json'),('pi-settings.json','/root/.pi/agent/settings.json')]:
@@ -288,7 +312,8 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
 def main():
     p=argparse.ArgumentParser();p.add_argument('--task',required=True,type=Path)
     p.add_argument('--arm',choices=['go','pi'],required=True);p.add_argument('--out',required=True,type=Path)
+    p.add_argument('--profile',choices=PROFILE_IDS,default=PROFILE_ID)
     p.add_argument('--probe-only',action='store_true');p.add_argument('--fixture-smoke',action='store_true');p.add_argument('--fixture-scenario',choices=['parallel','single-status','write-parallel'],default='parallel');args=p.parse_args()
-    run_trial(args.task.resolve(),args.arm,args.out.resolve(),args.probe_only,args.fixture_smoke,args.fixture_scenario)
+    run_trial(args.task.resolve(),args.arm,args.out.resolve(),args.probe_only,args.fixture_smoke,args.fixture_scenario,profile_id=args.profile)
 
 if __name__=='__main__':main()

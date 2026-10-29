@@ -15,11 +15,11 @@
     },
     {
       "path": "runner/RUNNER.md",
-      "sha256": "7e3938dbec21f2e2208a43ef5f5f9dacbef2699d62a02dba485fc3f0b5f27286"
+      "sha256": "7c3264968d749f1d6c581139bf9072e15a009e3912a39ebb3de321a35149022e"
     },
     {
       "path": "runner/audit_proxy.py",
-      "sha256": "48b9c97161704f2de90aa09e29ceae97367a1e99035e757e7aa742326d2bda0c"
+      "sha256": "f2ab1639924e9a4edd9de1399ac1d5c3ff8bef4372b806813b1ef05f43230e68"
     },
     {
       "path": "runner/dataset-lock.json",
@@ -27,7 +27,7 @@
     },
     {
       "path": "runner/eval_core.py",
-      "sha256": "b64ef5ad8f8fb168d5aec297c3f6cfbb01923bc1b336ce6a3016bc3bf4abfd00"
+      "sha256": "4f005185525e7382ccd54295a0dc198b6b1cd11c4218bddf5669c28f83033349"
     },
     {
       "path": "runner/grade_trial.py",
@@ -51,7 +51,7 @@
     },
     {
       "path": "runner/run_trial.py",
-      "sha256": "87127d7e8f0fe21c27640385cd8c8e45ebda825d1ed5d45359cd4bd40ac05bc4"
+      "sha256": "287f8add99b8d9237e4832d5b006cdecf208121fba6aa6b9f5255e6a1a9d2711"
     },
     {
       "path": "runner/scripts/asset_preflight.py",
@@ -64,6 +64,10 @@
     {
       "path": "runner/summarize_trials.py",
       "sha256": "5869f706ec7535d2df288894a1d0d656068fd2bb3ac70cf85ebcbcdc243dcf62"
+    },
+    {
+      "path": "runner/tests/fixtures/profile-v1.json",
+      "sha256": "9204a910f87694eede2890158a1086e957b8ce7aa2e9a9d78922aa756dd689ba"
     },
     {
       "path": "runner/tests/test_asset_preflight.py",
@@ -90,16 +94,54 @@
       "sha256": "5628ff3b45c85ee60eebe934d76d251ecae63e011b0cd0ac34dde404f7777fd4"
     },
     {
+      "path": "runner/tests/test_profiles.py",
+      "sha256": "697898fe75f27afd5b8451a190f83628770fa82b1337a3aff6a77b98763957cf"
+    },
+    {
       "path": "runner/tests/test_reviewer_contract.py",
       "sha256": "202f3ad0b432b17426f78ad7adf5a35498b72be094fa0c9d04fef8be41686d18"
     },
     {
       "path": "runner/tests/test_summarize.py",
       "sha256": "422cc26b2f554ed7fcf615b9770217588a049b2ec72efc2f6ac628334b50fd20"
+    },
+    {
+      "path": "runner/tests/test_tool_metadata.py",
+      "sha256": "0f1e2f705890e8f91c527b793d4dc100f67efa17d351b70eab9ff5cb09721dc6"
     }
   ],
   "source_base_revision": "5736e8828c80913fd4a32dc7b6e22eb82e5ec2b1",
   "reviewed_go_revision": "42ce22477d900265b186677762ad4eff4aea0e26",
   "profile_id": "main-5736e88-personal-memory-off-v1",
-  "go_automatic_personal_memory": false
+  "go_automatic_personal_memory": false,
+  "supported_profile_ids": [
+    "main-5736e88-personal-memory-off-v1",
+    "main-bash300-personal-memory-off-v2"
+  ],
+  "profile_host_declarations": {
+    "main-5736e88-personal-memory-off-v1": {
+      "configured_go_bash_execution_window_seconds": 30,
+      "go_supervisor_mode": "off",
+      "new_environment_override": false
+    },
+    "main-bash300-personal-memory-off-v2": {
+      "configured_go_bash_execution_window_seconds": 300,
+      "go_supervisor_mode": "off",
+      "fixed_container_environment": "GO_CLI_LINUX_SUBREAPER=0; inspected before start"
+    }
+  },
+  "profile_observation_boundary": "host declarations are not observed tool windows; Pi config/argv/budgets unchanged; actual new-profile CLI smoke not yet run",
+  "tool_metadata_observation": {
+    "description_hash": "actual UTF-8 SHA256 or null",
+    "parameters_hash": "actual object canonical JSON sort_keys compact UTF-8 allow_nan=False SHA256 or null",
+    "go_host_window_claim_values": [
+      "30s",
+      "5m0s",
+      null
+    ],
+    "claim_is_not_effective_timeout": true,
+    "command_only_schema": "actual complete bash schema true/known-different false/unknown null",
+    "raw_description_schema_messages_commands_logged": false,
+    "relay_raw_bytes_budget_usage_and_rejection_policy_unchanged": true
+  }
 }

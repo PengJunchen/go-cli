@@ -5,6 +5,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
 import threading
 import time
 import urllib.parse
@@ -14,6 +15,53 @@ from eval_core import MODEL,OUTPUT_LIMIT
 
 def digest(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+
+
+def command_only_schema(parameters):
+    if not isinstance(parameters,dict) or parameters.get('type')!='object':return None
+    properties=parameters.get('properties')
+    if not isinstance(properties,dict):return None
+    if set(properties)!={'command'}:return False
+    command=properties['command']
+    if not isinstance(command,dict) or 'type' not in command:return None
+    if command['type']!='string':return False
+    required=parameters.get('required')
+    if not isinstance(required,list) or any(not isinstance(name,str) for name in required):return None
+    if required!=['command']:return False
+    if 'additionalProperties' not in parameters:return None
+    additional=parameters['additionalProperties']
+    if additional is False:return True
+    if additional is True or isinstance(additional,dict):return False
+    return None
+
+
+def observe_tool_metadata(tools):
+    """Observe actual tool bytes as hashes/finite claims, never raw content."""
+    if not isinstance(tools,list):return []
+    observed=[]
+    for index,tool in enumerate(tools):
+        function=tool.get('function') if isinstance(tool,dict) else None
+        function=function if isinstance(function,dict) else {}
+        name=function.get('name') if isinstance(function.get('name'),str) else None
+        description=function.get('description')
+        parameters=function.get('parameters')
+        description_hash=parameters_hash=None
+        try:
+            if isinstance(description,str):description_hash=hashlib.sha256(description.encode('utf-8')).hexdigest()
+        except UnicodeError:pass
+        try:
+            if isinstance(parameters,dict):
+                canonical=json.dumps(parameters,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode('utf-8')
+                parameters_hash=hashlib.sha256(canonical).hexdigest()
+        except (TypeError,ValueError,UnicodeError):pass
+        claim=None
+        if name=='bash' and description_hash is not None:
+            clauses=set(re.findall(r'The configured host execution window is ([^;\r\n]+);',description))
+            if len(clauses)==1 and next(iter(clauses)) in ('30s','5m0s'):claim=next(iter(clauses))
+        observed.append({'index':index,'name':name,'description_sha256':description_hash,
+                         'parameters_sha256':parameters_hash,'go_host_window_claim':claim,
+                         'command_only_schema':command_only_schema(parameters) if name=='bash' and parameters_hash is not None else None})
+    return observed
 
 
 class AuditServer(ThreadingHTTPServer):
@@ -84,6 +132,7 @@ class Handler(BaseHTTPRequestHandler):
              'stream':bool(body.get('stream')),'request_bytes':len(raw),'request_sha256':hashlib.sha256(raw).hexdigest(),
              'messages_sha256':digest(body.get('messages',[])),'tools_sha256':digest(body.get('tools',[])),
              'tool_names':[t.get('function',{}).get('name') for t in body.get('tools',[])],
+             'tool_metadata':observe_tool_metadata(body.get('tools',[])),
              'usage':None,'response_id':None,'finish_reasons':[],'terminal_marker':False}
         self.server.append(row|{'phase':'start','time':time.time()})
         endpoint=self.server.upstream

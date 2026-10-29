@@ -3,11 +3,24 @@ MODEL = 'codex/gpt-6.1-sol'
 OUTPUT_LIMIT = 16384
 GO_REVISION = '5736e8828c80913fd4a32dc7b6e22eb82e5ec2b1'
 PROFILE_ID = 'main-5736e88-personal-memory-off-v1'
+BASH300_PROFILE_ID = 'main-bash300-personal-memory-off-v2'
+PROFILE_IDS = (PROFILE_ID, BASH300_PROFILE_ID)
 PI_VERSION = '1.4.0'
 
 
-def go_config(endpoint):
-    return {'provider': {'name':'openai','base_url':endpoint},
+def resolve_profile(profile_id=PROFILE_ID):
+    """Resolve one finite host declaration without reading files or environment."""
+    if not isinstance(profile_id,str) or profile_id not in PROFILE_IDS:
+        raise ValueError('unknown fixed evaluation profile')
+    configured=profile_id==BASH300_PROFILE_ID
+    return {'profile_id':profile_id,'configured_go_bash_execution_window_seconds':300 if configured else 30,
+            'go_supervisor_mode':'off','force_go_supervisor_off':configured,
+            'go_bash_timeout':'300s' if configured else None}
+
+
+def go_config(endpoint,profile_id=PROFILE_ID):
+    profile=resolve_profile(profile_id)
+    config={'provider': {'name':'openai','base_url':endpoint},
         'model': {'name':MODEL,'max_tokens':OUTPUT_LIMIT},
         'agent': {'thinking':'high'},
         'small_model': {'model':''},
@@ -17,6 +30,9 @@ def go_config(endpoint):
         'session': {'store_path':'/logs/agent/go-session'},
         'tracing': {'enabled':True,'exporter':'jsonl','file_path':'/logs/agent/go-trace.jsonl'},
         'production': {'model_timeout':{'total':'5m','stream_idle':'2m'}}}
+    if profile['go_bash_timeout'] is not None:
+        config['tools']={'bash':{'timeout':profile['go_bash_timeout']}}
+    return config
 
 
 def pi_config(endpoint):

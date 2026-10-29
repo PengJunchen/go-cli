@@ -4,6 +4,12 @@
 
 当前profile为 `main-5736e88-personal-memory-off-v1`，源码基础为 `5736e8828c80913fd4a32dc7b6e22eb82e5ec2b1` 加本次Thinking修复；实际版本另由payload manifest绑定。上游已经恢复受管Git等能力，不迁入旧379派生C的六只读实现。旧B/Pi首题分数与旧C无费结果保留原样，不作为新版本成绩。
 
+新增可选profile `main-bash300-personal-memory-off-v2`。不传`--profile`仍使用原profile，其Go配置和两款CLI的参数保持兼容；新profile只在Go配置增加`tools.bash.timeout="300s"`，Pi配置、原生时限策略、模型参数和共同预算不变。两款CLI的同一批实验都应显式选择同一个profile ID。`configured_go_bash_execution_window_seconds`记录Go宿主声明的30/300秒，不能当成Pi窗口或实际观察值；`go_supervisor_mode`同属宿主声明，实际验证另见`go_supervisor_environment_validation`。
+
+仅新profile向任务容器固定加入`GO_CLI_LINUX_SUBREAPER=0`，并在启动容器前用Docker inspect验证该key唯一且值为0；未知、重复或值1都停止。它不读取宿主的supervisor变量，也不提供自由duration/env覆盖入口。工具描述/schema哈希应从实际wire中的tools取得，本profile不会根据常量伪造观察；真实CLI双臂fixture与正式任务结果仍需另做验证。私有本机31秒命令对照不能代替这个标准profile的双CLI验证。
+
+relay的`tool_metadata`逐项记录实际工具index/name、description UTF-8 SHA和parameters对象的canonical JSON SHA，不保存原文。只有实际bash描述中的固定Go子句会给出`go_host_window_claim=30s/5m0s`，其余或冲突为null；这只是广告声明，不是秒表或实际执行时限证明。`command_only_schema`按完整实际schema给true/false/unknown，Pi带timeout等已知不同形状为false，不替Pi补Go默认值。同名工具逐项保留，消息/命令/工具原文不写日志；转发原始请求字节、usage和预算逻辑保持原样。
+
 固定候选模型 `codex/gpt-6.1-sol`，Chat Completions，effective `high`，主请求最大输出 16384。更小的原生内部请求上限允许原样通过。保留各 Harness 原生 system prompt、工具、子 Agent、重试和压缩；Go 不配独立 small model。所有模型调用经过同一审计 relay，其他模型与 effort 不符的请求在上游前拒绝。
 
 Go自动个人记忆在产品默认开启；本profile显式 `memory.enabled=false` 关闭自动提取和注入，fresh容器不挂用户HOME，用于隔离跨任务状态。这是公开的实验选项，不是修改产品默认，也不关闭原生session或压缩。所有实际后台/子Agent请求仍须计入审计与共同预算，不假设它们不存在。
@@ -22,6 +28,11 @@ Go自动个人记忆在产品默认开启；本profile显式 `memory.enabled=fal
   --arm go --out evidence/新的目录 --fixture-smoke
 .venv/bin/python run_trial.py --task third_party/swe-bench-pro/v2/tasks/完整任务ID \
   --arm pi --out evidence/新的目录 --fixture-smoke
+
+# 可选300秒Go窗口的独立profile；Pi对应尝试使用相同--profile ID。
+.venv/bin/python run_trial.py --task third_party/swe-bench-pro/v2/tasks/完整任务ID \
+  --arm go --out evidence/新的300秒profile目录 --fixture-smoke \
+  --profile main-bash300-personal-memory-off-v2
 ```
 
 fixture 使用本地固定协议服务，经过真实 CLI 和工具，不调用模型、不解真实题。Go 默认 `--fixture-scenario parallel` 请求 read/bash/git_status/read→final；`--fixture-scenario single-status` 请求 git_status→final。Pi 没有 git_status 时保留 read→final。成功门槛为同模型/high/输出限制、至少两次 accepted 请求及实际工具结果；Go 还须逐动作检查 quiescent、非空 completion proof 与 durable resolution，不能只匹配 final 标记。不能把 fixture token 数或结果当模型成绩。
