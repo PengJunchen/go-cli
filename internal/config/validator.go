@@ -61,6 +61,9 @@ var (
 // every constraint violation, or nil when the config is valid.
 func (v *DefaultValidator) Validate(cfg Config) error {
 	var errs []string
+	if _, _, err := cfg.Tools.Bash.ExecutionTimeout(); err != nil {
+		errs = append(errs, err.Error())
+	}
 	if cfg.Runtime.Profile != "" && cfg.Runtime.Profile != "default" && cfg.Runtime.Profile != "edge" {
 		errs = append(errs, "invalid runtime profile (supported: default, edge)")
 	}

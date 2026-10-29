@@ -138,7 +138,11 @@ func (t *BashTool) Name() string { return "bash" }
 
 // Description returns a brief description of the tool.
 func (t *BashTool) Description() string {
-	return "bash: runs a shell command and returns its combined output. Args: command (string)."
+	window := fmt.Sprintf("The configured host execution window is %s", t.Timeout)
+	if t.TimeoutTier {
+		window = "The host selects an execution window by command category"
+	}
+	return "bash: runs a synchronous, managed shell command and returns its combined output. Args: command (string). " + window + "; host runtime and parent cancellation may end it earlier. Wait for command-local parallel jobs (for example, cmd & wait); an unwaited background process is not a persistent worker. Longer synchronous commands require an appropriate host-configured execution window."
 }
 
 // Parameters returns the JSON Schema for the command this tool executes.
