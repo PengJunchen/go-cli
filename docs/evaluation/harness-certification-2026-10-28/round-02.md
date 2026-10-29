@@ -42,7 +42,7 @@ profile为 `main-5736e88-personal-memory-off-v1`：新HOME、自动个人记忆�
 
 缓存输入属于输入子集，reasoning属于输出统计内的细分，均不再加到总量。37次请求包含原生子Agent实际调用，不只计算主Agent；费用未取得可靠账单，不以token猜美元。累计输入609,514是多轮重复上下文，不是单次窗口。最大单请求30,695，不能把本次故障归因于超过128k上下文。
 
-“完整交付分”是自定义运行指标：valid官方评分存在，但CLI异常退出，因此记0；它不替换或抹掉官方reward1。纯解题诊断子集不收该运行时失败，本次仍完整保留在全部attempt和主交付分母中。一次尝试没有置信区间或总体排名，较短耗时也不能直接当速度胜出。
+本报告“完整交付分”沿用预先约定的自定义 **delivery_v1退出/协议指标**：valid官方评分存在，但CLI异常退出，因此记0。它不替换官方reward1，也不宣称已经完成跨Harness的操作系统资源闭合认证。纯解题诊断子集不收该运行时失败，本次仍完整保留在全部attempt和主交付分母中。一次尝试没有置信区间或总体排名，较短耗时也不能直接当速度胜出。
 
 ## 运行时发生了什么
 
@@ -50,7 +50,17 @@ profile为 `main-5736e88-personal-memory-off-v1`：新HOME、自动个人记忆�
 
 对应的是可见项目中的普通编辑、格式化及**后台运行测试**。独立审查了本次普通业务源码和测试补丁，没有发现跳过测试、修改裁判或硬写reward的行为；未公开完整补丁或日志。错误指向本地执行资源，不是模型API拒绝：37次请求均200且high/输出/usage合同满足。CLI终端报告invocation shutdown remains pending，日志/trace最终收尾被推迟。
 
-Agent结束后，collector另停止并杀掉了两个本容器残留PID，最终任务与评分容器均已清除。这项外部清理不能冒充Go内部已经完成的proof。原attempt没有保留足够/proc状态，尚不能仅凭PID1是sleep认定孤儿僵尸是根因。
+同口径核对三次原始process-cleanup记录，collector列出的外部STOP/KILL信号目标数如下：
+
+| 尝试 | 清理目标PID数 | 信号前进程状态 |
+|---|---:|---|
+| 旧Go B | 0 | unknown，未记录 |
+| 旧Pi1.4.0 | 22 | unknown，未记录 |
+| Go D | 2 | unknown，未记录 |
+
+这些是信号目标数，不是已证实的活进程数、僵尸数或成功终止数；0也不是完整资源证明。旧Pi的CLI exit0不能据此证明其资源收尾比Go强。外部清理与Go内部proof分开记录，原分数、退出码和全部attempt均不改。最终任务与评分容器均已清除，但原attempt没有信号前/proc快照，不能仅凭PID1是sleep认定孤儿僵尸是根因。
+
+后续共同collector已增加信号前 `processes-before-cleanup.json` 观察，记录PID/state/PPID/PGID/starttime/comm，枚举或单PID读取失败保留unknown。该未来版本通过52个导出合同及自有合成容器取证检查，适用于Go/Pi同一采集链；资源维度单列，不将新观测倒填本轮旧记录或静默改变delivery_v1。
 
 ## 后续因果诊断边界
 
@@ -70,7 +80,7 @@ Harbor0.25.0主服务模板没有默认init，只有egress sidecar设init；Nav�
 
 核心生产修复及test-only夹具已提交于42ce224；D的Go内容一致。第二轮完整make verify通过：9666 started / 9657 passed / 0 failed / 9 skipped，scan/log/leak门通过；goimports因工具缺失按Makefile跳过。单独tag120为2/2通过，仅证明120次真实本地SSE用户提交及至少一次压缩日志等机制。当前评测源包导出49个合同通过；D提交5aa063在GitHub上13项检查均成功。
 
-这些证据不等于R1b跨进程、多次压缩任务已通过，也不等于全部原生工具已认证。R1b只在独立工作树进行候选测试开发和源审，尚无对应真实二进制旅程结果；长任务LLM摘要、更多未见任务、多个模型与重复试验均未完成。
+截至D冻结与本轮模型运行时，R1b仍未完成。后续R1b v2已在独立测试版本跑通两进程续接与多次截断压缩，并将原件精确集成；outer-reaper及宿主Bash窗口也有新的无费工程证据，见[第3轮后续报告](round-03.md)。这些后续结果不回填D，也不代表全部工具、LLM摘要质量、真实长项目或更多未见题已完成；当前Darwin Go组合已通过fullverify与单独tagged验收，详见第3轮；不把后续验收回填D。
 
 ## 来源绑定
 

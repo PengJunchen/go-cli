@@ -10,6 +10,8 @@
 - C是旧379基线上的Thinking+Git只读生命周期修复变体；无费真实CLI单/并行fixture已有绿结果，**没有真实模型任务评分**。旧本地checkpoint `65cf537`保留调查材料，不作为新main的发布基线，也不推送旧开发历史。
 - PR9已包含更广的受管Git写/读、state、worker、子Agent、MCP、post-tool hook、会话管理与PTY修复。旧“未实现/不受管”判断只对旧版本成立；先复用新main已有测试，不重做已合并能力。来源与重新验收门见[版本迁移说明](version-migration.md)、[当前覆盖盘点](coverage-baseline.md)。
 - 新变体D已冻结为干净提交**5aa063ee647f753f7f0fc7282a3baf5b6e691932**，完成无费门与Nav开发回归：官方1、CLI exit1、自定义完整交付0，见[第2轮](round-02.md)。后续若有新通用修复，另记E或新版本，不能混用B/C/D成绩。原冻结Flipt/Vuls及额外10题未解封，仍需后续独立门禁和统一调度。
+- R1b v2已在独立测试版本实际完成两进程60+60次公开输入、125次本地HTTP、117次不同边界的截断压缩及一次副作用验收；三份测试原件已精确集成；当前Darwin Go组合fullverify已通过，另有tagged5/5通过，其中整合R1b为23.14秒，与早期v2的23.32秒分开留存。outer-reaper与宿主Bash执行窗口也有独立局部证据，Linux ARM归档的真实取消补臂已独审通过，均不冒充新标准任务成绩，见[第3轮工程报告](round-03.md)。
+- 当前Go改动已分为ACP fixture `df625c3`、宿主Bash窗口 `ea224bd`、显式outer `b88de71`、R1b测试 `081289b`并推送。验证时为098c350加冻结候选，1362份Go文件SHA/mode前后及当前一致；9708 started/9699 pass/0 fail/9 skip、31包，scan/log10/leak6通过，goimports按原规则skip。Linux amd64 opt-in CI尚未绑定终态，本机Rosetta未通过；新Python最终25源及64合同已独审冻结（14.444秒，manifest f14539b5…），提交0962aa7；历史52及f93/61记录原样保留，不倒填。
 - 旧单工具复现证实成功receipt不等于prepared completion；该安全原则继续适用，但不将旧缺口移植成新main事实。Nav后续属于开发回归，不能覆盖B首次失败。
 
 公开复现入口为主仓库的[评测源包](../../../scripts/harness_eval/README.md)、[执行约束](../../../scripts/harness_eval/runner/RUNNER.md)、[AA分层核查](../../../scripts/harness_eval/reports/aa-reference.md)与[首轮脱敏报告](round-01.md)。本地完整证据另保留于相邻目录 `go-cli-eval/jobs/nav-pilot-20261028/`，不发布原始日志、题解或密钥。
@@ -65,6 +67,8 @@
 **退出**：矩阵100%覆盖本轮实际启用核心工具，已知不完整能力单列阻断项；无费真实CLI、race和Reviewer负例通过后再开收费批次。最小先做文件/Bash/Git三链；Git优先复用PR9已有local+bare remote journey，必要时只补独立tree/ref验收。失败停在该链修复，不等所有工具一次铺开。
 
 ## R3：压缩、长对话与续接
+
+**当前局部进展**：R1b v2及当前整合Darwin组合的真实两进程续接/多次截断压缩/业务文件与一次副作用合同均已通过并独审；不是R2全工具矩阵或R3全部故障/摘要/性能分支已完成。LLM摘要质量、强杀恢复与真实长项目仍未完成，见[第3轮](round-03.md)。
 
 **进入**：R2通过；预先冻结独立合成fixture、验收清单和中断点，不使用正式题gold或Pi解答造fixture。
 
@@ -132,4 +136,4 @@
 - [ ] R5：真实长项目与性能回放分层，同题重复、成本/延迟/成功一并报告。
 - [ ] git仅提交本轮授权范围；代码修复先TDD再Reviewer，必要全量校验完成后推送，失败如实披露。
 
-当前失效的Flipt预检已另存`infra-interrupted`，旧暂停队列/控制进程及容器清理，不计empty负例；Nav既有empty0/reference1和真实评分保留。Flipt/Vuls fresh控制待资源窗口，当前不与Git修复/CI并行启动重型工作。
+当前失效的Flipt旧预检仍为`infra-interrupted`，不计empty负例；Nav既有校准和真实评分保留。Flipt已通过新资产元数据门，新fresh empty0/reference1串行完成，前后资产一致且容器已清除；fresh配置metadata补充确认15个Go/Pi候选路径全缺席。校准与配置metadata已通过独立审核；Go组合fullverify及tagged已通过；新Python25源/64合同最终包也已独审冻结；仍须新profile双CLI真实fixture有效态及最终payload门，尚未放行模型。R2/R3仍partial，后续若根派发Flipt仅属扩大工程pilot，不冒称已完成R4认证。Vuls fresh控制仍待后续调度；新增10题锁未改、未解封。

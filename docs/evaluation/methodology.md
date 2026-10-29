@@ -39,11 +39,16 @@
 |---|---|
 | 身份 | task/repeat/arm、profile、source revision/patch/binary、模型有效请求、task/image/verifier/runner哈希 |
 | 结果 | 官方reward、完成状态、退出码、失败分类、人工接管或越权 |
+| 资源 | 共同collector信号前进程快照、每PID状态与身份、未知覆盖率；与CLI退出/工具内部proof分别保存 |
 | 耗时 | 完整attempt墙钟、模型累计请求、评分耗时分别列；timeout按截尾解释，成功任务耗时另列 |
 | 用量 | input/output/reasoning/cache-read/cache-write、缺失覆盖率；未知填null，不能填0 |
 | 费用 | 所有失败/重试/摘要/子Agent的实际账单或明确估计；摊销每成功交付费用=全部费用/成功数 |
 
 同一失败可有官方0分，同时原因属于环境、预算、协议、Harness运行时或纯解题错误；不能因不利就删除，也不能把考场损坏当模型不会。LLM裁判应匿名、锁版本、用人工抽审校准；无法复核的项保留不确定性。
+
+当前自定义delivery_v1采用已经约定的CLI退出与协议条件，保留运行时失败的主分母；它不等于跨Harness完整资源闭合认证，CLI exit0也不能替代操作系统资源证据。历史B/Pi/D外部collector信号目标数分别为0/22/2，信号前/proc状态全部unknown；不把这些目标数解释成活进程数、僵尸数或证明某Harness资源管理更强，原始0/1与attempt均不改。
+
+未来使用共同 `processes-before-cleanup.json` 在STOP/KILL前采PID/state/PPID/PGID/starttime/comm，失败观测明确unknown，作为单独资源维度报告。新观测链已有52个导出合同及自有合成容器检查；历史缺失不回填，若将资源条件加入成功定义，应先预注册新的指标版本。实际例子与边界见[第2轮](harness-certification-2026-10-28/round-02.md)。
 
 ## 六、下一阶段怎样做
 
