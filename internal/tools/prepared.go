@@ -992,6 +992,7 @@ func (p *preparedInvocation) commitAndInvoke(ctx context.Context) (*ToolResult, 
 		return nil, err
 	}
 	executeCtx := p.withEffectStartGuard(ctx)
+	executeCtx = withPreparedBashInvocation(executeCtx, p)
 	if p.completionProof == CompletionOwnedProcessGroupJoined || p.completionProof == completionScopedSearchJoined || p.completionProof == completionLocalProcessOrPrestartNoProcessJoined {
 		executeCtx = withPreparedCompletionReporter(executeCtx, func(proof PreparedCompletionProof, done <-chan struct{}) {
 			p.completion.attach(proof, done)
@@ -1151,6 +1152,7 @@ func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sin
 		return nil, err
 	}
 	executeCtx := p.withEffectStartGuard(ctx)
+	executeCtx = withPreparedBashInvocation(executeCtx, p)
 	completionProof := p.completionProof
 	if p.streamingSink == nil {
 		completionProof = ""

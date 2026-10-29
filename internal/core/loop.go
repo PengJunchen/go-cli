@@ -645,11 +645,13 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			_ = es.Send(cloneAgentEvent(ev)) //nolint:errcheck
 		}
 	}
-	sendToolResultEvent := func(content string, isError bool, toolCallID, outcome string, sourceTruncated *bool) {
+	sendToolResultEvent := func(content string, isError bool, toolCallID, outcome string, sourceTruncated *bool, receiptClipped ...bool) {
+		clipped := len(receiptClipped) > 0 && receiptClipped[0]
 		sendEvent(AgentEvent{
 			Kind: "tool_result", Content: content, Timestamp: time.Now(), IsError: isError,
 			ToolCallID: toolCallID, ReceiptOutcome: outcome,
-			SourceTruncated: cloneOptionalBool(sourceTruncated),
+			SourceTruncated:        cloneOptionalBool(sourceTruncated),
+			ReceiptOutputTruncated: clipped,
 		})
 	}
 
@@ -1033,7 +1035,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 					if message.Role != string(llm.RoleTool) {
 						continue
 					}
-					sendToolResultEvent(message.Content, message.ReceiptOutcome != ReceiptOutcomeSuccess, message.ToolCallID, message.ReceiptOutcome, entry.SourceTruncated)
+					sendToolResultEvent(message.Content, message.ReceiptOutcome != ReceiptOutcomeSuccess, message.ToolCallID, message.ReceiptOutcome, entry.SourceTruncated, entry.ReceiptOutputTruncated)
 				}
 				if commitErr != nil {
 					span.SetStatus(tracing.SpanStatusError, commitErr.Error())
@@ -1140,7 +1142,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 
 				if consumer != nil {
 					result, commitErr := consumer.executeSequentialCall(iterationCtx, registry, assistantOrdinal, assistantEntry.Message, tc, es, &transcript, &messages)
-					sendToolResultEvent(result.output, result.isError, tc.ID, result.outcome, result.sourceTruncated)
+					sendToolResultEvent(result.output, result.isError, tc.ID, result.outcome, result.sourceTruncated, result.receiptOutputTruncated)
 					if commitErr != nil {
 						if !hasUnknownToolOutcome(commitErr) && callIndex+1 < len(resp.ToolCalls) && (errors.Is(commitErr, context.Canceled) || errors.Is(commitErr, context.DeadlineExceeded) || errors.Is(commitErr, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(commitErr, ErrRunCommitChildUnsupported) || errors.Is(commitErr, ErrRunCommitStreamingUnsupported)) {
 							for _, undispatched := range resp.ToolCalls[callIndex+1:] {
@@ -1509,6 +1511,11 @@ func appendTranscriptToolReceipt(transcript *[]TranscriptEntry, call llm.ToolCal
 
 func toolReceiptOutcome(ctx context.Context, err error, isError bool) string {
 	if err != nil {
+		// A private timeout borrowed from a prepared action is not authority
+		// for an unprepared legacy/custom dispatch.
+		if tools.IsPreparedBashOwnTimeout(err) {
+			return ReceiptOutcomeUnknown
+		}
 		if hasUnknownToolOutcome(err) {
 			return ReceiptOutcomeUnknown
 		}

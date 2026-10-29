@@ -254,7 +254,7 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 			"duration_ms", ms,
 			"reason", message,
 			"timeout", timeout.String())
-		return result, localLifecycleError(cause, lifecycle)
+		return result, bashLifecycleError(ctx, execCtx, cause, lifecycle)
 	}
 
 	if !lifecycle.quiescent {

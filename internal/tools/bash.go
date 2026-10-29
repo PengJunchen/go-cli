@@ -269,7 +269,7 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 			"duration_ms", ms,
 			"reason", message,
 			"timeout", timeout.String())
-		return &ToolResult{Output: output, Metadata: metadata}, localLifecycleError(cause, lifecycle)
+		return &ToolResult{Output: output, Metadata: metadata}, bashLifecycleError(ctx, execCtx, cause, lifecycle)
 	}
 
 	if !lifecycle.quiescent {

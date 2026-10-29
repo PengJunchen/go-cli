@@ -114,6 +114,9 @@ type AgentEvent struct {
 	ReceiptOutcome string `json:"receipt_outcome,omitempty"`
 	// SourceTruncated reports a source truncation fact when structured metadata provides one.
 	SourceTruncated *bool `json:"source_truncated,omitempty"`
+	// ReceiptOutputTruncated is true only when the host observed clipping of
+	// failed-receipt text. It is independent of source capture truncation.
+	ReceiptOutputTruncated bool `json:"receipt_output_truncated,omitempty"`
 	// PreToolCall carries a cancelable handle for "pre_tool_call" events.
 	// External interceptors call PreToolCall.Cancel() to prevent the
 	// tool from executing. It is nil for all other event kinds.
