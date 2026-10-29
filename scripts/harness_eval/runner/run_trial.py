@@ -2,6 +2,9 @@
 import argparse
 import hashlib
 import inspect
+import io
+import stat
+import tarfile
 import json
 import os
 from pathlib import Path
@@ -181,6 +184,133 @@ open('/logs/agent/process-cleanup.json','w').write(json.dumps({'other_pids_stopp
 '''
 
 
+NATIVE_CONFIG_TARGETS = {
+    'go.json':'/root/.go-cli/config.json',
+    'models.json':'/root/.pi/agent/models.json',
+    'pi-settings.json':'/root/.pi/agent/settings.json',
+}
+NATIVE_CONFIG_DIRS = ('root/.go-cli','root/.pi','root/.pi/agent')
+
+CONFIG_IDENTITY_PROBE = r'''import json,os,stat
+identity={'uid':os.getuid(),'gid':os.getgid(),'euid':os.geteuid(),'egid':os.getegid()}
+for path in ['/root','/root/.go-cli','/root/.pi','/root/.pi/agent']:
+ try: info=os.lstat(path)
+ except FileNotFoundError:
+  if path=='/root':raise
+  continue
+ if not stat.S_ISDIR(info.st_mode):raise RuntimeError('native config parent is not an ordinary directory')
+ if path!='/root' and ((info.st_uid,info.st_gid)!=(identity['euid'],identity['egid']) or stat.S_IMODE(info.st_mode) not in (0o700,0o755)):
+  raise RuntimeError('existing native config parent has another owner or uncontrolled mode')
+for path in ['/root/.go-cli/config.json','/root/.pi/agent/models.json','/root/.pi/agent/settings.json']:
+ if os.path.lexists(path):raise RuntimeError('refusing to overwrite an existing native config')
+if not os.access('/root',os.R_OK|os.X_OK):raise RuntimeError('default identity cannot traverse native config home')
+print(json.dumps({'identity':identity,'paths_safe':True},sort_keys=True))
+'''
+
+CONFIG_READBACK_PROBE = r'''import hashlib,json,os,stat,sys
+expected=json.loads(sys.argv[1])
+identity={'uid':os.getuid(),'gid':os.getgid(),'euid':os.geteuid(),'egid':os.getegid()}
+if identity!=expected['identity']:raise RuntimeError('default exec identity changed')
+result={'identity':identity,'directories':{},'files':{}}
+for path in ['/root','/root/.go-cli','/root/.pi','/root/.pi/agent']:
+ info=os.lstat(path)
+ if not stat.S_ISDIR(info.st_mode):raise RuntimeError('native config parent is not an ordinary directory')
+ if path=='/root':continue
+ row={'uid':info.st_uid,'gid':info.st_gid,'mode':stat.S_IMODE(info.st_mode)}
+ if row!=expected['directories'][path]:raise RuntimeError('private config directory owner/mode mismatch')
+ result['directories'][path]=row
+for path in ['/root/.go-cli/config.json','/root/.pi/agent/models.json','/root/.pi/agent/settings.json']:
+ fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+ try:
+  info=os.fstat(fd)
+  if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:raise RuntimeError('native config is not an independent regular file')
+  contents=b''
+  while True:
+   block=os.read(fd,65536)
+   if not block:break
+   contents+=block
+   if len(contents)>1024*1024:raise RuntimeError('native config exceeds bound')
+ finally:os.close(fd)
+ row={'uid':info.st_uid,'gid':info.st_gid,'mode':stat.S_IMODE(info.st_mode),'size':len(contents),'sha256':hashlib.sha256(contents).hexdigest()}
+ if row!=expected['files'][path]:raise RuntimeError('native config readback bytes/owner/mode mismatch')
+ result['files'][path]=row
+print(json.dumps(result,sort_keys=True))
+'''
+
+
+def validate_native_identity(value):
+    if (not isinstance(value,dict) or set(value)!={'uid','gid','euid','egid'}
+            or any(type(v) is not int or not 0<=v<2**32-1 for v in value.values())
+            or value['uid']!=value['euid'] or value['gid']!=value['egid']):
+        raise ValueError('actual default exec UID/GID is unknown or inconsistent')
+    return dict(value)
+
+
+def write_native_configs(configs,profile_id):
+    configs=Path(configs)
+    configs.mkdir(mode=0o700,parents=False,exist_ok=False)
+    values={'go.json':go_config('http://relay:8000/v1',profile_id=profile_id),
+            'models.json':pi_config('http://relay:8000/v1'),
+            'pi-settings.json':{'cacheWarming':'off','telemetry':False}}
+    for name,value in values.items():
+        data=(json.dumps(value,indent=2,ensure_ascii=False)+'\n').encode()
+        fd=os.open(configs/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'wb') as stream:stream.write(data)
+
+
+def make_native_config_archive(configs,identity):
+    identity=validate_native_identity(identity)
+    configs=Path(configs)
+    if configs.is_symlink() or not configs.is_dir() or stat.S_IMODE(configs.stat().st_mode)!=0o700 or set(p.name for p in configs.iterdir())!=set(NATIVE_CONFIG_TARGETS):
+        raise ValueError('native config sources must be exactly the fixed ordinary files')
+    expected={'identity':identity,'directories':{},'files':{}}
+    output=io.BytesIO()
+    with tarfile.open(fileobj=output,mode='w',format=tarfile.USTAR_FORMAT) as archive:
+        for name in NATIVE_CONFIG_DIRS:
+            row=tarfile.TarInfo(name);row.type=tarfile.DIRTYPE;row.mode=0o700
+            row.uid=identity['uid'];row.gid=identity['gid'];row.uname=row.gname='';row.mtime=0
+            archive.addfile(row)
+            expected['directories']['/'+name]={'uid':row.uid,'gid':row.gid,'mode':row.mode}
+        for name,target in NATIVE_CONFIG_TARGETS.items():
+            fd=os.open(configs/name,os.O_RDONLY|os.O_NOFOLLOW)
+            with os.fdopen(fd,'rb') as stream:
+                info=os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o600:
+                    raise ValueError('native config source must be private unlinked regular file')
+                data=stream.read(1024*1024+1)
+            if len(data)>1024*1024:raise ValueError('native config source exceeds bound')
+            row=tarfile.TarInfo(target.lstrip('/'));row.type=tarfile.REGTYPE;row.mode=0o600
+            row.uid=identity['uid'];row.gid=identity['gid'];row.uname=row.gname='';row.mtime=0;row.size=len(data)
+            archive.addfile(row,io.BytesIO(data))
+            expected['files'][target]={'uid':row.uid,'gid':row.gid,'mode':row.mode,'size':len(data),'sha256':hashlib.sha256(data).hexdigest()}
+    return output.getvalue(),expected
+
+
+def copy_native_config_archive(cid,archive):
+    # Daemon-side extraction preserves the archive's explicit numeric owner.
+    # No in-container chown, capability addition, or global upload API.
+    return subprocess.run(['docker','cp','-a','-',cid+':/'],input=archive,check=True,
+                          capture_output=True,timeout=120)
+
+
+def install_native_configs(cid,configs,*,profile_id=PROFILE_ID):
+    observation=json.loads(docker('exec',cid,'python3','-c',CONFIG_IDENTITY_PROBE).stdout)
+    if not isinstance(observation,dict) or observation.get('paths_safe') is not True:
+        raise ValueError('native config destination paths are not verified')
+    identity=validate_native_identity(observation.get('identity'))
+    write_native_configs(configs,profile_id)
+    archive,expected=make_native_config_archive(configs,identity)
+    copy_native_config_archive(cid,archive)
+    actual=json.loads(docker('exec',cid,'python3','-c',CONFIG_READBACK_PROBE,
+                            json.dumps(expected,sort_keys=True,separators=(',',':'))).stdout)
+    if actual!=expected:raise ValueError('native config readback does not match private host bytes/identity')
+    return {'identity':identity,'identity_source':'actual docker exec default process',
+            'host_config_sha256':{name:expected['files'][target]['sha256']for name,target in NATIVE_CONFIG_TARGETS.items()},
+            'archive_sha256':hashlib.sha256(archive).hexdigest(),'readback':actual,
+            'verified_before_native':True,'installation':'fixed-path daemon tar archive, no exec chown'}
+
+
+
 def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario="parallel",*,profile_id=PROFILE_ID):
     profile=resolve_profile(profile_id)
     out.mkdir(parents=True,exist_ok=False)
@@ -262,15 +392,11 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
         record['pi_lock_sha256']=payload_manifest.get('pi_lock_sha256')
         record['node_version']=payload_manifest.get('node')
         record['payload_manifest_sha256']=sha(payload/'manifest.json')
-        docker('exec',task_cid,'mkdir','-p','/opt/eval','/logs/agent','/root/.go-cli','/root/.pi/agent')
+        docker('exec',task_cid,'mkdir','-p','/opt/eval','/logs/agent')
         docker('cp',str(payload)+'/.',task_cid+':/opt/eval',timeout=180)
         configs=out/'configs'
-        dump(configs/'go.json',go_config('http://relay:8000/v1',profile_id=profile['profile_id']))
-        dump(configs/'models.json',pi_config('http://relay:8000/v1'))
-        dump(configs/'pi-settings.json',{'cacheWarming':'off','telemetry':False})
-        for source,destination in [('go.json','/root/.go-cli/config.json'),('models.json','/root/.pi/agent/models.json'),('pi-settings.json','/root/.pi/agent/settings.json')]:
-            docker('cp',configs/source,task_cid+':'+destination)
-        record['config_sha256']={p.name:sha(p) for p in configs.iterdir()}
+        record['native_config_installation']=install_native_configs(task_cid,configs,profile_id=profile['profile_id'])
+        record['config_sha256']=dict(record['native_config_installation']['host_config_sha256'])
         actual_argv=cli_argv(arm,prompt)
         record['argv_sha256']=hashlib.sha256(json.dumps(actual_argv).encode()).hexdigest()
         result=run_cli_once(task_cid,actual_argv,out,int(cfg['agent']['timeout_sec']))

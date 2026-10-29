@@ -112,10 +112,14 @@ class ProfileDriverContract(unittest.TestCase):
                 stdout = json.dumps([{'Config': {'Env': environment if environment is not None else ['GO_CLI_LINUX_SUBREAPER=0']}}])
             elif args[:3] == ('exec', 'task', 'python3') and args[4] == run_trial.PROBE:
                 stdout = json.dumps({'relay': True, 'github': False, 'pypi': False, 'npm': False, 'host_gateway': False, 'public_ip': False, 'internal_host_gateway': False})
+            elif args[:3] == ('exec','task','python3') and args[4] == run_trial.CONFIG_IDENTITY_PROBE:
+                stdout=json.dumps({'identity':{'uid':0,'gid':0,'euid':0,'egid':0},'paths_safe':True})
+            elif args[:3] == ('exec','task','python3') and args[4] == run_trial.CONFIG_READBACK_PROBE:
+                stdout=args[5]
             elif args[:4] == ('exec', 'task', 'git', 'rev-parse'):
                 stdout = 'b' * 40
             return subprocess.CompletedProcess(['docker', *args], 0, stdout, '')
-        with patch.object(run_trial, 'ROOT', runner), patch.object(run_trial, 'docker', side_effect=docker), patch.object(run_trial, 'resolve_locked_image', return_value=('repo@sha256:' + '1' * 64, {'Id': 'sha256:' + '1' * 64})), patch.object(run_trial, 'run_cli_once', return_value={'exit_code': 0, 'elapsed_seconds': 0.0, 'cli_invocations': 1}) as execute, contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(run_trial, 'copy_native_config_archive'), patch.object(run_trial, 'ROOT', runner), patch.object(run_trial, 'docker', side_effect=docker), patch.object(run_trial, 'resolve_locked_image', return_value=('repo@sha256:' + '1' * 64, {'Id': 'sha256:' + '1' * 64})), patch.object(run_trial, 'run_cli_once', return_value={'exit_code': 0, 'elapsed_seconds': 0.0, 'cli_invocations': 1}) as execute, contextlib.redirect_stdout(io.StringIO()):
             error = None
             try:
                 run_trial.run_trial(task, arm, output, profile_id=profile)

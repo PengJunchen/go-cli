@@ -47,7 +47,7 @@
     },
     {
       "path": "runner/run_trial.py",
-      "sha256": "287f8add99b8d9237e4832d5b006cdecf208121fba6aa6b9f5255e6a1a9d2711"
+      "sha256": "f532b85f281f35173bf7a9d8412df19912720908f978486a11967090bd1c8cc7"
     },
     {
       "path": "runner/scripts/asset_preflight.py",
@@ -86,12 +86,16 @@
       "sha256": "f94cb9bcf5ee8ddb703b2be579d2b9e77d4eeba62a2ab8f2c1e9ae4ee27ecd2b"
     },
     {
+      "path": "runner/tests/test_native_config_install.py",
+      "sha256": "6bcfbb0cdc2842de7ec78e27658c9a51fad49fff1ea3939c0b155df19b38029b"
+    },
+    {
       "path": "runner/tests/test_offline_fixture.py",
       "sha256": "5628ff3b45c85ee60eebe934d76d251ecae63e011b0cd0ac34dde404f7777fd4"
     },
     {
       "path": "runner/tests/test_profiles.py",
-      "sha256": "697898fe75f27afd5b8451a190f83628770fa82b1337a3aff6a77b98763957cf"
+      "sha256": "c3e4bbc453f338552cb4130405468d876b250e5c353a6b504b80e09405e7f551"
     },
     {
       "path": "runner/tests/test_reviewer_contract.py",
@@ -106,8 +110,8 @@
       "sha256": "0f1e2f705890e8f91c527b793d4dc100f67efa17d351b70eab9ff5cb09721dc6"
     }
   ],
-  "source_base_revision": "5736e8828c80913fd4a32dc7b6e22eb82e5ec2b1",
-  "reviewed_go_revision": "42ce22477d900265b186677762ad4eff4aea0e26",
+  "source_base_revision": "e9c438a42f40070272f90ddd866b116f3b22cdbf",
+  "reviewed_go_revision": "e9c438a42f40070272f90ddd866b116f3b22cdbf",
   "profile_id": "main-5736e88-personal-memory-off-v1",
   "go_automatic_personal_memory": false,
   "supported_profile_ids": [
@@ -126,7 +130,7 @@
       "fixed_container_environment": "GO_CLI_LINUX_SUBREAPER=0; inspected before start"
     }
   },
-  "profile_observation_boundary": "host declarations are not observed tool windows; Pi config/argv/budgets unchanged; actual new-profile CLI smoke not yet run",
+  "profile_observation_boundary": "Source declarations only; setup identity/readability and effective tool observations are recorded in private per-run evidence.",
   "tool_metadata_observation": {
     "description_hash": "actual UTF-8 SHA256 or null",
     "parameters_hash": "actual object canonical JSON sort_keys compact UTF-8 allow_nan=False SHA256 or null",
@@ -139,5 +143,14 @@
     "command_only_schema": "actual complete bash schema true/known-different false/unknown null",
     "raw_description_schema_messages_commands_logged": false,
     "relay_raw_bytes_budget_usage_and_rejection_policy_unchanged": true
+  },
+  "native_config_installation_contract": {
+    "version": "default-user-private-v1",
+    "host_file_mode": "0600",
+    "container_owner": "actual default exec UID/GID",
+    "container_directory_mode": "0700",
+    "container_file_mode": "0600",
+    "pre_native_gate": "same-identity O_NOFOLLOW open, fstat ownership/mode and exact byte SHA256",
+    "capabilities_unchanged": true
   }
 }
