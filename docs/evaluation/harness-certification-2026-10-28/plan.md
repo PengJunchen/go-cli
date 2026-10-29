@@ -6,6 +6,7 @@
 
 ## 当前事实与版本边界
 
+- 最新Go-only工程修复在e1基线上保留宿主PATH及三个固定开发路径键，普通/流式Bash改为非登录执行；设计、源码、Linux无模型实际入口复验均已独审，本机整合fullverify为9774 pass/0 fail/6 skip、1366份Go源SHA/mode不变。固定fd的三个既有目标已补验0 skip。tagged补验5/5、0 skip已通过，canonical Linux binary与实际诊断5974字节一致、1366源集合与fullverify同；实施已本地提交为`a7ae0207…`，源、完整门禁及R1b业务原件已独立终核，新远端CI按本次文档提交时状态仍待运行，不回填正式Flipt或继承e1 CI为修复通过；见[第5轮](round-05.md)。
 - 模型固定为 `codex/gpt-6.1-sol`，双方有效 `high`；主调用输出上限 16384，原生内部较低上限允许但记录。Magpie只作为共同网关，核对实际请求参数即可。
 - 原始版本 A 的 Eino 请求路径漏传 thinking；无费 fixture 先发现，通用修复后冻结 B。不能声称 A 已做真实基准。
 - Navidrome 首次真实尝试：**B：官方 clean reward 0；Pi：1**。B 运行21.13秒、3个成功HTTP请求后因 `git_status` 缺完成证明退出，未修改业务代码；Pi运行711.9秒、35次调用后交付。独立评分分别224.72/351.17秒，均fresh镜像、官方 patch replay、相同verifier资产。B提前退出不代表效率胜出。
@@ -15,7 +16,7 @@
 - R1b v2已在独立测试版本实际完成两进程60+60次公开输入、125次本地HTTP、117次不同边界的截断压缩及一次副作用验收；三份测试原件已精确集成；当前Darwin Go组合fullverify已通过，另有tagged5/5通过，其中整合R1b为23.14秒，与早期v2的23.32秒分开留存。outer-reaper与宿主Bash执行窗口也有独立局部证据，Linux ARM归档的真实取消补臂已独审通过，均不冒充新标准任务成绩，见[第3轮工程报告](round-03.md)。
 - Go改动已分为ACP fixture `df625c3`、宿主Bash窗口 `ea224bd`、显式outer `b88de71`、R1b测试 `081289b`并推送。第3轮验证时为098c350加冻结候选，1362份Go文件SHA/mode前后一致；9708 started/9699 pass/0 fail/9 skip、31包，scan/log10/leak6通过，goimports按原规则skip。其后f4的Linux CI因测试夹具未满足FD前置而失败；仅修Linux测试的6b已取得native CI13/13，生产文件及独立重建binary字节与f4一致。不能将此结果外推为Rosetta opt-in支持。Python25源/64合同已独审冻结（14.444秒，manifest f14539b5…），提交0962aa7；历史52及f93/61记录原样保留。
 - 最新Flipt pilot按`main-bash300-personal-memory-off-v2`固定Go→Pi、各一次：两边官方1、CLI0、delivery1；Agent墙钟432.108/1115.276秒，input+output为475676/711441。Pi未缓存input及output更少，USD均unknown，不能由总token宣布Go更便宜。产品源f4/binary914d与6b测试CI分开；本轮outer OFF。见[第4轮及白名单结果](round-04.md)。这是R2/R3仍partial下单独批准的扩大工程pilot，不是R4全面认证。
-- R2文件子链v4已在Darwin原生race CLI独审通过：9call、9action资源闭合、pending0、CLI约3.013秒，外置业务原件验收通过。v3首轮的YAML空flow列表配置失败发生在0HTTP，原件保留并分类fixture preflight，不计工具能力失败。6b加3份已审R2测试的本机整合fullverify已PASS：502.230秒、9749 started/9740 pass/0 fail/9 skip、31包，另log10/leak6及lint/vet/build/scan通过，可选goimports跳过；1365份Go源SHA/mode不变。整合R2子项7.32秒含构建/race，不与独立CLI3.013秒混池；尚无新增提交或其远端CI身份。Git/全部工具矩阵未完成。
+- R2文件子链v4已在Darwin原生race CLI独审通过：9call、9action资源闭合、pending0、CLI约3.013秒，外置业务原件验收通过。v3首轮的YAML空flow列表配置失败发生在0HTTP，原件保留并分类fixture preflight，不计工具能力失败。6b加3份已审R2测试的本机整合fullverify已PASS：502.230秒、9749 started/9740 pass/0 fail/9 skip、31包，另log10/leak6及lint/vet/build/scan通过，可选goimports跳过；1365份Go源SHA/mode不变。整合R2子项7.32秒含构建/race，不与独立CLI3.013秒混池；该次门禁本身不提供后续提交/远端CI身份；其后e1已推送并通过13项CI，见第5轮。Git/全部工具矩阵未完成。
 - 旧单工具复现证实成功receipt不等于prepared completion；该安全原则继续适用，但不将旧缺口移植成新main事实。Nav后续属于开发回归，不能覆盖B首次失败。
 
 公开复现入口为主仓库的[评测源包](../../../scripts/harness_eval/README.md)、[执行约束](../../../scripts/harness_eval/runner/RUNNER.md)、[AA分层核查](../../../scripts/harness_eval/reports/aa-reference.md)与[首轮脱敏报告](round-01.md)。本地完整证据另保留于相邻目录 `go-cli-eval/jobs/nav-pilot-20261028/`，不发布原始日志、题解或密钥。
