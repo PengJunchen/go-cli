@@ -23,11 +23,19 @@ import (
 )
 
 func main() {
+	if code, handled := standaloneSubreaperDispatch(); handled {
+		os.Exit(code)
+	}
 	tm, err := newPersistentTrustManager()
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: persistent trust store unavailable: %v\n", err) //nolint:errcheck // startup warning is best-effort
 	}
 	os.Exit(runWithTrustManager(os.Args[1:], os.Stdout, os.Stderr, tm))
+}
+
+func writeSubreaperFailure(err error) int {
+	_, _ = fmt.Fprintln(os.Stderr, err) //nolint:errcheck // startup failure diagnostic is best-effort
+	return 125
 }
 
 // newPersistentTrustManager creates the one process-wide manager over the
