@@ -241,34 +241,45 @@ func TestGRPCAdapterConnectContextCancellation(t *testing.T) {
 func TestStdioAdapterDisconnectWritesFrame(t *testing.T) {
 	clientR, serverW := io.Pipe()
 	serverR, clientW := io.Pipe()
+	peerDone := make(chan struct{})
 	t.Cleanup(func() {
 		closeIgnored(serverR)
 		closeIgnored(clientW)
 		closeIgnored(serverW)
 		closeIgnored(clientR)
+		select {
+		case <-peerDone:
+		case <-time.After(2 * time.Second):
+			t.Error("fake peer reader did not join after pipe cleanup")
+		}
 	})
 
 	client := NewStdioAdapter(clientR, clientW)
 	frames := make(chan ACPMessage, 8)
 	go func() {
+		defer close(peerDone)
+		defer close(frames)
 		for {
 			line, err := readLineLen(serverR)
 			if err != nil {
-				close(frames)
 				return
 			}
 			var m ACPMessage
 			if json.Unmarshal(line, &m) == nil {
 				frames <- m
+				if m.Type == TypeDisconnect {
+					// Keep the active session readable until its actual farewell
+					// arrives, then release the caller-owned reader worker.
+					closeIgnored(serverW)
+					return
+				}
 			}
 		}
 	}()
 
 	require.NoError(t, client.Connect(context.Background()))
 
-	// The reader is caller-owned, so close the peer's input side before
-	// Disconnect to let the adapter prove that its reader worker has returned.
-	closeIgnored(serverW)
+	// Do not inject terminal EOF before requesting the disconnect frame.
 	require.NoError(t, client.Disconnect(context.Background()))
 
 	// Collect frames until a disconnect is observed or we time out.
