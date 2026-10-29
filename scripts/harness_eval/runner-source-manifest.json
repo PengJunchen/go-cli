@@ -14,10 +14,6 @@
       "sha256": "d7e6697de7a4a160fb5b8dea54a30d13a484cac184db085178c1c541a1bf4b35"
     },
     {
-      "path": "runner/RUNNER.md",
-      "sha256": "7c3264968d749f1d6c581139bf9072e15a009e3912a39ebb3de321a35149022e"
-    },
-    {
       "path": "runner/audit_proxy.py",
       "sha256": "f2ab1639924e9a4edd9de1399ac1d5c3ff8bef4372b806813b1ef05f43230e68"
     },
