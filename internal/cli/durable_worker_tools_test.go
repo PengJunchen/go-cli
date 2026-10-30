@@ -82,6 +82,11 @@ func TestDurableWorkerProcess(t *testing.T) {
 
 func durableWorkerConfig(t *testing.T, mode string) (*config.Config, string, string) {
 	t.Helper()
+	return durableWorkerConfigWithTimeout(t, mode, 2000)
+}
+
+func durableWorkerConfigWithTimeout(t *testing.T, mode string, timeoutMillis int) (*config.Config, string, string) {
+	t.Helper()
 	configureDurableCLISessionTest(t)
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
@@ -92,7 +97,7 @@ func durableWorkerConfig(t *testing.T, mode string) (*config.Config, string, str
 	require.NoError(t, err)
 	digest := sha256.Sum256(artifact)
 	calls, starts := filepath.Join(root, "calls"), filepath.Join(root, "starts")
-	descriptor := extension.RPCProcessConfig{Command: []string{executable, "-test.run=^TestDurableWorkerProcess$"}, Cwd: root, Env: map[string]string{"GO_CLI_DURABLE_WORKER": "1", "GO_CLI_WORKER_MODE": mode, "GO_CLI_WORKER_CALLS": calls, "GO_CLI_WORKER_STARTS": starts}, ArtifactSHA256: hex.EncodeToString(digest[:]), TimeoutMillis: 2000}
+	descriptor := extension.RPCProcessConfig{Command: []string{executable, "-test.run=^TestDurableWorkerProcess$"}, Cwd: root, Env: map[string]string{"GO_CLI_DURABLE_WORKER": "1", "GO_CLI_WORKER_MODE": mode, "GO_CLI_WORKER_CALLS": calls, "GO_CLI_WORKER_STARTS": starts}, ArtifactSHA256: hex.EncodeToString(digest[:]), TimeoutMillis: timeoutMillis}
 	encoded, err := json.Marshal(descriptor)
 	require.NoError(t, err)
 	path := filepath.Join(root, "worker.rpc.json")
