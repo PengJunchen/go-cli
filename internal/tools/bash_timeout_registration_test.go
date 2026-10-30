@@ -36,7 +36,15 @@ func TestRegisteredBashTimeoutDefaultsAndExplicitConfiguration(t *testing.T) {
 		require.False(t, bash.TimeoutTier)
 		schema, ok := bash.Parameters().(map[string]any)
 		require.True(t, ok)
-		require.Equal(t, map[string]any{"command": map[string]any{"type": "string"}}, schema["properties"])
+		properties, ok := schema["properties"].(map[string]any)
+		require.True(t, ok)
+		require.Len(t, properties, 2)
+		require.Equal(t, map[string]any{"type": "string"}, properties["command"])
+		timeoutSchema, ok := properties["timeout_ms"].(map[string]any)
+		require.True(t, ok)
+		require.Equal(t, "integer", timeoutSchema["type"])
+		require.Equal(t, 1, timeoutSchema["minimum"])
+		require.Equal(t, maxBashTimeoutMilliseconds, timeoutSchema["maximum"])
 	}
 	for _, invalid := range []time.Duration{0, -time.Second} {
 		registry := NewDefaultToolRegistry()

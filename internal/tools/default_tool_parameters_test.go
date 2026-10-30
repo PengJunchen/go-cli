@@ -32,7 +32,7 @@ func TestRegisteredDefaultToolsExposeAccurateParameterSchemas(t *testing.T) {
 			closed:        true,
 		},
 		"bash": {
-			propertyTypes: map[string]string{"command": "string"},
+			propertyTypes: map[string]string{"command": "string", "timeout_ms": "integer"},
 			required:      []string{"command"},
 			closed:        true,
 		},

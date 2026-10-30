@@ -113,6 +113,14 @@ func TestPreparedBashOwnTimeoutLifecycleGuardsStayUnknown(t *testing.T) {
 }
 
 func TestPreparedBashParentCancellationIsNotRecoverableTimeout(t *testing.T) {
+	testPreparedBashParentCancellation(t, false)
+}
+
+func TestPreparedBashPerCallParentCancellationIsNotRecoverableTimeout(t *testing.T) {
+	testPreparedBashParentCancellation(t, true)
+}
+
+func testPreparedBashParentCancellation(t *testing.T, perCall bool) {
 	root := t.TempDir()
 	pidPath := filepath.Join(root, "started.pid")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -122,7 +130,11 @@ func TestPreparedBashParentCancellationIsNotRecoverableTimeout(t *testing.T) {
 	registry := NewMiddlewareToolRegistry(base)
 	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
 	quoted := "'" + strings.ReplaceAll(pidPath, "'", "'\\''") + "'"
-	invocation, err := registry.PrepareToolCall(ctx, ToolCall{ID: "cancel-parent", Name: "bash", Args: map[string]any{"command": "printf '%s' \"$$\" > " + quoted + "; exec sleep 20"}})
+	args := map[string]any{"command": "printf '%s' \"$$\" > " + quoted + "; exec sleep 20"}
+	if perCall {
+		args["timeout_ms"] = 6000
+	}
+	invocation, err := registry.PrepareToolCall(ctx, ToolCall{ID: "cancel-parent", Name: "bash", Args: args})
 	require.NoError(t, err)
 	done := make(chan error, 1)
 	go func() { _, dispatchErr := invocation.Dispatch(ctx); done <- dispatchErr }()

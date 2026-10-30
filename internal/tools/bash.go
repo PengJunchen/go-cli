@@ -142,7 +142,7 @@ func (t *BashTool) Description() string {
 	if t.TimeoutTier {
 		window = "The host selects an execution window by command category"
 	}
-	return "bash: runs a synchronous, managed shell command and returns its combined output. Args: command (string). " + window + "; host runtime and parent cancellation may end it earlier. Wait for command-local parallel jobs (for example, cmd & wait); an unwaited background process is not a persistent worker. Longer synchronous commands require an appropriate host-configured execution window."
+	return "bash: runs a synchronous, managed shell command and returns its combined output. Args: command (string), timeout_ms (optional positive integer milliseconds; only shortens the host-selected window). " + window + "; host runtime and parent cancellation may end it earlier. Wait for command-local parallel jobs (for example, cmd & wait); an unwaited background process is not a persistent worker. Longer synchronous commands require an appropriate host-configured execution window."
 }
 
 // Parameters returns the JSON Schema for the command this tool executes.
@@ -151,6 +151,10 @@ func (t *BashTool) Parameters() any {
 		"type": "object",
 		"properties": map[string]any{
 			"command": map[string]any{"type": "string"},
+			"timeout_ms": map[string]any{
+				"type": "integer", "minimum": 1, "maximum": maxBashTimeoutMilliseconds,
+				"description": "Optional execution timeout in milliseconds; only shortens the host-selected command window. Parent and runtime deadlines may end execution earlier.",
+			},
 		},
 		"required":             []any{"command"},
 		"additionalProperties": false,
@@ -171,6 +175,14 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("bash.missing_command", "tool", "bash")
 		return nil, errors.New("bash: missing string argument 'command'")
+	}
+
+	timeout, err := t.executionTimeout(ctx, command, call.Args)
+	if err != nil {
+		reportPreparedNoProcessCompletion(ctx)
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("bash.invalid_timeout", "tool", "bash")
+		return nil, err
 	}
 
 	// A sandbox is required by default. When Sandbox is nil, return an
@@ -196,14 +208,6 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		return nil, err
 	}
 
-	// Determine the effective timeout. When TimeoutTier is enabled, the
-	// timeout is classified per-command; otherwise the fixed Timeout is used.
-	timeout := t.Timeout
-	if t.TimeoutTier {
-		timeout = classifyCommand(command)
-	}
-
-	timeout = runtimeBashTimeout(ctx, timeout)
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := execCtx.Err(); err != nil {
