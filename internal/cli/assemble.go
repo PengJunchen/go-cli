@@ -1449,8 +1449,11 @@ func (s *assembleState) assembleApproval() error {
 	}
 
 	// Wrap the classifier with an append-only audit trail so every classification
-	// decision is recorded to .go-cli/audit/{date}.jsonl.
-	auditDir := filepath.Join(s.gitCwd, ".go-cli", "audit")
+	// decision is recorded in the private HOME namespace for this workspace.
+	auditDir, err := resolveApprovalAuditDir(os.UserHomeDir, func() (string, error) { return s.gitCwd, nil })
+	if err != nil {
+		return fmt.Errorf("assemble: resolve approval audit directory: %w", err)
+	}
 	auditTrail := approval.NewAuditTrail(auditDir)
 	classifier = approval.NewAuditClassifier(classifier, auditTrail, auditMode, s.sessionID)
 
