@@ -51,7 +51,7 @@
     },
     {
       "path": "runner/run_trial.py",
-      "sha256": "afeea138ab9053e6c5e6b874d2c67c29fed9ce92c09538ea10c4253f7c832c6f"
+      "sha256": "d75e1be02211e88ac4d4be8638e2fc10a2262e7034779f63b89cdc58cdcccd28"
     },
     {
       "path": "runner/scripts/asset_preflight.py",
@@ -80,6 +80,10 @@
     {
       "path": "runner/tests/test_asset_preflight.py",
       "sha256": "e90d19f643796de9cff89a3e3db2977e7ba1d024a23b99c31048d3ea5efde905"
+    },
+    {
+      "path": "runner/tests/test_collector_keeper.py",
+      "sha256": "1d4d5d4a74bb6857ff73757f59d50e79c7ad797390dbc28c6086e854811228b3"
     },
     {
       "path": "runner/tests/test_contract.py",
@@ -119,7 +123,7 @@
     },
     {
       "path": "runner/tests/test_profiles.py",
-      "sha256": "6d534a649e1c23c80890ad4c7e534971411d3cf940c11b95052909d45f370e6b"
+      "sha256": "890f2d0a528c0b3f97bb65dd8ed09effff450d9adcf0996247b633168b7f3c12"
     },
     {
       "path": "runner/tests/test_reviewer_contract.py",
@@ -131,7 +135,7 @@
     },
     {
       "path": "runner/tests/test_task_init_profile.py",
-      "sha256": "ebf44e54a38c809f7ae92e3aa24ce4344f706ecbd422d2c560cbc5df6132e474"
+      "sha256": "7b4f88034f00eb14fb700fb7be75601c11170dad3e8e2fba5144d80a1f7635f9"
     },
     {
       "path": "runner/tests/test_tool_metadata.py",
@@ -249,5 +253,11 @@
     "same_closed_alias_gate_as": "main-bash300-personal-memory-off-usage-observe-v3",
     "legacy_profiles_create_and_native_argv_unchanged": true,
     "environment_change_not_product_timeout_fix": true
+  },
+  "collector_init_keeper_contract": {
+    "legacy_init_false": "PID1/self exclusion and STOP/KILL/Git sequence unchanged",
+    "init_true": "trusted before-native fullCID/PID/starttime/PPID/PGID/executable-device-inode binding; kernel recheck before signals; exclude only same keeper",
+    "unknown_or_replaced_identity": "collector fails before any signal; before-snapshot and failure/fallback retained",
+    "no_per_action_completion_proof_or_business_success_inferred": true
   }
 }

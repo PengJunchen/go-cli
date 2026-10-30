@@ -185,12 +185,76 @@ def snapshot_processes(proc_root,excluded_pids):
     return snapshot
 
 
+def _keeper_container_id(container_id):
+    if not isinstance(container_id,str) or len(container_id)!=64 or any(c not in '0123456789abcdef' for c in container_id):
+        raise RuntimeError('exact owned keeper container identity unavailable')
+    return container_id
+
+
+def _keeper_identity(proc_root,row,container_id):
+    if (not isinstance(row,dict) or row.get('status')!='observed'
+            or any(type(row.get(key)) is not int for key in ('pid','ppid','pgid','starttime'))
+            or row['pid']<=1 or row['pid']==os.getpid() or row['ppid']!=1
+            or row['starttime']<=0 or row.get('state') not in ('R','S','D','I')):
+        raise RuntimeError('trusted init keeper process identity unavailable')
+    try:
+        executable=os.path.join(proc_root,str(row['pid']),'exe')
+        target=os.readlink(executable)
+        info=os.stat(executable)
+    except OSError as exc:
+        raise RuntimeError('trusted init keeper executable identity unavailable') from exc
+    if (not isinstance(target,str) or not target.startswith('/') or target.endswith(' (deleted)')
+            or type(info.st_dev) is not int or type(info.st_ino) is not int or info.st_dev<0 or info.st_ino<=0):
+        raise RuntimeError('trusted init keeper executable identity malformed')
+    return {'schema':'trusted-init-keeper/v1','container_id':_keeper_container_id(container_id),'init':True,
+            'pid':row['pid'],'ppid':row['ppid'],'pgid':row['pgid'],'starttime':row['starttime'],
+            'exe':target,'exe_device':info.st_dev,'exe_inode':info.st_ino}
+
+
+def _validate_keeper_binding(binding,container_id):
+    keys={'schema','container_id','init','pid','ppid','pgid','starttime','exe','exe_device','exe_inode'}
+    if (not isinstance(binding,dict) or set(binding)!=keys
+            or binding['schema']!='trusted-init-keeper/v1' or binding['init']is not True
+            or binding['container_id']!=_keeper_container_id(container_id)
+            or any(type(binding[key])is not int for key in ('pid','ppid','pgid','starttime','exe_device','exe_inode'))
+            or binding['pid']<=1 or binding['ppid']!=1 or binding['starttime']<=0
+            or binding['exe_device']<0 or binding['exe_inode']<=0
+            or not isinstance(binding['exe'],str) or not binding['exe'].startswith('/')):
+        raise RuntimeError('trusted init keeper binding unavailable or mismatched')
+    return binding
+
+
+def capture_init_keeper(proc_root,container_id):
+    # Only the trusted startup stage calls this, before payload/native dispatch.
+    # The fixed sleep-infinity entrypoint is then the unique non-collector process.
+    _keeper_container_id(container_id)
+    before=snapshot_processes(proc_root,[1,os.getpid()])
+    if before['enumeration_status']!='observed' or before['unknown_process_count']!=0 or len(before['processes'])!=1:
+        raise RuntimeError('trusted init keeper startup is missing, ambiguous or unknown')
+    return _keeper_identity(proc_root,before['processes'][0],container_id)
+
+
+def verified_init_keeper_pid(proc_root,before,binding,container_id):
+    binding=_validate_keeper_binding(binding,container_id)
+    matches=[row for row in before['processes'] if row.get('pid')==binding['pid']]
+    if len(matches)!=1 or _keeper_identity(proc_root,matches[0],container_id)!=binding:
+        raise RuntimeError('trusted init keeper changed before collection')
+    return binding['pid']
+
+
+_KEEPER_HELPERS=''.join(inspect.getsource(helper) for helper in
+    (snapshot_processes,_keeper_container_id,_keeper_identity,_validate_keeper_binding,
+     capture_init_keeper,verified_init_keeper_pid))
+KEEPER_CAPTURE='import json,os,sys,time\n'+_KEEPER_HELPERS+"print(json.dumps(capture_init_keeper('/proc',sys.argv[1]),sort_keys=True))\n"
+
+
 # Embed the same pure helper exercised by fake-procfs tests. Do not execute
 # this signal-sending program on the host; it is for our owned container only.
-COLLECT='import json,os,signal,subprocess,sys,time\n'+inspect.getsource(snapshot_processes)+r'''
+COLLECT='import json,os,signal,subprocess,sys,time\n'+_KEEPER_HELPERS+r'''
 baseline=sys.argv[1]
 # Only this container's PID namespace. Stop then kill every leftover agent/tool
-# process before reading artifacts; PID 1 and this trusted collector survive.
+# process before reading artifacts; PID 1, this collector and a verified init
+# keeper survive. Keeper identity is never inferred from comm or a fixed PID.
 before=snapshot_processes('/proc',[1,os.getpid()])
 os.makedirs('/logs/agent',exist_ok=True)
 with open('/logs/agent/processes-before-cleanup.json','w') as output:
@@ -199,7 +263,10 @@ with open('/logs/agent/processes-before-cleanup.json','w') as output:
  os.fsync(output.fileno())
 if before['enumeration_status']!='observed':
  raise RuntimeError('process enumeration unknown; pre-cleanup evidence retained')
-others=[row['pid'] for row in before['processes']]
+keeper=None
+if len(sys.argv)>2:
+ keeper=verified_init_keeper_pid('/proc',before,json.loads(sys.argv[2]),sys.argv[3])
+others=[row['pid'] for row in before['processes'] if row['pid']!=keeper]
 for sig in (signal.SIGSTOP,signal.SIGKILL):
  for pid in others:
   try:os.kill(pid,sig)
@@ -443,6 +510,11 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
             if task_init_requested and record['task_docker_init_observation']['observed_init']is not True:
                 raise ValueError('task Docker init must be observed true before start')
         docker('start',task_cid)
+        if task_init_requested:
+            if record['task_docker_init_observation']['observed_init']is not True:
+                raise ValueError('trusted keeper capture requires observed task init')
+            record['collector_keeper_binding']=json.loads(docker('exec',task_cid,'python3','-c',KEEPER_CAPTURE,task_cid).stdout)
+            _validate_keeper_binding(record['collector_keeper_binding'],task_cid)
         record['network_probe']=json.loads(docker('exec',task_cid,'python3','-c',PROBE,gateway_ip,timeout=60).stdout)
         if record['network_probe']!={'relay':True,'github':False,'pypi':False,'npm':False,'host_gateway':False,'public_ip':False,'internal_host_gateway':False}:
             raise RuntimeError('network isolation gate failed')
@@ -475,7 +547,8 @@ def run_trial(task,arm,out,probe_only=False,fixture_smoke=False,fixture_scenario
             record.update(native_terminal=terminal,native_terminal_status=terminal['status'],
                           native_terminal_failure=terminal['status']in ('runtime_error','aborted','output_truncated'))
         if not result.get('outer_kill'):
-            cleanup=docker('exec',task_cid,'python3','-c',COLLECT,baseline,check=False,timeout=120)
+            cleanup=docker('exec',task_cid,'python3','-c',COLLECT,baseline,
+                *([json.dumps(record['collector_keeper_binding'],sort_keys=True),task_cid]if task_init_requested else[]),check=False,timeout=120)
             record['artifact_collection_exit_code']=cleanup.returncode
             (out/'artifact-collection.log').write_text(cleanup.stdout+cleanup.stderr)
         if result.get('outer_kill') or record.get('artifact_collection_exit_code')!=0:

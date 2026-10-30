@@ -41,6 +41,15 @@ class TaskInitContracts(unittest.TestCase):
         self.assertEqual(v['cpus'],1);self.assertEqual(v['memory_bytes'],4*1024**3)
         self.assertEqual(v['go_supervisor_environment_validation']['effective_value'],'0')
         self.assertEqual(native.call_count,1);self.assertEqual(native.call_args.args[1],test_profiles.FIXTURE['go_argv'])
+        capture=next(x for x in calls if x[:1]==('exec',)and len(x)>4 and x[4]==run_trial.KEEPER_CAPTURE)
+        collection=next(x for x in calls if x[:1]==('exec',)and len(x)>4 and x[4]==run_trial.COLLECT)
+        native_event=next(x for x in calls if x[0]=='native')
+        self.assertLess(calls.index(capture),calls.index(native_event))
+        self.assertLess(calls.index(native_event),calls.index(collection))
+        self.assertEqual(v['collector_keeper_binding']['container_id'],'1'*64)
+        self.assertEqual(json.loads(collection[6]),v['collector_keeper_binding'])
+        self.assertEqual(collection[7],'1'*64)
+
 
     def test_unknown_or_false_init_rejected_before_start_and_native(self):
         for value in (None,False,'true',1):
@@ -57,7 +66,16 @@ class TaskInitContracts(unittest.TestCase):
                 self.assertIsNone(error)
                 self.assertTrue(all('--init'not in call for call in calls if call[0]=='create'))
                 self.assertIs(v['task_docker_init_requested'],False)
+                self.assertNotIn('collector_keeper_binding',v)
+                self.assertFalse(any(call[0]=='exec'and len(call)>4 and call[4]==run_trial.KEEPER_CAPTURE for call in calls))
                 self.assertEqual(native.call_args.args[1],test_profiles.FIXTURE['go_argv'])
+
+    def test_unknown_keeper_startup_rejected_before_native(self):
+        _,v,calls,native,error=self.helper.run_fake_trial('go',PROFILE,alias_manifest=self.alias,task_init=True,keeper_binding=None)
+        self.assertIsInstance(error,RuntimeError)
+        native.assert_not_called()
+        self.assertFalse(any(call[0]=='exec'and len(call)>4 and call[4]==run_trial.COLLECT for call in calls))
+        self.assertEqual(v['infrastructure_error'],'RuntimeError')
 
     def test_public_cli_accepts_only_finite_explicit_profile(self):
         args=['run_trial.py','--task','/task','--arm','go','--out','/new','--profile',PROFILE,'--served-alias-manifest','/fixed']

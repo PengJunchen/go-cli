@@ -81,7 +81,7 @@ class ProfileContract(unittest.TestCase):
 
 
 class ProfileDriverContract(unittest.TestCase):
-    def run_fake_trial(self, arm, profile, environment=None, alias_manifest=None, task_init=None):
+    def run_fake_trial(self, arm, profile, environment=None, alias_manifest=None, task_init=None, keeper_binding="default"):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -99,6 +99,7 @@ class ProfileDriverContract(unittest.TestCase):
         (payload / 'pi/node_modules/@earendil-works/pi-coding-agent/package.json').write_text('{}')
         (payload / 'manifest.json').write_text(json.dumps({'go_cli_source_revision': 'a' * 40, 'go_cli_sha256': run_trial.sha(payload / 'go-cli')}))
         calls = []
+        task_cid='1'*64 if task_init is True else 'task'
         def docker(*args, **kwargs):
             calls.append(args)
             stdout = ''
@@ -107,19 +108,23 @@ class ProfileDriverContract(unittest.TestCase):
             elif args[:2] == ('network', 'inspect'):
                 stdout = json.dumps([{'IPAM': {'Config': [{'Gateway': '172.20.0.1'}]}}])
             elif args[0] == 'create':
-                stdout = 'relay' if '--name' in args else 'task'
+                stdout = 'relay' if '--name' in args else task_cid
             elif args[0] == 'inspect':
                 stdout = json.dumps([{'Config': {'Env': environment if environment is not None else ['GO_CLI_LINUX_SUBREAPER=0']},'HostConfig':{'Init':task_init}}])
-            elif args[:3] == ('exec', 'task', 'python3') and args[4] == run_trial.PROBE:
+            elif args[:3] == ('exec',task_cid,'python3') and args[4] == run_trial.KEEPER_CAPTURE:
+                stdout=json.dumps({'schema':'trusted-init-keeper/v1','container_id':task_cid,'init':True,
+                    'pid':7,'ppid':1,'pgid':7,'starttime':123,'exe':'/usr/bin/sleep','exe_device':2,'exe_inode':800}if keeper_binding=='default'else keeper_binding)
+            elif args[:3] == ('exec', task_cid, 'python3') and args[4] == run_trial.PROBE:
                 stdout = json.dumps({'relay': True, 'github': False, 'pypi': False, 'npm': False, 'host_gateway': False, 'public_ip': False, 'internal_host_gateway': False})
-            elif args[:3] == ('exec','task','python3') and args[4] == run_trial.CONFIG_IDENTITY_PROBE:
+            elif args[:3] == ('exec',task_cid,'python3') and args[4] == run_trial.CONFIG_IDENTITY_PROBE:
                 stdout=json.dumps({'identity':{'uid':0,'gid':0,'euid':0,'egid':0},'paths_safe':True})
-            elif args[:3] == ('exec','task','python3') and args[4] == run_trial.CONFIG_READBACK_PROBE:
+            elif args[:3] == ('exec',task_cid,'python3') and args[4] == run_trial.CONFIG_READBACK_PROBE:
                 stdout=args[5]
-            elif args[:4] == ('exec', 'task', 'git', 'rev-parse'):
+            elif args[:4] == ('exec', task_cid, 'git', 'rev-parse'):
                 stdout = 'b' * 40
             return subprocess.CompletedProcess(['docker', *args], 0, stdout, '')
         def native(cid,argv,out,timeout):
+            calls.append(('native',cid))
             rows=([{'kind':'done','content':'synthetic','timestamp':'2026-10-29T00:00:00Z'}]if arm=='go'else
                   [{'type':'agent_end','willRetry':False,'messages':[{'role':'assistant','stopReason':'stop'}]},{'type':'agent_settled','aborted':False}])
             (out/'stdout.jsonl').write_text(''.join(json.dumps(row)+'\n'for row in rows))
@@ -128,7 +133,7 @@ class ProfileDriverContract(unittest.TestCase):
             error = None
             try:
                 run_trial.run_trial(task, arm, output, profile_id=profile,served_alias_manifest=alias_manifest)
-            except ValueError as rejected:
+            except (ValueError,RuntimeError) as rejected:
                 error = rejected
         result = json.loads((output / 'result.json').read_text()) if (output / 'result.json').is_file() else {}
         return output, result, calls, execute, error
