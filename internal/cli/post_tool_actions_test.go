@@ -205,7 +205,7 @@ func runPostToolInterruption(t *testing.T, cancelDuringHook bool) {
 				case <-runCtx.Done():
 					return
 				case <-ticker.C:
-					if _, err := os.Stat(hookMarker); err == nil {
+					if postToolCancellationMarkerReady(hookMarker) {
 						cancel()
 						return
 					}
@@ -384,4 +384,27 @@ func TestPostToolHostIDsCannotPromoteDeniedSource(t *testing.T) {
 			})
 		}
 	}
+}
+
+// postToolCancellationMarkerReady observes the effect required before the
+// cancellation fixture interrupts the hook. Existence alone precedes printf.
+func postToolCancellationMarkerReady(path string) bool {
+	data, err := os.ReadFile(path)
+	return err == nil && string(data) == "hook"
+}
+
+func TestPostToolCancellationWaitsForCompleteMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hook")
+	require.False(t, postToolCancellationMarkerReady(path))
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	require.False(t, postToolCancellationMarkerReady(path), "O_CREAT is not completion of printf")
+	require.NoError(t, os.WriteFile(path, []byte("hoo"), 0o600))
+	require.False(t, postToolCancellationMarkerReady(path), "partial write is not the expected effect")
+	require.NoError(t, os.WriteFile(path, []byte("hook"), 0o600))
+	require.True(t, postToolCancellationMarkerReady(path))
+	require.NoError(t, os.WriteFile(path, []byte("hookhook"), 0o600))
+	require.False(t, postToolCancellationMarkerReady(path), "the required once-only effect must be exact")
+	require.False(t, postToolCancellationMarkerReady(filepath.Dir(path)), "read errors are not readiness")
 }
