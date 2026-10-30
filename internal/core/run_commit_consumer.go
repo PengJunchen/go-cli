@@ -796,7 +796,7 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 		}
 		if !resolved {
 			toolResult.isError = true
-			return toolResult, runCommitQuiescenceError{cause: ErrRunCommitQuiescenceUnproven}
+			return toolResult, runCommitQuiescenceError{cause: dispatch.err}
 		}
 	}
 	if outcome == ReceiptOutcomeUnknown {
