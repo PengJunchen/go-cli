@@ -645,11 +645,13 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			_ = es.Send(cloneAgentEvent(ev)) //nolint:errcheck
 		}
 	}
-	sendToolResultEvent := func(content string, isError bool, toolCallID, outcome string, sourceTruncated *bool) {
+	sendToolResultEvent := func(content string, isError bool, toolCallID, outcome string, sourceTruncated *bool, receiptClipped ...bool) {
+		clipped := len(receiptClipped) > 0 && receiptClipped[0]
 		sendEvent(AgentEvent{
 			Kind: "tool_result", Content: content, Timestamp: time.Now(), IsError: isError,
 			ToolCallID: toolCallID, ReceiptOutcome: outcome,
-			SourceTruncated: cloneOptionalBool(sourceTruncated),
+			SourceTruncated:        cloneOptionalBool(sourceTruncated),
+			ReceiptOutputTruncated: clipped,
 		})
 	}
 
@@ -832,13 +834,14 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		}
 
 		if consumer != nil {
-			compacted, compactErr := preflightDurableRequest(spanCtx, messages, consumer, compactor, estimator, maxTokens)
+			compacted, compactedSubmissionIndex, compactErr := preflightDurableRequest(spanCtx, messages, consumer, compactor, estimator, maxTokens, currentSubmissionIndex)
 			if compactErr != nil {
 				span.SetStatus(tracing.SpanStatusError, compactErr.Error())
 				sendEvent(errEvent(compactErr))
 				return CanonicalRunResult{Events: events, Transcript: transcript}, compactErr
 			}
 			messages = compacted
+			currentSubmissionIndex = compactedSubmissionIndex
 		} else if midTurnCompactor != nil && compactor != nil && estimator != nil && maxTokens > 0 {
 			compacted, compactedSubmissionIndex, compactResult, compactErr := preflightNonDurableRequest(
 				spanCtx, messages, currentSubmissionIndex, midTurnCompactor, compactor, estimator, maxTokens,
@@ -1033,7 +1036,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 					if message.Role != string(llm.RoleTool) {
 						continue
 					}
-					sendToolResultEvent(message.Content, message.ReceiptOutcome != ReceiptOutcomeSuccess, message.ToolCallID, message.ReceiptOutcome, entry.SourceTruncated)
+					sendToolResultEvent(message.Content, message.ReceiptOutcome != ReceiptOutcomeSuccess, message.ToolCallID, message.ReceiptOutcome, entry.SourceTruncated, entry.ReceiptOutputTruncated)
 				}
 				if commitErr != nil {
 					span.SetStatus(tracing.SpanStatusError, commitErr.Error())
@@ -1140,7 +1143,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 
 				if consumer != nil {
 					result, commitErr := consumer.executeSequentialCall(iterationCtx, registry, assistantOrdinal, assistantEntry.Message, tc, es, &transcript, &messages)
-					sendToolResultEvent(result.output, result.isError, tc.ID, result.outcome, result.sourceTruncated)
+					sendToolResultEvent(result.output, result.isError, tc.ID, result.outcome, result.sourceTruncated, result.receiptOutputTruncated)
 					if commitErr != nil {
 						if !hasUnknownToolOutcome(commitErr) && callIndex+1 < len(resp.ToolCalls) && (errors.Is(commitErr, context.Canceled) || errors.Is(commitErr, context.DeadlineExceeded) || errors.Is(commitErr, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(commitErr, ErrRunCommitChildUnsupported) || errors.Is(commitErr, ErrRunCommitStreamingUnsupported)) {
 							for _, undispatched := range resp.ToolCalls[callIndex+1:] {
@@ -1230,40 +1233,53 @@ func preflightDurableRequest(
 	compactor compaction.Compactor,
 	estimator compaction.TokenEstimator,
 	maxTokens int,
-) ([]llm.Message, error) {
+	currentSubmissionIndex int,
+) ([]llm.Message, int, error) {
 	items := messagesToTurnItems(messages)
 	if err := validateDurableRequestSource(items, consumer.source, consumer.runID); err != nil {
-		return nil, err
+		return nil, currentSubmissionIndex, err
 	}
 	if maxTokens <= 0 || estimator == nil || compaction.EstimateTokens(items, estimator) <= maxTokens {
-		return messages, nil
+		return messages, currentSubmissionIndex, nil
 	}
 	if err := compaction.ValidateCompactionEligible(items); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrDurableCompactionUnsupported, err)
+		return nil, currentSubmissionIndex, fmt.Errorf("%w: %v", ErrDurableCompactionUnsupported, err)
 	}
 	if consumer.source == nil || compactor == nil {
-		return nil, ErrRunCommitCompactionProjectionUnavailable
+		return nil, currentSubmissionIndex, ErrRunCommitCompactionProjectionUnavailable
 	}
 	currentInput, err := captureDurableCurrentInput(items, consumer.source, consumer.runID)
 	if err != nil {
-		return nil, err
+		return nil, currentSubmissionIndex, err
 	}
 	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), maxTokens, estimator)
 	if err != nil {
-		return nil, err
+		return nil, currentSubmissionIndex, err
 	}
 	projection, err := validateDurableCompactionResult(items, result, consumer.source, consumer.runID)
 	if err != nil {
-		return nil, err
+		return nil, currentSubmissionIndex, err
 	}
 	if err := validateDurableCurrentInputPreserved(currentInput, result.Items); err != nil {
-		return nil, err
+		return nil, currentSubmissionIndex, err
+	}
+	compactedSubmissionIndex := -1
+	for index, item := range result.Items {
+		if item.Runtime.Source == currentInput.Runtime.Source {
+			// The preservation check above proves this full typed source is
+			// present exactly once, including when tools follow the user input.
+			compactedSubmissionIndex = index
+			break
+		}
+	}
+	if compactedSubmissionIndex < 0 {
+		return nil, currentSubmissionIndex, fmt.Errorf("%w: preserved current input has no position", ErrDurableCompactionUnsupported)
 	}
 	if err := consumer.commitCompaction(projection); err != nil {
 		markRunOutcomeUnknown(ctx)
-		return nil, err
+		return nil, currentSubmissionIndex, err
 	}
-	return turnItemsToMessages(result.Items), nil
+	return turnItemsToMessages(result.Items), compactedSubmissionIndex, nil
 }
 
 func preflightDurableRequestAt(
@@ -1509,6 +1525,11 @@ func appendTranscriptToolReceipt(transcript *[]TranscriptEntry, call llm.ToolCal
 
 func toolReceiptOutcome(ctx context.Context, err error, isError bool) string {
 	if err != nil {
+		// A private timeout borrowed from a prepared action is not authority
+		// for an unprepared legacy/custom dispatch.
+		if tools.IsPreparedBashOwnTimeout(err) {
+			return ReceiptOutcomeUnknown
+		}
 		if hasUnknownToolOutcome(err) {
 			return ReceiptOutcomeUnknown
 		}

@@ -246,15 +246,34 @@ func TestStdioAdapterDisconnectDeliversFrame(t *testing.T) {
 	serverR, clientW := io.Pipe() // server reads, client writes
 
 	client := NewStdioAdapter(clientR, clientW, WithName("client"))
+	peerDone := make(chan struct{})
+	t.Cleanup(func() {
+		closeIgnored(clientW)
+		closeIgnored(serverR)
+		closeIgnored(serverW)
+		closeIgnored(clientR)
+		select {
+		case <-peerDone:
+		case <-time.After(2 * time.Second):
+			t.Error("fake peer reader did not join after pipe cleanup")
+		}
+	})
 
 	// Continuously read frames the client sends.
 	frames := make(chan []byte, 4)
 	go func() {
+		defer close(peerDone)
+		defer close(frames)
 		rd := bufio.NewReader(serverR)
 		for {
 			line, err := rd.ReadBytes('\n')
 			if len(line) > 0 {
 				frames <- line
+				var msg ACPMessage
+				if json.Unmarshal(line, &msg) == nil && msg.Type == TypeDisconnect {
+					closeIgnored(serverW)
+					return
+				}
 			}
 			if err != nil {
 				return
@@ -272,8 +291,7 @@ func TestStdioAdapterDisconnectDeliversFrame(t *testing.T) {
 		t.Fatal("timed out waiting for connect frame")
 	}
 
-	// Close the client's input so readLoop exits after Disconnect.
-	closeIgnored(serverW)
+	// The peer closes client input only after observing the actual farewell.
 
 	require.NoError(t, client.Disconnect(ctx))
 
@@ -288,9 +306,6 @@ func TestStdioAdapterDisconnectDeliversFrame(t *testing.T) {
 		t.Fatal("timed out waiting for disconnect frame")
 	}
 
-	closeIgnored(clientW)
-	closeIgnored(serverR)
-	closeIgnored(clientR)
 }
 
 // waitForSpan polls the exporter until a span with the given name is collected.

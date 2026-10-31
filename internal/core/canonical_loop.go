@@ -53,6 +53,9 @@ type TranscriptEntry struct {
 	// SourceTruncated is transient result metadata from the exact prepared
 	// invocation. It is not part of AgentMessage and is never persisted.
 	SourceTruncated *bool `json:"-"`
+	// ReceiptOutputTruncated is transient host representation metadata. The
+	// persisted content carries an explicit marker; source facts stay separate.
+	ReceiptOutputTruncated bool `json:"-"`
 }
 
 // CanonicalLoop is an optional extension to AgentLoop for implementations that

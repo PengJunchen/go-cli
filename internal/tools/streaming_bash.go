@@ -159,6 +159,14 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 		return nil, errors.New("bash: missing string argument 'command'")
 	}
 
+	timeout, err := t.executionTimeout(ctx, command, call.Args)
+	if err != nil {
+		reportPreparedNoProcessCompletion(ctx)
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("streaming_bash.invalid_timeout", "tool", "bash")
+		return nil, err
+	}
+
 	// A sandbox is required by default. When Sandbox is nil, return an
 	// error unless the caller explicitly opted out via WithNoSandbox().
 	if t.Sandbox == nil {
@@ -181,13 +189,6 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 		return nil, err
 	}
 
-	// Determine the effective timeout.
-	timeout := t.Timeout
-	if t.TimeoutTier {
-		timeout = classifyCommand(command)
-	}
-
-	timeout = runtimeBashTimeout(ctx, timeout)
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := execCtx.Err(); err != nil {
@@ -197,7 +198,7 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 	// Wrap the command with resource limits.
 	command = wrapCommandWithLimits(command, t.ResourceLimits)
 
-	cmd := exec.Command("bash", "-lc", command)
+	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = t.Workdir
 	cmd.Env = filteredEnv(t.Env)
 	if _, supplied := bashRuntimeInputFromContext(ctx); supplied {
@@ -254,7 +255,7 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 			"duration_ms", ms,
 			"reason", message,
 			"timeout", timeout.String())
-		return result, localLifecycleError(cause, lifecycle)
+		return result, bashLifecycleError(ctx, execCtx, cause, lifecycle)
 	}
 
 	if !lifecycle.quiescent {

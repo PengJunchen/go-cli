@@ -8,7 +8,14 @@ import (
 	"os"
 	"strings"
 
+	"github.com/pengjunchen/go-cli/internal/compaction"
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
+)
+
+const (
+	diagnosticMandatorySystemPromptOverBudget = "mandatory_system_prompt_over_budget"
+	diagnosticRequestEnvelopeRejected         = "request_envelope_rejected"
 )
 
 // UserFriendlyError wraps an error with an action description and a recovery
@@ -17,6 +24,8 @@ type UserFriendlyError struct {
 	Err    error
 	Action string // what the user was trying to do
 	Hint   string // recovery suggestion
+	// DiagnosticCode is a closed, non-sensitive category for runtime diagnostics.
+	DiagnosticCode string
 }
 
 // Error implements the error interface.
@@ -53,6 +62,23 @@ func classifyError(err error) *UserFriendlyError {
 			Err:    err,
 			Action: "unsupported PostToolUse hook",
 			Hint:   hint,
+		}
+	}
+
+	if errors.Is(err, compaction.ErrMandatorySystemPromptOverBudget) {
+		return &UserFriendlyError{
+			Err:            err,
+			Action:         "local compaction budget cannot fit mandatory instructions",
+			Hint:           "Increase --max-tokens or compaction.max_tokens to fit required context before trying again. This local context budget is separate from the provider output token cap.",
+			DiagnosticCode: diagnosticMandatorySystemPromptOverBudget,
+		}
+	}
+	if errors.Is(err, core.ErrRequestEnvelopeRejected) {
+		return &UserFriendlyError{
+			Err:            err,
+			Action:         "request envelope rejected before provider dispatch",
+			Hint:           "Inspect the request, context limits, and provider configuration before retrying; an envelope rejection is not necessarily a local budget-size problem.",
+			DiagnosticCode: diagnosticRequestEnvelopeRejected,
 		}
 	}
 

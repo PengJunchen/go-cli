@@ -1,0 +1,263 @@
+{
+  "schema_version": 1,
+  "snapshot_date": "2026-10-30",
+  "scope": "owned runner sources and locks; not task contents or execution evidence",
+  "official_asset_commit": "66f92766bba642462d4bbe5479e83f91f9211862",
+  "model": "codex/gpt-6.1-sol",
+  "reasoning_effort": "high",
+  "primary_max_output_tokens": 16384,
+  "max_upstream_requests": 80,
+  "metadata_portability_change": "dataset-lock task_path values are workspace-relative; task/instruction/image pins unchanged",
+  "files": [
+    {
+      "path": "runner/.gitignore",
+      "sha256": "d7e6697de7a4a160fb5b8dea54a30d13a484cac184db085178c1c541a1bf4b35"
+    },
+    {
+      "path": "runner/audit_proxy.py",
+      "sha256": "8227686e5f9a21154e153b4b7dfb089cb31ae8097d589ac53d3502143c1491d5"
+    },
+    {
+      "path": "runner/dataset-lock.json",
+      "sha256": "0578d097c7c287e9bb9021df546cceb9f63be0314476b4c9596200cb43923cd1"
+    },
+    {
+      "path": "runner/eval_core.py",
+      "sha256": "4f005185525e7382ccd54295a0dc198b6b1cd11c4218bddf5669c28f83033349"
+    },
+    {
+      "path": "runner/grade_trial.py",
+      "sha256": "dd4e8dbbfabff3a354e1980b62bbb8c8a0148584425b3262b3ed5345766ff793"
+    },
+    {
+      "path": "runner/locks/pi/package-lock.json",
+      "sha256": "5d508d747bc5d893fce2d247b845aa3861e188d4b02aedace36b2f6c84988123"
+    },
+    {
+      "path": "runner/locks/pi/package.json",
+      "sha256": "cf3773802a543ee8be76b1023f41bbda52935494811d6bb60bbfe105ffe02d1b"
+    },
+    {
+      "path": "runner/native_terminal.py",
+      "sha256": "07925afe2c398c8fe614f82117a928b1a27937dba9a04d18cb48fa67e9daed8e"
+    },
+    {
+      "path": "runner/offline_fixture.py",
+      "sha256": "8f58fe92240525f8ac020e72fc32aaa4365736e4144714641ec6d5fec427b471"
+    },
+    {
+      "path": "runner/requirements.lock",
+      "sha256": "44c794641202d85a53273a895d83141d548cf559f7b1de04644686e47eae51a7"
+    },
+    {
+      "path": "runner/run_trial.py",
+      "sha256": "d75e1be02211e88ac4d4be8638e2fc10a2262e7034779f63b89cdc58cdcccd28"
+    },
+    {
+      "path": "runner/scripts/asset_preflight.py",
+      "sha256": "92817b3b6920c44b0a178e2079436c73b5f25be370c354b50ba47b232f8608a6"
+    },
+    {
+      "path": "runner/selected-tasks.txt",
+      "sha256": "cff7e28261e8c507205cdeadb871fc4286c9e06e45e9646fa1c8959101836e5b"
+    },
+    {
+      "path": "runner/summarize_trials.py",
+      "sha256": "3b5f905ccb74c2ad316b99eab8fe90fcf2bef99a259a2fcbb0ef1a1ff4670498"
+    },
+    {
+      "path": "runner/tests/fixtures/profile-v1.json",
+      "sha256": "9204a910f87694eede2890158a1086e957b8ce7aa2e9a9d78922aa756dd689ba"
+    },
+    {
+      "path": "runner/tests/fixtures/swe_pro_patch_replay.LICENSE",
+      "sha256": "03a44b2f703779d3f34c18e056da5b893537ca61588e6b15b615a4a612e77fb9"
+    },
+    {
+      "path": "runner/tests/fixtures/swe_pro_patch_replay.py",
+      "sha256": "5c8b344de37164e9723f1724c2573013957fb644c3913a64c12c1718c737d876"
+    },
+    {
+      "path": "runner/tests/test_asset_preflight.py",
+      "sha256": "e90d19f643796de9cff89a3e3db2977e7ba1d024a23b99c31048d3ea5efde905"
+    },
+    {
+      "path": "runner/tests/test_collector_keeper.py",
+      "sha256": "1d4d5d4a74bb6857ff73757f59d50e79c7ad797390dbc28c6086e854811228b3"
+    },
+    {
+      "path": "runner/tests/test_contract.py",
+      "sha256": "734b39d557823e792fb5989667b6dfe1e0fafe1ae353efd460d6adafa7b322b3"
+    },
+    {
+      "path": "runner/tests/test_driver.py",
+      "sha256": "96c4df6e9fc20cbf80cb752a83f05e2b071a8d242c9f37627a2aafe02386170d"
+    },
+    {
+      "path": "runner/tests/test_grade.py",
+      "sha256": "cc2fad88a1e80e060b16ea983a5aef1245f7c6221e396339ccf995005df3f925"
+    },
+    {
+      "path": "runner/tests/test_image_pin.py",
+      "sha256": "f94cb9bcf5ee8ddb703b2be579d2b9e77d4eeba62a2ab8f2c1e9ae4ee27ecd2b"
+    },
+    {
+      "path": "runner/tests/test_native_config_install.py",
+      "sha256": "6bcfbb0cdc2842de7ec78e27658c9a51fad49fff1ea3939c0b155df19b38029b"
+    },
+    {
+      "path": "runner/tests/test_native_terminal.py",
+      "sha256": "a27a8304644ef92dc1e505892542a4f70f946eb7abec2e4ab6030f65147aba0d"
+    },
+    {
+      "path": "runner/tests/test_offline_fixture.py",
+      "sha256": "87dc877ebe931fab2327d3a7abe72c5c78b4abf95d8526b789e4df36e2e5f3dd"
+    },
+    {
+      "path": "runner/tests/test_patch_transfer.py",
+      "sha256": "390a1a3bbe2aa6fbee06bda127db7abb1e1b88356ec0a2d717281042784d6ace"
+    },
+    {
+      "path": "runner/tests/test_policy_driver.py",
+      "sha256": "706cd854cdc9d32cdff952ecf601dd7eb340830fb6a658582785076fbcacba74"
+    },
+    {
+      "path": "runner/tests/test_profiles.py",
+      "sha256": "890f2d0a528c0b3f97bb65dd8ed09effff450d9adcf0996247b633168b7f3c12"
+    },
+    {
+      "path": "runner/tests/test_reviewer_contract.py",
+      "sha256": "f14def7edfff389bd6109d3d3ed9509bfaa68158506cedc3511d61a59a0066ae"
+    },
+    {
+      "path": "runner/tests/test_summarize.py",
+      "sha256": "422cc26b2f554ed7fcf615b9770217588a049b2ec72efc2f6ac628334b50fd20"
+    },
+    {
+      "path": "runner/tests/test_task_init_profile.py",
+      "sha256": "7b4f88034f00eb14fb700fb7be75601c11170dad3e8e2fba5144d80a1f7635f9"
+    },
+    {
+      "path": "runner/tests/test_tool_metadata.py",
+      "sha256": "0f1e2f705890e8f91c527b793d4dc100f67efa17d351b70eab9ff5cb09721dc6"
+    },
+    {
+      "path": "runner/tests/test_usage_policy.py",
+      "sha256": "00e73ba493fafd4236205a3339b3c8b395b0ac11a2d1e86b8ba9c585a40bff7c"
+    }
+  ],
+  "source_base_revision": "3d5919074bb14e8118feaf4e6d13eebcc215342d",
+  "reviewed_go_revision": "e9c438a42f40070272f90ddd866b116f3b22cdbf",
+  "profile_id": "main-5736e88-personal-memory-off-v1",
+  "go_automatic_personal_memory": false,
+  "supported_profile_ids": [
+    "main-5736e88-personal-memory-off-v1",
+    "main-bash300-personal-memory-off-v2",
+    "main-bash300-personal-memory-off-usage-observe-v3",
+    "main-bash300-personal-memory-off-usage-observe-init-v4"
+  ],
+  "profile_host_declarations": {
+    "main-5736e88-personal-memory-off-v1": {
+      "configured_go_bash_execution_window_seconds": 30,
+      "go_supervisor_mode": "off",
+      "new_environment_override": false
+    },
+    "main-bash300-personal-memory-off-v2": {
+      "configured_go_bash_execution_window_seconds": 300,
+      "go_supervisor_mode": "off",
+      "fixed_container_environment": "GO_CLI_LINUX_SUBREAPER=0; inspected before start"
+    },
+    "main-bash300-personal-memory-off-usage-observe-v3": {
+      "configured_go_bash_execution_window_seconds": 300,
+      "go_supervisor_mode": "off",
+      "fixed_container_environment": "GO_CLI_LINUX_SUBREAPER=0; inspected before start",
+      "audit_policy": "usage-observe-native-retry-v1",
+      "frozen_served_alias_required": true
+    }
+  },
+  "profile_observation_boundary": "Source declarations only; setup identity/readability and effective tool observations are recorded in private per-run evidence.",
+  "tool_metadata_observation": {
+    "description_hash": "actual UTF-8 SHA256 or null",
+    "parameters_hash": "actual object canonical JSON sort_keys compact UTF-8 allow_nan=False SHA256 or null",
+    "go_host_window_claim_values": [
+      "30s",
+      "5m0s",
+      null
+    ],
+    "claim_is_not_effective_timeout": true,
+    "command_only_schema": "actual complete bash schema true/known-different false/unknown null",
+    "raw_description_schema_messages_commands_logged": false,
+    "relay_raw_bytes_budget_usage_and_rejection_policy_unchanged": true
+  },
+  "native_config_installation_contract": {
+    "version": "default-user-private-v1",
+    "host_file_mode": "0600",
+    "container_owner": "actual default exec UID/GID",
+    "container_directory_mode": "0700",
+    "container_file_mode": "0600",
+    "pre_native_gate": "same-identity O_NOFOLLOW open, fstat ownership/mode and exact byte SHA256",
+    "capabilities_unchanged": true
+  },
+  "audit_request_policy": {
+    "default": "strict-unknown-usage-stop-v1",
+    "explicit_opt_in": "usage-observe-native-retry-v1",
+    "native_retry_only": true,
+    "relay_auto_retry": false,
+    "same_max_upstream_slots": 80,
+    "same_task_seconds": 3000,
+    "usage_missing": "unknown coverage and known lower bound; no synthetic zero",
+    "served_alias": "closed explicit mapping and evidence SHA256; missing provenance stays unknown",
+    "raw_payload_persistence": false
+  },
+  "native_terminal_observation": {
+    "supported_schemas": [
+      "go-agent-event-e9-v1",
+      "pi-json-event-1.4.0-v1"
+    ],
+    "scope": "single prompt from pinned versions; no universal multi-session claim",
+    "go": "final typed done/error",
+    "pi": "final agent_end with willRetry=false followed by settled; final assistant stopReason",
+    "cli_zero_is_not_sufficient": true,
+    "unknown_preserved": true,
+    "task_scoring_unchanged": true
+  },
+  "official_replay_test_fixture": {
+    "upstream": "https://github.com/scaleapi/SWE-bench_Pro-os",
+    "commit": "66f92766bba642462d4bbe5479e83f91f9211862",
+    "upstream_path": "v2/tooling/patch_replay.py",
+    "fixture_path": "runner/tests/fixtures/swe_pro_patch_replay.py",
+    "sha256": "5c8b344de37164e9723f1724c2573013957fb644c3913a64c12c1718c737d876",
+    "license": "MIT",
+    "license_path": "runner/tests/fixtures/swe_pro_patch_replay.LICENSE",
+    "license_sha256": "03a44b2f703779d3f34c18e056da5b893537ca61588e6b15b615a4a612e77fb9",
+    "test_only": true,
+    "production_official_asset_path_unchanged": true
+  },
+  "replay_patch_transport_contract": {
+    "target": "/tmp/replay.patch",
+    "canonical_source_sha256_required": true,
+    "canonical_source_metadata_and_bytes_preserved": true,
+    "private_staging_parent_mode": "0700",
+    "independent_staging_file_mode": "0644",
+    "copy_success_is_not_readback_or_apply_success": true,
+    "official_replay_and_verifier_unchanged": true
+  },
+  "explicit_task_init_profile": {
+    "profile_id": "main-bash300-personal-memory-off-usage-observe-init-v4",
+    "task_only": true,
+    "requested_flag": "--init",
+    "observed_field": "docker inspect HostConfig.Init",
+    "must_be_true_before_start": true,
+    "relay_and_grader_changed": false,
+    "native_config_profile_id": "main-bash300-personal-memory-off-v2",
+    "same_closed_alias_gate_as": "main-bash300-personal-memory-off-usage-observe-v3",
+    "legacy_profiles_create_and_native_argv_unchanged": true,
+    "environment_change_not_product_timeout_fix": true
+  },
+  "collector_init_keeper_contract": {
+    "legacy_init_false": "PID1/self exclusion and STOP/KILL/Git sequence unchanged",
+    "init_true": "trusted before-native fullCID/PID/starttime/PPID/PGID/executable-device-inode binding; kernel recheck before signals; exclude only same keeper",
+    "unknown_or_replaced_identity": "collector fails before any signal; before-snapshot and failure/fallback retained",
+    "no_per_action_completion_proof_or_business_success_inferred": true
+  }
+}

@@ -217,7 +217,7 @@ func TestPromptDurableCustomUnknownPersistsWithoutReplay(t *testing.T) {
 	t.Chdir(root)
 	marker := filepath.Join(root, "effect")
 	command := filepath.Join(root, "custom")
-	require.NoError(t, os.WriteFile(command, []byte("#!/bin/sh\nprintf called >> '"+marker+"'\n/bin/sleep 5\n"), 0o700))
+	require.NoError(t, os.WriteFile(command, []byte("#!/bin/sh\nprintf called >> '"+marker+"'\n/bin/sleep 60 >/dev/null 2>&1 &\nexit 124\n"), 0o700))
 	previous := approval.GetTrustManager()
 	manager := approval.NewDefaultTrustManager(nil)
 	require.NoError(t, manager.TrustProject(ctx, root))
@@ -230,9 +230,12 @@ func TestPromptDurableCustomUnknownPersistsWithoutReplay(t *testing.T) {
 	disabledMemory := false
 	cfg.Memory.Enabled = &disabledMemory
 	cfg.Git.WorkDir = root
-	cfg.Tools.CustomTools = []config.CustomToolConfig{{Name: "custom_unknown", Command: []string{command}, Timeout: 1, WorkingDir: root}}
+	cfg.Tools.CustomTools = []config.CustomToolConfig{{Name: "custom_unknown", Command: []string{command}, WorkingDir: root}}
 	var output bytes.Buffer
-	require.Error(t, newPromptCmd(&output).Run(ctx, cfg, []string{"--approve", "auto", "perform one action"}))
+	err = newPromptCmd(&output).Run(ctx, cfg, []string{"--approve", "auto", "perform one action"})
+	require.ErrorIs(t, err, core.ErrRunCommitQuiescenceUnproven)
+	require.ErrorContains(t, err, "child processes remained after the shell exited")
+	require.ErrorContains(t, err, "exit status 124")
 	id := physicalSessionIDFromOutput(t, output.String())
 	resumed, err := newDurableCLISession(ctx, store, "inspect unknown", id, "")
 	require.NoError(t, err)
@@ -246,6 +249,7 @@ func TestPromptDurableCustomUnknownPersistsWithoutReplay(t *testing.T) {
 	for _, row := range snapshot.DurableEntries {
 		if row.ToolCallID == "unknown-custom" {
 			require.Empty(t, row.CompletionProof)
+			require.NotEqual(t, session.CheckpointExecutionResolution, row.CheckpointKind)
 		}
 	}
 	data, err := os.ReadFile(marker)

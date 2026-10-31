@@ -17,7 +17,7 @@ import (
 )
 
 func TestInteractiveResumeProjectsCompletedMCPWorkerCustomAndStateReceipts(t *testing.T) {
-	workerConfig, workerCalls, _ := durableWorkerConfig(t, "normal")
+	workerConfig, workerCalls, workerStarts := durableWorkerConfigWithTimeout(t, "normal", 10000)
 	peer := newMCPGenerationPeer(t, []string{"lookup"}, "completed MCP response", false, false, false)
 	cfg := newMCPListTestConfig(t, []config.MCPServerConfig{{Name: "catalog", URL: peer.server.URL}})
 	cfg.Extensions = workerConfig.Extensions
@@ -85,6 +85,9 @@ func TestInteractiveResumeProjectsCompletedMCPWorkerCustomAndStateReceipts(t *te
 	workerData, err := os.ReadFile(workerCalls)
 	require.NoError(t, err)
 	require.Equal(t, "call\n", string(workerData), "history projection must not replay worker effects")
+	startData, err := os.ReadFile(workerStarts)
+	require.NoError(t, err)
+	require.Equal(t, "start\nstart\n", string(startData), "each Assembly must initialize its own actual worker")
 	require.EqualValues(t, 1, peer.calls.Load(), "history projection must not replay remote effects")
 	latest, err := newDurableCLISession(ctx, cfg.Session.StorePath, "inspect after interactive", physical, "")
 	require.NoError(t, err)

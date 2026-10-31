@@ -178,7 +178,7 @@ func (t *WriteTool) Name() string { return "write" }
 
 // Description returns a brief description of the tool.
 func (t *WriteTool) Description() string {
-	return "write: writes content to a file, creating parent directories. Args: path (string), content (string)."
+	return "write: writes content to a file, creating parent directories. Args: path (string), content (string), append (optional boolean; add to existing content). Existing files are protected from replacement by default."
 }
 
 // Parameters returns the JSON Schema describing the required write arguments.
@@ -245,7 +245,7 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 	if exists && !t.Overwrite && !appendMode {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("write.exists", "path", abspath)
-		return nil, fmt.Errorf("write: file %q already exists (set overwrite or append)", abspath)
+		return nil, fmt.Errorf("write: file %q already exists (set append=true to append content)", abspath)
 	}
 
 	parent := filepath.Dir(abspath)
@@ -334,7 +334,7 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 
 // PromptGuidelines returns usage hints for the write tool.
 func (t *WriteTool) PromptGuidelines() []string {
-	return []string{"Use write to create new files or overwrite existing ones"}
+	return []string{"Use write to create new files, or set append=true to add content to existing files"}
 }
 
 // writeAtomicContext writes data to a temp file in the destination directory and

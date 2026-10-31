@@ -24,15 +24,24 @@ import (
 )
 
 type receiptGateSessionWriter struct {
-	base          session.DurableSessionWriter
-	statusHandles <-chan core.RunStatusHandle
-	signals       <-chan tools.PreparedCompletionSignal
-	receiptAppend chan struct{}
-	receiptOnce   sync.Once
+	base              session.DurableSessionWriter
+	statusHandles     <-chan core.RunStatusHandle
+	signals           <-chan tools.PreparedCompletionSignal
+	receiptAppend     chan struct{}
+	receiptOnce       sync.Once
+	executionDeadline chan<- time.Time
 }
 
 func (writer *receiptGateSessionWriter) AppendAndSync(ctx context.Context, entries ...session.SessionEntry) ([]session.SessionEntry, error) {
 	for _, entry := range entries {
+		if writer.executionDeadline != nil && entry.ActionState == session.ActionStateExecution && entry.CompletionProof == "" {
+			if deadline, ok := ctx.Deadline(); ok {
+				select {
+				case writer.executionDeadline <- deadline:
+				default:
+				}
+			}
+		}
 		if entry.Type != session.EntryTypeTool || entry.ReceiptOutcome == "" {
 			continue
 		}
@@ -74,6 +83,29 @@ func (writer *receiptGateSessionWriter) AppendAndSync(ctx context.Context, entri
 				return nil, errors.New("test: receipt sync passed before local proof became owner-visible")
 			case <-ticker.C:
 			}
+		}
+	}
+	return writer.base.AppendAndSync(ctx, entries...)
+}
+
+// preReceiptExpiryWriter holds only the default-budget negative fixture.
+// It waits for the real cleanup context, then keeps the callback gated until
+// the caller has observed the bounded pending return. No proof is fabricated.
+type preReceiptExpiryWriter struct {
+	base     session.DurableSessionWriter
+	expired  chan struct{}
+	release  <-chan struct{}
+	observed chan error
+	once     sync.Once
+}
+
+func (writer *preReceiptExpiryWriter) AppendAndSync(ctx context.Context, entries ...session.SessionEntry) ([]session.SessionEntry, error) {
+	for _, entry := range entries {
+		if entry.ActionState == session.ActionStateExecution && entry.CompletionProof == "" {
+			<-ctx.Done()
+			writer.once.Do(func() { writer.observed <- ctx.Err(); close(writer.expired) })
+			<-writer.release
+			return nil, ctx.Err()
 		}
 	}
 	return writer.base.AppendAndSync(ctx, entries...)
@@ -1133,6 +1165,22 @@ func TestRunCommitLoopKeepsMarkerAfterClosedCompletionWithoutProofAndReopen(t *t
 }
 
 func TestRunCommitLoopPersistsLateProofDuringReceiptBeforeResolution(t *testing.T) {
+	runLateProofReceiptFixture(t, false)
+}
+
+func TestRunCommitLoopDefaultCleanupBudgetExpiresBeforeReceipt(t *testing.T) {
+	runLateProofReceiptFixture(t, true)
+}
+
+func runLateProofReceiptFixture(t *testing.T, defaultBudgetNegative bool) {
+	t.Helper()
+	const orderingCleanupBudget = 5 * time.Second
+	fixtureReady := make(chan struct{})
+	abortFixture := make(chan struct{})
+	expiryRelease := make(chan struct{})
+	var abortOnce, releaseOnce sync.Once
+	defer abortOnce.Do(func() { close(abortFixture) })
+	defer releaseOnce.Do(func() { close(expiryRelease) })
 	root := t.TempDir()
 	t.Setenv("HOME", root)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
@@ -1159,13 +1207,22 @@ func TestRunCommitLoopPersistsLateProofDuringReceiptBeforeResolution(t *testing.
 	statusHandles := make(chan core.RunStatusHandle, 1)
 	completionSignals := make(chan tools.PreparedCompletionSignal, 1)
 	receiptAppend := make(chan struct{})
+	executionDeadline := make(chan time.Time, 1)
+	cancelStarted := make(chan time.Time, 1)
 	writer := &receiptGateSessionWriter{
-		base:          prepared.DurableWriter(),
-		statusHandles: statusHandles,
-		signals:       completionSignals,
-		receiptAppend: receiptAppend,
+		base:              prepared.DurableWriter(),
+		statusHandles:     statusHandles,
+		signals:           completionSignals,
+		receiptAppend:     receiptAppend,
+		executionDeadline: executionDeadline,
 	}
-	preparedForSink := &receiptGatedPreparedSession{PreparedSession: prepared, writer: writer}
+	var sinkWriter session.DurableSessionWriter = writer
+	expired := make(chan struct{})
+	expiryObserved := make(chan error, 1)
+	if defaultBudgetNegative {
+		sinkWriter = &preReceiptExpiryWriter{base: writer, expired: expired, release: expiryRelease, observed: expiryObserved}
+	}
+	preparedForSink := &receiptGatedPreparedSession{PreparedSession: prepared, writer: sinkWriter}
 	sink, err := session.NewSessionRunCommitSink(preparedForSink, index, workspaceID, nil)
 	require.NoError(t, err)
 
@@ -1179,12 +1236,19 @@ func TestRunCommitLoopPersistsLateProofDuringReceiptBeforeResolution(t *testing.
 			case toolEntered <- struct{}{}:
 			default:
 			}
-			cancelOnce.Do(cancel)
+			select {
+			case <-fixtureReady:
+			case <-time.After(3 * time.Second):
+				return nil, errors.New("test: parent fixture was not ready before cancellation")
+			}
+			cancelOnce.Do(func() { cancelStarted <- time.Now(); cancel() })
 			// This test needs completion to become visible during receipt sync,
 			// not before the first execution row is sampled. Cancellation alone
 			// does not prevent a fast queued write from finishing immediately.
 			select {
 			case <-receiptAppend:
+			case <-abortFixture:
+				return nil, toolCtx.Err()
 			case <-time.After(3 * time.Second):
 				return nil, errors.New("test: receipt append did not release the queued write")
 			}
@@ -1211,24 +1275,83 @@ func TestRunCommitLoopPersistsLateProofDuringReceiptBeforeResolution(t *testing.
 		mock.ConversationTurn{AssistantContent: "must not be requested after cancellation"},
 	))
 	agent := core.NewAgentImpl("receipt-proof-race", core.NewLoopAgent(core.WithLLM(model), core.WithTools(registry)))
-	harness := core.NewHarnessImpl(agent)
+	// This is a durable ordering contract, not a requirement that every real
+	// fsync in a loaded race suite completes within the production default250ms.
+	// The independent negative keeps that default unchanged and exercises expiry.
+	var harness *core.HarnessImpl
+	if defaultBudgetNegative {
+		harness = core.NewHarnessImpl(agent)
+	} else {
+		harness = core.NewHarnessImpl(agent, core.WithRunCleanupTimeout(orderingCleanupBudget))
+	}
 	stream, err := harness.Submit(core.WithRunCommit(ctx, sink, core.RunCommitBinding{SessionID: prepared.View().SessionID, WorkspaceID: workspaceID}), "write output")
 	require.NoError(t, err)
 	statusSource, ok := stream.(core.RunStatusSource)
 	require.True(t, ok)
 	statusHandles <- statusSource.RunStatusHandle()
 	eventsDone := make(chan struct{})
+	eventsStarted := make(chan struct{})
 	go func() {
 		defer close(eventsDone)
+		close(eventsStarted)
 		for range stream.Events() {
 		}
 	}()
+	<-eventsStarted
+	close(fixtureReady)
 	select {
 	case <-toolEntered:
 	case <-time.After(3 * time.Second):
 		<-eventsDone
 		_, runErr := stream.Result()
 		t.Fatalf("prepared write wrapper did not enter; run error: %v", runErr)
+	}
+	if defaultBudgetNegative {
+		select {
+		case <-expired:
+		case <-time.After(3 * time.Second):
+			t.Fatal("default-budget fixture did not observe the actual cleanup deadline")
+		}
+		<-eventsDone
+		_, runErr := stream.Result()
+		require.EqualError(t, runErr, "core: run cleanup continues after caller deadline")
+		require.ErrorIs(t, <-expiryObserved, context.DeadlineExceeded)
+		select {
+		case <-receiptAppend:
+			t.Fatal("pre-receipt expiry must not be counted as receipt-time late proof")
+		default:
+		}
+		releaseOnce.Do(func() { close(expiryRelease) })
+		abortOnce.Do(func() { close(abortFixture) })
+		require.NoError(t, queue.Close())
+		waiter, ok := statusSource.RunStatusHandle().(core.RunStatusWaiter)
+		require.True(t, ok)
+		joinCtx, stopJoin := context.WithTimeout(context.Background(), 3*time.Second)
+		defer stopJoin()
+		final, _, joinErr := waiter.WaitForCompletion(joinCtx)
+		require.NoError(t, joinErr, "the queued fixture and its owner must actually join")
+		require.Zero(t, final.PendingWorkers)
+		require.Equal(t, core.RunOutcomeUnknown, final.Outcome)
+		require.Equal(t, core.RunExecutionQuarantined, final.ExecutionState)
+		require.Equal(t, 1, model.CallCount())
+		snapshot, snapshotErr := prepared.Snapshot()
+		require.NoError(t, snapshotErr)
+		var intent session.SessionEntry
+		for _, row := range snapshot.DurableEntries {
+			if row.ActionState == session.ActionStateIntent {
+				intent = row
+			}
+			require.Empty(t, row.ReceiptOutcome, "expired initial execution must not fabricate a receipt")
+			require.Empty(t, row.CompletionProof, "expired bookkeeping must not fabricate positive proof")
+			require.NotEqual(t, session.CheckpointExecutionResolution, row.CheckpointKind)
+		}
+		require.NotEmpty(t, intent.ID)
+		ref := session.PendingActionRef{SessionID: prepared.View().SessionID, WorkspaceID: workspaceID, RunID: intent.RunID, ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: *intent.AssistantTranscriptOrdinal, ToolCallID: intent.ToolCallID, ActionID: intent.ActionID}
+		decisions, inspectErr := index.InspectDispatchMarkers(context.Background(), []session.PendingActionRef{ref})
+		require.NoError(t, inspectErr)
+		require.Len(t, decisions, 1)
+		require.Equal(t, session.DispatchMarkerPresent, decisions[0].MarkerState, "local joins alone cannot clear an unpersisted resolution")
+		return
 	}
 	select {
 	case <-receiptAppend:
@@ -1243,6 +1366,12 @@ func TestRunCommitLoopPersistsLateProofDuringReceiptBeforeResolution(t *testing.
 		t.Fatalf("known local proof should be persisted before resolution, got: %v", runErr)
 	}
 	require.Equal(t, 1, model.CallCount(), "cancellation prevents a later provider request")
+	select {
+	case deadline := <-executionDeadline:
+		require.Greater(t, deadline.Sub(<-cancelStarted), time.Second, "ordering acceptance needs its explicit cleanup budget; default250ms is tested separately")
+	default:
+		t.Fatal("initial execution did not expose its cleanup deadline")
+	}
 
 	snapshot, err := prepared.Snapshot()
 	require.NoError(t, err)

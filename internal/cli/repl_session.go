@@ -869,6 +869,9 @@ func (s *REPLSession) executeTurn() error {
 
 	if s.turnErr != nil && !interrupted {
 		if ufe := classifyError(s.turnErr); ufe != nil {
+			if ufe.DiagnosticCode != "" {
+				s.logger.ErrorContext(s.spanCtx, "cli.turn.failed", "op", "cli.turn.failed", "error_type", ufe.DiagnosticCode)
+			}
 			fmt.Fprintf(s.out, "Error: %s\n", ufe.Action) //nolint:errcheck
 			fmt.Fprintf(s.out, "Hint: %s\n", ufe.Hint)    //nolint:errcheck
 		} else {

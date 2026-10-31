@@ -19,11 +19,12 @@ import (
 // scriptedChatModel returns a fixed sequence of responses (each possibly nil)
 // then a final content-only response, letting tests drive every loop branch.
 type scriptedChatModel struct {
-	mu       sync.Mutex
-	seq      []*llm.Message
-	errs     []error
-	idx      int
-	requests [][]llm.Message
+	mu             sync.Mutex
+	seq            []*llm.Message
+	errs           []error
+	idx            int
+	requests       [][]llm.Message
+	activityChunks int
 }
 
 func (m *scriptedChatModel) Generate(_ context.Context, messages []llm.Message, _ ...llm.Option) (*llm.Message, error) {
@@ -52,7 +53,10 @@ func (m *scriptedChatModel) Stream(ctx context.Context, msgs []llm.Message, opts
 	if resp == nil {
 		return nil, errors.New("model returned nil response")
 	}
-	ch := make(chan llm.MessageChunk, 2)
+	ch := make(chan llm.MessageChunk, 2+m.activityChunks)
+	for range m.activityChunks {
+		ch <- llm.MessageChunk{Role: llm.RoleAssistant}
+	}
 	if resp.Content != "" {
 		ch <- llm.MessageChunk{Role: resp.Role, Content: resp.Content}
 	}

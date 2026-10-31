@@ -40,11 +40,21 @@ func TestWriteOverwriteDisabledFails(t *testing.T) {
 	_, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"path": "out.txt", "content": "new"},
 	})
-	assert.Error(t, err)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "append=true")
+	assert.NotContains(t, err.Error(), "set overwrite")
 
 	data, rerr := os.ReadFile(path)
 	require.NoError(t, rerr)
 	assert.Equal(t, "original", string(data))
+
+	_, err = tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "out.txt", "content": " appended", "append": true},
+	})
+	require.NoError(t, err)
+	data, rerr = os.ReadFile(path)
+	require.NoError(t, rerr)
+	assert.Equal(t, "original appended", string(data))
 }
 
 func TestWriteOverwriteEnabledSucceeds(t *testing.T) {
@@ -129,6 +139,27 @@ func TestWriteDescription(t *testing.T) {
 	desc := tool.Description()
 	assert.Contains(t, desc, "write")
 	assert.Contains(t, desc, "path")
+	assert.Contains(t, desc, "append")
+	assert.Contains(t, desc, "protected")
+}
+
+func TestWriteGuidanceMatchesAvailableArguments(t *testing.T) {
+	tool := NewWriteTool()
+	parameters, ok := tool.Parameters().(map[string]any)
+	require.True(t, ok)
+	properties, ok := parameters["properties"].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, properties, "path")
+	assert.Contains(t, properties, "content")
+	assert.Contains(t, properties, "append")
+	assert.NotContains(t, properties, "overwrite")
+
+	guidelines := tool.PromptGuidelines()
+	require.NotEmpty(t, guidelines)
+	for _, guideline := range guidelines {
+		assert.Contains(t, guideline, "append=true")
+		assert.NotContains(t, guideline, "overwrite")
+	}
 }
 
 func TestWriteWithWriteMaxBytes(t *testing.T) {

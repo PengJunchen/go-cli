@@ -130,7 +130,9 @@ func TestStdioCleanEOFClosesReceiveAndFencesSend(t *testing.T) {
 	assert.Equal(t, TypeConnect, connect.Type, "the only outbound frame should be the handshake")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
+	writtenBeforeDisconnect := out.Len()
 	require.NoError(t, client.Disconnect(ctx))
+	assert.Equal(t, writtenBeforeDisconnect, out.Len(), "Disconnect after terminal EOF must not append a frame to the dead session")
 }
 
 func TestStdioOutboundFrameLimitRejectsBeforeWriteWithoutPoisoning(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -66,20 +67,23 @@ type completedToolAction struct {
 }
 
 type runCommitDispatchResult struct {
-	metadata        map[string]any
-	output          string
-	isError         bool
-	err             error
-	returned        bool
-	committed       bool
-	sourceTruncated *bool
+	metadata               map[string]any
+	output                 string
+	isError                bool
+	err                    error
+	returned               bool
+	committed              bool
+	sourceTruncated        *bool
+	knownBashOwnTimeout    bool
+	receiptOutputTruncated bool
 }
 
 type runCommitToolResult struct {
-	output          string
-	isError         bool
-	outcome         string
-	sourceTruncated *bool
+	output                 string
+	isError                bool
+	outcome                string
+	sourceTruncated        *bool
+	receiptOutputTruncated bool
 }
 
 type runCommitQuiescenceError struct{ cause error }
@@ -149,13 +153,23 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 	}
 	if toolResult != nil {
 		result.metadata = cloneStringAnyMap(toolResult.Metadata)
+		result.sourceTruncated = sourceTruncatedFromMetadata(toolResult.Metadata)
 	}
 	result.returned = true
 	result.committed = invocation.DispatchCommitted()
 	if err != nil {
-		result.output = "Error: " + err.Error()
+		partial := ""
+		if toolResult != nil {
+			partial = toolResult.Output
+		}
+		result.output, result.receiptOutputTruncated = boundedToolFailureOutput(partial, err)
+		if result.metadata == nil {
+			result.metadata = make(map[string]any)
+		}
+		result.metadata["receipt_output_truncated"] = result.receiptOutputTruncated
 		result.isError = true
 		result.err = err
+		result.knownBashOwnTimeout = tools.PreparedBashOwnTimeoutKnown(invocation, err)
 		var pending tools.PendingExecutionError
 		if errors.As(err, &pending) {
 			pendingDone := pending.ExecutionDone()
@@ -185,6 +199,31 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 	result.isError = toolResult.IsError
 	result.sourceTruncated = sourceTruncatedFromMetadata(toolResult.Metadata)
 	return result
+}
+
+// Failed receipt text is a representation, not the complete captured source.
+// 100000 bytes also leaves JSON's worst six-byte escaping well below the
+// existing 1MiB durable row cap for ordinary receipt fields. Neither the Bash
+// capture limit nor the session limit changes; arbitrary metadata remains
+// subject to its existing independent validation and size constraints.
+const maxFailedReceiptOutputBytes = 100000
+const failedReceiptTruncatedMarker = "\n[partial output truncated for receipt]"
+
+func boundedToolFailureOutput(partial string, cause error) (string, bool) {
+	output := "Error: " + cause.Error()
+	if partial != "" {
+		output += "\n" + partial
+	}
+	if len(output) <= maxFailedReceiptOutputBytes {
+		return output, false
+	}
+	end := maxFailedReceiptOutputBytes - len(failedReceiptTruncatedMarker)
+	// Keep the retained prefix on a UTF-8 boundary. JSON's existing encoder
+	// still handles any invalid source bytes; no new decoding authority exists.
+	for end > 0 && !utf8.RuneStart(output[end]) {
+		end--
+	}
+	return output[:end] + failedReceiptTruncatedMarker, true
 }
 
 func sourceTruncatedFromMetadata(metadata map[string]any) *bool {
@@ -728,9 +767,11 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 	appendToolReceipt(messages, transcript, call, dispatch.output, outcome, consumer)
 	index := uint64(len(*transcript) - 1)
 	(*transcript)[len(*transcript)-1].SourceTruncated = cloneOptionalBool(dispatch.sourceTruncated)
+	(*transcript)[len(*transcript)-1].ReceiptOutputTruncated = dispatch.receiptOutputTruncated
 	toolResult := runCommitToolResult{
 		output: dispatch.output, isError: dispatch.isError, outcome: outcome,
-		sourceTruncated: cloneOptionalBool(dispatch.sourceTruncated),
+		sourceTruncated:        cloneOptionalBool(dispatch.sourceTruncated),
+		receiptOutputTruncated: dispatch.receiptOutputTruncated,
 	}
 	if err := consumer.recordActionReceipt(taskID, ordinal, intent, dispatchState, index, (*transcript)[len(*transcript)-1]); err != nil {
 		markLatestToolReceiptUnknown(messages, transcript)
@@ -755,7 +796,7 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 		}
 		if !resolved {
 			toolResult.isError = true
-			return toolResult, runCommitQuiescenceError{cause: ErrRunCommitQuiescenceUnproven}
+			return toolResult, runCommitQuiescenceError{cause: dispatch.err}
 		}
 	}
 	if outcome == ReceiptOutcomeUnknown {
@@ -817,10 +858,13 @@ func (consumer *runCommitConsumer) resolvePreparedTask(ctx context.Context, task
 	return true, nil
 }
 
-func runCommitReceiptOutcome(_ context.Context, dispatch runCommitDispatchResult) string {
+func runCommitReceiptOutcome(ctx context.Context, dispatch runCommitDispatchResult) string {
 	if dispatch.err != nil {
 		if hasUnknownToolOutcome(dispatch.err) {
 			return ReceiptOutcomeUnknown
+		}
+		if dispatch.knownBashOwnTimeout && ctx.Err() == nil {
+			return ReceiptOutcomeError
 		}
 		if errors.Is(dispatch.err, context.Canceled) || errors.Is(dispatch.err, context.DeadlineExceeded) {
 			if !dispatch.committed {
@@ -1012,6 +1056,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 		}
 		appendToolReceipt(messages, transcript, action.call, output, outcome, consumer)
 		(*transcript)[len(*transcript)-1].SourceTruncated = cloneOptionalBool(dispatch.sourceTruncated)
+		(*transcript)[len(*transcript)-1].ReceiptOutputTruncated = dispatch.receiptOutputTruncated
 		entry := (*transcript)[len(*transcript)-1]
 		if err := consumer.recordActionReceipt(action.taskID, ordinal, action.intent, dispatchState, transcriptIndex, entry); err != nil {
 			markLatestToolReceiptUnknown(messages, transcript)

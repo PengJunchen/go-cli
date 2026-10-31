@@ -43,14 +43,15 @@ func (t *approvalAuditAssemblyTool) Execute(context.Context, tools.ToolCall) (*t
 func assembleApprovalAuditTestTool(t *testing.T, tool *approvalAuditAssemblyTool) (*AgentAssembly, string) {
 	t.Helper()
 	ctx := context.Background()
-	cfg := newAssembleTestConfig(t)
+	cfg := newApprovalAuditTestConfig(t)
 	assembly, err := AssembleAgent(ctx, cfg, cfg.Provider.Name, "approval-audit-assembly", io.Discard,
 		WithApproveMode(ApproveAuto),
 	)
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
 
-	auditDir := filepath.Join(cfg.Git.WorkDir, ".go-cli", "audit")
+	auditDir, err := resolveApprovalAuditDir(os.UserHomeDir, func() (string, error) { return cfg.Git.WorkDir, nil })
+	require.NoError(t, err)
 	tool.auditDir = auditDir
 	tool.auditFile = filepath.Join(auditDir, time.Now().UTC().Format("2006-01-02")+".jsonl")
 	require.NoError(t, assembly.ToolRegistry.Register(ctx, tool))

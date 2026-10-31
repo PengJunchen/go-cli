@@ -138,7 +138,11 @@ func (t *BashTool) Name() string { return "bash" }
 
 // Description returns a brief description of the tool.
 func (t *BashTool) Description() string {
-	return "bash: runs a shell command and returns its combined output. Args: command (string)."
+	window := fmt.Sprintf("The configured host execution window is %s", t.Timeout)
+	if t.TimeoutTier {
+		window = "The host selects an execution window by command category"
+	}
+	return "bash: runs a synchronous, managed shell command and returns its combined output. Args: command (string), timeout_ms (optional positive integer milliseconds; only shortens the host-selected window). " + window + "; host runtime and parent cancellation may end it earlier. Wait for command-local parallel jobs (for example, cmd & wait); an unwaited background process is not a persistent worker. Longer synchronous commands require an appropriate host-configured execution window."
 }
 
 // Parameters returns the JSON Schema for the command this tool executes.
@@ -147,6 +151,10 @@ func (t *BashTool) Parameters() any {
 		"type": "object",
 		"properties": map[string]any{
 			"command": map[string]any{"type": "string"},
+			"timeout_ms": map[string]any{
+				"type": "integer", "minimum": 1, "maximum": maxBashTimeoutMilliseconds,
+				"description": "Optional execution timeout in milliseconds; only shortens the host-selected command window. Parent and runtime deadlines may end execution earlier.",
+			},
 		},
 		"required":             []any{"command"},
 		"additionalProperties": false,
@@ -167,6 +175,14 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("bash.missing_command", "tool", "bash")
 		return nil, errors.New("bash: missing string argument 'command'")
+	}
+
+	timeout, err := t.executionTimeout(ctx, command, call.Args)
+	if err != nil {
+		reportPreparedNoProcessCompletion(ctx)
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("bash.invalid_timeout", "tool", "bash")
+		return nil, err
 	}
 
 	// A sandbox is required by default. When Sandbox is nil, return an
@@ -192,14 +208,6 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		return nil, err
 	}
 
-	// Determine the effective timeout. When TimeoutTier is enabled, the
-	// timeout is classified per-command; otherwise the fixed Timeout is used.
-	timeout := t.Timeout
-	if t.TimeoutTier {
-		timeout = classifyCommand(command)
-	}
-
-	timeout = runtimeBashTimeout(ctx, timeout)
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := execCtx.Err(); err != nil {
@@ -210,7 +218,7 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	// process is affected, not the Go runtime.
 	command = wrapCommandWithLimits(command, t.ResourceLimits)
 
-	cmd := exec.Command("bash", "-lc", command)
+	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = t.Workdir
 	cmd.Env = filteredEnv(t.Env)
 	if _, supplied := bashRuntimeInputFromContext(ctx); supplied {
@@ -265,7 +273,7 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 			"duration_ms", ms,
 			"reason", message,
 			"timeout", timeout.String())
-		return &ToolResult{Output: output, Metadata: metadata}, localLifecycleError(cause, lifecycle)
+		return &ToolResult{Output: output, Metadata: metadata}, bashLifecycleError(ctx, execCtx, cause, lifecycle)
 	}
 
 	if !lifecycle.quiescent {
@@ -333,14 +341,17 @@ func envSlice(env map[string]string) []string {
 // any matching *_API_KEY, *_TOKEN, or *_SECRET — are dropped to prevent
 // accidental secret leakage to child processes (AC-1).
 var envWhitelist = map[string]bool{
-	"PATH":     true,
-	"HOME":     true,
-	"USER":     true,
-	"SHELL":    true,
-	"LANG":     true,
-	"LC_ALL":   true,
-	"LC_CTYPE": true,
-	"TERM":     true,
+	"PATH":       true,
+	"GOPATH":     true,
+	"GOCACHE":    true,
+	"GOMODCACHE": true,
+	"HOME":       true,
+	"USER":       true,
+	"SHELL":      true,
+	"LANG":       true,
+	"LC_ALL":     true,
+	"LC_CTYPE":   true,
+	"TERM":       true,
 }
 
 // sensitiveEnvSuffixes lists the case-insensitive name suffixes that mark an

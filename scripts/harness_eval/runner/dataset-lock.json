@@ -1,0 +1,103 @@
+{
+  "source_repo": "https://github.com/scaleapi/SWE-bench_Pro-os",
+  "source_commit": "66f92766bba642462d4bbe5479e83f91f9211862",
+  "runner": "harbor==0.25.0 (custom Docker adapted profile permitted)",
+  "sampling_rule": "Within each predefined repo flipt-io/flipt, navidrome/navidrome, future-architect/vuls, sort SHA256(go-cli-pi-pilot-v1| + exact ID) ascending and take first; no result-based selection.",
+  "tasks": [
+    {
+      "task_id": "instance_flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5",
+      "selection_sha256": "0200f7228c9523607acf50ed30b83a6a8155dcc62f5841df999f3b57197e5635",
+      "task_path": "third_party/swe-bench-pro/v2/tasks/instance_flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5",
+      "task_toml_sha256": "a328cdb17b4391954ecd6b05e7e29972d5328ebebc006da0594b9033df163163",
+      "instruction_sha256": "dd6f30b5653fbf3318314416a343feba0b03d0731b7c70e06abff80cfc48b7a6",
+      "environment": {
+        "network_mode": "public",
+        "build_timeout_sec": 1800.0,
+        "docker_image": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5",
+        "os": "linux",
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240,
+        "mcp_servers": [],
+        "env": {}
+      },
+      "agent": {
+        "network_mode": "no-network",
+        "timeout_sec": 3000.0
+      },
+      "verifier": {
+        "network_mode": "public",
+        "timeout_sec": 3000.0,
+        "collect": [],
+        "env": {}
+      },
+      "source_tree_record": "040000 tree 4702ec0a1c839a4c1a4cb6b90e3a9f1778854606\tv2/tasks/instance_flipt-io__flipt-b2170346dc37cf42fda1386cd630f24821ad2ac5",
+      "pinned_image": "ghcr.io/scaleapi/swe-bench_pro-v2@sha256:2f7f1326835b2423e79b7225a9e384c25ff38ada8ea8b3c10da3b0223865b7ee"
+    },
+    {
+      "task_id": "instance_navidrome__navidrome-1e96b858a91c640fe64e84c5e5ad8cc0954ea38d",
+      "selection_sha256": "07626e3f32ca1d0e181bed04d75916ce12ea95ecc5a7cefae357ea87f9ba1221",
+      "task_path": "third_party/swe-bench-pro/v2/tasks/instance_navidrome__navidrome-1e96b858a91c640fe64e84c5e5ad8cc0954ea38d",
+      "task_toml_sha256": "64ee1ca1ac83ec93c769cf6478631a9efc641aee8ede6c37935b7ff37b0df637",
+      "instruction_sha256": "2dda914e5953615aec5a09c7efe233da46db297ee4d0a0235091b776168d50e8",
+      "environment": {
+        "network_mode": "public",
+        "build_timeout_sec": 1800.0,
+        "docker_image": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_navidrome__navidrome-1e96b858a91c640fe64e84c5e5ad8cc0954ea38d",
+        "os": "linux",
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240,
+        "mcp_servers": [],
+        "env": {}
+      },
+      "agent": {
+        "network_mode": "no-network",
+        "timeout_sec": 3000.0
+      },
+      "verifier": {
+        "network_mode": "public",
+        "timeout_sec": 3000.0,
+        "collect": [],
+        "env": {}
+      },
+      "source_tree_record": "040000 tree fafdca208d8493a4c624c96bdfd7045f12f60508\tv2/tasks/instance_navidrome__navidrome-1e96b858a91c640fe64e84c5e5ad8cc0954ea38d",
+      "pinned_image": "ghcr.io/scaleapi/swe-bench_pro-v2@sha256:b45146e8c3ce77bdc2294fdaa8fa1d7ae2eb8680b3c832e5c41b24de87910d6f"
+    },
+    {
+      "task_id": "instance_future-architect__vuls-436341a4a522dc83eb8bddd1164b764c8dd6bc45",
+      "selection_sha256": "0087fb85c67fbe83e67790d7fb3cb52159705ee83551dda2710078985eda4bef",
+      "task_path": "third_party/swe-bench-pro/v2/tasks/instance_future-architect__vuls-436341a4a522dc83eb8bddd1164b764c8dd6bc45",
+      "task_toml_sha256": "9e669e79207d8f76004989d3dedab7b218e14d581dda95a3190238d0e5bbd986",
+      "instruction_sha256": "bd0c3af1c6a021311ce28311b2842bcd1a5a988e6cc286ea728b10de2b95fd24",
+      "environment": {
+        "network_mode": "public",
+        "build_timeout_sec": 1800.0,
+        "docker_image": "ghcr.io/scaleapi/swe-bench_pro-v2:instance_future-architect__vuls-436341a4a522dc83eb8bddd1164b764c8dd6bc45",
+        "os": "linux",
+        "cpus": 1,
+        "memory_mb": 4096,
+        "storage_mb": 10240,
+        "mcp_servers": [],
+        "env": {}
+      },
+      "agent": {
+        "network_mode": "no-network",
+        "timeout_sec": 3000.0
+      },
+      "verifier": {
+        "network_mode": "public",
+        "timeout_sec": 3000.0,
+        "collect": [],
+        "env": {}
+      },
+      "source_tree_record": "040000 tree e91b341f2167caaa429497100bc43baf6a2fa8e2\tv2/tasks/instance_future-architect__vuls-436341a4a522dc83eb8bddd1164b764c8dd6bc45",
+      "pinned_image": "ghcr.io/scaleapi/swe-bench_pro-v2@sha256:726bd27db30702f31a1b21a4914c4bdec072b0d0abde686fcabb21013f866146"
+    }
+  ],
+  "reserved_validation_candidates_not_downloaded_or_run": [
+    "instance_flipt-io__flipt-d966559200183b713cdf3ea5007a7e0ba86a5afb",
+    "instance_navidrome__navidrome-3853c3318f67b41a9e4cb768618315ff77846fdb",
+    "instance_future-architect__vuls-2c84be80b65d022c262956cd26fc79d8bb2f7010"
+  ]
+}

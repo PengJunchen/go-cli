@@ -494,7 +494,7 @@ func (m *HTTPChatModel) buildBody(msgs []Message, opts ...Option) ([]byte, error
 	if err != nil {
 		return nil, fmt.Errorf("llm: marshal request: %w", err)
 	}
-	return data, nil
+	return injectThinking(data, genOpts, OpenAIThinkingAdapter{}, "")
 }
 
 // roundTrip builds the HTTP request, executes it against the provider, and

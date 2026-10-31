@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -107,6 +111,184 @@ func (durableCharacterEstimator) Estimate(text string) (int, error) {
 type snapshotCheckingChatModel struct {
 	base  llm.BaseChatModel
 	check func([]llm.Message) error
+}
+
+// Forward the production resolver and candidate-checking contracts so the
+// persisted-session regression also traverses prepared-envelope admission.
+type durableResolverCheckingModel struct{ *snapshotCheckingChatModel }
+
+func (model *durableResolverCheckingModel) ProviderCandidates() []llm.ResolvedCandidateHandle {
+	return llm.ProviderCandidatesFromModel(model.base)
+}
+
+func (model *durableResolverCheckingModel) CandidateSelectionSource() llm.CandidateSelectionSource {
+	source, _ := llm.CandidateSelectionSourceFromModel(model.base)
+	return source
+}
+
+func (*durableResolverCheckingModel) MaxCandidateBytes() int { return llm.GuardedStreamMaxBytes }
+
+func (*durableResolverCheckingModel) CheckCandidate(context.Context, string) (*core.CandidateOutputResult, error) {
+	return &core.CandidateOutputResult{Allowed: true}, nil
+}
+
+type durableTwoStageTruncator struct {
+	budgets []int
+	results []compaction.CompactionResult
+}
+
+func (recorder *durableTwoStageTruncator) Compact(ctx context.Context, items []compaction.TurnItem, budget int, estimator compaction.TokenEstimator) (compaction.CompactionResult, error) {
+	result, err := compaction.NewTruncatingCompactor().Compact(ctx, items, budget, estimator)
+	recorder.budgets = append(recorder.budgets, budget)
+	recorder.results = append(recorder.results, result)
+	return result, err
+}
+
+func TestDurableTwoStageTruncationPersistsAndReopensCurrentInput(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	ctx := t.Context()
+	const workspaceID = "durable-two-stage-reopen"
+	const current = "exact current input after two durable cuts"
+	const retained = "retained prior answer"
+	estimator := durableCharacterEstimator{}
+	minimal := []compaction.TurnItem{
+		{Role: "system", Content: "s"},
+		{Role: "user", Content: compaction.DurableTruncationMarker, IsCompaction: true},
+		{Role: "assistant", Content: retained}, {Role: "user", Content: current},
+	}
+	minimalTokens := compaction.EstimateTokens(minimal, estimator)
+	padding := strings.Repeat("p", minimalTokens)
+	tail := append([]compaction.TurnItem{minimal[0], minimal[1], {Role: "user", Content: padding}}, minimal[2:]...)
+	ceiling := compaction.EstimateTokens(tail, estimator)
+	messageBudget := 4 * ceiling / 5
+	require.Greater(t, ceiling, messageBudget)
+	require.LessOrEqual(t, minimalTokens, messageBudget)
+	index, prepared, _ := prepareRunCommitSession(t, root, workspaceID, "two-stage persisted compaction")
+	preparedOpen := true
+	t.Cleanup(func() {
+		if preparedOpen {
+			_ = prepared.Close()
+		}
+	})
+	for turn, seed := range []struct{ input, answer string }{
+		{strings.Repeat("x", ceiling+1), strings.Repeat("y", ceiling+1)},
+		{padding, retained},
+	} {
+		seedSink, err := session.NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+		require.NoError(t, err)
+		source, err := seedSink.CompactionSourceSnapshot()
+		require.NoError(t, err)
+		model := mock.NewMockLLMServer(mock.NewConversationTemplate(fmt.Sprintf("two-stage-seed-%d", turn), "seed durable source",
+			mock.ConversationTurn{AssistantContent: seed.answer}))
+		agent := core.NewAgentImpl("two-stage-seed", core.NewLoopAgent(core.WithLLM(model), core.WithSystemPrompt("s")))
+		require.NoError(t, agent.SetHistoryFromSourceSnapshot(source))
+		submitDurableCompactionRun(t, agent, seedSink, prepared, workspaceID, seed.input)
+		require.Equal(t, 1, model.CallCount())
+	}
+	sink, err := session.NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+	source, err := sink.CompactionSourceSnapshot()
+	require.NoError(t, err)
+	require.Len(t, source.SourceEntryIDs, 4)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		requests.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"durable accepted\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer server.Close()
+	registry := llm.NewProviderRegistry()
+	require.NoError(t, registry.Register(llm.NewEinoProvider(llm.WithProviderName("durable-two-stage-reopen-provider"),
+		llm.WithModels([]llm.ModelInfo{{Name: "durable-two-stage-reopen-model", InputTokenLimit: 1000000}}), llm.WithHTTPClient(server.Client()))))
+	resolved, err := registry.SnapshotResolver().ResolveModel(ctx, llm.ModelRequest{ProviderID: "durable-two-stage-reopen-provider", ModelID: "durable-two-stage-reopen-model", Endpoint: server.URL})
+	require.NoError(t, err)
+	model, cleanup, err := resolved.Build(ctx)
+	require.NoError(t, err)
+	defer cleanup()
+	var beforeProvider session.PreparedSessionSnapshot
+	checking := &durableResolverCheckingModel{&snapshotCheckingChatModel{base: model, check: func(messages []llm.Message) error {
+		var snapshotErr error
+		beforeProvider, snapshotErr = prepared.Snapshot()
+		if snapshotErr != nil {
+			return snapshotErr
+		}
+		currentCount := 0
+		for _, message := range messages {
+			if message.Role == llm.RoleUser && message.Content == current {
+				currentCount++
+				ref := message.Runtime.Source
+				if ref.Kind != llm.SourceRunTranscript || ref.RunID == "" || ref.PriorSourceCount != 4 || ref.TranscriptIndex != 0 {
+					return errors.New("test: current input's durable identity changed")
+				}
+			}
+		}
+		if currentCount != 1 {
+			return errors.New("test: provider did not receive current input exactly once")
+		}
+		return nil
+	}}}
+	recorder := &durableTwoStageTruncator{}
+	loop := core.NewLoopAgent(core.WithLLM(checking), core.WithSystemPrompt("s"), core.WithMaxIterations(1))
+	loop.SetMidTurnCompaction(nil, recorder, estimator, ceiling)
+	agent := core.NewAgentImpl("durable-two-stage-reopen", loop)
+	require.NoError(t, agent.SetHistoryFromSourceSnapshot(source))
+	harness := core.NewHarnessImpl(agent)
+	stream, err := harness.Submit(core.WithRunCommit(ctx, sink, core.RunCommitBinding{SessionID: prepared.View().SessionID, WorkspaceID: workspaceID}), current)
+	require.NoError(t, err)
+	for range stream.Events() {
+	}
+	_, runErr := stream.Result()
+	statusSource, ok := stream.(core.RunStatusSource)
+	require.True(t, ok)
+	status := statusSource.RunStatusHandle().Snapshot()
+	t.Logf("persisted full-loop error_type=%T error=%v provider_requests=%d real_compactor_budgets=%v", runErr, runErr, requests.Load(), recorder.budgets)
+	require.NoError(t, runErr)
+	require.EqualValues(t, 1, requests.Load())
+	require.Equal(t, []int{ceiling, messageBudget}, recorder.budgets)
+	require.Len(t, recorder.results, 2)
+	require.EqualValues(t, 2, recorder.results[0].NewProjection.Through.PriorHistoryCount)
+	require.EqualValues(t, 3, recorder.results[1].NewProjection.Through.PriorHistoryCount)
+	require.Equal(t, core.RunOutcomeSuccess, status.Outcome)
+	require.Zero(t, status.PendingWorkers)
+	var checkpoints []session.SessionEntry
+	for _, entry := range beforeProvider.DurableEntries {
+		if entry.Type == session.EntryTypeCompaction && entry.RunID == status.RunID {
+			checkpoints = append(checkpoints, entry)
+		}
+	}
+	require.Len(t, checkpoints, 2, "both projections must already be synced before provider dispatch")
+	require.Equal(t, source.SourceEntryIDs[1], checkpoints[0].CompactedThroughEntryID)
+	require.Equal(t, source.SourceEntryIDs[2], checkpoints[1].CompactedThroughEntryID)
+	live, err := prepared.Snapshot()
+	require.NoError(t, err)
+	require.NoError(t, prepared.Close())
+	preparedOpen = false
+	reopened, err := session.NewDurableJSONLSessionPreparer(filepath.Join(root, "durable"), index).PrepareResume(ctx, live.SessionID)
+	require.NoError(t, err)
+	defer reopened.Close()
+	restored, err := reopened.Snapshot()
+	require.NoError(t, err)
+	require.Equal(t, live.PublishedView, restored.PublishedView)
+	require.Equal(t, live.DurableEntries, restored.DurableEntries)
+	require.Len(t, restored.PublishedView.Messages, 4)
+	require.Equal(t, compaction.UntrustedSummaryContext(compaction.DurableTruncationMarker), restored.PublishedView.Messages[0].Content)
+	require.Equal(t, retained, restored.PublishedView.Messages[1].Content)
+	require.Equal(t, current, restored.PublishedView.Messages[2].Content)
+	require.Equal(t, "durable accepted", restored.PublishedView.Messages[3].Content)
+	pending, err := session.InspectPendingActions(restored)
+	require.NoError(t, err)
+	require.Empty(t, pending)
+	terminalCount := 0
+	for _, entry := range restored.DurableEntries {
+		if entry.Type == session.EntryTypeCheckpoint && entry.CheckpointKind == session.CheckpointRunTerminal && entry.RunID == status.RunID {
+			terminalCount++
+			require.Equal(t, core.RunOutcomeSuccess, entry.RunOutcome)
+		}
+	}
+	require.Equal(t, 1, terminalCount)
 }
 
 type failingDurableCompactionWriter struct {

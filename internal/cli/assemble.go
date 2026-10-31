@@ -408,7 +408,17 @@ func AssembleAgent(
 	out io.Writer,
 	opts ...AssembleOption,
 ) (*AgentAssembly, error) {
+	var bashExecutionTimeout time.Duration
+	var bashExecutionTimeoutSet bool
+	if rc != nil {
+		var err error
+		bashExecutionTimeout, bashExecutionTimeoutSet, err = rc.Tools.Bash.ExecutionTimeout()
+		if err != nil {
+			return nil, fmt.Errorf("assemble: validate Bash execution window: %w", err)
+		}
+	}
 	s, thinkingLevel := newAssembleState(ctx, rc, providerName, modelName, out, opts...)
+	s.bashExecutionTimeout, s.bashExecutionTimeoutSet = bashExecutionTimeout, bashExecutionTimeoutSet
 	mode, approvalErr := resolveApprovalMode(s.rc, s.ac.approveMode, s.ac.approveModeSet)
 	if approvalErr != nil {
 		return nil, errors.Join(approvalErr, s.runCleanup())
@@ -717,20 +727,22 @@ type assembleState struct {
 	tracer *tracing.Tracer
 
 	// Tools section
-	tr               tools.ToolRegistry
-	underlyingReg    tools.ToolRegistry
-	todoState        *assemblyTodoState
-	fileTracker      *tools.FileTracker
-	diffGen          tools.DiffGenerator
-	mutationQueue    tools.FileMutationQueue
-	gitTool          tools.GitTool
-	gitCwd           string
-	worktreeMgr      *tools.WorktreeManager
-	snapshotMgr      *tools.SnapshotManager
-	htmlConverter    *tools.DefaultHTMLConverter
-	lspClientField   tools.LSPClient
-	lspWorkspaceRoot string
-	skillInfos       []core.SkillInfo
+	tr                      tools.ToolRegistry
+	underlyingReg           tools.ToolRegistry
+	todoState               *assemblyTodoState
+	fileTracker             *tools.FileTracker
+	diffGen                 tools.DiffGenerator
+	mutationQueue           tools.FileMutationQueue
+	gitTool                 tools.GitTool
+	gitCwd                  string
+	worktreeMgr             *tools.WorktreeManager
+	snapshotMgr             *tools.SnapshotManager
+	htmlConverter           *tools.DefaultHTMLConverter
+	lspClientField          tools.LSPClient
+	lspWorkspaceRoot        string
+	skillInfos              []core.SkillInfo
+	bashExecutionTimeout    time.Duration
+	bashExecutionTimeoutSet bool
 
 	// Extensions section
 	extHooks         []core.Hook
@@ -1098,6 +1110,9 @@ func (s *assembleState) assembleTools() error {
 		tools.WithRegisteredResourceLimits(resourceLimits),
 		tools.WithRegisteredGitTool(s.gitTool),
 	}
+	if s.bashExecutionTimeoutSet {
+		regOpts = append(regOpts, tools.WithRegisteredBashTimeout(s.bashExecutionTimeout))
+	}
 	if s.durableSession != nil && s.durableSession.manager != nil {
 		regOpts = append(regOpts, tools.WithRegisteredCanonicalWorkspaceRoot(s.durableSession.manager.root))
 	}
@@ -1434,8 +1449,11 @@ func (s *assembleState) assembleApproval() error {
 	}
 
 	// Wrap the classifier with an append-only audit trail so every classification
-	// decision is recorded to .go-cli/audit/{date}.jsonl.
-	auditDir := filepath.Join(s.gitCwd, ".go-cli", "audit")
+	// decision is recorded in the private HOME namespace for this workspace.
+	auditDir, err := resolveApprovalAuditDir(os.UserHomeDir, func() (string, error) { return s.gitCwd, nil })
+	if err != nil {
+		return fmt.Errorf("assemble: resolve approval audit directory: %w", err)
+	}
 	auditTrail := approval.NewAuditTrail(auditDir)
 	classifier = approval.NewAuditClassifier(classifier, auditTrail, auditMode, s.sessionID)
 

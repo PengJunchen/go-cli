@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 )
 
 // RegisterDefaultsOption configures RegisterDefaults behavior.
@@ -19,6 +20,8 @@ type registerDefaultsConfig struct {
 	builtinWhitelist map[string]bool
 	pathWhitelist    []string
 	canonicalRoot    string
+	bashTimeout      time.Duration
+	bashTimeoutSet   bool
 }
 
 // WithRegisteredFileTracker wires a FileTracker into the WriteTool and
@@ -37,6 +40,14 @@ func WithRegisteredDiffGenerator(dg DiffGenerator) RegisterDefaultsOption {
 // RegisterDefaults.
 func WithRegisteredBashSandbox(sb BashSandbox) RegisterDefaultsOption {
 	return func(c *registerDefaultsConfig) { c.bashSandbox = sb }
+}
+
+// WithRegisteredBashTimeout configures the host execution window for the
+// registered Bash tool. Explicit nonpositive values reject registration.
+func WithRegisteredBashTimeout(timeout time.Duration) RegisterDefaultsOption {
+	return func(c *registerDefaultsConfig) {
+		c.bashTimeout, c.bashTimeoutSet = timeout, true
+	}
 }
 
 // WithRegisteredResourceLimits wires ResourceLimits into the BashTool
@@ -96,6 +107,9 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if cfg.bashTimeoutSet && cfg.bashTimeout <= 0 {
+		return errors.New("tools: registered Bash timeout must be positive")
+	}
 
 	// Build WriteTool options.
 	writeOpts := []WriteToolOption{}
@@ -134,6 +148,9 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 
 	// Build BashTool options.
 	bashOpts := []BashToolOption{}
+	if cfg.bashTimeoutSet {
+		bashOpts = append(bashOpts, WithTimeout(cfg.bashTimeout))
+	}
 	if cfg.bashSandbox != nil {
 		bashOpts = append(bashOpts, WithBashSandbox(cfg.bashSandbox))
 	}

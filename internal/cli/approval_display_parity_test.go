@@ -26,7 +26,7 @@ type approvalParityOutcome struct {
 
 func TestAssembledAskBaseClassifierMatchesDisplayedPolicy(t *testing.T) {
 	for _, channel := range []bool{false, true} {
-		cfg := newAssembleTestConfig(t)
+		cfg := newApprovalAuditTestConfig(t)
 		options := []AssembleOption{WithApproveMode(ApproveAsk)}
 		if channel {
 			options = append(options, WithApprovalChannel(make(chan approval.InteractiveRequest, 1)))
@@ -42,7 +42,7 @@ func TestAssembledAskBashUsesHumanChoiceAcrossDisplays(t *testing.T) {
 	for _, display := range []string{"stdio", "channel"} {
 		for _, choice := range []string{"yes", "no", "input-ended", "cancel-late-always"} {
 			t.Run(display+"/"+choice, func(t *testing.T) {
-				cfg := newAssembleTestConfig(t)
+				cfg := newApprovalAuditTestConfig(t)
 				cfg.Tools.Builtin = []string{"bash"}
 				cwd, err := os.Getwd()
 				require.NoError(t, err)
@@ -158,7 +158,7 @@ func TestAssembledAskBashUsesHumanChoiceAcrossDisplays(t *testing.T) {
 					}
 					require.NoFileExists(t, marker)
 				}
-				entries, err := approval.NewAuditTrail(filepath.Join(cfg.Git.WorkDir, ".go-cli", "audit")).ReadEntries(time.Now())
+				entries, err := approval.NewAuditTrail(approvalAuditTestDir(t, cfg.Git.WorkDir)).ReadEntries(time.Now())
 				require.NoError(t, err)
 				var resolutions []approval.AuditEntry
 				for _, entry := range entries {
@@ -200,7 +200,7 @@ func TestAssembledBashExplicitModesIgnoreDisplay(t *testing.T) {
 	for _, mode := range []ApproveMode{ApproveAuto, ApproveDeny} {
 		for _, display := range []string{"stdio", "channel"} {
 			t.Run(mode.String()+"/"+display, func(t *testing.T) {
-				cfg := newAssembleTestConfig(t)
+				cfg := newApprovalAuditTestConfig(t)
 				cfg.Tools.Builtin = []string{"bash"}
 				cwd, err := os.Getwd()
 				require.NoError(t, err)
@@ -239,7 +239,7 @@ func TestAssembledBashExplicitModesIgnoreDisplay(t *testing.T) {
 }
 
 func TestAssembledAskNonTTYCannotProvideApproval(t *testing.T) {
-	cfg := newAssembleTestConfig(t)
+	cfg := newApprovalAuditTestConfig(t)
 	cfg.Tools.Builtin = []string{"bash"}
 	input, err := os.CreateTemp(cfg.Git.WorkDir, "non-tty-")
 	require.NoError(t, err)
@@ -264,7 +264,7 @@ func TestAssembledAskNonTTYCannotProvideApproval(t *testing.T) {
 	position, err := input.Seek(0, io.SeekCurrent)
 	require.NoError(t, err)
 	require.Zero(t, position, "non-TTY input cannot be consumed as human authorization")
-	entries, err := approval.NewAuditTrail(filepath.Join(cfg.Git.WorkDir, ".go-cli", "audit")).ReadEntries(time.Now())
+	entries, err := approval.NewAuditTrail(approvalAuditTestDir(t, cfg.Git.WorkDir)).ReadEntries(time.Now())
 	require.NoError(t, err)
 	resolutions := 0
 	for _, entry := range entries {

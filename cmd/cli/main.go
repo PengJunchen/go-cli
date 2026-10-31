@@ -23,11 +23,19 @@ import (
 )
 
 func main() {
+	if code, handled := standaloneSubreaperDispatch(); handled {
+		os.Exit(code)
+	}
 	tm, err := newPersistentTrustManager()
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warning: persistent trust store unavailable: %v\n", err) //nolint:errcheck // startup warning is best-effort
 	}
 	os.Exit(runWithTrustManager(os.Args[1:], os.Stdout, os.Stderr, tm))
+}
+
+func writeSubreaperFailure(err error) int {
+	_, _ = fmt.Fprintln(os.Stderr, err) //nolint:errcheck // startup failure diagnostic is best-effort
+	return 125
 }
 
 // newPersistentTrustManager creates the one process-wide manager over the
@@ -108,18 +116,23 @@ func runWithContextLoader(
 	// and user interaction. If the log file is unavailable, logs fall back to
 	// stderr. This runs before config loading so even config_load spans are
 	// captured in the file when available.
-	logDir := filepath.Join(".go-cli", "logs")
-	if err := os.MkdirAll(logDir, 0o750); err == nil {
-		var fErr error
-		logFile, fErr = os.OpenFile(filepath.Join(logDir, "go-cli.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-		if fErr == nil {
-			logHandler = slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo})
-		} else {
-			logFile = nil
+	logPath, explicitLogPath, logErr := resolveRuntimeLogFilePath(os.LookupEnv)
+	if !explicitLogPath {
+		// Preserve the original default destination, modes and optional fallback.
+		if err := os.MkdirAll(filepath.Dir(logPath), 0o750); err == nil {
+			logFile, logErr = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		}
+	} else if logErr == nil {
+		logFile, logErr = openExplicitRuntimeLogFile(logPath)
+	}
+	if logFile != nil {
+		logHandler = slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo})
 	}
 	invocationLogger = slog.New(tracing.NewRedactingSlogHandler(logHandler))
 	slog.SetDefault(invocationLogger)
+	if explicitLogPath && logErr != nil {
+		invocationLogger.Warn("runtime log file unavailable; continuing on stderr")
+	}
 
 	registry := cli.NewDefaultCommandRegistry()
 	cli.RegisterBuiltinCommands(registry, stdout)

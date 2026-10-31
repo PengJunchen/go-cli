@@ -209,10 +209,18 @@ type ToolsConfig struct {
 	Builtin     []string           `json:"builtin"`
 	Registry    []string           `json:"registry"`
 	CustomTools []CustomToolConfig `json:"custom_tools"`
+	Bash        BashToolConfig     `json:"bash"`
 	// Parallel enables concurrent tool execution within a single turn.
 	// When nil or true, tools execute in parallel; when explicitly false,
 	// tools execute sequentially.
 	Parallel *bool `json:"parallel"`
+}
+
+// BashToolConfig contains host-controlled settings for the local Bash tool.
+type BashToolConfig struct {
+	// Timeout is a positive Go duration. Nil preserves the tool's native
+	// default; an explicit empty string is invalid, not an unlimited window.
+	Timeout *string `json:"timeout"`
 }
 
 // CustomToolConfig describes a user-defined command-line tool that wraps an

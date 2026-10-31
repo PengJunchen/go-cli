@@ -114,7 +114,7 @@ func TestDurableProjectionRejectsSourceBackedSystemPrefixBeforeCommit(t *testing
 	}
 	consumer := &runCommitConsumer{source: snapshot, runID: "run-system", sink: &compactionCommitCountingSink{}}
 	compactor := &fixedCompactionResult{result: result}
-	_, err := preflightDurableRequest(context.Background(), messages, consumer, compactor, oneTokenPerNonEmptyText{}, 1)
+	_, _, err := preflightDurableRequest(context.Background(), messages, consumer, compactor, oneTokenPerNonEmptyText{}, 1, len(messages)-1)
 	require.ErrorIs(t, err, ErrDurableCompactionUnsupported)
 	require.Equal(t, 1, compactor.calls)
 	require.Zero(t, consumer.sink.(*compactionCommitCountingSink).commits, "unsupported retained source prefix must not sync a projection")
@@ -341,15 +341,80 @@ func TestClosedHistoricalUnknownPassesRequestGateButNotOverBudgetCompactionGate(
 	}
 	consumer := &runCommitConsumer{source: snapshot, runID: "run-fresh", sink: &compactionCommitCountingSink{}}
 	compactor := &fixedCompactionResult{}
-	unchanged, err := preflightDurableRequest(context.Background(), messages, consumer, compactor, oneTokenPerNonEmptyText{}, 20)
+	unchanged, unchangedIndex, err := preflightDurableRequest(context.Background(), messages, consumer, compactor, oneTokenPerNonEmptyText{}, 20, len(messages)-1)
 	require.NoError(t, err)
 	require.Equal(t, messages, unchanged)
+	require.Equal(t, len(messages)-1, unchangedIndex)
 	require.Zero(t, compactor.calls, "a closed unknown group remains unchanged below budget")
 
-	_, err = preflightDurableRequest(context.Background(), messages, consumer, compactor, oneTokenPerNonEmptyText{}, 1)
+	_, _, err = preflightDurableRequest(context.Background(), messages, consumer, compactor, oneTokenPerNonEmptyText{}, 1, len(messages)-1)
 	require.ErrorIs(t, err, ErrDurableCompactionUnsupported)
 	require.Zero(t, compactor.calls, "unknown over-budget history is rejected before any strategy")
 	require.Zero(t, consumer.sink.(*compactionCommitCountingSink).commits)
+}
+
+func TestInitialDurablePreflightTracksTypedCurrentInputBeforeTrailingToolGroup(t *testing.T) {
+	snapshot, messages := durableLargeWriteFixture()
+	const runID = "run-large-write-envelope"
+	// A same-text prior user must not be mistaken for the source-backed current
+	// input, which is deliberately followed by a closed current-run tool group.
+	snapshot.Messages[0].Content = messages[3].Content
+	messages[0].Content = messages[3].Content
+	current := messages[3]
+	transcriptSource := func(index uint64) llm.RuntimeMetadata {
+		return llm.RuntimeMetadata{Source: llm.SourceRef{Kind: llm.SourceRunTranscript, RunID: runID,
+			PriorSourceCount: uint64(len(snapshot.SourceEntryIDs)), TranscriptIndex: index}}
+	}
+	messages = append(messages,
+		llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "current-read", Name: "read", Args: map[string]any{"path": "current.txt"}}}, Runtime: transcriptSource(1)},
+		llm.Message{Role: llm.RoleTool, Content: "current receipt", ToolCallID: "current-read", Name: "read", Runtime: transcriptSource(2)},
+	)
+	messages[5].Runtime.ReceiptOutcome = ReceiptOutcomeSuccess
+	input := messagesToTurnItems(messages)
+	require.NoError(t, validateDurableRequestSource(input, snapshot, runID))
+	estimator := durableRuneCountEstimator{}
+	const ceiling = 6400
+	require.Greater(t, compaction.EstimateTokens(input, estimator), ceiling)
+	realResult, err := compaction.NewTruncatingCompactor().Compact(t.Context(), cloneCompactionTurnItems(input), ceiling, estimator)
+	require.NoError(t, err)
+	require.Equal(t, input[3:], realResult.Items[1:])
+	t.Run("real truncation rebinds typed non-last current", func(t *testing.T) {
+		sink := &compactionCommitCountingSink{}
+		owner := newRunOwner(t.Context(), nil, RunClaim{ID: runID}, nil)
+		consumer := &runCommitConsumer{ctx: owner.ctx, owner: owner, source: snapshot, runID: runID, sink: sink}
+		compacted, currentIndex, compactErr := preflightDurableRequest(t.Context(), messages, consumer, compaction.NewTruncatingCompactor(), estimator, ceiling, 3)
+		require.NoError(t, compactErr)
+		require.Equal(t, 1, currentIndex)
+		require.NotEqual(t, len(compacted)-1, currentIndex)
+		require.Equal(t, current, compacted[currentIndex])
+		require.Equal(t, messages[4:], compacted[currentIndex+1:])
+		require.Equal(t, 1, sink.commits)
+	})
+	for _, test := range []struct {
+		name   string
+		mutate func([]compaction.TurnItem) []compaction.TurnItem
+	}{
+		{name: "missing current", mutate: func(items []compaction.TurnItem) []compaction.TurnItem { return append(items[:1], items[2:]...) }},
+		{name: "duplicate current source", mutate: func(items []compaction.TurnItem) []compaction.TurnItem { return append(items, items[1]) }},
+		{name: "changed current content", mutate: func(items []compaction.TurnItem) []compaction.TurnItem { items[1].Content = "rewritten"; return items }},
+		{name: "changed typed source", mutate: func(items []compaction.TurnItem) []compaction.TurnItem {
+			items[1].Runtime.Source.RunID = "foreign-run"
+			return items
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sink := &compactionCommitCountingSink{}
+			owner := newRunOwner(t.Context(), nil, RunClaim{ID: runID}, nil)
+			consumer := &runCommitConsumer{ctx: owner.ctx, owner: owner, source: snapshot, runID: runID, sink: sink}
+			bad := realResult
+			bad.Items = test.mutate(cloneCompactionTurnItems(realResult.Items))
+			_, unchangedIndex, compactErr := preflightDurableRequest(t.Context(), messages, consumer, &fixedCompactionResult{result: bad}, estimator, ceiling, 3)
+			require.ErrorIs(t, compactErr, ErrDurableCompactionUnsupported)
+			require.Equal(t, 3, unchangedIndex, "an invalid projection cannot publish a new current index")
+			require.Zero(t, sink.commits)
+			require.Equal(t, current, messages[3], "an invalid strategy cannot rewrite caller-owned input")
+		})
+	}
 }
 
 func priorRef(snapshot *CompactionSourceSnapshot, ordinal int) llm.SourceRef {

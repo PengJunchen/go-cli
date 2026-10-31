@@ -293,7 +293,7 @@ func TestManagedBashStartGateRestoresShellOptions(t *testing.T) {
 	}
 	command := `case $- in *x*) printf enabled ;; *) printf disabled ;; esac`
 	env := filteredEnv(map[string]string{"SHELLOPTS": "xtrace"})
-	control := exec.Command("bash", "-lc", command)
+	control := exec.Command("bash", "-c", command)
 	control.Env = env
 	var expected bytes.Buffer
 	control.Stdout = &expected
@@ -302,7 +302,7 @@ func TestManagedBashStartGateRestoresShellOptions(t *testing.T) {
 	}
 	require.Equal(t, "enabled", expected.String(), "the control invocation must enable xtrace from SHELLOPTS")
 
-	cmd := exec.Command("bash", "-lc", command)
+	cmd := exec.Command("bash", "-c", command)
 	cmd.Env = env
 	var output bytes.Buffer
 	cmd.Stdout = &output
@@ -320,7 +320,7 @@ func TestManagedBashStartGatePreservesArgv0(t *testing.T) {
 	if err != nil {
 		t.Skip("bash is required for process lifecycle tests")
 	}
-	cmd := exec.Command("bash", "-lc", `printf '%s' "$0"`)
+	cmd := exec.Command("bash", "-c", `printf '%s' "$0"`)
 	cmd.Env = filteredEnv(nil)
 	var output bytes.Buffer
 	var stderr bytes.Buffer
@@ -339,14 +339,14 @@ func TestManagedBashStartGatePreservesArgv0(t *testing.T) {
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("gated command failed: %v; stderr=%s", err, stderr.String())
 	}
-	require.Equal(t, "bash", output.String(), "bash -lc must retain its original $0")
+	require.Equal(t, "bash", output.String(), "bash -c must retain its original $0")
 }
 
 func TestManagedBashStartGateClosesControlPipeBeforeUserCommand(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash is required for process lifecycle tests")
 	}
-	cmd := exec.Command("bash", "-lc", `test ! -e /dev/fd/3 && printf closed || printf leaked`)
+	cmd := exec.Command("bash", "-c", `test ! -e /dev/fd/3 && printf closed || printf leaked`)
 	cmd.Env = filteredEnv(nil)
 	var output bytes.Buffer
 	cmd.Stdout = &output
@@ -388,7 +388,7 @@ func TestPreparedBashRejectsUntrustedBashOnPATHBeforeStart(t *testing.T) {
 			fakeScript := "#!/bin/sh\n/usr/bin/touch " + shellQuoteTestArgument(marker) + "\nexec sleep 30\n"
 			require.NoError(t, os.WriteFile(fakeBash, []byte(fakeScript), 0o700))
 			t.Setenv("PATH", fakeDirectory+string(os.PathListSeparator)+originalPath)
-			resolved := exec.Command("bash", "-lc", ":")
+			resolved := exec.Command("bash", "-c", ":")
 			require.Equal(t, fakeBash, resolved.Path, "the test must resolve the hostile PATH entry")
 
 			persistErr := errors.New("identity persistence intentionally held then rejected")
@@ -437,7 +437,7 @@ func TestManagedBashStartGateRestoresEnvironmentWithoutShellParsing(t *testing.T
 	}
 	marker := filepath.Join(t.TempDir(), "environment-value-executed")
 	value := " leading space\nquote: ' ; touch " + shellQuoteTestArgument(marker) + " $(touch " + shellQuoteTestArgument(marker) + ") trailing space "
-	cmd := exec.Command("bash", "-lc", `printf '%s' "$GATE_VALUE"`)
+	cmd := exec.Command("bash", "-c", `printf '%s' "$GATE_VALUE"`)
 	cmd.Env = filteredEnv(map[string]string{"GATE_VALUE": value})
 	var output bytes.Buffer
 	cmd.Stdout = &output
@@ -460,13 +460,13 @@ func TestManagedBashStartGateRestoresBashOptions(t *testing.T) {
 	}
 	command := `shopt -q extglob && printf yes || printf no`
 	env := filteredEnv(map[string]string{"BASHOPTS": "extglob"})
-	control := exec.Command("bash", "-lc", command)
+	control := exec.Command("bash", "-c", command)
 	control.Env = env
 	var expected bytes.Buffer
 	control.Stdout = &expected
 	require.NoError(t, control.Run())
 
-	cmd := exec.Command("bash", "-lc", command)
+	cmd := exec.Command("bash", "-c", command)
 	cmd.Env = env
 	var output bytes.Buffer
 	cmd.Stdout = &output
@@ -714,4 +714,18 @@ func TestRemoteBashMetadataRemainsBounded(t *testing.T) {
 	assert.Contains(t, result.Output, "[output truncated]")
 	assert.LessOrEqual(t, len(result.Output), maxOutput+len("\n[output truncated]"))
 	assert.NotContains(t, result.Metadata, "local_ssh_process_group_scope", "custom SSH clients do not declare local process containment")
+}
+
+func TestManagedBashStartGateRejectsLoginAndOtherFlags(t *testing.T) {
+	for _, flag := range []string{"-lc", "-l", "-ic", "--login"} {
+		t.Run(flag, func(t *testing.T) {
+			cmd := exec.Command("bash", flag, ":")
+			cmd.Env = filteredEnv(nil)
+			gate, err := installBashProcessStartGate(cmd)
+			if gate != nil {
+				gate.abort()
+			}
+			require.Error(t, err, "the gate accepts only the exact non-login -c contract")
+		})
+	}
 }

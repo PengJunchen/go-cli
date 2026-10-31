@@ -260,6 +260,9 @@ func envKey(prefix, key string) string { return prefix + "_" + key }
 // loadFromEnv builds a partial Config from GO_CLI_* environment variables.
 func loadFromEnv(prefix string) *Config {
 	cfg := &Config{samplingPresenceKnown: true}
+	if value, present := os.LookupEnv(envKey(prefix, "TOOLS_BASH_TIMEOUT")); present {
+		cfg.Tools.Bash.Timeout = &value
+	}
 	if v, ok := parseBoolEnv(envKey(prefix, "VERBOSE")); ok && v {
 		cfg.verbose = true
 	}

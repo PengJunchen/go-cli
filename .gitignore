@@ -73,3 +73,10 @@ ppt_build/
 /tests/fixtures/live-eval/
 /screenshots/
 /docs/screenshots/
+
+# Private local evaluation documents
+/docs/evaluation/
+/scripts/harness_eval/reports/
+/scripts/harness_eval/context-budget-audit.md
+/scripts/harness_eval/README.md
+/scripts/harness_eval/runner/RUNNER.md
