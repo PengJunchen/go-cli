@@ -340,6 +340,50 @@ func TestRunCommitConsumerWritesSequentialFactsBeforeAcknowledging(t *testing.T)
 	require.Equal(t, 2, model.idx, "the next provider request is allowed only after receipt and resolution sync")
 }
 
+func TestRunCommitToolActivityPulsesDoNotPublishExtraBusinessMessages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "input.txt")
+	require.NoError(t, os.WriteFile(path, []byte("business input"), 0o600))
+	sink := &consumerTestSink{}
+	call := llm.ToolCall{ID: "read-once", Name: "read", Args: map[string]any{"path": path}}
+	model := &scriptedChatModel{activityChunks: 5, seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{call}},
+		{Role: llm.RoleAssistant, Content: "done"},
+	}}
+	agent := NewAgentImpl("activity-consumer", NewLoopAgent(WithLLM(model), WithTools(newPreparedConsumerReadRegistry(t))))
+	owner := newRunOwner(context.Background(), nil, RunClaim{ID: "run-activity-consumer"}, nil)
+	owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "session-activity", WorkspaceID: "workspace-activity"})
+	_, runErr := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+		return agent.Run(ctx, Submission{Type: SubmissionUserMessage, Content: "read file"})
+	})
+	require.NoError(t, runErr)
+	steps, batches, receipts, terminal := sink.snapshot()
+	require.Equal(t, []string{"input", "begin", "execution", "receipt", "resolution", "terminal"}, steps)
+	require.Len(t, batches, 1)
+	require.Len(t, batches[0].Intents, 1)
+	require.Len(t, sink.executionSnapshot(), 1)
+	require.Len(t, sink.resolutionSnapshot(), 1)
+	require.Len(t, receipts, 1)
+	require.Equal(t, ReceiptOutcomeSuccess, receipts[0].ReceiptOutcome)
+	require.Equal(t, DispatchStateDispatched, receipts[0].DispatchState)
+	require.NotNil(t, terminal)
+	require.Equal(t, RunOutcomeSuccess, terminal.Outcome)
+	require.Len(t, terminal.Transcript, 4, "ten empty activity chunks must not enter the business transcript")
+	require.Equal(t, "user", terminal.Transcript[0].Message.Role)
+	require.Equal(t, "read file", terminal.Transcript[0].Message.Content)
+	require.Equal(t, "assistant", terminal.Transcript[1].Message.Role)
+	require.Empty(t, terminal.Transcript[1].Message.Content)
+	require.Equal(t, []llm.ToolCall{call}, terminal.Transcript[1].Message.ToolCalls)
+	require.Equal(t, "tool", terminal.Transcript[2].Message.Role)
+	require.Contains(t, terminal.Transcript[2].Message.Content, "business input")
+	require.Equal(t, "assistant", terminal.Transcript[3].Message.Role)
+	require.Equal(t, "done", terminal.Transcript[3].Message.Content)
+	require.Empty(t, terminal.Transcript[3].Message.ToolCalls)
+	require.Equal(t, 2, model.idx)
+	status := owner.Snapshot()
+	require.Equal(t, RunExecutionQuiescent, status.ExecutionState)
+	require.Zero(t, status.PendingWorkers)
+}
+
 func TestRunCommitReceiptPersistenceFailureDoesNotPublishSuccess(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "input.txt")

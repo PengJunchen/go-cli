@@ -129,6 +129,78 @@ func TestStreamTimeoutIsNotComplete(t *testing.T) {
 	assert.Equal(t, "partial", content.String(), "unguarded streams preserve already emitted partial text before a terminal timeout")
 }
 
+func TestNativeToolActivityKeepsTotalAndCallerCancellationAuthoritative(t *testing.T) {
+	for _, mode := range []string{"total", "caller cancellation"} {
+		t.Run(mode, func(t *testing.T) {
+			outer, stop := context.WithTimeout(t.Context(), 5*time.Second)
+			defer stop()
+			ctx, cancel := context.WithCancelCause(outer)
+			defer cancel(nil)
+			release := make(chan struct{})
+			joined := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				defer close(joined)
+				w.Header().Set("Content-Type", "text/event-stream")
+				writeSSE(w, `{"id":"continuous-native-tool-fixture","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-native","type":"function","function":{"name":"inspect","arguments":"{\"value\":\""}}]}}]}`)
+				select {
+				case <-release:
+				case <-request.Context().Done():
+					return
+				}
+				ticker := time.NewTicker(20 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-request.Context().Done():
+						return
+					case <-ticker.C:
+						writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"x"}}]}}]}`)
+					}
+				}
+			}))
+			defer func() { cancel(nil); server.Close() }()
+			provider := NewOpenAIProvider(WithNativeBaseURL(server.URL), WithNativeHTTPClient(server.Client()))
+			model, cleanup, err := provider.Build(ctx, ModelConfig{Model: "native-tool-guard-fixture"})
+			require.NoError(t, err)
+			defer cleanup()
+			stream, err := NewTimeoutModelMiddleware(WithTotalTimeout(500*time.Millisecond), WithStreamChunkTimeout(2*time.Second)).WrapModel(model).Stream(ctx, []Message{{Role: RoleUser, Content: "inspect"}})
+			require.NoError(t, err)
+			cause := errors.New("operator canceled the tool stream")
+			var streamErr error
+			activity := 0
+			for chunk := range stream {
+				require.False(t, chunk.Final)
+				require.Empty(t, chunk.Content)
+				require.Empty(t, chunk.ToolCalls)
+				if chunk.Error != nil {
+					streamErr = errors.Join(streamErr, chunk.Error)
+					continue
+				}
+				require.Equal(t, RoleAssistant, chunk.Role)
+				activity++
+				if activity == 1 {
+					close(release)
+				}
+				if mode == "caller cancellation" && activity == 4 {
+					cancel(cause)
+				}
+			}
+			require.GreaterOrEqual(t, activity, 4, "the guard must terminate a genuinely active accepted-tool stream")
+			if mode == "total" {
+				require.ErrorIs(t, streamErr, context.DeadlineExceeded)
+				require.EqualError(t, streamErr, "timeout: stream exceeded 500ms: context deadline exceeded")
+			} else {
+				require.ErrorIs(t, streamErr, cause)
+			}
+			select {
+			case <-joined:
+			case <-outer.Done():
+				t.Fatal("native HTTP stream producer did not join after cancellation")
+			}
+		})
+	}
+}
+
 func TestOpenAIStreamRejectsChoicesAfterTerminalFinishReason(t *testing.T) {
 	for name, lateDelta := range map[string]string{
 		"text":      `"content":"injected"`,

@@ -85,11 +85,13 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 			terminalSeen = true
 		}
 		delta := choice.Delta
+		emittedActivity := false
 
 		if !emittedRole {
 			select {
 			case ch <- MessageChunk{Role: RoleAssistant, Content: ""}:
 				emittedRole = true
+				emittedActivity = true
 			case <-ctx.Done():
 				canceled = true
 				continue
@@ -99,6 +101,7 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 		if delta.Content != "" {
 			select {
 			case ch <- MessageChunk{Role: RoleAssistant, Content: delta.Content}:
+				emittedActivity = true
 			case <-ctx.Done():
 				canceled = true
 				continue
@@ -106,6 +109,7 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 		}
 
 		// Accumulate tool_call fragments emitted across chunks.
+		previousToolPayloadBytes := toolPayloadBytes
 		for ci, tc := range delta.ToolCalls {
 			if tc.Index == nil {
 				tc.Index = &ci
@@ -160,6 +164,15 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 				}
 				toolPayloadBytes = next
 				toolArgsBuf[idx].WriteString(tc.Function.Arguments)
+			}
+		}
+		// Keep the chunk-idle watchdog informed of accepted tool activity,
+		// without publishing partial tool calls or fabricated assistant text.
+		if streamErr == nil && toolPayloadBytes > previousToolPayloadBytes && !emittedActivity {
+			select {
+			case ch <- MessageChunk{Role: RoleAssistant}:
+			case <-ctx.Done():
+				canceled = true
 			}
 		}
 	}
