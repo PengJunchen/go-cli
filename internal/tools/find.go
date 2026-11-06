@@ -160,11 +160,12 @@ func (t *FindTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		}
 	}
 	truncated := captured.truncated || output.Truncated()
+	text, records := renderDirectoryOutput(output, truncated)
 
 	span.SetAttributes(
 		tracing.Attribute{Key: "path", Value: searchPath},
 		tracing.Attribute{Key: "pattern", Value: pattern},
-		tracing.Attribute{Key: "matches", Value: output.Records()},
+		tracing.Attribute{Key: "matches", Value: records},
 		tracing.Attribute{Key: "truncated", Value: truncated},
 		tracing.Attribute{Key: "success", Value: true},
 	)
@@ -172,13 +173,13 @@ func (t *FindTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		"tool", "find",
 		"path", searchPath,
 		"pattern", pattern,
-		"matches", output.Records(),
+		"matches", records,
 		"truncated", truncated,
 		"duration_ms", time.Since(start).Milliseconds())
 
 	return &ToolResult{
-		Output:   output.String(),
-		Metadata: map[string]any{"path": searchPath, "pattern": pattern, "matches": output.Records(), "truncated": truncated},
+		Output:   text,
+		Metadata: map[string]any{"path": searchPath, "pattern": pattern, "matches": records, "truncated": truncated},
 	}, nil
 }
 

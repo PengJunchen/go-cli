@@ -201,20 +201,21 @@ func (t *ReadTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 			}
 		}
 		truncated := entries.Truncated() || output.Truncated()
+		text, records := renderDirectoryOutput(output, truncated)
 		span.SetAttributes(
-			tracing.Attribute{Key: "entries", Value: output.Records()},
+			tracing.Attribute{Key: "entries", Value: records},
 			tracing.Attribute{Key: "truncated", Value: truncated},
 			tracing.Attribute{Key: "success", Value: true},
 		)
 		logger.Info("read.dir",
 			"path", abspath,
-			"entries", output.Records(),
+			"entries", records,
 			"truncated", truncated,
 			"duration_ms", time.Since(start).Milliseconds())
 
 		return &ToolResult{
-			Output:   output.String(),
-			Metadata: map[string]any{"path": abspath, "entries": output.Records(), "truncated": truncated},
+			Output:   text,
+			Metadata: map[string]any{"path": abspath, "entries": records, "truncated": truncated},
 		}, nil
 	}
 

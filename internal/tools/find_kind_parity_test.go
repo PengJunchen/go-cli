@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -113,7 +114,8 @@ func TestFindKindFilterPreservesFileRootAndRegularFileTopK(t *testing.T) {
 	for i := range want {
 		want[i] = fmt.Sprintf("entry-%04d.txt", i)
 	}
-	assert.Equal(t, want, sortedFindOutputBasenames(result.Output))
+	require.True(t, strings.HasPrefix(result.Output, expectedDirectoryTruncationNotice))
+	assert.Equal(t, want, sortedFindOutputBasenames(strings.TrimPrefix(result.Output, expectedDirectoryTruncationNotice)))
 	assert.Equal(t, findMaxResults, result.Metadata["matches"])
 	assert.True(t, result.Metadata["truncated"].(bool))
 }
