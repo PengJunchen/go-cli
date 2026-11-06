@@ -766,7 +766,8 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		// operation. Each steering message is injected as a user message
 		// so the model sees it on the next iteration.
 		if l.steerCh != nil {
-			for _, instruction := range drainSteerMessages(l.steerCh, &messages, logger) {
+			messageStart := len(messages)
+			for index, instruction := range drainSteerMessages(l.steerCh, &messages, logger) {
 				entry := TranscriptEntry{Message: AgentMessage{Role: string(llm.RoleUser), Content: instruction, InputKind: InputKindSteering}}
 				entry.Message.Runtime = consumer.transcriptMetadata(uint64(len(transcript)), "")
 				if consumer != nil {
@@ -776,7 +777,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 						return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
 					}
 				}
-				messages[len(messages)-1].Runtime = entry.Message.Runtime
+				messages[messageStart+index].Runtime = entry.Message.Runtime
 				transcript = append(transcript, entry)
 			}
 		}
@@ -785,7 +786,8 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		// Follow-ups are injected as user messages after steering so the
 		// model sees steering context first, then the follow-up.
 		if l.followUpCh != nil {
-			for _, content := range drainFollowUpMessages(l.followUpCh, &messages, logger) {
+			messageStart := len(messages)
+			for index, content := range drainFollowUpMessages(l.followUpCh, &messages, logger) {
 				entry := TranscriptEntry{Message: AgentMessage{Role: string(llm.RoleUser), Content: content, InputKind: InputKindFollowUp}}
 				entry.Message.Runtime = consumer.transcriptMetadata(uint64(len(transcript)), "")
 				if consumer != nil {
@@ -795,7 +797,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 						return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
 					}
 				}
-				messages[len(messages)-1].Runtime = entry.Message.Runtime
+				messages[messageStart+index].Runtime = entry.Message.Runtime
 				transcript = append(transcript, entry)
 			}
 		}
