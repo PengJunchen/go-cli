@@ -195,7 +195,8 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 		return result
 	}
 	captureMaterializedArtifact(ctx, invocation.NormalizedCall(), toolResult)
-	result.output = toolResult.Output
+	call := invocation.NormalizedCall()
+	result.output, result.receiptOutputTruncated = boundedSuccessfulReceiptOutput(toolResult.Output, call.ID, call.Name)
 	result.isError = toolResult.IsError
 	result.sourceTruncated = sourceTruncatedFromMetadata(toolResult.Metadata)
 	return result
