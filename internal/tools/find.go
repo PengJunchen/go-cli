@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -364,6 +365,9 @@ func normalizeFindDirectoryPath(searchPath, candidate string) (string, bool, err
 func findPureGo(ctx context.Context, searchPath, pattern, kind string, maxDepth int) (result findCaptureResult, err error) {
 	if err := ctx.Err(); err != nil {
 		return findCaptureResult{}, err
+	}
+	if _, err := path.Match(pattern, ""); err != nil {
+		return findCaptureResult{}, fmt.Errorf("find: invalid name glob. Correct or remove the pattern argument: %w", err)
 	}
 	info, err := os.Stat(searchPath)
 	if err != nil {

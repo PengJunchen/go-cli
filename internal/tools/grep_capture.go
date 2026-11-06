@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -313,6 +314,9 @@ func grepPureGo(ctx context.Context, re *regexp.Regexp, searchPath, glob string,
 func grepPureGoWithOpen(ctx context.Context, re *regexp.Regexp, searchPath, glob string, whitelist PathWhitelist, capture *grepMatchCapture, openDir grepDirectoryOpenFunc) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
+	}
+	if _, err := path.Match(glob, ""); err != nil {
+		return false, fmt.Errorf("grep: invalid glob filter. Correct or remove the glob argument: %w", err)
 	}
 	rootInfo, err := os.Lstat(searchPath)
 	if ctxErr := ctx.Err(); ctxErr != nil {
