@@ -473,7 +473,9 @@ func TestE2E_Phase46_StdioAdapterNormalDisconnect(t *testing.T) {
 
 	// Continuously read frames the client sends.
 	frames := make(chan []byte, 4)
+	frameReaderDone := make(chan struct{})
 	go func() {
+		defer close(frameReaderDone)
 		rd := bufio.NewReader(serverR)
 		for {
 			line, err := rd.ReadBytes('\n')
@@ -488,6 +490,44 @@ func TestE2E_Phase46_StdioAdapterNormalDisconnect(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	disconnectResult := make(chan error, 1)
+	disconnectDone := make(chan struct{})
+	disconnectStarted := false
+	disconnectFinished := false
+	defer func() {
+		// Closing both pipe pairs releases a blocked adapter read, blocked frame
+		// writes, and the frame-reader goroutine on every failure path.
+		closeIgnore(serverR)
+		closeIgnore(serverW)
+		closeIgnore(clientW)
+		closeIgnore(clientR)
+
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 2*time.Second)
+		cleanupErr := client.Disconnect(cleanupCtx)
+		cancelCleanup()
+		var pending *acp.StdioPendingError
+		if errors.As(cleanupErr, &pending) {
+			select {
+			case <-pending.Done():
+			case <-time.After(2 * time.Second):
+				t.Error("stdio cleanup did not join after closing the pipe endpoints")
+			}
+		} else if cleanupErr != nil {
+			t.Errorf("stdio cleanup: %v", cleanupErr)
+		}
+		if disconnectStarted && !disconnectFinished {
+			select {
+			case <-disconnectDone:
+			case <-time.After(2 * time.Second):
+				t.Error("Disconnect goroutine did not return after cleanup")
+			}
+		}
+		select {
+		case <-frameReaderDone:
+		case <-time.After(2 * time.Second):
+			t.Error("frame reader did not exit after closing its pipe")
+		}
+	}()
 
 	require.NoError(t, client.Connect(ctx))
 
@@ -498,12 +538,15 @@ func TestE2E_Phase46_StdioAdapterNormalDisconnect(t *testing.T) {
 		t.Fatal("timed out waiting for connect frame")
 	}
 
-	// Close the client's input so readLoop exits after Disconnect.
-	closeIgnore(serverW)
+	// Start a real local disconnect while the peer is still connected. EOF on
+	// clientR is a separate remote-cleanup event and must not win the race.
+	disconnectStarted = true
+	go func() {
+		defer close(disconnectDone)
+		disconnectResult <- client.Disconnect(ctx)
+	}()
 
-	require.NoError(t, client.Disconnect(ctx))
-
-	// The disconnect frame should arrive promptly.
+	// The disconnect frame should arrive before the peer closes its input side.
 	select {
 	case line := <-frames:
 		var msg acp.ACPMessage
@@ -514,10 +557,22 @@ func TestE2E_Phase46_StdioAdapterNormalDisconnect(t *testing.T) {
 		t.Fatal("timed out waiting for disconnect frame")
 	}
 
-	// Cleanup.
-	closeIgnore(clientW)
-	closeIgnore(serverR)
-	closeIgnore(clientR)
+	// Releasing the input now lets readLoop join the cleanup already started by
+	// the explicit Disconnect call.
+	closeIgnore(serverW)
+	select {
+	case err := <-disconnectResult:
+		require.NoError(t, err)
+		disconnectFinished = true
+	case <-time.After(5 * time.Second):
+		t.Fatal("Disconnect did not finish after the peer released its input")
+	}
+	select {
+	case <-disconnectDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Disconnect goroutine did not join")
+	}
+
 }
 
 // ---------------------------------------------------------------------------

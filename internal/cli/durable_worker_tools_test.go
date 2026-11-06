@@ -209,6 +209,18 @@ func assertUnknownWorkerPending(ctx context.Context, t *testing.T, cfg *config.C
 	pending, err := session.InspectPendingActions(snapshot)
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
+	require.Equal(t, id, pending[0].Action.SessionID)
+	require.Equal(t, resumed.workspaceID, pending[0].Action.WorkspaceID)
+	require.Equal(t, "unknown-worker", pending[0].Action.ToolCallID)
+	require.NotEmpty(t, pending[0].Action.ActionID)
+	require.Equal(t, "worker_echo", pending[0].ToolName)
+	require.Equal(t, core.DispatchStateDispatched, pending[0].DispatchState)
+	require.Equal(t, core.ReceiptOutcomeUnknown, pending[0].ReceiptOutcome)
+	decisions, err := resumed.index.InspectDispatchMarkers(ctx, []session.PendingActionRef{pending[0].Action})
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, pending[0].Action, decisions[0].Action)
+	require.Equal(t, session.DispatchMarkerPresent, decisions[0].MarkerState)
 	intents, receipts := 0, 0
 	for _, row := range snapshot.DurableEntries {
 		if row.ToolCallID != "unknown-worker" {
@@ -239,6 +251,11 @@ func assertUnknownWorkerPending(ctx context.Context, t *testing.T, cfg *config.C
 	after, err := os.ReadFile(calls)
 	require.NoError(t, err)
 	require.Equal(t, before, after, "a fresh host must never replay an unknown worker request")
+	decisions, err = resumed.index.InspectDispatchMarkers(ctx, []session.PendingActionRef{pending[0].Action})
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, pending[0].Action, decisions[0].Action)
+	require.Equal(t, session.DispatchMarkerPresent, decisions[0].MarkerState)
 }
 
 // The caller deadline starts after the real worker has initialized, so this
@@ -281,6 +298,10 @@ func TestDurableWorkerCallerDeadlineAfterInitialize(t *testing.T) {
 	require.NoError(t, hydrateDurableRunHistory(assembly.Agent, sink))
 	stream, err := assembly.Harness.Submit(runCtx, "one effect")
 	require.NoError(t, err)
+	statusSource, ok := stream.(core.RunStatusSource)
+	require.True(t, ok)
+	waiter, ok := statusSource.RunStatusHandle().(core.RunStatusWaiter)
+	require.True(t, ok)
 	done := make(chan error, 1)
 	go func() {
 		for range stream.Events() {
@@ -325,23 +346,22 @@ func TestDurableWorkerCallerDeadlineAfterInitialize(t *testing.T) {
 	}
 	require.ErrorIs(t, caller.Err(), context.DeadlineExceeded)
 	require.NoError(t, outer.Err())
-	var unknown *extension.RPCOutcomeUnknownError
-	require.ErrorAs(t, runErr, &unknown)
 	require.ErrorIs(t, runErr, context.DeadlineExceeded)
-	require.ErrorIs(t, runErr, core.ErrRunCommitQuiescenceUnproven)
 	require.Len(t, script.requestBodies(), 1)
-	sink.CloseRunCommit()
-	select {
-	case <-unknown.ExecutionDone():
-	case <-outer.Done():
-		t.Fatal("the exact worker owner did not join")
-	}
+	inspect, cancelInspect := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancelInspect()
+	status, publication, err := waiter.WaitForCompletion(inspect)
+	require.NoError(t, err, "the same owner must join its callback and resources before inspection")
+	require.NotEqual(t, core.RunOutcomeSuccess, status.Outcome)
+	require.Zero(t, status.PendingWorkers)
+	require.Contains(t, []core.RunExecutionState{core.RunExecutionQuiescent, core.RunExecutionQuarantined}, status.ExecutionState)
+	require.Contains(t, []core.DurablePublicationState{core.DurablePublicationSynced, core.DurablePublicationFailed}, publication.State)
+	require.Equal(t, status.RunID, publication.RunID)
+	require.Equal(t, id, publication.SessionID)
 	cleanup, cancelCleanup := context.WithTimeout(context.Background(), 10*time.Second)
 	require.NoError(t, closeAssemblyForCommand(cleanup, assembly, "prompt"))
 	cancelCleanup()
 	closed = true
-	inspect, cancelInspect := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancelInspect()
 	assertUnknownWorkerPending(inspect, t, cfg, id, calls, true)
 	require.Len(t, script.requestBodies(), 1)
 }
