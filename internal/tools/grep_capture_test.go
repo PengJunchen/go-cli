@@ -127,6 +127,77 @@ func TestGrepRipgrepJSONWriterProtocolAndFrameLimits(t *testing.T) {
 	require.ErrorIs(t, writer.Finish(), errGrepCaptureLimit)
 }
 
+func TestGrepRipgrepJSONWriterChunkFramingAndLimits(t *testing.T) {
+	first := grepJSONEvent("first.txt", "first", 1)
+	second := grepJSONEvent("second.txt", "second", 2)
+
+	t.Run("exact limit with newline and another frame", func(t *testing.T) {
+		header := []byte(`{"type":"summary","data":{}}`)
+		frame := append(header, bytes.Repeat([]byte{' '}, grepMaxJSONFrameBytes-len(header))...)
+		writer := newGrepRipgrepJSONWriter(newGrepMatchCapture(2, 200))
+		n, err := writer.Write(frame[:len(frame)-1])
+		require.NoError(t, err)
+		require.Equal(t, len(frame)-1, n)
+		last := append(append([]byte{}, frame[len(frame)-1:]...), []byte("\n"+first+"\n")...)
+		n, err = writer.Write(last)
+		require.NoError(t, err)
+		require.Equal(t, len(last), n)
+		require.NoError(t, writer.Finish())
+		require.Equal(t, []match{{File: "first.txt", Line: 1, Content: "first"}}, writer.capture.Matches())
+	})
+
+	t.Run("exact limit without newline is parsed at finish", func(t *testing.T) {
+		writer := newGrepRipgrepJSONWriter(newGrepMatchCapture(1, 100))
+		frame := bytes.Repeat([]byte{' '}, grepMaxJSONFrameBytes)
+		n, err := writer.Write(frame)
+		require.NoError(t, err)
+		require.Equal(t, len(frame), n)
+		require.NoError(t, writer.CaptureError())
+		require.ErrorIs(t, writer.Finish(), errGrepOutputProtocol)
+		require.NotErrorIs(t, writer.Finish(), errGrepCaptureLimit)
+	})
+
+	t.Run("overflow across chunks remains latched while draining", func(t *testing.T) {
+		writer := newGrepRipgrepJSONWriter(newGrepMatchCapture(1, 100))
+		frame := bytes.Repeat([]byte{'x'}, grepMaxJSONFrameBytes)
+		n, err := writer.Write(frame)
+		require.NoError(t, err)
+		require.Equal(t, len(frame), n)
+		n, err = writer.Write([]byte("x\n" + first + "\n"))
+		require.NoError(t, err)
+		require.Equal(t, len("x\n"+first+"\n"), n)
+		require.ErrorIs(t, writer.CaptureError(), errGrepCaptureLimit)
+		assert.Nil(t, writer.frame)
+		more := []byte(second + "\n")
+		n, err = writer.Write(more)
+		require.NoError(t, err)
+		require.Equal(t, len(more), n)
+		require.ErrorIs(t, writer.Finish(), errGrepCaptureLimit)
+		assert.Empty(t, writer.capture.Matches())
+	})
+
+	t.Run("malformed frame stops later records", func(t *testing.T) {
+		writer := newGrepRipgrepJSONWriter(newGrepMatchCapture(3, 300))
+		data := []byte(first + "\nnot-json\n" + second + "\n")
+		n, err := writer.Write(data)
+		require.NoError(t, err)
+		require.Equal(t, len(data), n)
+		require.ErrorIs(t, writer.Finish(), errGrepOutputProtocol)
+		require.Equal(t, []match{{File: "first.txt", Line: 1, Content: "first"}}, writer.capture.Matches())
+	})
+
+	t.Run("truncation stops later records in the same chunk", func(t *testing.T) {
+		writer := newGrepRipgrepJSONWriter(newGrepMatchCapture(1, 100))
+		data := []byte(first + "\n" + second + "\nnot-json\n")
+		n, err := writer.Write(data)
+		require.NoError(t, err)
+		require.Equal(t, len(data), n)
+		require.NoError(t, writer.Finish())
+		require.True(t, writer.capture.Truncated())
+		require.Equal(t, []match{{File: "first.txt", Line: 1, Content: "first"}}, writer.capture.Matches())
+	})
+}
+
 func TestGrepPureGoReadDirOneDFSObservedOrderAndBoundedWidth(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.Mkdir(filepath.Join(root, "nested-dir"), 0o700))

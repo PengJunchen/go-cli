@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -153,28 +154,31 @@ func (w *grepRipgrepJSONWriter) Write(p []byte) (int, error) {
 		w.frame = nil
 		return len(p), nil
 	}
-	for _, value := range p {
-		if w.err != nil || w.capture.Truncated() {
-			w.frame = nil
-			break
+	inputBytes := len(p)
+	for len(p) > 0 {
+		newline := bytes.IndexByte(p, '\n')
+		end := newline
+		if end < 0 {
+			end = len(p)
 		}
-		if value == '\n' {
-			w.consumeFrame()
-			if w.err != nil || w.capture.Truncated() {
-				w.frame = nil
-				break
-			}
-			w.frame = w.frame[:0]
-			continue
-		}
-		if len(w.frame) == grepMaxJSONFrameBytes {
+		if end > grepMaxJSONFrameBytes-len(w.frame) {
 			w.err = fmt.Errorf("%w: ripgrep event exceeds %d bytes", errGrepCaptureLimit, grepMaxJSONFrameBytes)
 			w.frame = nil
 			break
 		}
-		w.frame = append(w.frame, value)
+		w.frame = append(w.frame, p[:end]...)
+		if newline < 0 {
+			break
+		}
+		w.consumeFrame()
+		if w.err != nil || w.capture.Truncated() {
+			w.frame = nil
+			break
+		}
+		w.frame = w.frame[:0]
+		p = p[newline+1:]
 	}
-	return len(p), nil
+	return inputBytes, nil
 }
 
 func (w *grepRipgrepJSONWriter) Finish() error {
