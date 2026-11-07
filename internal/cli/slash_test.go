@@ -96,7 +96,7 @@ func TestSlashHelp(t *testing.T) {
 	for _, want := range []string{
 		"Capability boundaries",
 		"Memory: workspace-scoped automatic extraction",
-		"memory.enabled: false disables both",
+		"memory.enabled: true enables both",
 		"Goal, Task, and Todo: stored only in memory for this process",
 		"Session storage: without session.store_path, /session is unsupported.",
 		"Durable sessions support saved-state inspection, clear, compact, retry, branch navigation, and exact physical resume; unknown actions remain fenced.",

@@ -274,6 +274,29 @@ func (ft *FileTracker) Backup(path string) (string, error) {
 	return id, nil
 }
 
+// backupExistingSnapshot records bytes already read from an edit target. It
+// avoids resolving the target again after the edit captured and validated it.
+func (ft *FileTracker) backupExistingSnapshot(path string, content []byte, mode os.FileMode) (string, error) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+
+	path = ft.resolve(path)
+	now := time.Now()
+	id := fmt.Sprintf("cp_%d", now.UnixNano())
+	if len(content) > maxBackupFileSize {
+		slog.Warn("file_tracker.backup_large_file", "path", path, "size", len(content))
+	}
+	meta := CheckpointMeta{ID: id, Path: path, Timestamp: now, Existed: true, Mode: mode}
+	if !isBinaryContent(content) {
+		meta.Size = int64(len(content))
+		content = append([]byte(nil), content...)
+	} else {
+		content = nil
+	}
+	ft.storeCheckpoint(meta, content)
+	return id, nil
+}
+
 // Restore restores the file to the state recorded in the checkpoint.
 // If the checkpoint was for an existing file, it restores the backup content.
 // If the checkpoint was for a new file (Existed=false), it deletes the file.

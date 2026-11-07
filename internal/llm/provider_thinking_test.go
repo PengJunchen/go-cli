@@ -98,3 +98,38 @@ func TestHTTPChatModelThinkingOnWire(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenAIProviderRejectsInvalidTypedThinkingLevelBeforeDispatch(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		provider func(string) ModelProvider
+	}{
+		{name: "native", provider: func(endpoint string) ModelProvider {
+			return NewOpenAIProvider(WithNativeBaseURL(endpoint))
+		}},
+		{name: "compatible", provider: func(endpoint string) ModelProvider {
+			return NewEinoProvider(WithBaseURL(endpoint))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requests := make(chan struct{}, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests <- struct{}{}
+				w.Header().Set("Content-Type", "application/json")
+				writeResponse(t, w, `{"choices":[{"message":{"role":"assistant","content":"unexpected"},"finish_reason":"stop"}]}`)
+			}))
+			defer server.Close()
+
+			model, cleanup, err := test.provider(server.URL).Build(context.Background(), ModelConfig{Model: "wire-test"})
+			require.NoError(t, err)
+			defer cleanup()
+			_, err = model.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hello"}},
+				WithThinking(ThinkingConfig{Level: ThinkingLevel(99)}))
+			var setupError *PreDispatchCandidateError
+			require.ErrorAs(t, err, &setupError)
+			require.Equal(t, PreDispatchInvalidRequest, setupError.Class)
+			require.ErrorContains(t, setupError.Unwrap(), "invalid thinking level")
+			require.Empty(t, requests, "invalid typed thinking level must be rejected before HTTP dispatch")
+		})
+	}
+}

@@ -23,6 +23,26 @@ var errNoSummarizer = errors.New("compaction: no summarizer configured")
 // truncation marker cannot fit the configured summary prompt budget.
 var ErrSummaryPromptBudgetTooSmall = errors.New("compaction: summary prompt budget too small")
 
+// errSummaryEssentialInputTooLarge is local to prompt construction. Unlike an
+// output-size failure, it must never authorize dropping the source prefix.
+var errSummaryEssentialInputTooLarge = errors.New("compaction: essential summary input exceeds prompt budget")
+
+// Preserve the existing framing error identity while treating a critical item
+// and an unusably small prompt together as the same protected local failure.
+var errSummaryEssentialFramingTooSmall = fmt.Errorf("%w: %w", errSummaryEssentialInputTooLarge, ErrSummaryPromptBudgetTooSmall)
+
+func isLocalEssentialSummaryError(err error) bool {
+	return err == errSummaryEssentialInputTooLarge || err == errSummaryEssentialFramingTooSmall
+}
+
+// IsSummaryEssentialInputBudgetError reports a direct essential-input budget
+// failure from built-in summary prompt construction. It does not unwrap errors:
+// an error reported by a summary source must not be mistaken for local budget
+// evidence even if that source returns a previously observed budget error.
+func IsSummaryEssentialInputBudgetError(err error) bool {
+	return isLocalEssentialSummaryError(err)
+}
+
 // localSummaryBudgetError is created only after the built-in strategy itself
 // determines that its summary cannot fit. Source failures are wrapped separately
 // so a callback cannot reuse this value as permission to truncate another input.
@@ -77,8 +97,10 @@ func WithMaxSummaryPromptTokens(n int) SummaryCompactorOption {
 	return func(c *SummaryCompactor) { c.maxSummaryPromptTokens = n }
 }
 
-// WithMaxSummaryItemTokens bounds each rendered history item before the total
-// prompt budget is applied. Non-positive values select the default bound.
+// WithMaxSummaryItemTokens bounds ordinary rendered output items before the
+// total prompt budget is applied. User items, error receipts and prior summaries
+// are kept whole or omitted; the latest user and error receipt are required.
+// Non-positive values select the default bound.
 func WithMaxSummaryItemTokens(n int) SummaryCompactorOption {
 	return func(c *SummaryCompactor) { c.maxSummaryItemTokens = n }
 }
@@ -91,7 +113,7 @@ const defaultMaxSummaryTokens = 2000
 // context window.
 const defaultMaxSummaryPromptTokens = 6000
 
-// defaultMaxSummaryItemTokens prevents one transcript item from consuming the
+// defaultMaxSummaryItemTokens prevents one ordinary output from consuming the
 // entire bounded prompt.
 const defaultMaxSummaryItemTokens = 2048
 
@@ -216,6 +238,9 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		return CompactionResult{Items: normalized}, localSummaryBudgetError{}
 	}
 
+	if err := ValidateImageGroupCut(normalized, cut); err != nil {
+		return CompactionResult{Items: items}, err
+	}
 	old := normalized[:cut]
 	keep := normalized[cut:]
 	through, hasSource, err := sourceThroughForPrefix(old)
@@ -229,6 +254,9 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 
 	prompt, err := c.buildSummaryPrompt(old, estimator)
 	if err != nil {
+		if isLocalEssentialSummaryError(err) {
+			return CompactionResult{Items: items}, err
+		}
 		return CompactionResult{Items: normalized}, err
 	}
 	summary, err := c.summarizer.Summarize(ctx, prompt)
@@ -291,30 +319,151 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 	return CompactionResult{Items: result, Strategy: StrategySummary, NewProjection: projection}, nil
 }
 
-// buildSummaryPrompt renders the history in transcript order, enforcing both
-// the per-item and total prompt budgets with the caller's estimator.
+// summaryPackedBlock is one renderable source item and its inclusion priority.
+type summaryPackedBlock struct {
+	text      string
+	priority  int
+	selected  bool
+	available bool
+}
+
+// buildSummaryPrompt protects the latest real user message and error receipt,
+// then admits lower-priority evidence while the complete rendered prompt fits.
+// Selected blocks and omission markers are always rendered in source order.
 func (c *SummaryCompactor) buildSummaryPrompt(items []TurnItem, estimator TokenEstimator) (string, error) {
-	blocks := make([]string, 0, len(items))
-	for _, item := range items {
+	latestUser, latestError := -1, -1
+	for i, item := range items {
+		if item.IsCompaction {
+			continue
+		}
+		if item.Role == RoleUser {
+			latestUser = i
+		}
+		if item.Role == RoleTool && item.ReceiptOutcome == "error" {
+			latestError = i
+		}
+	}
+
+	blocks := make([]summaryPackedBlock, 0, len(items))
+	allAvailable := true
+	for i, item := range items {
 		block, ok := renderSummaryItem(item)
 		if !ok {
 			continue
 		}
-		bounded, err := truncateSummaryText(block, c.maxSummaryItemTokens, estimator)
-		if err != nil {
-			return "", err
+		priority := 3
+		switch {
+		case i == latestUser || i == latestError:
+			priority = 0
+		case !item.IsCompaction && (item.Role == RoleUser || item.Role == RoleTool && item.ReceiptOutcome == "error"):
+			priority = 1
+		case item.IsCompaction:
+			priority = 2
 		}
-		blocks = append(blocks, bounded)
+		available := true
+		if priority == 3 {
+			var err error
+			if item.Role == RoleTool {
+				// Preserve the structured name/outcome header even when a long
+				// ordinary receipt body must be shortened.
+				separator := strings.IndexByte(block, '\n') + 1
+				block, err = truncateSummaryBody(block[:separator], block[separator:], c.maxSummaryItemTokens, estimator)
+			} else {
+				block, err = truncateSummaryText(block, c.maxSummaryItemTokens, estimator)
+			}
+			if err != nil {
+				available = false
+				allAvailable = false
+			}
+		}
+		blocks = append(blocks, summaryPackedBlock{text: block, priority: priority, selected: available, available: available})
 	}
 
-	prompt, err := truncateSummaryBody(summaryPromptInstruction, strings.Join(blocks, "\n"), c.maxSummaryPromptTokens, estimator)
-	if err != nil {
-		return "", err
+	// Preserve the exact old rendering for small histories.
+	prompt := renderPackedSummary(blocks)
+	if allAvailable && estimateLength(prompt, estimator) <= c.maxSummaryPromptTokens {
+		return prompt, nil
 	}
-	if estimateLength(prompt, estimator) > c.maxSummaryPromptTokens {
+	if estimateLength(summaryPromptInstruction+summaryTruncatedMarker, estimator) > c.maxSummaryPromptTokens {
+		if latestUser >= 0 || latestError >= 0 {
+			return "", errSummaryEssentialFramingTooSmall
+		}
 		return "", ErrSummaryPromptBudgetTooSmall
 	}
+	for i := range blocks {
+		blocks[i].selected = blocks[i].priority == 0
+	}
+	prompt = renderPackedSummary(blocks)
+	if estimateLength(prompt, estimator) > c.maxSummaryPromptTokens {
+		// Replacing a complete omitted run by very short actual items can be
+		// cheaper than its marker. Try that before declaring the essentials
+		// unfit; a run containing an unrenderable item cannot be included.
+		for i := 0; i < len(blocks); {
+			if blocks[i].selected {
+				i++
+				continue
+			}
+			start := i
+			available := true
+			for i < len(blocks) && !blocks[i].selected {
+				available = available && blocks[i].available
+				i++
+			}
+			if !available {
+				continue
+			}
+			for j := start; j < i; j++ {
+				blocks[j].selected = true
+			}
+			candidate := renderPackedSummary(blocks)
+			if estimateLength(candidate, estimator) < estimateLength(prompt, estimator) {
+				prompt = candidate
+			} else {
+				for j := start; j < i; j++ {
+					blocks[j].selected = false
+				}
+			}
+		}
+		if estimateLength(prompt, estimator) > c.maxSummaryPromptTokens {
+			return "", errSummaryEssentialInputTooLarge
+		}
+	}
+
+	// Earlier user/error evidence wins over prior summaries and ordinary
+	// outputs. Within each tier, prefer the more recent item. Every attempted
+	// inclusion is priced as the complete prompt, markers and framing included.
+	for priority := 1; priority <= 3; priority++ {
+		for i := len(blocks) - 1; i >= 0; i-- {
+			if blocks[i].priority != priority || blocks[i].selected || !blocks[i].available {
+				continue
+			}
+			blocks[i].selected = true
+			candidate := renderPackedSummary(blocks)
+			if estimateLength(candidate, estimator) <= c.maxSummaryPromptTokens {
+				prompt = candidate
+			} else {
+				blocks[i].selected = false
+			}
+		}
+	}
 	return prompt, nil
+}
+
+func renderPackedSummary(blocks []summaryPackedBlock) string {
+	parts := make([]string, 0, len(blocks))
+	omitted := false
+	for _, block := range blocks {
+		if !block.selected {
+			if !omitted {
+				parts = append(parts, summaryTruncatedMarker)
+			}
+			omitted = true
+			continue
+		}
+		parts = append(parts, block.text)
+		omitted = false
+	}
+	return summaryPromptInstruction + strings.Join(parts, "\n")
 }
 
 func renderSummaryItem(item TurnItem) (string, bool) {
@@ -328,6 +477,12 @@ func renderSummaryItem(item TurnItem) (string, bool) {
 		// not be copied into a derived summary prompt.
 		return "", false
 	case RoleUser:
+		// Provider encoders use ContentBlocks whenever the slice is non-nil,
+		// even when the legacy Content field is populated.
+		if item.ContentBlocks != nil {
+			item.Content = ""
+			item.ToolResult = ""
+		}
 		return "[user]\n" + itemText(item), true
 	case RoleAssistant:
 		var block strings.Builder

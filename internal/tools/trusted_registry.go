@@ -375,6 +375,17 @@ func (r *DefaultToolRegistry) registerTrustedLocalProcess(ctx context.Context, d
 			proof = completionLocalProcessOrPrestartNoProcessJoined
 		}
 		return r.registerDefinitionWithCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), proof)
+	case *ProcessSessionTool:
+		if tool == nil {
+			return errors.New("tools: process-session registration requires a manager")
+		}
+		manager, ok := tool.manager.(*LocalProcessSessionManager)
+		if !ok || manager == nil || !ownedCommandPlatformSupported() {
+			return errors.New("tools: process-session registration requires a manager")
+		}
+		// The prepared tool call itself joins synchronously. A separately
+		// persisted process-session lease records any process that outlives it.
+		return r.registerDefinitionWithCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), CompletionInlinePipelineJoined)
 	default:
 		return errors.New("tools: local-process completion requires a reviewed local bash tool")
 	}

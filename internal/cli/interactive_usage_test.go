@@ -236,10 +236,10 @@ func TestEmitTokenUsageEvent_NoEstimatorNoUsage(t *testing.T) {
 	}
 }
 
-// TestLastAssistantAPIUsage verifies the helper that finds the last assistant
-// message with non-nil Usage.
+// TestLastAssistantAPIUsage verifies the helper uses the latest assistant
+// message, including when its Usage is nil instead of borrowing older evidence.
 func TestLastAssistantAPIUsage(t *testing.T) {
-	t.Run("finds last assistant with usage", func(t *testing.T) {
+	t.Run("finds latest assistant usage", func(t *testing.T) {
 		msgs := []core.AgentMessage{
 			{Role: "user", Content: "q1"},
 			{Role: "assistant", Content: "a1", Usage: &llm.Usage{InputTokens: 5, OutputTokens: 2}},
@@ -252,10 +252,18 @@ func TestLastAssistantAPIUsage(t *testing.T) {
 		assert.Equal(t, 4, usage.OutputTokens)
 	})
 
-	t.Run("returns nil when no assistant has usage", func(t *testing.T) {
+	t.Run("latest assistant without usage does not borrow older report", func(t *testing.T) {
+		msgs := []core.AgentMessage{
+			{Role: "assistant", Content: "a1", Usage: &llm.Usage{InputTokens: 5, OutputTokens: 2}},
+			{Role: "user", Content: "q2"},
+			{Role: "assistant", Content: "a2"},
+		}
+		assert.Nil(t, lastAssistantAPIUsage(msgs))
+	})
+
+	t.Run("returns nil when no assistant exists", func(t *testing.T) {
 		msgs := []core.AgentMessage{
 			{Role: "user", Content: "q1"},
-			{Role: "assistant", Content: "a1"},
 		}
 		usage := lastAssistantAPIUsage(msgs)
 		assert.Nil(t, usage)

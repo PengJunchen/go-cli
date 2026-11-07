@@ -29,10 +29,10 @@ func newCompactionHook(
 		}
 
 		// Convert AgentMessage -> TurnItem
-		items := messagesToTurnItems(messages)
+		items := messagesToTurnItems(core.CloneAgentMessages(messages))
 
 		// Run compaction
-		compacted, err := compactor.Compact(ctx, items, maxTokens, estimator)
+		compacted, err := compaction.CompactPreservingImages(ctx, compactor, items, maxTokens, estimator)
 		if err != nil {
 			return nil, fmt.Errorf("compaction hook: %w", err)
 		}

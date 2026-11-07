@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"sync"
 	"sync/atomic"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // ProviderOperationID identifies one logical provider operation.
@@ -966,10 +968,55 @@ func finishProviderAttempt(ctx context.Context, attempt *ProviderAttempt, err er
 	if result.AttemptID != attempt.ID() {
 		return errors.Join(err, errors.New("llm: provider attempt returned a mismatched terminal result"))
 	}
+	traceAttemptUsage(ctx, result)
 	if err != nil {
 		return &FinishedProviderAttemptError{Result: result, cause: err}
 	}
 	return nil
+}
+
+func traceAttemptUsage(ctx context.Context, result ProviderAttemptResult) {
+	span, _ := tracing.SpanFromContext(ctx, "llm.attempt_usage", tracing.SpanKindInternal)
+	defer span.End()
+	span.SetAttributes(
+		tracing.Attribute{Key: "provider", Value: result.Identity.ProviderID},
+		tracing.Attribute{Key: "model", Value: result.Identity.ModelID},
+		tracing.Attribute{Key: "attempt_outcome", Value: int(result.Outcome)},
+		tracing.Attribute{Key: "usage_known", Value: result.Usage.State == UsageKnown},
+	)
+	if opaqueAttemptTraceID(string(result.OperationID), "op-") {
+		span.SetAttributes(tracing.Attribute{Key: "operation_id", Value: string(result.OperationID)})
+	}
+	if opaqueAttemptTraceID(string(result.AttemptID), "attempt-") {
+		span.SetAttributes(tracing.Attribute{Key: "attempt_id", Value: string(result.AttemptID)})
+	}
+	if result.Outcome == AttemptSuccess {
+		span.SetStatus(tracing.SpanStatusOK, "")
+	} else {
+		span.SetStatus(tracing.SpanStatusError, "provider attempt did not succeed")
+	}
+	if usage := result.Usage.Usage; result.Usage.State == UsageKnown && usage != nil {
+		span.SetAttributes(
+			tracing.Attribute{Key: "tokens_input", Value: usage.InputTokens},
+			tracing.Attribute{Key: "tokens_output", Value: usage.OutputTokens},
+			tracing.Attribute{Key: "primary_coverage", Value: string(usage.PrimaryCoverage.Normalized())},
+		)
+		if usage.CacheReadInputTokensReported && validUsageDetail(usage.CacheReadInputTokens, usage.InputTokens, true) {
+			span.SetAttributes(tracing.Attribute{Key: "tokens_cache_read_input", Value: usage.CacheReadInputTokens})
+		}
+		if usage.ReasoningOutputTokensReported && validUsageDetail(usage.ReasoningOutputTokens, usage.OutputTokens, true) {
+			span.SetAttributes(tracing.Attribute{Key: "tokens_reasoning_output", Value: usage.ReasoningOutputTokens})
+		}
+	}
+}
+
+// opaqueAttemptTraceID emits only core-minted random operation identifiers.
+func opaqueAttemptTraceID(value, prefix string) bool {
+	if len(value) != len(prefix)+32 || value[:len(prefix)] != prefix {
+		return false
+	}
+	_, err := hex.DecodeString(value[len(prefix):])
+	return err == nil
 }
 
 // FinishedProviderAttemptError keeps the provider error chain available while

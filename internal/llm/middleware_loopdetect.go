@@ -97,6 +97,42 @@ type loopDetectModel struct {
 
 var _ BaseChatModel = (*loopDetectModel)(nil)
 
+// RepeatedResponseError reports that a complete response repeated the
+// detector's bounded fingerprint. It retains no response text or arguments.
+type RepeatedResponseError struct {
+	fingerprint string
+	count       int
+	eligible    bool
+}
+
+func (e *RepeatedResponseError) Error() string {
+	if e == nil {
+		return "loopdetection: invalid repeated response"
+	}
+	return fmt.Sprintf("loopdetection: detected repeated response (count=%d)", e.count)
+}
+
+// MatchesResponse checks whether the supplied complete response matches this
+// repeated fingerprint. Recovery is eligible only for a valid single-tool
+// response; provider-generated tool-call IDs are excluded from the digest.
+func (e *RepeatedResponseError) MatchesResponse(content string, calls []ToolCall) bool {
+	if e == nil || !e.eligible || e.count < 2 || len(e.fingerprint) != sha256.Size*2 {
+		return false
+	}
+	fingerprint, err := responseFingerprint(content, calls)
+	return err == nil && fingerprint == e.fingerprint
+}
+
+func markCompleteRepeatedToolResponse(err error, finishReason string, calls []ToolCall) {
+	repeated, ok := err.(*RepeatedResponseError)
+	if !ok || repeated == nil || finishReason != "tool_calls" || len(calls) != 1 ||
+		calls[0].ID == "" || calls[0].Name == "" {
+		return
+	}
+	args, valid := calls[0].Args.(map[string]any)
+	repeated.eligible = valid && args != nil
+}
+
 // responseFingerprint returns a bounded fingerprint of the assistant's
 // user-visible text and ordered tool actions. Provider-generated tool IDs are
 // excluded because they vary between otherwise identical responses.
@@ -168,7 +204,7 @@ func (m *loopDetectModel) checkLoop(fingerprint string) error {
 	if count >= m.threshold {
 		m.logger.Warn("loopdetection.detected",
 			"count", count, "threshold", m.threshold)
-		return fmt.Errorf("loopdetection: detected repeated response (count=%d)", count)
+		return &RepeatedResponseError{fingerprint: fingerprint, count: count}
 	}
 	return nil
 }
@@ -185,6 +221,7 @@ func (m *loopDetectModel) Generate(ctx context.Context, msgs []Message, opts ...
 		return nil, err
 	}
 	if err := m.checkLoop(fingerprint); err != nil {
+		markCompleteRepeatedToolResponse(err, resp.FinishReason, resp.ToolCalls)
 		return nil, err
 	}
 	return resp, nil
@@ -293,6 +330,7 @@ func (m *loopDetectModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 			return
 		}
 		if loopErr := m.checkLoop(fingerprint); loopErr != nil {
+			markCompleteRepeatedToolResponse(loopErr, finalChunk.FinishReason, finalChunk.ToolCalls)
 			m.logger.Warn("loopdetection.stream.post_hoc",
 				"op", "loopdetection.stream.post_hoc",
 				"error", loopErr.Error(),

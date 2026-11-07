@@ -294,7 +294,7 @@ func TestGrepPureGoOutputBudgetUsesWholePrefixAndExactBoundary(t *testing.T) {
 	tool := NewGrepTool(WithGrepWorkdir(dir), WithForcePureGo(true), WithGrepMaxOutput(len(firstRecord)))
 	result, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{"pattern": "needle", "path": file}})
 	require.NoError(t, err)
-	assert.Equal(t, strings.TrimSuffix(firstRecord, "\n")+"\n[results truncated]", result.Output)
+	assert.Equal(t, strings.TrimSuffix(firstRecord, "\n")+"\n[results truncated]\nNarrow path, glob, or pattern, or use read for full file contents.", result.Output)
 	assert.Equal(t, 1, result.Metadata["matches"])
 	assert.Equal(t, true, result.Metadata["truncated"])
 

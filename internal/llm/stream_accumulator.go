@@ -21,15 +21,48 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 	canceled := false
 	doneSeen := false
 	terminalSeen := false
+	validTerminal := false
 	eventCount := 0
 	toolPayloadBytes := 0
 	var streamErr error
+	terminalUsageAccepted := false
+	acceptUsage := func(candidate *openAIUsage) {
+		if candidate == nil || terminalUsageAccepted {
+			return
+		}
+		if reported := candidate.toUsage(); reported != nil && reported.PrimaryCoverage.Normalized() == UsageCoverageComplete {
+			// A preterminal snapshot is useful billing evidence, but an empty
+			// later stop frame cannot establish that it contains final totals.
+			if !validTerminal {
+				reported.PrimaryCoverage = UsageCoverageUnknown
+			}
+			usage = reported
+			// Keep the first valid terminal usage if a provider sends another
+			// contradictory usage object after it; do not fabricate a replacement.
+			if terminalSeen {
+				terminalUsageAccepted = true
+			}
+		} else if candidate.PromptTokens != nil && candidate.CompletionTokens != nil && usage != nil {
+			// Present but unrepresentable counts cannot validate an earlier
+			// snapshot. Retain its evidence and any proven partial status.
+			if usage.PrimaryCoverage == UsageCoverageComplete {
+				usage.PrimaryCoverage = UsageCoverageUnknown
+			}
+			usage.CacheReadInputTokens, usage.ReasoningOutputTokens = 0, 0
+			usage.CacheReadInputTokensReported, usage.ReasoningOutputTokensReported = false, false
+		}
+	}
 
 	for event := range events {
 		if event.Error != nil {
 			if streamErr == nil {
 				streamErr = event.Error
 			}
+			continue
+		}
+		// Drain the source after a protocol or transport error, but do not treat
+		// subsequent frames as authoritative evidence or publish their deltas.
+		if streamErr != nil {
 			continue
 		}
 		if canceled {
@@ -56,23 +89,17 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 
 		var chunk openAIStreamChunk
 		if err := json.Unmarshal([]byte(event.Data), &chunk); err != nil {
-			if streamErr == nil {
-				streamErr = fmt.Errorf("llm: decode OpenAI stream event: %w", err)
-			}
+			streamErr = fmt.Errorf("llm: decode OpenAI stream event: %w", err)
 			continue
 		}
 		if len(chunk.Choices) == 0 && chunk.Usage == nil {
-			if streamErr == nil {
-				streamErr = fmt.Errorf("llm: OpenAI stream event has neither choices nor usage")
-			}
+			streamErr = fmt.Errorf("llm: OpenAI stream event has neither choices nor usage")
 			continue
 		}
 		// OpenAI sends usage in a final chunk with an empty choices array
 		// when stream_options.include_usage is true.
-		if chunk.Usage != nil {
-			usage = chunk.Usage.toUsage()
-		}
 		if len(chunk.Choices) == 0 {
+			acceptUsage(chunk.Usage)
 			continue
 		}
 		if terminalSeen {
@@ -166,18 +193,44 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 				toolArgsBuf[idx].WriteString(tc.Function.Arguments)
 			}
 		}
-		// Keep the chunk-idle watchdog informed of accepted tool activity,
-		// without publishing partial tool calls or fabricated assistant text.
-		if streamErr == nil && toolPayloadBytes > previousToolPayloadBytes && !emittedActivity {
+		// A terminal choice cannot receive more tool fragments. Validate its
+		// complete calls before trusting usage attached to that same frame.
+		if streamErr == nil && !canceled && choice.FinishReason != "" {
+			toolCalls, streamErr = assembleOpenAIStreamToolCalls(toolArgsBuf, toolNameByIndex, toolIDByIndex, finishReason)
+		}
+		// Accepted reasoning and partial tool calls are real stream activity,
+		// but neither is published as assistant text or a premature tool call.
+		if streamErr == nil && !canceled && !emittedActivity &&
+			(toolPayloadBytes > previousToolPayloadBytes || streamReasoningActivity(delta.Reasoning) || streamReasoningActivity(delta.ReasoningContent)) {
 			select {
 			case ch <- MessageChunk{Role: RoleAssistant}:
 			case <-ctx.Done():
 				canceled = true
 			}
 		}
+		if streamErr == nil && !canceled {
+			if choice.FinishReason != "" {
+				validTerminal = openAITerminalUsageReason(choice.FinishReason)
+			}
+			// Only valid output frames can make earlier usage a subtotal. A
+			// valid usage on this same frame may refresh it immediately.
+			if usage != nil && delta.generated {
+				usage.PrimaryCoverage = UsageCoveragePartial
+				usage.ReasoningOutputTokens = 0
+				usage.ReasoningOutputTokensReported = false
+			} else if usage != nil && delta.unknownActivity && usage.PrimaryCoverage == UsageCoverageComplete {
+				usage.PrimaryCoverage = UsageCoverageUnknown
+			}
+			acceptUsage(chunk.Usage)
+		}
 	}
 	if ctx.Err() != nil && streamErr == nil {
 		streamErr = ctx.Err()
+	}
+	// If the stream ended before a terminal reason, an otherwise valid early
+	// usage snapshot remains evidence, but cannot prove final coverage.
+	if usage != nil && !validTerminal && (streamErr != nil || !doneSeen || finishReason == "") && usage.PrimaryCoverage == UsageCoverageComplete {
+		usage.PrimaryCoverage = UsageCoverageUnknown
 	}
 	if streamErr != nil {
 		return nil, finishReason, usage, streamErr
@@ -189,36 +242,88 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 		return nil, finishReason, usage, fmt.Errorf("llm: OpenAI stream ended without a terminal finish reason")
 	}
 
-	// Build the final tool-call slice in provider index order. Missing IDs,
-	// names, or complete JSON arguments are protocol errors; only a response
-	// explicitly truncated for length may carry incomplete arguments onward so
-	// the loop can discard them before requesting a continuation.
+	return toolCalls, finishReason, usage, nil
+}
+
+// openAIFinishReasonStop is the OpenAI reason for a normal or stop-sequence completion.
+const openAIFinishReasonStop = "stop"
+
+// IsNormalFinishReason identifies a normal or stop-sequence provider finish.
+// It does not establish whether the requested work was completed correctly.
+func IsNormalFinishReason(reason string) bool {
+	return reason == openAIFinishReasonStop
+}
+
+// Unsupported provider-specific reasons remain usable as terminal output, but
+// do not by themselves prove that an attached usage snapshot is final.
+func openAITerminalUsageReason(reason string) bool {
+	switch reason {
+	case openAIFinishReasonStop, "length", "tool_calls", "function_call", "content_filter":
+		return true
+	default:
+		return false
+	}
+}
+
+// streamJSONActivity detects optional reasoning fragments without assuming a
+// provider-specific string or structured representation.
+func streamJSONActivity(raw []byte) bool {
+	value := strings.TrimSpace(string(raw))
+	return value != "" && value != "null" && value != `""` && value != "[]" && value != "{}"
+}
+
+// streamReasoningActivity accepts nonempty textual or structured reasoning
+// fragments without exposing their contents or treating scalar metadata as work.
+func streamReasoningActivity(raw []byte) bool {
+	var value any
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return false
+	}
+	switch fragment := value.(type) {
+	case string:
+		return len(fragment) > 0
+	case []any:
+		return len(fragment) > 0
+	case map[string]any:
+		return len(fragment) > 0
+	default:
+		return false
+	}
+}
+
+// assembleOpenAIStreamToolCalls builds the tool-call slice in provider index
+// order. Missing IDs, names, or complete JSON arguments are protocol errors;
+// only a response
+// explicitly truncated for length may carry incomplete arguments onward so
+// the loop can discard them before requesting a continuation.
+func assembleOpenAIStreamToolCalls(toolArgsBuf []*strings.Builder, toolNameByIndex, toolIDByIndex map[int]string, finishReason string) ([]ToolCall, error) {
+	var toolCalls []ToolCall
 	if len(toolArgsBuf) > 0 {
 		toolCalls = make([]ToolCall, len(toolArgsBuf))
 		for idx := range toolArgsBuf {
 			name := toolNameByIndex[idx]
 			id := toolIDByIndex[idx]
 			if name == "" || id == "" {
-				return nil, finishReason, usage, fmt.Errorf("llm: OpenAI tool call %d is missing an ID or name", idx)
+				return nil, fmt.Errorf("llm: OpenAI tool call %d is missing an ID or name", idx)
 			}
 
 			rawArgs := toolArgsBuf[idx].String()
 			var args any
 			if rawArgs == "" {
 				if finishReason != finishReasonLength {
-					return nil, finishReason, usage, fmt.Errorf("llm: OpenAI tool call %q has no arguments", id)
+					return nil, fmt.Errorf("llm: OpenAI tool call %q has no arguments", id)
 				}
 				args = rawArgs
 			} else {
 				var object map[string]any
 				if err := json.Unmarshal([]byte(rawArgs), &object); err != nil {
 					if finishReason != finishReasonLength {
-						return nil, finishReason, usage, fmt.Errorf("llm: decode arguments for OpenAI tool call %q: %w", id, err)
+						return nil, fmt.Errorf("llm: decode arguments for OpenAI tool call %q: %w", id, err)
 					}
 					args = rawArgs
 				} else if object == nil {
 					if finishReason != finishReasonLength {
-						return nil, finishReason, usage, fmt.Errorf("llm: OpenAI tool call %q arguments must be a JSON object", id)
+						return nil, fmt.Errorf("llm: OpenAI tool call %q arguments must be a JSON object", id)
 					}
 					args = rawArgs
 				} else {
@@ -229,5 +334,5 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 		}
 	}
 
-	return toolCalls, finishReason, usage, nil
+	return toolCalls, nil
 }

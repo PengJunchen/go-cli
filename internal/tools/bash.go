@@ -214,9 +214,13 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		return nil, fmt.Errorf("bash: canceled before start: %w", err)
 	}
 
-	// Wrap the command with resource limits (ulimit) so only the child
-	// process is affected, not the Go runtime.
-	command = wrapCommandWithLimits(command, t.ResourceLimits)
+	limits, err := effectiveBashResourceSettings(t.ResourceLimits, t.Sandbox)
+	if err != nil {
+		reportPreparedNoProcessCompletion(ctx)
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("bash.invalid_resource_limits", "tool", "bash", "err", err)
+		return nil, err
+	}
 
 	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = t.Workdir
@@ -225,7 +229,7 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		cmd.Stdin = runtimeBashStdin(ctx)
 	}
 
-	managed, err := startManagedLocalBashCommand(execCtx, cancel, cmd)
+	managed, err := startManagedLocalBashCommand(execCtx, cancel, cmd, limits)
 	if err != nil {
 		return nil, fmt.Errorf("bash: start: %w", err)
 	}

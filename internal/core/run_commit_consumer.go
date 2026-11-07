@@ -4,21 +4,27 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
 	"sync"
 	"unicode/utf8"
 
+	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 var (
-	ErrRunCommitOwnerUnavailable                = errors.New("core: durable run requires its run owner")
-	ErrRunCommitPreparedInvocationUnavailable   = errors.New("core: durable run requires prepared tool dispatch")
-	ErrRunCommitChildUnsupported                = errors.New("core: durable child run requires an independent physical session")
-	ErrRunCommitStreamingUnsupported            = errors.New("core: durable streaming dispatch requires an attested synchronous stream sink")
-	ErrRunCommitQuiescenceUnproven              = errors.New("core: tool completion did not prove local resource quiescence")
-	ErrRunCommitCompactionProjectionUnavailable = errors.New("core: durable compaction requires a typed history projection")
-	ErrRunCommitSinkPanicked                    = errors.New("core: run commit sink panicked")
+	ErrRunCommitOwnerUnavailable                 = errors.New("core: durable run requires its run owner")
+	ErrRunCommitPreparedInvocationUnavailable    = errors.New("core: durable run requires prepared tool dispatch")
+	ErrRunCommitChildUnsupported                 = errors.New("core: durable child run requires an independent physical session")
+	ErrRunCommitStreamingUnsupported             = errors.New("core: durable streaming dispatch requires an attested synchronous stream sink")
+	ErrRunCommitQuiescenceUnproven               = errors.New("core: tool completion did not prove local resource quiescence")
+	ErrRunCommitCompactionProjectionUnavailable  = errors.New("core: durable compaction requires a typed history projection")
+	ErrRunCommitSinkPanicked                     = errors.New("core: run commit sink panicked")
+	ErrRunCommitProcessSessionActive             = errors.New("core: process-session leases are still active under the invocation host")
+	ErrRunCommitProcessSessionClosureUnconfirmed = errors.New("core: invocation host closed without durable process-session closure acknowledgement")
+	ErrRunCommitProcessSessionUnavailable        = errors.New("core: process-session dispatch requires a durable host-lease sink")
 )
 
 // ErrRunCommitCompletionUnsupported rejects a tool before any durable dispatch
@@ -48,34 +54,50 @@ func (err runCommitPersistenceError) Unwrap() error    { return err.cause }
 func (runCommitPersistenceError) OutcomeUnknown() bool { return true }
 
 type runCommitConsumer struct {
-	ctx            context.Context
-	owner          *runOwner
-	sink           RunCommitSink
-	source         *CompactionSourceSnapshot
-	projections    []CompactionProjection
-	binding        RunCommitBinding
-	runID          string
-	terminalID     TerminalCheckpointID
-	identityMu     sync.RWMutex
-	identities     map[string]ExecutionIdentity
-	completedTools map[string]completedToolAction
+	ctx                     context.Context
+	owner                   *runOwner
+	sink                    RunCommitSink
+	source                  *CompactionSourceSnapshot
+	projections             []CompactionProjection
+	initialInput            *AgentMessage
+	initialInputLossy       bool
+	binding                 RunCommitBinding
+	runID                   string
+	terminalID              TerminalCheckpointID
+	identityMu              sync.RWMutex
+	identities              map[string]ExecutionIdentity
+	completedTools          map[string]completedToolAction
+	processSession          *tools.ProcessSessionInvocation
+	processSessionAdmission *tools.ProcessSessionAdmissionCapability
+	completionTaskIDs       map[string]uint64
 }
 
 type completedToolAction struct {
-	actionID string
-	metadata map[string]any
+	actionID        string
+	callID          string
+	runID           string
+	ownerGeneration string
+	ordinal         uint64
+	metadata        map[string]any
+	readEvidence    *tools.PreparedReadEvidence
+	editMismatch    *tools.PreparedEditMismatchEvidence
 }
 
 type runCommitDispatchResult struct {
-	metadata               map[string]any
-	output                 string
-	isError                bool
-	err                    error
-	returned               bool
-	committed              bool
-	sourceTruncated        *bool
-	knownBashOwnTimeout    bool
-	receiptOutputTruncated bool
+	contentBlocks                 []llm.ContentBlock
+	metadata                      map[string]any
+	output                        string
+	isError                       bool
+	err                           error
+	returned                      bool
+	committed                     bool
+	sourceTruncated               *bool
+	knownBashOwnTimeout           bool
+	receiptOutputTruncated        bool
+	processSessionLease           *tools.ProcessSessionLeaseSnapshot
+	processSessionAdmission       *tools.ProcessSessionAdmissionCapability
+	processSessionLeaseInvocation *tools.ProcessSessionInvocation
+	readEvidence                  *tools.PreparedReadEvidence
 }
 
 type runCommitToolResult struct {
@@ -101,6 +123,11 @@ func (err runCommitQuiescenceError) Unwrap() error {
 func (runCommitQuiescenceError) OutcomeUnknown() bool { return true }
 
 func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.PreparedInvocation, streamSink tools.SynchronousStreamSink, taskID uint64) (result runCommitDispatchResult) {
+	defer func() {
+		if result.err != nil || result.isError {
+			result.contentBlocks = nil
+		}
+	}()
 	if invocation == nil {
 		return runCommitDispatchResult{output: "Error: prepared invocation is unavailable", isError: true, err: ErrRunCommitPreparedInvocationUnavailable}
 	}
@@ -154,6 +181,17 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 	if toolResult != nil {
 		result.metadata = cloneStringAnyMap(toolResult.Metadata)
 		result.sourceTruncated = sourceTruncatedFromMetadata(toolResult.Metadata)
+		if err == nil && !toolResult.IsError {
+			result.readEvidence, _ = tools.PreparedReadEvidenceFor(invocation, toolResult)
+		}
+		if toolResult.ProcessSessionLease != nil {
+			lease := tools.CloneProcessSessionLeaseSnapshot(*toolResult.ProcessSessionLease)
+			result.processSessionLease = &lease
+		}
+		if toolResult.ProcessSessionAdmission != nil {
+			capability := *toolResult.ProcessSessionAdmission
+			result.processSessionAdmission = &capability
+		}
 	}
 	result.returned = true
 	result.committed = invocation.DispatchCommitted()
@@ -194,6 +232,13 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 		result.err = errToolMissingReceipt
 		return result
 	}
+	blocks, imageErr := toolResultContentBlocks(toolResult)
+	if imageErr != nil {
+		result.output = "Error: " + imageErr.Error()
+		result.err, result.isError = imageErr, true
+		return result
+	}
+	result.contentBlocks = blocks
 	captureMaterializedArtifact(ctx, invocation.NormalizedCall(), toolResult)
 	call := invocation.NormalizedCall()
 	result.output, result.receiptOutputTruncated = boundedSuccessfulReceiptOutput(toolResult.Output, call.ID, call.Name)
@@ -318,7 +363,20 @@ func (consumer *runCommitConsumer) commitInput(index uint64, message AgentMessag
 		InputKind:       message.InputKind,
 		Generation:      runGenerationMetadataPointer(consumer.ctx),
 	})
-	return persistenceError("input", err)
+	if err != nil {
+		return persistenceError("input", err)
+	}
+	if index == 0 {
+		lossy := (message.ContentBlocks != nil && len(message.ContentBlocks) == 0) || (message.ToolCalls != nil && len(message.ToolCalls) == 0)
+		frozen := cloneAgentMessage(message)
+		frozen.Runtime = llm.RuntimeMetadata{}
+		if consumer.initialInput != nil && !reflect.DeepEqual(*consumer.initialInput, frozen) {
+			return fmt.Errorf("%w: current input changed after commit", ErrDurableCompactionUnsupported)
+		}
+		consumer.initialInput = &frozen
+		consumer.initialInputLossy = lossy
+	}
+	return nil
 }
 
 func (consumer *runCommitConsumer) transcriptMetadata(index uint64, receiptOutcome string) llm.RuntimeMetadata {
@@ -337,15 +395,160 @@ func (consumer *runCommitConsumer) transcriptMetadata(index uint64, receiptOutco
 	return metadata
 }
 
-func (consumer *runCommitConsumer) commitCompaction(projection CompactionProjection) error {
+func (consumer *runCommitConsumer) commitCompaction(projection CompactionProjection, current ...compaction.TurnItem) error {
 	if consumer == nil {
 		return nil
 	}
-	if err := consumer.sink.CommitCompaction(consumer.commitContext(), projection); err != nil {
+	commitCtx := consumer.commitContext()
+	if projection.RetainCurrentInput {
+		commitCtx = consumer.ctx
+		if err := commitCtx.Err(); err != nil {
+			return err
+		}
+		if err := CheckRunGeneration(commitCtx); err != nil {
+			return err
+		}
+		if consumer.initialInput == nil || consumer.initialInputLossy || len(current) != 1 {
+			return fmt.Errorf("%w: retained input was not captured at commit", ErrDurableCompactionUnsupported)
+		}
+		if err := consumer.validateCommittedInput(current[0]); err != nil {
+			return err
+		}
+		digest, err := RetainedInputDigest(consumer.runID, *consumer.initialInput)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrDurableCompactionUnsupported, err)
+		}
+		if projection.RetainedInputDigest != "" && projection.RetainedInputDigest != digest {
+			return fmt.Errorf("%w: retained input digest changed", ErrDurableCompactionUnsupported)
+		}
+		projection.RetainedInputDigest = digest
+	} else if projection.RetainedInputDigest != "" {
+		return fmt.Errorf("%w: unanchored projection carries an input digest", ErrDurableCompactionUnsupported)
+	}
+	if err := consumer.sink.CommitCompaction(commitCtx, projection); err != nil {
 		return runCommitPersistenceError{operation: "compaction", cause: err}
 	}
 	consumer.projections = append(consumer.projections, projection)
 	return nil
+}
+
+func (consumer *runCommitConsumer) validateCommittedInput(item compaction.TurnItem) error {
+	if consumer.initialInput == nil || consumer.initialInputLossy {
+		return fmt.Errorf("%w: retained input was not captured losslessly", ErrDurableCompactionUnsupported)
+	}
+	frozen := consumer.initialInput
+	if item.Role != frozen.Role || item.Content != frozen.Content || !reflect.DeepEqual(item.ContentBlocks, frozen.ContentBlocks) ||
+		!reflect.DeepEqual(item.Usage, frozen.Usage) || !reflect.DeepEqual(item.ToolCalls, frozen.ToolCalls) ||
+		item.ToolCallID != frozen.ToolCallID || item.ToolName != frozen.ToolName || item.FinishReason != "" ||
+		item.ToolResult != "" || item.ReceiptOutcome != frozen.ReceiptOutcome || item.IsCompaction ||
+		(item.InputKind != "" && item.InputKind != frozen.InputKind) || item.Runtime.CompactionMarker {
+		return fmt.Errorf("%w: retained input differs from committed input", ErrDurableCompactionUnsupported)
+	}
+	return nil
+}
+
+// activeProcessSessionRefs returns manager-validated active leases that also
+// have exact durable action/receipt records. Persisted rows alone cannot
+// recreate the same-manager runtime capability.
+func (consumer *runCommitConsumer) activeProcessSessionRefs() ([]ActiveProcessSessionRef, error) {
+	if consumer == nil || consumer.processSession == nil {
+		return nil, nil
+	}
+	sink, ok := consumer.sink.(RunCommitProcessSessionSink)
+	if !ok {
+		return nil, ErrRunCommitProcessSessionUnavailable
+	}
+	for {
+		leases, err := sink.ActiveProcessSessionLeases(consumer.commitContext(), consumer.runID)
+		if err != nil {
+			return nil, fmt.Errorf("core: inspect active process-session leases: %w", err)
+		}
+		refs := make([]ActiveProcessSessionRef, 0, len(leases))
+		closing := ""
+		for _, lease := range leases {
+			if consumer.processSession.AllowsLease(lease) {
+				refs = append(refs, ActiveProcessSessionRef{
+					OwnerID: lease.OwnerID, WorkspaceID: lease.WorkspaceID, RunID: lease.RunID,
+					SessionID: lease.SessionID, OwnerGeneration: lease.OwnerGeneration, StartActionID: lease.Action.ActionID,
+				})
+				continue
+			}
+			live, isClosing, lifecycleErr := consumer.processSession.LeaseLifecycle(lease)
+			if lifecycleErr != nil || live {
+				if lifecycleErr == nil {
+					lifecycleErr = errors.New("core: process-session lease is live but failed exact physical validation")
+				}
+				return nil, fmt.Errorf("core: durable process-session lease does not match its live manager: %w", lifecycleErr)
+			}
+			if !isClosing {
+				return nil, errors.New("core: durable process-session lease has no live or owned-closing manager state")
+			}
+			closing = lease.SessionID
+			break
+		}
+		if closing == "" {
+			sort.Slice(refs, func(left, right int) bool {
+				return refs[left].SessionID < refs[right].SessionID
+			})
+			return refs, nil
+		}
+		_, err = consumer.waitForProcessSessionClosure(closing)
+		if err != nil {
+			return nil, err
+		}
+		refreshed, err := sink.ActiveProcessSessionLeases(consumer.commitContext(), consumer.runID)
+		if err != nil {
+			return nil, fmt.Errorf("core: refresh process-session leases after closure: %w", err)
+		}
+		for _, lease := range refreshed {
+			if lease.SessionID == closing && lease.RunID == consumer.runID && lease.WorkspaceID == consumer.binding.WorkspaceID &&
+				(lease.Phase == tools.ProcessSessionLeaseActive || lease.Phase == tools.ProcessSessionLeaseDelivered) {
+				return nil, errors.New("core: process-session closure acknowledgement did not clear its active durable lease")
+			}
+		}
+	}
+}
+
+func (consumer *runCommitConsumer) waitForProcessSessionClosure(sessionID string) (bool, error) {
+	if consumer == nil || consumer.processSession == nil || sessionID == "" {
+		return false, ErrRunCommitProcessSessionClosureUnconfirmed
+	}
+	leaseDone := consumer.processSession.SessionClosed(sessionID)
+	closureAttempted := consumer.processSession.SessionClosureAttempted(sessionID)
+	ownerClosed := consumer.processSession.OwnerClosed()
+	if leaseDone == nil || closureAttempted == nil || ownerClosed == nil {
+		return false, ErrRunCommitProcessSessionClosureUnconfirmed
+	}
+	select {
+	case <-leaseDone:
+		return true, nil
+	default:
+	}
+	select {
+	case <-leaseDone:
+		return false, nil
+	case <-closureAttempted:
+		select {
+		case <-leaseDone:
+			return false, nil
+		default:
+			return false, ErrRunCommitProcessSessionClosureUnconfirmed
+		}
+	case <-ownerClosed:
+		select {
+		case <-leaseDone:
+			return false, nil
+		default:
+			return false, ErrRunCommitProcessSessionClosureUnconfirmed
+		}
+	case <-consumer.ctx.Done():
+		select {
+		case <-leaseDone:
+			return false, nil
+		default:
+			return false, consumer.ctx.Err()
+		}
+	}
 }
 
 func (consumer *runCommitConsumer) beginIntentBatch(batch RunIntentBatch, transcript *[]TranscriptEntry, messages *[]llm.Message) error {
@@ -354,6 +557,7 @@ func (consumer *runCommitConsumer) beginIntentBatch(batch RunIntentBatch, transc
 	}
 	batch.RunID = consumer.runID
 	batch.CanonicalWorkspaceRoot = consumer.binding.CanonicalWorkspaceRoot
+	batch.ProcessSessionAdmission = consumer.processSessionAdmission
 	if err := consumer.sink.BeginIntentBatch(consumer.commitContext(), batch); err != nil {
 		closed, closeErr := consumer.takeRejectedBatch(batch, transcript, messages)
 		if closeErr != nil {
@@ -363,6 +567,90 @@ func (consumer *runCommitConsumer) beginIntentBatch(batch RunIntentBatch, transc
 			return knownRejectedBatchError{cause: err}
 		}
 		return runCommitPersistenceError{operation: "intent batch", cause: err}
+	}
+	return nil
+}
+
+func (consumer *runCommitConsumer) completeProcessSessionAction(invocation *tools.ProcessSessionInvocation, lease *tools.ProcessSessionLeaseSnapshot, intent ActionIntent) error {
+	if consumer == nil || invocation == nil || lease == nil {
+		return nil
+	}
+	sink, ok := consumer.sink.(RunCommitProcessSessionSink)
+	if !ok {
+		return ErrRunCommitProcessSessionUnavailable
+	}
+	publish := func(snapshot tools.ProcessSessionLeaseSnapshot) error {
+		*lease = tools.CloneProcessSessionLeaseSnapshot(snapshot)
+		if snapshot.Phase != tools.ProcessSessionLeaseActive && snapshot.Phase != tools.ProcessSessionLeaseStopped {
+			return runCommitQuiescenceError{cause: ErrRunCommitQuiescenceUnproven}
+		}
+		if err := sink.CompleteProcessSessionAction(consumer.commitContext(), snapshot, processSessionActionRefFromIntent(intent), invocation.Operation()); err != nil {
+			return runCommitPersistenceError{operation: "process-session action", cause: err}
+		}
+		// The manager reports its initial Active phase from inside Start, before
+		// this consumer can durably record the delivered-live execution. Publish
+		// Active only after the exact execution, receipt, and action checkpoint
+		// are synced; a joined Stopped snapshot must remain stopped.
+		if invocation.Operation() == tools.ProcessSessionOperationStart && snapshot.Phase == tools.ProcessSessionLeaseActive {
+			if err := sink.RecordProcessSessionLease(consumer.commitContext(), snapshot); err != nil {
+				return runCommitPersistenceError{operation: "process-session active lease", cause: err}
+			}
+		}
+		return nil
+	}
+	if invocation.Operation() == tools.ProcessSessionOperationStart {
+		if err := invocation.WithStartLeasePublication(lease.SessionID, publish); err != nil {
+			return err
+		}
+		return nil
+	}
+	return publish(*lease)
+}
+
+func (consumer *runCommitConsumer) resolveProcessSessionLease(lease tools.ProcessSessionLeaseSnapshot) error {
+	if consumer == nil {
+		return nil
+	}
+	if lease.Phase != tools.ProcessSessionLeaseStopped || !lease.GroupAbsent || !lease.LeaderWaited || !lease.ReadersJoined {
+		return ErrRunCommitQuiescenceUnproven
+	}
+	sink, ok := consumer.sink.(RunCommitProcessSessionSink)
+	if !ok {
+		return ErrRunCommitProcessSessionUnavailable
+	}
+	if err := sink.ResolveProcessSessionLease(consumer.commitContext(), lease, lease.GroupAbsent, lease.LeaderWaited, lease.ReadersJoined); err != nil {
+		return runCommitPersistenceError{operation: "process-session closure", cause: err}
+	}
+	if consumer.processSession != nil {
+		consumer.processSession.MarkLeaseClosed(lease.SessionID)
+	}
+	if taskID := consumer.completionTaskIDs[lease.Action.ActionID]; taskID > 0 {
+		markRunCompletionResolved(consumer.ctx, taskID)
+	}
+	return nil
+}
+
+func (consumer *runCommitConsumer) resolveProcessSessionLeaseForInvocation(
+	invocation *tools.ProcessSessionInvocation,
+	lease tools.ProcessSessionLeaseSnapshot,
+	taskID uint64,
+) error {
+	if consumer == nil || invocation == nil {
+		return ErrRunCommitProcessSessionUnavailable
+	}
+	if lease.Phase != tools.ProcessSessionLeaseStopped || !lease.GroupAbsent || !lease.LeaderWaited || !lease.ReadersJoined {
+		return ErrRunCommitQuiescenceUnproven
+	}
+	sink, ok := consumer.sink.(RunCommitProcessSessionSink)
+	if !ok {
+		return ErrRunCommitProcessSessionUnavailable
+	}
+	if err := sink.ResolveProcessSessionLease(consumer.commitContext(), lease, lease.GroupAbsent, lease.LeaderWaited, lease.ReadersJoined); err != nil {
+		return runCommitPersistenceError{operation: "process-session closure", cause: err}
+	}
+	invocation.MarkLeaseClosed(lease.SessionID)
+	if taskID > 0 {
+		markRunCompletionResolved(consumer.ctx, taskID)
 	}
 	return nil
 }
@@ -515,18 +803,56 @@ func (consumer *runCommitConsumer) commitTerminal(transcript []TranscriptEntry, 
 	if err := CheckRunGeneration(consumer.commitContext()); err != nil {
 		return toolOutcomeUnknownError{cause: err}
 	}
+	var deliveryBinding *tools.ProcessSessionDeliveryBinding
+	if consumer.processSession != nil {
+		previous := ""
+		for {
+			refs, err := consumer.activeProcessSessionRefs()
+			if err != nil {
+				return toolOutcomeUnknownError{cause: err}
+			}
+			binding, active, err := consumer.processSession.DeliveryBinding(consumer.runID)
+			if err != nil {
+				return toolOutcomeUnknownError{cause: err}
+			}
+			if active {
+				deliveryBinding = &binding
+				break
+			}
+			if len(refs) == 0 {
+				break
+			}
+			var current string
+			for _, ref := range refs {
+				current += ref.SessionID + "\x00"
+			}
+			if current == previous {
+				return toolOutcomeUnknownError{cause: errors.New("core: active process-session lease is absent from its manager handoff")}
+			}
+			previous = current
+		}
+	}
 	terminal := RunTerminal{
-		Generation:           runGenerationMetadataPointer(consumer.ctx),
-		RunID:                consumer.runID,
-		Transcript:           cloneTranscriptEntries(transcript),
-		Projections:          append([]CompactionProjection(nil), projections...),
-		Outcome:              outcome,
-		TerminalCheckpointID: consumer.terminalID,
+		Generation:             runGenerationMetadataPointer(consumer.ctx),
+		RunID:                  consumer.runID,
+		Transcript:             cloneTranscriptEntries(transcript),
+		Projections:            append([]CompactionProjection(nil), projections...),
+		Outcome:                outcome,
+		TerminalCheckpointID:   consumer.terminalID,
+		ProcessSessionDelivery: deliveryBinding,
 	}
 	if err := consumer.sink.CommitTerminal(consumer.commitContext(), terminal); err != nil {
 		return runCommitPersistenceError{operation: "terminal", cause: err}
 	}
-	markRunCommitTerminalSynced(consumer.ctx)
+	if deliveryBinding != nil {
+		delivery, err := consumer.processSession.ConfirmTerminalDelivery(*deliveryBinding)
+		if err != nil {
+			return toolOutcomeUnknownError{cause: fmt.Errorf("confirm process-session terminal delivery: %w", err)}
+		}
+		markRunCommitTerminalSyncedWithDelivery(consumer.ctx, &delivery)
+	} else {
+		markRunCommitTerminalSynced(consumer.ctx)
+	}
 	return nil
 }
 
@@ -668,7 +994,50 @@ func (consumer *runCommitConsumer) prepareInvocation(ctx context.Context, regist
 	if err := preflightDurableCompletion(ctx, invocation, nil); err != nil {
 		return nil, nil, err
 	}
+	if _, ok := tools.ProcessSessionInvocationFor(invocation); ok {
+		if _, supported := consumer.sink.(RunCommitProcessSessionSink); !supported {
+			return nil, nil, ErrRunCommitProcessSessionUnavailable
+		}
+	}
 	return invocation, nil, nil
+}
+
+func processSessionActionRefFromIntent(intent ActionIntent) tools.ProcessSessionActionRef {
+	return tools.ProcessSessionActionRef{
+		SessionID: intent.SessionID, WorkspaceID: intent.WorkspaceID, RunID: intent.RunID,
+		ActionBatchID: intent.ActionBatchID, ActionID: intent.ActionID, OwnerGeneration: intent.OwnerGeneration,
+		AssistantTranscriptOrdinal: intent.AssistantTranscriptOrdinal, ToolCallID: intent.ToolCallID,
+		SchemaDigest: intent.SchemaDigest, ArgumentDigest: intent.ArgumentDigest,
+	}
+}
+
+func (consumer *runCommitConsumer) processSessionContext(ctx context.Context, intent ActionIntent, invocation tools.PreparedInvocation, taskID uint64) (context.Context, *tools.ProcessSessionInvocation, error) {
+	processInvocation, ok := tools.ProcessSessionInvocationFor(invocation)
+	if !ok {
+		return ctx, nil, nil
+	}
+	leaseSink, ok := consumer.sink.(RunCommitProcessSessionSink)
+	if !ok {
+		return ctx, nil, ErrRunCommitProcessSessionUnavailable
+	}
+	if processInvocation.Operation() == tools.ProcessSessionOperationStart {
+		ctx = tools.WithProcessSessionAction(ctx, processSessionActionRefFromIntent(intent), func(_ context.Context, lease tools.ProcessSessionLeaseSnapshot) error {
+			// The Active checkpoint is written by completeProcessSessionAction
+			// after the delivered-live execution and successful start receipt are
+			// durable. Recording it here would order it before the execution.
+			if lease.Phase == tools.ProcessSessionLeaseActive {
+				return nil
+			}
+			if lease.Phase == tools.ProcessSessionLeaseStopped && processInvocation.StartActionPublished(lease.SessionID) {
+				return consumer.resolveProcessSessionLeaseForInvocation(&processInvocation, lease, taskID)
+			}
+			if err := leaseSink.RecordProcessSessionLease(consumer.commitContext(), lease); err != nil {
+				return runCommitPersistenceError{operation: "process-session lease", cause: err}
+			}
+			return nil
+		})
+	}
+	return ctx, &processInvocation, nil
 }
 
 func preflightDurableCompletion(ctx context.Context, invocation tools.PreparedInvocation, streamSink tools.SynchronousStreamSink) error {
@@ -713,9 +1082,40 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 		}
 		return runCommitToolResult{output: output, isError: true, outcome: outcome}, nil
 	}
+	if tools.PreparedEditRetryBlockedBeforeDispatch(ctx, invocation) {
+		output := "Error: " + ErrEditRecoveryStaleRetry.Error()
+		outcome := ReceiptOutcomeError
+		if ctx.Err() != nil {
+			output = "Error: edit retry was interrupted before dispatch"
+			outcome = ReceiptOutcomeInterrupted
+		}
+		if err := consumer.commitKnownCall(ordinal, assistant, "batch-"+newClaimID(), call, uint64(len(*transcript)), output, outcome, transcript, messages); err != nil {
+			return runCommitToolResult{output: output, isError: true, outcome: outcome}, err
+		}
+		if ctx.Err() != nil {
+			return runCommitToolResult{output: output, isError: true, outcome: outcome}, ctx.Err()
+		}
+		return runCommitToolResult{output: output, isError: true, outcome: outcome}, ErrEditRecoveryStaleRetry
+	}
 
 	batchID := "batch-" + newClaimID()
 	intent := consumer.actionIntent(batchID, ordinal, call, invocation)
+	return consumer.executePreparedSequentialAction(ctx, ordinal, assistant, call, invocation, streamSink, batchID, intent, nil, transcript, messages)
+}
+
+func (consumer *runCommitConsumer) executePreparedSequentialAction(
+	ctx context.Context,
+	ordinal uint64,
+	assistant AgentMessage,
+	call llm.ToolCall,
+	invocation tools.PreparedInvocation,
+	streamSink tools.SynchronousStreamSink,
+	batchID string,
+	intent ActionIntent,
+	dispatchOut *runCommitDispatchResult,
+	transcript *[]TranscriptEntry,
+	messages *[]llm.Message,
+) (runCommitToolResult, error) {
 	rejectionTranscriptStart := len(*transcript)
 	if err := consumer.beginIntentBatch(RunIntentBatch{
 		ActionBatchID:              batchID,
@@ -734,10 +1134,39 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 		return runCommitToolResult{}, err
 	}
 	taskID := registerRunCompletionTask(ctx, intent, invocation.CompletionSignal())
+	if taskID > 0 {
+		if consumer.completionTaskIDs == nil {
+			consumer.completionTaskIDs = make(map[string]uint64)
+		}
+		consumer.completionTaskIDs[intent.ActionID] = taskID
+	}
 	dispatch := runCommitDispatchResult{output: "Error: run owner cannot track prepared completion", isError: true, err: ErrRunCommitOwnerUnavailable}
 	if taskID > 0 {
 		dispatchCtx := consumer.processExecutionIdentityContext(ctx, taskID, intent, invocation)
-		dispatch = dispatchPreparedRunCommitCall(dispatchCtx, invocation, streamSink, taskID)
+		var processInvocation *tools.ProcessSessionInvocation
+		var processErr error
+		dispatchCtx, processInvocation, processErr = consumer.processSessionContext(dispatchCtx, intent, invocation, taskID)
+		if processInvocation != nil {
+			consumer.processSession = processInvocation
+			dispatch.processSessionLeaseInvocation = processInvocation
+		}
+		if processErr != nil {
+			dispatch = runCommitDispatchResult{output: "Error: " + processErr.Error(), isError: true, err: processErr, returned: true}
+		} else {
+			dispatch = dispatchPreparedRunCommitCall(dispatchCtx, invocation, streamSink, taskID)
+		}
+		if processInvocation != nil {
+			dispatch.processSessionLeaseInvocation = processInvocation
+		}
+		if dispatch.processSessionAdmission != nil {
+			consumer.processSessionAdmission = dispatch.processSessionAdmission
+		}
+		if processInvocation != nil {
+			dispatch.processSessionLeaseInvocation = processInvocation
+		}
+	}
+	if dispatchOut != nil {
+		*dispatchOut = dispatch
 	}
 	dispatchState := DispatchStateDispatched
 	resourceState := RunExecutionCleanupPending
@@ -750,6 +1179,20 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 		resourceState = RunExecutionQuiescent
 		proof = details.proof
 	}
+	processInvocation := dispatch.processSessionLeaseInvocation
+	processStartLive := processInvocation != nil && processInvocation.Operation() == tools.ProcessSessionOperationStart &&
+		dispatch.processSessionLease != nil && processInvocation.AllowsLease(*dispatch.processSessionLease)
+	processStartDeliveredAtExecution := processStartLive
+	if processStartLive {
+		resourceState = RunExecutionDeliveredLive
+		proof = ""
+	} else if dispatch.committed && processInvocation != nil && processInvocation.Operation() == tools.ProcessSessionOperationStart && dispatch.processSessionLease != nil {
+		// Do not claim a live transfer when the exact manager no longer proves
+		// the original process identity active. The typed closure path below must
+		// resolve it before the run can become quiescent.
+		resourceState = RunExecutionCleanupPending
+		proof = ""
+	}
 	execution := ActionExecution{
 		RunID:                      intent.RunID,
 		AssistantTranscriptOrdinal: intent.AssistantTranscriptOrdinal,
@@ -761,11 +1204,16 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 		ExecutionIdentity:          consumer.executionIdentity(intent.ActionID),
 		CompletionProof:            proof,
 	}
+	if processStartLive {
+		lease := tools.CloneProcessSessionLeaseSnapshot(*dispatch.processSessionLease)
+		execution.ProcessSessionLease = &lease
+	}
 	if err := consumer.recordTaskExecution(taskID, execution); err != nil {
 		return runCommitToolResult{}, err
 	}
 	outcome := runCommitReceiptOutcome(ctx, dispatch)
 	appendToolReceipt(messages, transcript, call, dispatch.output, outcome, consumer)
+	attachToolContentBlocks(messages, transcript, dispatch.contentBlocks)
 	index := uint64(len(*transcript) - 1)
 	(*transcript)[len(*transcript)-1].SourceTruncated = cloneOptionalBool(dispatch.sourceTruncated)
 	(*transcript)[len(*transcript)-1].ReceiptOutputTruncated = dispatch.receiptOutputTruncated
@@ -780,6 +1228,42 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 		toolResult.outcome = ReceiptOutcomeUnknown
 		return toolResult, err
 	}
+	if outcome == ReceiptOutcomeSuccess {
+		if err := consumer.completeProcessSessionAction(processInvocation, dispatch.processSessionLease, intent); err != nil {
+			toolResult.isError = true
+			toolResult.outcome = ReceiptOutcomeUnknown
+			return toolResult, err
+		}
+		if processInvocation != nil && processInvocation.Operation() == tools.ProcessSessionOperationStart {
+			processStartLive = dispatch.processSessionLease != nil &&
+				dispatch.processSessionLease.Phase == tools.ProcessSessionLeaseActive &&
+				processInvocation.AllowsLease(*dispatch.processSessionLease)
+			if processStartDeliveredAtExecution && !processStartLive && dispatch.processSessionLease != nil &&
+				dispatch.processSessionLease.Phase == tools.ProcessSessionLeaseActive {
+				_, closing, lifecycleErr := processInvocation.LeaseLifecycle(*dispatch.processSessionLease)
+				if lifecycleErr != nil || !closing {
+					if lifecycleErr == nil {
+						lifecycleErr = ErrRunCommitQuiescenceUnproven
+					}
+					toolResult.isError = true
+					return toolResult, runCommitQuiescenceError{cause: lifecycleErr}
+				}
+				if _, waitErr := consumer.waitForProcessSessionClosure(dispatch.processSessionLease.SessionID); waitErr != nil {
+					toolResult.isError = true
+					return toolResult, waitErr
+				}
+				if refreshErr := processInvocation.WithStartLeasePublication(dispatch.processSessionLease.SessionID, func(snapshot tools.ProcessSessionLeaseSnapshot) error {
+					*dispatch.processSessionLease = tools.CloneProcessSessionLeaseSnapshot(snapshot)
+					return nil
+				}); refreshErr != nil {
+					toolResult.isError = true
+					return toolResult, refreshErr
+				}
+				processStartLive = dispatch.processSessionLease.Phase == tools.ProcessSessionLeaseActive &&
+					processInvocation.AllowsLease(*dispatch.processSessionLease)
+			}
+		}
+	}
 	if !dispatch.committed {
 		if err := consumer.resolveTask(taskID, ExecutionResolution{RunID: intent.RunID, ActionID: intent.ActionID, Evidence: ResolutionNeverDispatched}); err != nil {
 			toolResult.isError = true
@@ -789,7 +1273,38 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 			toolResult.isError = true
 			return toolResult, ctx.Err()
 		}
+	} else if processStartLive {
+		leaseDone := processInvocation.SessionClosed(dispatch.processSessionLease.SessionID)
+		ownerClosed := processInvocation.OwnerClosed()
+		if !transferRunCompletionTaskToHost(ctx, taskID, leaseDone, ownerClosed) {
+			toolResult.isError = true
+			return toolResult, errors.Join(ErrRunCommitQuiescenceUnproven, errors.New("process-session lease could not transfer to its live host owner"))
+		}
+		if dispatch.processSessionAdmission != nil {
+			consumer.processSessionAdmission = dispatch.processSessionAdmission
+		}
+	} else if processInvocation != nil && processInvocation.Operation() == tools.ProcessSessionOperationStart {
+		lease := dispatch.processSessionLease
+		if lease == nil || lease.Phase != tools.ProcessSessionLeaseStopped || !lease.GroupAbsent || !lease.LeaderWaited || !lease.ReadersJoined {
+			toolResult.isError = true
+			return toolResult, runCommitQuiescenceError{cause: ErrRunCommitQuiescenceUnproven}
+		}
+		if err := consumer.resolveProcessSessionLease(*lease); err != nil {
+			toolResult.isError = true
+			return toolResult, err
+		}
+		if runOwnerFromContext(ctx) == nil {
+			toolResult.isError = true
+			return toolResult, ErrRunCommitOwnerUnavailable
+		}
+		markRunCompletionResolved(ctx, taskID)
 	} else {
+		if dispatch.processSessionLease != nil && dispatch.processSessionLease.Phase == tools.ProcessSessionLeaseStopped {
+			if err := consumer.resolveProcessSessionLease(*dispatch.processSessionLease); err != nil {
+				toolResult.isError = true
+				return toolResult, err
+			}
+		}
 		resolved, err := consumer.resolvePreparedTask(ctx, taskID, intent, execution)
 		if err != nil {
 			toolResult.isError = true
@@ -805,16 +1320,30 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 		return toolResult, markUnknownToolOutcome(dispatch.err)
 	}
 	if dispatch.committed {
-		consumer.markToolCompleted(call.ID, intent.ActionID, dispatch.metadata)
+		consumer.markToolCompleted(call, intent, invocation, dispatch, outcome)
+		if tools.PreparedEditRetryBlockedKnown(invocation, dispatch.err) {
+			return toolResult, ErrEditRecoveryStaleRetry
+		}
 	}
 	return toolResult, nil
 }
 
-func (consumer *runCommitConsumer) markToolCompleted(id, actionID string, metadata map[string]any) {
+func (consumer *runCommitConsumer) markToolCompleted(call llm.ToolCall, intent ActionIntent, invocation tools.PreparedInvocation, dispatch runCommitDispatchResult, outcome string) {
 	if consumer.completedTools == nil {
 		consumer.completedTools = map[string]completedToolAction{}
 	}
-	consumer.completedTools[id] = completedToolAction{actionID: actionID, metadata: cloneStringAnyMap(metadata)}
+	completed := completedToolAction{
+		actionID: intent.ActionID, callID: call.ID, runID: intent.RunID,
+		ownerGeneration: intent.OwnerGeneration, ordinal: intent.AssistantTranscriptOrdinal,
+		metadata: cloneStringAnyMap(dispatch.metadata),
+	}
+	if outcome == ReceiptOutcomeSuccess && !dispatch.isError && dispatch.err == nil {
+		completed.readEvidence = dispatch.readEvidence
+	}
+	if outcome == ReceiptOutcomeError && dispatch.committed && dispatch.err != nil {
+		completed.editMismatch, _ = tools.PreparedEditMismatchEvidenceFor(invocation, dispatch.err)
+	}
+	consumer.completedTools[call.ID] = completed
 }
 
 func (consumer *runCommitConsumer) resolvePreparedTask(ctx context.Context, taskID uint64, intent ActionIntent, firstExecution ActionExecution) (bool, error) {
@@ -888,6 +1417,7 @@ type runCommitParallelAction struct {
 	intent     ActionIntent
 	taskID     uint64
 	known      *runCommitToolResult
+	prepareErr error
 	stopErr    error
 	result     runCommitDispatchResult
 	done       chan struct{}
@@ -931,9 +1461,24 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 				known.outcome = ReceiptOutcomeInterrupted
 			}
 			action.known = &known
+			action.prepareErr = err
 			if errors.Is(err, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(err, ErrRunCommitChildUnsupported) || errors.Is(err, ErrRunCommitStreamingUnsupported) || errors.Is(err, ErrLoopDetected) {
 				action.stopErr = err
 			}
+			batch.KnownReceipts = append(batch.KnownReceipts, consumer.knownReceipt(ordinal, call, uint64(len(*transcript)+index), known.output, known.outcome))
+			actions[index] = action
+			continue
+		}
+		if tools.PreparedEditRetryBlockedBeforeDispatch(ctx, invocation) {
+			known := runCommitToolResult{output: "Error: " + ErrEditRecoveryStaleRetry.Error(), isError: true, outcome: ReceiptOutcomeError}
+			if ctx.Err() != nil {
+				known.output = "Error: edit retry was interrupted before dispatch"
+				known.outcome = ReceiptOutcomeInterrupted
+				action.stopErr = ctx.Err()
+			} else {
+				action.stopErr = ErrEditRecoveryStaleRetry
+			}
+			action.known = &known
 			batch.KnownReceipts = append(batch.KnownReceipts, consumer.knownReceipt(ordinal, call, uint64(len(*transcript)+index), known.output, known.outcome))
 			actions[index] = action
 			continue
@@ -943,6 +1488,159 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 		action.intent = consumer.actionIntent(batchID, ordinal, call, invocation)
 		batch.Intents = append(batch.Intents, action.intent)
 		actions[index] = action
+	}
+	segments := delegationSegments(actions, consumer.binding.CanonicalWorkspaceRoot)
+	if len(segments) == 0 {
+		return consumer.executePreparedParallelGroup(ctx, batch, actions, transcript, messages)
+	}
+	for segmentIndex, segment := range segments {
+		if err := ctx.Err(); err != nil {
+			return consumer.finishUnreservedStagedCalls(ordinal, assistant, actions[segment.start:], transcript, messages, err)
+		}
+		phaseID := batchID
+		if segmentIndex > 0 {
+			phaseID = "batch-" + newClaimID()
+		}
+		phase := RunIntentBatch{ActionBatchID: phaseID, AssistantTranscriptOrdinal: ordinal, AssistantMessage: assistant}
+		for i := segment.start; i < segment.end; i++ {
+			action := &actions[i]
+			if action.known != nil {
+				phase.KnownReceipts = append(phase.KnownReceipts, consumer.knownReceipt(
+					ordinal, action.call, uint64(len(*transcript)+i-segment.start), action.known.output, action.known.outcome,
+				))
+				continue
+			}
+			action.intent.ActionBatchID = phaseID
+			phase.Intents = append(phase.Intents, action.intent)
+		}
+		if err := consumer.executePreparedParallelGroup(ctx, phase, actions[segment.start:segment.end], transcript, messages); err != nil {
+			// Close only the unreserved suffix for a known cancellation. Unknown or
+			// persistence failures keep their uncertain durable state fenced.
+			if !hasUnknownToolOutcome(err) && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+				return consumer.finishUnreservedStagedCalls(ordinal, assistant, actions[segment.end:], transcript, messages, err)
+			}
+			return err
+		}
+		for i := segment.start; i < segment.end; i++ {
+			// A closed business error is delivered to the model and permits later
+			// segments. A pre-dispatch guard/fence failure is a barrier because its
+			// executor never ran.
+			if actions[i].known == nil && !actions[i].result.committed {
+				cause := actions[i].result.err
+				if cause == nil {
+					cause = ErrRunCommitPreparedInvocationUnavailable
+				}
+				return consumer.finishUnreservedStagedCalls(ordinal, assistant, actions[segment.end:], transcript, messages, cause)
+			}
+		}
+	}
+	return nil
+}
+
+type runCommitActionSegment struct{ start, end int }
+
+// delegationSegments preserves ordinary parallel phases while isolating exact
+// host-owned delegation and process-session calls. Prepared capabilities are
+// not reissued, and only the typed process-session path may transfer a live
+// lease to the invocation host.
+func delegationSegments(actions []runCommitParallelAction, root string) []runCommitActionSegment {
+	isolated := make([]bool, len(actions))
+	hasIsolated := false
+	for i := range actions {
+		action := &actions[i]
+		if action.invocation != nil && action.known == nil {
+			if _, ok := tools.ProcessSessionInvocationFor(action.invocation); ok {
+				isolated[i], hasIsolated = true, true
+				continue
+			}
+		}
+		intent := action.intent
+		if action.invocation == nil || action.known != nil || intent.ManagedDelegationProof == nil ||
+			!intent.ManagedDelegationProof.MatchesAction(intent.ToolIdentity, intent.EffectSet, intent.SchemaDigest, intent.ArgumentDigest, intent.ToolCallID, root) {
+			continue
+		}
+		isolated[i], hasIsolated = true, true
+	}
+	if !hasIsolated {
+		return nil
+	}
+	var segments []runCommitActionSegment
+	ordinaryStart := 0
+	for i := range actions {
+		action := &actions[i]
+		if action.known != nil && action.stopErr == nil && stagedPreparationStopsRun(action.prepareErr) {
+			action.stopErr = action.prepareErr
+		}
+		// A known authority failure is a barrier too: later ordinary calls must
+		// not run concurrently with that rejection.
+		if !isolated[i] && (action.known == nil || action.stopErr == nil) {
+			continue
+		}
+		if ordinaryStart < i {
+			segments = append(segments, runCommitActionSegment{start: ordinaryStart, end: i})
+		}
+		segments = append(segments, runCommitActionSegment{start: i, end: i + 1})
+		ordinaryStart = i + 1
+	}
+	if ordinaryStart < len(actions) {
+		segments = append(segments, runCommitActionSegment{start: ordinaryStart, end: len(actions)})
+	}
+	return segments
+}
+
+func stagedPreparationStopsRun(err error) bool {
+	if err == nil {
+		return false
+	}
+	for _, failure := range []error{
+		context.Canceled, context.DeadlineExceeded,
+		tools.ErrDispatchFenceChanged, tools.ErrDispatchFenceUnavailable,
+		tools.ErrInvalidDispatchFenceDomain, tools.ErrPreparedInvocationConsumed,
+		tools.ErrPreparedInvocationUnavailable, tools.ErrPreparedDispatchLeaseUnavailable,
+		tools.ErrPreparedToolPolicyUnavailable, tools.ErrPreparedCallMutation,
+		tools.ErrPreparedProxyRegistrationStale,
+	} {
+		if errors.Is(err, failure) {
+			return true
+		}
+	}
+	return hasUnknownToolOutcome(err)
+}
+
+func (consumer *runCommitConsumer) finishUnreservedStagedCalls(
+	ordinal uint64,
+	assistant AgentMessage,
+	actions []runCommitParallelAction,
+	transcript *[]TranscriptEntry,
+	messages *[]llm.Message,
+	cause error,
+) error {
+	for _, action := range actions {
+		if err := consumer.commitKnownCall(ordinal, assistant, "batch-"+newClaimID(), action.call, uint64(len(*transcript)), RejectedBatchSuffixOutput, ReceiptOutcomeInterrupted, transcript, messages); err != nil {
+			return errors.Join(cause, err)
+		}
+	}
+	return cause
+}
+
+func (consumer *runCommitConsumer) executePreparedParallelGroup(
+	ctx context.Context,
+	batch RunIntentBatch,
+	actions []runCommitParallelAction,
+	transcript *[]TranscriptEntry,
+	messages *[]llm.Message,
+) error {
+	ordinal := batch.AssistantTranscriptOrdinal
+	if len(actions) == 1 && actions[0].invocation != nil {
+		if _, isProcessSession := tools.ProcessSessionInvocationFor(actions[0].invocation); isProcessSession {
+			action := &actions[0]
+			_, err := consumer.executePreparedSequentialAction(
+				ctx, ordinal, batch.AssistantMessage, action.call, action.invocation, action.streamSink,
+				batch.ActionBatchID, action.intent, &action.result, transcript, messages,
+			)
+			action.complete = err == nil
+			return err
+		}
 	}
 	if err := consumer.beginIntentBatch(batch, transcript, messages); err != nil {
 		return err
@@ -1056,6 +1754,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 			outcome = ReceiptOutcomeUnknown
 		}
 		appendToolReceipt(messages, transcript, action.call, output, outcome, consumer)
+		attachToolContentBlocks(messages, transcript, dispatch.contentBlocks)
 		(*transcript)[len(*transcript)-1].SourceTruncated = cloneOptionalBool(dispatch.sourceTruncated)
 		(*transcript)[len(*transcript)-1].ReceiptOutputTruncated = dispatch.receiptOutputTruncated
 		entry := (*transcript)[len(*transcript)-1]
@@ -1124,7 +1823,8 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 	if runErr == nil {
 		for _, action := range actions {
 			if action.invocation != nil && action.complete && action.result.committed {
-				consumer.markToolCompleted(action.call.ID, action.intent.ActionID, action.result.metadata)
+				outcome := runCommitReceiptOutcome(ctx, action.result)
+				consumer.markToolCompleted(action.call, action.intent, action.invocation, action.result, outcome)
 			}
 		}
 	}

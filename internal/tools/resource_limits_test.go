@@ -43,7 +43,7 @@ func TestApplyResourceLimits_ZeroLimitsNoOp(t *testing.T) {
 func TestBashTool_ResourceLimitsSimpleCommand(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	limits := ResourceLimits{MaxMemory: 256 * 1024 * 1024} // 256MB
+	limits := ResourceLimits{MaxCPU: 5 * time.Second}
 	tool := NewBashTool(WithResourceLimits(limits), WithTimeout(10*time.Second), WithNoSandbox())
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "echo limited"},

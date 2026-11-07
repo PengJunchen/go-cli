@@ -202,6 +202,18 @@ type AgentConfig struct {
 	// Thinking controls the LLM reasoning depth. Valid values:
 	// none|minimal|low|medium|high|max. Empty defaults to medium.
 	Thinking string `json:"thinking"`
+	// MultimodalTokensPerItemReserve bounds locally estimated input usage for
+	// each content block whose token size cannot be estimated. Zero keeps the
+	// request-envelope estimate fail-closed for unknown multimodal content.
+	MultimodalTokensPerItemReserve    int `json:"multimodal_tokens_per_item_reserve"`
+	multimodalTokensPerItemReserveSet bool
+}
+
+// SetMultimodalTokensPerItemReserve sets the per-item reserve explicitly,
+// including zero when a higher-priority config layer must clear a lower one.
+func (a *AgentConfig) SetMultimodalTokensPerItemReserve(value int) {
+	a.MultimodalTokensPerItemReserve = value
+	a.multimodalTokensPerItemReserveSet = true
 }
 
 // ToolsConfig controls which builtin tools and tool registries are available.
@@ -266,13 +278,13 @@ type ApprovalConfig struct {
 // default user store; a trusted project can choose its own workspace path.
 type MemoryConfig struct {
 	StorePath string `json:"store_path"`
-	// Enabled defaults to true. False disables automatic extraction and prompt
+	// Enabled defaults to false. True enables automatic extraction and prompt
 	// injection while preserving explicit /memory operations.
 	Enabled *bool `json:"enabled"`
 }
 
 // AutomaticEnabled reports whether automatic workspace memory is enabled.
-func (cfg MemoryConfig) AutomaticEnabled() bool { return cfg.Enabled == nil || *cfg.Enabled }
+func (cfg MemoryConfig) AutomaticEnabled() bool { return cfg.Enabled != nil && *cfg.Enabled }
 
 // SessionConfig controls the active session and its persistence location.
 type SessionConfig struct {

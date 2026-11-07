@@ -17,6 +17,7 @@ type registerDefaultsConfig struct {
 	bashSandbox      BashSandbox
 	resourceLimits   ResourceLimits
 	gitTool          GitTool
+	processSessions  ProcessSessionOperations
 	builtinWhitelist map[string]bool
 	pathWhitelist    []string
 	canonicalRoot    string
@@ -61,6 +62,12 @@ func WithRegisteredResourceLimits(limits ResourceLimits) RegisterDefaultsOption 
 // stash_pop, reset, revert, fetch, pull, remote) registered by RegisterDefaults.
 func WithRegisteredGitTool(git GitTool) RegisterDefaultsOption {
 	return func(c *registerDefaultsConfig) { c.gitTool = git }
+}
+
+// WithRegisteredProcessSessionManager wires host-owned process sessions into
+// RegisterDefaults. The tool is omitted when no manager is supplied.
+func WithRegisteredProcessSessionManager(manager ProcessSessionOperations) RegisterDefaultsOption {
+	return func(c *registerDefaultsConfig) { c.processSessions = manager }
 }
 
 // WithRegisteredBuiltinWhitelist restricts RegisterDefaults to only the named
@@ -154,7 +161,7 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	if cfg.bashSandbox != nil {
 		bashOpts = append(bashOpts, WithBashSandbox(cfg.bashSandbox))
 	}
-	if cfg.resourceLimits.MaxMemory > 0 || cfg.resourceLimits.MaxCPU > 0 {
+	if cfg.resourceLimits.MaxMemory != 0 || cfg.resourceLimits.MaxCPU != 0 {
 		bashOpts = append(bashOpts, WithResourceLimits(cfg.resourceLimits))
 	}
 
@@ -189,6 +196,9 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 		NewGrepTool(grepOpts...),
 		NewFindTool(findOpts...),
 		NewLSTool(lsOpts...),
+	}
+	if cfg.processSessions != nil {
+		defs = append(defs, NewProcessSessionTool(cfg.processSessions))
 	}
 
 	// Register git tools when a GitTool is wired.
@@ -256,6 +266,10 @@ func registerDefaultTool(ctx context.Context, reg ToolRegistry, def ToolDefiniti
 			return registrar.registerTrustedWorkspaceWrite(ctx, def)
 		}
 	case *BashTool, *StreamingBashToolImpl:
+		if registrar, ok := reg.(trustedLocalProcessRegistrar); ok {
+			return registrar.registerTrustedLocalProcess(ctx, def)
+		}
+	case *ProcessSessionTool:
 		if registrar, ok := reg.(trustedLocalProcessRegistrar); ok {
 			return registrar.registerTrustedLocalProcess(ctx, def)
 		}

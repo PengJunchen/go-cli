@@ -1072,8 +1072,6 @@ func TestDefaultTraceContainsNoPrompt(t *testing.T) {
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"todo_write","arguments":"{\"action\":\"add\",\"content\":\"` + toolCanary + `\"}"}}]}}]}`)) //nolint:errcheck
 		case 2:
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_2","type":"function","function":{"name":"enter_plan_mode","arguments":"{\"reason\":\"` + promptCanary + `\"}"}}]}}]}`)) //nolint:errcheck
-		case 4:
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"[]"}}]}`)) //nolint:errcheck
 		default:
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)) //nolint:errcheck
 		}
@@ -1106,7 +1104,7 @@ func TestDefaultTraceContainsNoPrompt(t *testing.T) {
 		return cfg, nil
 	})
 	require.Equal(t, 0, code, "stderr: %s", stderr.String())
-	require.Equal(t, 4, requestCount, "expected two tool calls, a final response, and default automatic extraction")
+	require.Equal(t, 3, requestCount, "expected two tool calls and one final response; memory extraction is opt-in")
 
 	files, err := filepath.Glob(filepath.Join(traceDir, "*.jsonl"))
 	require.NoError(t, err)

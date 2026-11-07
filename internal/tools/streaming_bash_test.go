@@ -366,7 +366,7 @@ func streamingBashDrainCommand(t *testing.T, bothStreams bool) string {
 	return command
 }
 
-func TestStreamingBashLongLineReportsScannerErrorAndDrains(t *testing.T) {
+func TestStreamingBashLongLineRetainsPrefixAndDrains(t *testing.T) {
 	const (
 		maxOutput = 20
 		timeout   = 3 * time.Second
@@ -384,15 +384,13 @@ func TestStreamingBashLongLineReportsScannerErrorAndDrains(t *testing.T) {
 	})
 	elapsed := time.Since(started)
 
-	require.Error(t, err)
-	assert.NotContains(t, err.Error(), "timed out")
+	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Less(t, elapsed, timeout)
-	assert.LessOrEqual(t, len(result.Output), maxOutput+len("\n[output truncated]"))
-	assert.Contains(t, result.Output, "[output truncated]")
-	assert.LessOrEqual(t, len(result.Output)-len("\n[output truncated]"), maxOutput)
+	assert.Equal(t, strings.Repeat(" ", maxOutput)+streamingBashTruncatedMarker, result.Output)
 	assert.Equal(t, true, result.Metadata["truncated"])
-	assert.Contains(t, result.Metadata["read_error"], "token too long")
+	assert.Equal(t, 0, result.Metadata["exit_code"])
+	assert.NotContains(t, result.Metadata, "read_error")
 }
 
 func TestReadPipeSurfacesNonEOFReadErrorAfterDraining(t *testing.T) {

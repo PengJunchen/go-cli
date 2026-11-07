@@ -261,7 +261,7 @@ func (r *retryModel) Generate(ctx context.Context, msgs []Message, opts ...Optio
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		msg, err := r.next.Generate(ctx, msgs, opts...)
+		msg, err := r.next.Generate(withRequestAttempt(ctx, attempt), msgs, opts...)
 		if err == nil {
 			if attempt > 0 {
 				r.logger.Debug("middleware.retry",
@@ -321,7 +321,7 @@ func (r *retryModel) Stream(ctx context.Context, msgs []Message, opts ...Option)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		attemptCtx, cancel := context.WithCancelCause(ctx)
+		attemptCtx, cancel := context.WithCancelCause(withRequestAttempt(ctx, attempt))
 		ch, err := r.next.Stream(attemptCtx, msgs, opts...)
 		if err == nil && ch != nil {
 			if attempt > 0 {

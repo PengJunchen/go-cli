@@ -12,6 +12,13 @@ import (
 
 var errDurableCompactionProjectionInvalid = errors.New("core: durable compaction projection is invalid")
 
+func (consumer *runCommitConsumer) validateDurableRequest(items []compaction.TurnItem) error {
+	if err := validateDurableRequestSource(items, consumer.source, consumer.runID); err != nil {
+		return err
+	}
+	return consumer.validateExistingAnchoredSummary(items)
+}
+
 func validateDurableRequestSource(items []compaction.TurnItem, snapshot *CompactionSourceSnapshot, runID string) error {
 	if err := compaction.ValidateRunRequestIntegrity(items); err != nil {
 		return fmt.Errorf("%w: %v", ErrDurableCompactionUnsupported, err)
@@ -88,6 +95,10 @@ func validateDurableCompactionResult(input []compaction.TurnItem, result compact
 	if result.Strategy == compaction.StrategyTruncating && result.NewProjection.Summary != compaction.DurableTruncationMarker {
 		return unsupported("a truncating projection must use the fixed omission marker")
 	}
+	anchored := result.NewProjection.RetainCurrentInput
+	if anchored && (result.Strategy != compaction.StrategyTruncating || result.NewProjection.Summary != compaction.DurableTruncationMarker || result.NewProjection.Through.TranscriptCount < 2) {
+		return unsupported("retaining the current input requires an anchored truncating projection")
+	}
 	through := result.NewProjection.Through
 	if through == (llm.SourceThrough{}) || through.PriorHistoryCount > uint64(len(snapshot.SourceEntryIDs)) || (through.TranscriptCount > 0 && through.PriorHistoryCount != uint64(len(snapshot.SourceEntryIDs))) {
 		return unsupported("the typed summary cursor is outside the captured source view")
@@ -95,8 +106,51 @@ func validateDurableCompactionResult(input []compaction.TurnItem, result compact
 	if err := compaction.ValidateRunRequestIntegrity(input); err != nil {
 		return unsupported(err.Error())
 	}
-	if _, err := exactSourceBoundary(input, through); err != nil {
+	boundary, err := exactSourceBoundary(input, through)
+	if err != nil {
 		return unsupported(err.Error())
+	}
+	if err := compaction.ValidateImageGroupCut(input, boundary+1); err != nil {
+		return CompactionProjection{}, err
+	}
+	if err := compaction.ValidateImageGroupRetention(input, result.Items); err != nil {
+		return CompactionProjection{}, err
+	}
+	var anchor compaction.TurnItem
+	if anchored {
+		var err error
+		anchor, err = captureDurableCurrentInput(input, snapshot, runID)
+		if err != nil {
+			return CompactionProjection{}, err
+		}
+		if err := validateDurableCurrentInputPreserved(anchor, result.Items); err != nil {
+			return CompactionProjection{}, err
+		}
+		var beforeSystems, afterSystems []compaction.TurnItem
+		for _, item := range input {
+			if item.Runtime.Source.Kind == llm.SourceEphemeral {
+				if item.Role != compaction.RoleSystem || item.IsCompaction {
+					return unsupported("anchored input contains a non-system ephemeral message")
+				}
+				beforeSystems = append(beforeSystems, item)
+			}
+		}
+		for _, item := range result.Items {
+			if item.Runtime.Source.Kind == llm.SourceEphemeral {
+				if item.Role != compaction.RoleSystem || item.IsCompaction {
+					return unsupported("anchored result contains a non-system ephemeral message")
+				}
+				afterSystems = append(afterSystems, item)
+			}
+		}
+		if len(beforeSystems) != len(afterSystems) {
+			return unsupported("anchored projection changes mandatory systems")
+		}
+		for i := range beforeSystems {
+			if !sameDurableSuffixItem(beforeSystems[i], afterSystems[i]) {
+				return unsupported("anchored projection changes mandatory systems")
+			}
+		}
 	}
 
 	summaryIndex := -1
@@ -109,7 +163,7 @@ func validateDurableCompactionResult(input []compaction.TurnItem, result compact
 			if !item.IsCompaction || item.Role != compaction.RoleUser || item.Content != result.NewProjection.Summary {
 				return unsupported("the run-local summary body or role differs from the typed projection")
 			}
-			if item.Runtime.Source.RunID != runID || item.Runtime.Source.Through != through {
+			if item.Runtime.Source.RunID != runID || item.Runtime.Source.Through != through || item.Runtime.Source.RetainCurrentInput != anchored {
 				return unsupported("the summary item cursor differs from the typed projection")
 			}
 		}
@@ -133,7 +187,7 @@ func validateDurableCompactionResult(input []compaction.TurnItem, result compact
 		if err != nil {
 			return unsupported(fmt.Sprintf("input item %d: %v", index, err))
 		}
-		if !covered {
+		if !covered || (anchored && source == anchor.Runtime.Source) {
 			expectedSuffix = append(expectedSuffix, item)
 		}
 	}
@@ -142,7 +196,7 @@ func validateDurableCompactionResult(input []compaction.TurnItem, result compact
 		if item.Runtime.Source.Kind == llm.SourceEphemeral {
 			continue
 		}
-		if index < summaryIndex {
+		if index < summaryIndex && !(anchored && index == summaryIndex-1 && item.Runtime.Source == anchor.Runtime.Source) {
 			return unsupported("a source-backed item was retained before the replacement summary")
 		}
 		if index == summaryIndex {
@@ -165,7 +219,91 @@ func validateDurableCompactionResult(input []compaction.TurnItem, result compact
 		ExpectedHistoryRevision: snapshot.Revision,
 		Through:                 CompactionCursor{PriorHistoryCount: through.PriorHistoryCount, TranscriptCount: through.TranscriptCount},
 		Summary:                 result.NewProjection.Summary,
+		RetainCurrentInput:      anchored,
 	}, nil
+}
+
+func bindActiveProcessSessionSummary(
+	consumer *runCommitConsumer,
+	projection *CompactionProjection,
+	result *compaction.CompactionResult,
+	maxTokens int,
+	estimator compaction.TokenEstimator,
+) error {
+	if consumer == nil || projection == nil || result == nil {
+		return nil
+	}
+	refs, err := consumer.activeProcessSessionRefs()
+	if err != nil {
+		return fmt.Errorf("%w: active process-session roster: %w", ErrDurableCompactionUnsupported, err)
+	}
+	if err := ValidateActiveProcessSessionRefs(refs, consumer.runID, consumer.binding.WorkspaceID); err != nil {
+		return fmt.Errorf("%w: invalid active process-session roster: %w", ErrDurableCompactionUnsupported, err)
+	}
+	projection.ActiveProcessSessions = append([]ActiveProcessSessionRef(nil), refs...)
+	content, err := ActiveProcessSessionSummaryContext(projection.Summary, refs)
+	if err != nil {
+		return fmt.Errorf("%w: render active process-session roster: %w", ErrDurableCompactionUnsupported, err)
+	}
+	if content == projection.Summary {
+		return nil
+	}
+	found := false
+	for index := range result.Items {
+		if result.Items[index].Runtime.Source.Kind != llm.SourceRunSummary {
+			continue
+		}
+		if found || result.Items[index].Content != projection.Summary || !result.Items[index].IsCompaction || result.Items[index].Role != compaction.RoleUser {
+			return fmt.Errorf("%w: active process-session roster has no unique typed summary item", ErrDurableCompactionUnsupported)
+		}
+		result.Items[index].Content = content
+		found = true
+	}
+	if !found {
+		return fmt.Errorf("%w: active process-session roster has no typed summary item", ErrDurableCompactionUnsupported)
+	}
+	if maxTokens > 0 && estimator != nil && compaction.EstimateTokens(result.Items, estimator) > maxTokens {
+		return fmt.Errorf("%w: active process-session roster exceeds the compacted request budget", ErrDurableCompactionUnsupported)
+	}
+	return nil
+}
+
+func (consumer *runCommitConsumer) validateExistingAnchoredSummary(items []compaction.TurnItem) error {
+	for _, item := range items {
+		source := item.Runtime.Source
+		if source.Kind != llm.SourceRunSummary || !source.RetainCurrentInput {
+			continue
+		}
+		if consumer.initialInput == nil {
+			return fmt.Errorf("%w: anchored summary lacks its committed input", ErrDurableCompactionUnsupported)
+		}
+		anchor, err := captureDurableCurrentInput(items, consumer.source, consumer.runID)
+		if err != nil {
+			return err
+		}
+		if err := consumer.validateCommittedInput(anchor); err != nil {
+			return err
+		}
+		digest, err := RetainedInputDigest(consumer.runID, *consumer.initialInput)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrDurableCompactionUnsupported, err)
+		}
+		found := false
+		for _, projection := range consumer.projections {
+			content, contextErr := ActiveProcessSessionSummaryContext(projection.Summary, projection.ActiveProcessSessions)
+			if contextErr != nil {
+				return fmt.Errorf("%w: invalid committed process-session roster: %w", ErrDurableCompactionUnsupported, contextErr)
+			}
+			if projection.RetainCurrentInput && projection.ExpectedHistoryRevision == consumer.source.Revision && projection.RetainedInputDigest == digest && content == item.Content && projection.Through.PriorHistoryCount == source.Through.PriorHistoryCount && projection.Through.TranscriptCount == source.Through.TranscriptCount {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("%w: anchored summary has no committed projection", ErrDurableCompactionUnsupported)
+		}
+	}
+	return nil
 }
 
 func captureDurableCurrentInput(items []compaction.TurnItem, snapshot *CompactionSourceSnapshot, runID string) (compaction.TurnItem, error) {
@@ -241,7 +379,7 @@ func (compactor isolatedCompactorInput) Compact(
 	maxTokens int,
 	estimator compaction.TokenEstimator,
 ) (compaction.CompactionResult, error) {
-	return compactor.delegate.Compact(ctx, cloneCompactionTurnItems(items), maxTokens, estimator)
+	return compaction.CompactPreservingImages(ctx, compactor.delegate, cloneCompactionTurnItems(items), maxTokens, estimator)
 }
 
 func withIsolatedCompactorInput(compactor compaction.Compactor) compaction.Compactor {
@@ -276,6 +414,12 @@ func exactSourceBoundary(items []compaction.TurnItem, expected llm.SourceThrough
 	var cursor llm.SourceThrough
 	lastRunSummaryCursor := llm.SourceThrough{}
 	boundary := -1
+	anchorIndex := -1
+	for index, item := range items {
+		if item.Runtime.Source.Kind == llm.SourceRunSummary && item.Runtime.Source.RetainCurrentInput {
+			anchorIndex = index - 1
+		}
+	}
 	for index, item := range items {
 		source := item.Runtime.Source
 		switch source.Kind {
@@ -287,6 +431,9 @@ func exactSourceBoundary(items []compaction.TurnItem, expected llm.SourceThrough
 			}
 			cursor.PriorHistoryCount++
 		case llm.SourceRunTranscript:
+			if index == anchorIndex {
+				cursor.PriorHistoryCount = source.PriorSourceCount
+			}
 			if source.PriorSourceCount != cursor.PriorHistoryCount || source.TranscriptIndex != cursor.TranscriptCount {
 				return -1, fmt.Errorf("transcript gap before item %d", index)
 			}

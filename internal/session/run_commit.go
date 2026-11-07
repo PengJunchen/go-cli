@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -362,6 +363,7 @@ func (s *SessionRunCommitSink) BeginIntentBatch(ctx context.Context, batch core.
 			intentRows = append(intentRows, row)
 		}
 		dispatchActions = append(dispatchActions, WorkspaceDispatchAction{
+			OwnerGeneration: intent.OwnerGeneration,
 			Action: PendingActionRef{
 				SessionID: intent.SessionID, WorkspaceID: intent.WorkspaceID, RunID: intent.RunID,
 				ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: intent.AssistantTranscriptOrdinal,
@@ -389,7 +391,8 @@ func (s *SessionRunCommitSink) BeginIntentBatch(ctx context.Context, batch core.
 	dispatchBatch := WorkspaceDispatchBatch{
 		WorkspaceID: s.workspaceID, SessionID: s.sessionID, RunID: batch.RunID,
 		ActionBatchID: batch.ActionBatchID, Actions: dispatchActions,
-		CanonicalWorkspaceRoot: batch.CanonicalWorkspaceRoot,
+		CanonicalWorkspaceRoot:  batch.CanonicalWorkspaceRoot,
+		ProcessSessionAdmission: batch.ProcessSessionAdmission,
 	}
 	result, definiteNoIO, err := s.index.beginDispatchBatch(ctx, dispatchBatch)
 	if err != nil {
@@ -436,6 +439,24 @@ func (s *SessionRunCommitSink) RecordExecution(ctx context.Context, execution co
 	if execution.CompletionProof != "" && execution.DispatchState != core.DispatchStateDispatched {
 		return errors.New("session: positive completion proof requires a dispatched action")
 	}
+	if execution.ResourceState == core.RunExecutionDeliveredLive {
+		if execution.ProcessSessionLease == nil {
+			return errors.New("session: delivered-live execution requires a typed process-session lease")
+		}
+		lease := execution.ProcessSessionLease
+		if lease.Phase != tools.ProcessSessionLeaseActive || lease.SessionID == "" || lease.OwnerID == "" ||
+			lease.WorkspaceID != s.workspaceID || lease.RunID != execution.RunID || lease.OwnerGeneration != execution.OwnerGeneration ||
+			lease.Action.SessionID != s.sessionID || lease.Action.WorkspaceID != s.workspaceID || lease.Action.RunID != execution.RunID ||
+			lease.Action.ActionID != execution.ActionID || lease.Action.ToolCallID != execution.ToolCallID ||
+			lease.Action.AssistantTranscriptOrdinal != execution.AssistantTranscriptOrdinal || lease.Action.OwnerGeneration != execution.OwnerGeneration {
+			return errors.New("session: delivered-live execution lease does not match its exact action")
+		}
+		if lease.Identity == nil || lease.Identity.LeaderPID <= 0 || lease.Identity.ProcessGroupID != lease.Identity.LeaderPID || lease.Identity.ProcessStartToken == "" || lease.Identity.HostGeneration == "" {
+			return errors.New("session: delivered-live execution requires a captured process-group identity")
+		}
+	} else if execution.ProcessSessionLease != nil {
+		return errors.New("session: process-session lease is valid only for a delivered-live execution")
+	}
 	var identity *core.ExecutionIdentity
 	if execution.ExecutionIdentity != nil {
 		if err := execution.ExecutionIdentity.Validate(); err != nil {
@@ -472,14 +493,22 @@ func (s *SessionRunCommitSink) RecordExecution(ctx context.Context, execution co
 		ToolCallID:                 intent.ToolCallID, ToolName: intent.ToolName,
 		DispatchState: execution.DispatchState, ResourceState: execution.ResourceState,
 		ExecutionIdentity: identity, CompletionProof: execution.CompletionProof,
+		ProcessSessionLease: func() *tools.ProcessSessionLeaseSnapshot {
+			if execution.ProcessSessionLease == nil {
+				return nil
+			}
+			lease := tools.CloneProcessSessionLeaseSnapshot(*execution.ProcessSessionLease)
+			return &lease
+		}(),
 	}
 	row.ID, err = stableRunCommitEntryID("execution", struct {
-		ActionRef       PendingActionRef
-		DispatchState   core.DispatchState
-		ResourceState   core.RunExecutionState
-		Identity        *core.ExecutionIdentity
-		CompletionProof string
-	}{refFromEntry(row, s.sessionID), execution.DispatchState, execution.ResourceState, identity, string(execution.CompletionProof)})
+		ActionRef           PendingActionRef
+		DispatchState       core.DispatchState
+		ResourceState       core.RunExecutionState
+		Identity            *core.ExecutionIdentity
+		CompletionProof     string
+		ProcessSessionLease *tools.ProcessSessionLeaseSnapshot
+	}{refFromEntry(row, s.sessionID), execution.DispatchState, execution.ResourceState, identity, string(execution.CompletionProof), row.ProcessSessionLease})
 	if err != nil {
 		return err
 	}
@@ -791,7 +820,7 @@ func (s *SessionRunCommitSink) CommitTerminal(ctx context.Context, terminal core
 		return err
 	}
 	if hasTerminal {
-		if terminalRow.ID != terminalID || terminalRow.RunOutcome != terminal.Outcome {
+		if terminalRow.ID != terminalID || terminalRow.RunOutcome != terminal.Outcome || !reflect.DeepEqual(terminalRow.ProcessSessionDelivery, terminal.ProcessSessionDelivery) {
 			return errors.New("session: terminal checkpoint conflicts with its durable row")
 		}
 		if len(existingRows) != len(terminal.Transcript) {
@@ -799,6 +828,9 @@ func (s *SessionRunCommitSink) CommitTerminal(ctx context.Context, terminal core
 		}
 		s.terminalID = terminalID
 		return nil
+	}
+	if err := s.prepareProcessSessionTerminalDeliveryLocked(ctx, terminal.RunID, terminal.ProcessSessionDelivery); err != nil {
+		return err
 	}
 	rows := make([]SessionEntry, 0, len(terminal.Transcript)-len(existingRows)+1)
 	for index := len(existingRows); index < len(terminal.Transcript); index++ {
@@ -833,7 +865,7 @@ func (s *SessionRunCommitSink) CommitTerminal(ctx context.Context, terminal core
 	checkpoint := SessionEntry{
 		ID: terminalID, Type: EntryTypeCheckpoint, RunID: terminal.RunID,
 		WorkspaceID: s.workspaceID, CheckpointKind: CheckpointRunTerminal,
-		RunOutcome: terminal.Outcome,
+		RunOutcome: terminal.Outcome, ProcessSessionDelivery: cloneProcessSessionDeliveryBinding(terminal.ProcessSessionDelivery),
 		Generation: terminal.Generation,
 	}
 	if metadata, ok := core.RunGenerationMetadataFromContext(ctx); ok {
@@ -921,17 +953,117 @@ func (s *SessionRunCommitSink) commitCompactionLocked(ctx context.Context, runID
 			return errors.New("session: run already has a different compaction at this source boundary")
 		}
 	}
+	if projection.RetainCurrentInput {
+		positions := make(map[string]int, len(s.branchRows))
+		for i, entry := range s.branchRows {
+			positions[entry.ID] = i
+		}
+		for _, existing := range s.branchRows {
+			if existing.RecordVersion == 1 && existing.Type == EntryTypeCompaction && existing.RunID == runID {
+				previous, exists := positions[existing.CompactedThroughEntryID]
+				if !exists || previous >= positions[row.CompactedThroughEntryID] {
+					return errors.New("session: anchored compaction boundary does not advance")
+				}
+			}
+		}
+	}
 	_, err = s.appendAndRefreshRowsLocked(ctx, row)
 	return err
+}
+
+// validateAnchoredCompaction checks the original input and closure evidence
+// independently both before append and when deriving a persisted view.
+func validateAnchoredCompaction(entries []SessionEntry, marker SessionEntry, markerIndex int, sessionID, branchID string) error {
+	if marker.RetainedInputEntryID == "" {
+		return errors.New("session: anchored compaction lacks retained input identity")
+	}
+	if !isEntryPayloadDigest(marker.RetainedInputPayloadDigest) || !isHexDigest(marker.RetainedInputDigest) {
+		return errors.New("session: anchored compaction has invalid input digests")
+	}
+	if marker.Summary != compaction.DurableTruncationMarker || marker.Content != marker.Summary {
+		return errors.New("session: anchored compaction has an invalid omission marker")
+	}
+	positions := make(map[string]int, markerIndex)
+	for i := 0; i < markerIndex; i++ {
+		positions[entries[i].ID] = i
+	}
+	anchorIndex, anchorOK := positions[marker.RetainedInputEntryID]
+	boundaryIndex, boundaryOK := positions[marker.CompactedThroughEntryID]
+	if !anchorOK || !boundaryOK || anchorIndex >= boundaryIndex || boundaryIndex >= markerIndex {
+		return errors.New("session: anchored compaction has an invalid source boundary")
+	}
+	anchor, boundary := entries[anchorIndex], entries[boundaryIndex]
+	if anchor.RecordVersion != 1 || anchor.Type != EntryTypeUser || !anchor.SurfaceVisible() || anchor.SessionID != sessionID || anchor.BranchID != branchID || anchor.RunID != marker.RunID || anchor.WorkspaceID != marker.WorkspaceID || anchor.TranscriptIndex == nil || *anchor.TranscriptIndex != 0 || anchor.ActionState != "" {
+		return errors.New("session: retained input is not this run's original user row")
+	}
+	if boundary.RecordVersion != 1 || boundary.SessionID != sessionID || boundary.BranchID != branchID || boundary.WorkspaceID != marker.WorkspaceID || boundary.RunID != marker.RunID || boundary.TranscriptIndex == nil || *boundary.TranscriptIndex < 1 || boundary.ActionState != "" {
+		return errors.New("session: anchored boundary is not a later run transcript row")
+	}
+	_, payloadDigest, err := canonicalEntryPayload(anchor)
+	if err != nil || payloadDigest != anchor.PayloadDigest || payloadDigest != marker.RetainedInputPayloadDigest {
+		return errors.New("session: retained input payload digest does not match")
+	}
+	input, ok := sessionEntryToAgentMessage(anchor)
+	if !ok {
+		return errors.New("session: retained input is not a user message")
+	}
+	digest, err := core.RetainedInputDigest(marker.RunID, input)
+	if err != nil || digest != marker.RetainedInputDigest {
+		return errors.New("session: retained input content binding does not match")
+	}
+	if err := validateTranscriptRowsInPhysicalOrder(entries[:markerIndex], marker.RunID); err != nil {
+		return err
+	}
+	plan, err := analyzeDurableActionJournal(entries[:markerIndex], sessionID)
+	if err != nil {
+		return fmt.Errorf("session: anchored compaction action journal: %w", err)
+	}
+	activeStartActions, err := validateActiveProcessSessionReferences(entries, marker, markerIndex, sessionID)
+	if err != nil {
+		return fmt.Errorf("session: anchored compaction process-session evidence: %w", err)
+	}
+	for _, occurrence := range plan.occurrences {
+		assistantIndex, exists := positions[occurrence.assistant.ID]
+		if !exists || (assistantIndex > boundaryIndex && occurrence.assistant.RunID != marker.RunID) {
+			continue
+		}
+		if occurrence.receipt == nil || occurrence.receipt.ReceiptOutcome == core.ReceiptOutcomeUnknown {
+			return errors.New("session: anchored compaction covers an open or unknown tool call")
+		}
+		if assistantIndex <= boundaryIndex && positions[occurrence.receipt.ID] > boundaryIndex {
+			return errors.New("session: anchored compaction splits a tool-call group")
+		}
+		if occurrence.intent == nil {
+			if occurrence.receipt.DispatchState != DispatchStateNotDispatched || occurrence.receipt.ActionID != "" {
+				return errors.New("session: anchored compaction has an unproven unreserved receipt")
+			}
+		} else if occurrence.resolution == nil {
+			if _, activeLease := activeStartActions[occurrence.ref.ActionID]; !activeLease {
+				return errors.New("session: anchored compaction has an unresolved action")
+			}
+		}
+	}
+	return nil
 }
 
 func (s *SessionRunCommitSink) compactionEntryLocked(runID string, projection core.CompactionProjection) (SessionEntry, error) {
 	if runID == "" || projection.ExpectedHistoryRevision != s.baseView.Revision {
 		return SessionEntry{}, errors.New("session: compaction projection has a stale run-start history revision")
 	}
+	if err := core.ValidateActiveProcessSessionRefs(projection.ActiveProcessSessions, runID, s.workspaceID); err != nil {
+		return SessionEntry{}, fmt.Errorf("session: invalid active process-session references: %w", err)
+	}
 	if strings.TrimSpace(projection.Summary) == "" {
 		return SessionEntry{}, errors.New("session: compaction projection requires a non-empty summary")
 	}
+	if projection.RetainCurrentInput {
+		if !isHexDigest(projection.RetainedInputDigest) || projection.Summary != compaction.DurableTruncationMarker || projection.Through.TranscriptCount < 2 {
+			return SessionEntry{}, errors.New("session: anchored compaction requires a fixed marker and input digest")
+		}
+	} else if projection.RetainedInputDigest != "" {
+		return SessionEntry{}, errors.New("session: unanchored compaction carries an input digest")
+	}
+	var err error
 	priorCount := projection.Through.PriorHistoryCount
 	transcriptCount := projection.Through.TranscriptCount
 	var boundaryID string
@@ -973,18 +1105,80 @@ func (s *SessionRunCommitSink) compactionEntryLocked(runID string, projection co
 	if err := s.validateCompactionBoundaryLocked(boundaryPosition); err != nil {
 		return SessionEntry{}, err
 	}
+	evidenceIndex := len(s.branchRows)
+	for index, existing := range s.branchRows {
+		if existing.RecordVersion == 1 && existing.Type == EntryTypeCompaction && existing.RunID == runID && existing.CompactedThroughEntryID == boundaryID {
+			evidenceIndex = index
+			break
+		}
+	}
 	row := SessionEntry{
 		Type: EntryTypeCompaction, Content: projection.Summary, Summary: projection.Summary,
 		RunID: runID, WorkspaceID: s.workspaceID, CompactedThroughEntryID: boundaryID,
+		ActiveProcessSessions: append([]core.ActiveProcessSessionRef(nil), projection.ActiveProcessSessions...),
 	}
-	entryID, err := stableRunCommitEntryID("compaction", struct {
-		RunID       string
-		Revision    string
-		PriorCount  uint64
-		Transcript  uint64
-		BoundaryID  string
-		SummaryHash string
-	}{runID, projection.ExpectedHistoryRevision, priorCount, transcriptCount, boundaryID, hashText(projection.Summary)})
+	if _, err := validateActiveProcessSessionReferences(s.branchRows, row, evidenceIndex, s.sessionID); err != nil {
+		return SessionEntry{}, fmt.Errorf("session: active process-session references lack synced lease evidence: %w", err)
+	}
+	if projection.RetainCurrentInput {
+		transcriptRows, err := transcriptRowsByIndex(s.branchRows, runID)
+		if err != nil {
+			return SessionEntry{}, err
+		}
+		anchor, ok := transcriptRows[0]
+		if !ok {
+			return SessionEntry{}, errors.New("session: anchored compaction has no original input")
+		}
+		row.RetainedInputEntryID = anchor.ID
+		row.RetainedInputPayloadDigest = anchor.PayloadDigest
+		row.RetainedInputDigest = projection.RetainedInputDigest
+		if err := validateAnchoredCompaction(s.branchRows, row, evidenceIndex, s.sessionID, s.branchID); err != nil {
+			return SessionEntry{}, err
+		}
+		var entryID string
+		if len(row.ActiveProcessSessions) == 0 {
+			entryID, err = stableRunCommitEntryID("compaction-anchored-v1", struct {
+				RunID, Revision                             string
+				PriorCount, Transcript                      uint64
+				BoundaryID, SummaryHash                     string
+				AnchorID, AnchorPayloadDigest, AnchorDigest string
+			}{runID, projection.ExpectedHistoryRevision, priorCount, transcriptCount, boundaryID, hashText(projection.Summary), row.RetainedInputEntryID, row.RetainedInputPayloadDigest, row.RetainedInputDigest})
+		} else {
+			entryID, err = stableRunCommitEntryID("compaction-anchored-active-process-sessions-v1", struct {
+				RunID, Revision                             string
+				PriorCount, Transcript                      uint64
+				BoundaryID, SummaryHash                     string
+				AnchorID, AnchorPayloadDigest, AnchorDigest string
+				ActiveProcessSessions                       []core.ActiveProcessSessionRef
+			}{runID, projection.ExpectedHistoryRevision, priorCount, transcriptCount, boundaryID, hashText(projection.Summary), row.RetainedInputEntryID, row.RetainedInputPayloadDigest, row.RetainedInputDigest, row.ActiveProcessSessions})
+		}
+		if err != nil {
+			return SessionEntry{}, err
+		}
+		row.ID = entryID
+		return row, nil
+	}
+	var entryID string
+	if len(row.ActiveProcessSessions) == 0 {
+		entryID, err = stableRunCommitEntryID("compaction", struct {
+			RunID       string
+			Revision    string
+			PriorCount  uint64
+			Transcript  uint64
+			BoundaryID  string
+			SummaryHash string
+		}{runID, projection.ExpectedHistoryRevision, priorCount, transcriptCount, boundaryID, hashText(projection.Summary)})
+	} else {
+		entryID, err = stableRunCommitEntryID("compaction-active-process-sessions-v1", struct {
+			RunID                 string
+			Revision              string
+			PriorCount            uint64
+			Transcript            uint64
+			BoundaryID            string
+			SummaryHash           string
+			ActiveProcessSessions []core.ActiveProcessSessionRef
+		}{runID, projection.ExpectedHistoryRevision, priorCount, transcriptCount, boundaryID, hashText(projection.Summary), row.ActiveProcessSessions})
+	}
 	if err != nil {
 		return SessionEntry{}, err
 	}
@@ -1079,7 +1273,9 @@ func (s *SessionRunCommitSink) findTerminalCheckpointLocked(runID string) (Sessi
 func sameCompactionRow(existing, candidate SessionEntry) bool {
 	return existing.ID == candidate.ID && existing.Type == EntryTypeCompaction && existing.RunID == candidate.RunID &&
 		existing.WorkspaceID == candidate.WorkspaceID && existing.Summary == candidate.Summary &&
-		existing.Content == candidate.Content && existing.CompactedThroughEntryID == candidate.CompactedThroughEntryID
+		existing.Content == candidate.Content && existing.CompactedThroughEntryID == candidate.CompactedThroughEntryID &&
+		existing.RetainedInputEntryID == candidate.RetainedInputEntryID && existing.RetainedInputPayloadDigest == candidate.RetainedInputPayloadDigest && existing.RetainedInputDigest == candidate.RetainedInputDigest &&
+		reflect.DeepEqual(existing.ActiveProcessSessions, candidate.ActiveProcessSessions)
 }
 
 func hashText(value string) string {
@@ -1249,6 +1445,27 @@ func (s *SessionRunCommitSink) resolveEvidenceReferenceLocked(
 		if receipt.DispatchState != core.DispatchStateDispatched {
 			return core.ExecutionResolution{}, errors.New("session: local quiescence resolution requires a dispatched terminal receipt")
 		}
+		if resolution.ProcessSessionClosureRef != "" {
+			candidates := make([]SessionEntry, 0, 1)
+			for _, row := range s.branchRows {
+				lease := row.ProcessSessionLease
+				if row.RecordVersion != 1 || row.Type != EntryTypeCheckpoint || row.CheckpointKind != CheckpointProcessSessionLease || lease == nil ||
+					row.ID != resolution.ProcessSessionClosureRef || row.Seq == 0 || row.OwnerGeneration != intent.OwnerGeneration ||
+					!sameActionReference(ref, refFromEntry(row, s.sessionID)) || lease.Phase != tools.ProcessSessionLeaseStopped ||
+					!lease.GroupAbsent || !lease.LeaderWaited || !lease.ReadersJoined {
+					continue
+				}
+				candidates = append(candidates, *row.clone())
+			}
+			id, err := selectExact(candidates, "stopped process-session lease")
+			if err != nil {
+				return core.ExecutionResolution{}, err
+			}
+			if id != resolution.EvidenceRef {
+				return core.ExecutionResolution{}, errors.New("session: process-session closure reference differs from its evidence row")
+			}
+			break
+		}
 		candidates := make([]SessionEntry, 0, 1)
 		for _, row := range s.branchRows {
 			if row.RecordVersion != 1 || row.ActionState != ActionStateExecution || row.CompletionProof == "" || row.DispatchState != core.DispatchStateDispatched || row.Seq <= intent.Seq || row.OwnerGeneration != intent.OwnerGeneration || !sameActionReference(ref, refFromEntry(row, s.sessionID)) {
@@ -1325,7 +1542,8 @@ func sameExecutionObservation(existing, candidate SessionEntry) bool {
 		sameUint64Pointer(existing.AssistantTranscriptOrdinal, candidate.AssistantTranscriptOrdinal) &&
 		existing.ToolCallID == candidate.ToolCallID && existing.ToolName == candidate.ToolName &&
 		existing.DispatchState == candidate.DispatchState && existing.ResourceState == candidate.ResourceState &&
-		existing.CompletionProof == candidate.CompletionProof && reflect.DeepEqual(existing.ExecutionIdentity, candidate.ExecutionIdentity)
+		existing.CompletionProof == candidate.CompletionProof && reflect.DeepEqual(existing.ExecutionIdentity, candidate.ExecutionIdentity) &&
+		reflect.DeepEqual(existing.ProcessSessionLease, candidate.ProcessSessionLease)
 }
 
 func assistantToolName(assistant SessionEntry, toolCallID string) (string, bool) {

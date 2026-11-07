@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
@@ -265,6 +266,7 @@ func (s *DefaultSubAgent) runAndFinalize(ctx context.Context, prompt string, out
 	span, spanCtx := tracing.SpanFromContext(ctx, "subagent.run", tracing.SpanKindInternal)
 	span.SetAttributes(
 		tracing.Attribute{Key: "subagent_name", Value: s.config.Name},
+		tracing.Attribute{Key: "purpose", Value: string(llm.RequestPurposeSubagent)},
 	)
 	defer span.End()
 	defer func() {
@@ -304,6 +306,7 @@ func (s *DefaultSubAgent) runAndFinalize(ctx context.Context, prompt string, out
 	var result AgentMessage
 	var err error
 	runner := s.runnerFactory(s.config)
+	spanCtx = llm.WithRequestPurpose(spanCtx, llm.RequestPurposeSubagent)
 	spanCtx = context.WithValue(spanCtx, subagentInputSealKey{}, s.finishInput)
 	result, err = runner.Run(spanCtx, prompt, inbox, emit)
 

@@ -109,18 +109,18 @@ func startManagedLocalCommandWithStartHook(ctx context.Context, cancel context.C
 	return &managedLocalCommand{cmd: cmd, scope: scope, stdout: stdoutRead, stderr: stderrRead, cancel: cancel}, nil
 }
 
-func startManagedLocalBashCommand(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd) (*managedLocalCommand, error) {
+func startManagedLocalBashCommand(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd, limits bashResourceSettings) (*managedLocalCommand, error) {
 	observer := processExecutionIdentityObserverFromContext(ctx)
 	if observer == nil {
 		_, capturedStartGuard := ctx.Value(preparedEffectStartKey{}).(preparedEffectStartGuard)
 		input, supplied := bashRuntimeInputFromContext(ctx)
-		if capturedStartGuard || (supplied && input.guard != nil) {
+		if capturedStartGuard || (supplied && input.guard != nil) || limits.enabled() {
 			observer = func(context.Context, ProcessExecutionIdentity) error { return nil }
 		} else {
 			return startManagedLocalCommand(cancel, cmd)
 		}
 	}
-	return startManagedLocalBashCommandWithIdentityObserver(ctx, cancel, cmd, observer)
+	return startManagedLocalBashCommandWithIdentityObserver(ctx, cancel, cmd, observer, limits)
 }
 
 // collect drains both pipes concurrently while the owner watches the leader,

@@ -29,9 +29,10 @@ type CompleteResponseGuard interface {
 }
 
 type guardedStreamBudget struct {
-	bytes   int
-	chunks  int
-	visible bool
+	bytes         int
+	chunks        int
+	visible       bool
+	assistantText bool
 }
 
 func (b *guardedStreamBudget) accountChunk(chunk llm.MessageChunk) error {

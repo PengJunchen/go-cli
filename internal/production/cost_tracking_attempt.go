@@ -49,6 +49,21 @@ type AttemptCostSummary struct {
 	Attempts          int
 	KnownInputTokens  int
 	KnownOutputTokens int
+	// PrimarySubtotalIncomplete means some known attempt counts could not be
+	// represented in this aggregate; individual attempt evidence is retained.
+	PrimarySubtotalIncomplete bool
+	// KnownPrimarySubtotalAttempts counts attempts included in the representable
+	// subtotal, including explicit zero counts.
+	KnownPrimarySubtotalAttempts int
+	// Detail counts are known subtotals. Unknown counts include missing detail
+	// and counts omitted from an overflowing aggregate.
+	KnownCacheReadInputTokens  int
+	CacheReadKnownInputTokens  int
+	KnownReasoningOutputTokens int
+	CacheReadKnownAttempts     int
+	CacheReadUnknownAttempts   int
+	ReasoningKnownAttempts     int
+	ReasoningUnknownAttempts   int
 	// KnownCostSubtotal covers attempt records only.
 	KnownCostSubtotal    float64
 	UnknownUsageAttempts int
@@ -76,6 +91,16 @@ var (
 // budget callback.
 func (t *CostTracker) RecordAttempt(result llm.ProviderAttemptResult) (AttemptCostRecord, error) {
 	result = cloneAttemptResult(result)
+	if usage := result.Usage.Usage; usage != nil {
+		if !usage.CacheReadInputTokensReported || usage.CacheReadInputTokens < 0 || usage.CacheReadInputTokens > usage.InputTokens {
+			usage.CacheReadInputTokens = 0
+			usage.CacheReadInputTokensReported = false
+		}
+		if !usage.ReasoningOutputTokensReported || usage.ReasoningOutputTokens < 0 || usage.ReasoningOutputTokens > usage.OutputTokens {
+			usage.ReasoningOutputTokens = 0
+			usage.ReasoningOutputTokensReported = false
+		}
+	}
 	if err := validateAttemptResult(result); err != nil {
 		return AttemptCostRecord{}, err
 	}
@@ -125,10 +150,44 @@ func (t *CostTracker) RecordAttempt(result llm.ProviderAttemptResult) (AttemptCo
 	t.attemptSummary.Attempts++
 	t.calls++
 	if result.Usage.State == llm.UsageKnown {
-		t.attemptSummary.KnownInputTokens += result.Usage.Usage.InputTokens
-		t.attemptSummary.KnownOutputTokens += result.Usage.Usage.OutputTokens
+		usage := result.Usage.Usage
+		max := int(^uint(0) >> 1)
+		inputOK := usage.InputTokens <= max-t.attemptSummary.KnownInputTokens
+		outputOK := usage.OutputTokens <= max-t.attemptSummary.KnownOutputTokens
+		combinedOK := false
+		if inputOK && outputOK {
+			input := t.attemptSummary.KnownInputTokens + usage.InputTokens
+			output := t.attemptSummary.KnownOutputTokens + usage.OutputTokens
+			combinedOK = input <= max-output
+		}
+		if !inputOK || !outputOK || !combinedOK {
+			// Keep each attempt and its cost, while omitting this whole response
+			// from the representable token subtotal.
+			t.attemptSummary.PrimarySubtotalIncomplete = true
+			t.attemptSummary.CacheReadUnknownAttempts++
+			t.attemptSummary.ReasoningUnknownAttempts++
+		} else {
+			t.attemptSummary.KnownPrimarySubtotalAttempts++
+			t.attemptSummary.KnownInputTokens += usage.InputTokens
+			t.attemptSummary.KnownOutputTokens += usage.OutputTokens
+			if usage.CacheReadInputTokensReported {
+				t.attemptSummary.KnownCacheReadInputTokens += usage.CacheReadInputTokens
+				t.attemptSummary.CacheReadKnownInputTokens += usage.InputTokens
+				t.attemptSummary.CacheReadKnownAttempts++
+			} else {
+				t.attemptSummary.CacheReadUnknownAttempts++
+			}
+			if usage.ReasoningOutputTokensReported {
+				t.attemptSummary.KnownReasoningOutputTokens += usage.ReasoningOutputTokens
+				t.attemptSummary.ReasoningKnownAttempts++
+			} else {
+				t.attemptSummary.ReasoningUnknownAttempts++
+			}
+		}
 	} else {
 		t.attemptSummary.UnknownUsageAttempts++
+		t.attemptSummary.CacheReadUnknownAttempts++
+		t.attemptSummary.ReasoningUnknownAttempts++
 	}
 	if record.Status == AttemptCostUnknown {
 		t.attemptSummary.UnknownCostAttempts++

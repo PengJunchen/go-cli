@@ -96,7 +96,7 @@ func TestClaudeToolUseGenerateAndStreamParity(t *testing.T) {
 		{ID: "lookup-1", Name: "lookup", Args: map[string]any{"key": "alpha"}},
 		{ID: "lookup-2", Name: "lookup", Args: map[string]any{"key": "beta"}},
 	}, generated.ToolCalls)
-	require.Equal(t, &Usage{InputTokens: 12, OutputTokens: 5, TotalTokens: 17}, generated.Usage)
+	require.Equal(t, &Usage{InputTokens: 12, OutputTokens: 5, TotalTokens: 17, PrimaryCoverage: UsageCoverageComplete}, generated.Usage)
 
 	stream, err := model.Stream(context.Background(), msgs, options...)
 	require.NoError(t, err)

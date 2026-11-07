@@ -213,13 +213,37 @@ func (m *sdkModel) Generate(ctx context.Context, messages []llm.Message, options
 	if request.MaxTokens == nil && m.config.MaxTokensSet {
 		request.MaxTokens = &m.config.MaxTokens
 	}
-	var response api.Message
+	// Decode optional usage fields before api.Usage's integer zero values erase
+	// whether the provider supplied input and output counts.
+	var response struct {
+		api.Message
+		Usage *struct {
+			InputTokens  *int `json:"input_tokens"`
+			OutputTokens *int `json:"output_tokens"`
+			TotalTokens  *int `json:"total_tokens"`
+		} `json:"usage"`
+	}
 	if err := m.caller.call(ctx, "provider.generate", request, &response); err != nil {
 		return nil, err
 	}
 	var result llm.Message
-	if err := convertSDK(response, &result); err != nil {
+	if err := convertSDK(response.Message, &result); err != nil {
 		return nil, err
+	}
+	if response.Usage != nil && response.Usage.InputTokens != nil && response.Usage.OutputTokens != nil {
+		input, output := *response.Usage.InputTokens, *response.Usage.OutputTokens
+		max := int(^uint(0) >> 1)
+		min := -max - 1
+		if (output > 0 && input > max-output) || (output < 0 && input < min-output) {
+			return &result, nil
+		}
+		result.Usage = &llm.Usage{InputTokens: input, OutputTokens: output, TotalTokens: input + output}
+		if response.Usage.TotalTokens != nil {
+			result.Usage.TotalTokens = *response.Usage.TotalTokens
+		}
+		if result.Usage.InputTokens >= 0 && result.Usage.OutputTokens >= 0 {
+			result.Usage.PrimaryCoverage = llm.UsageCoverageComplete
+		}
 	}
 	return &result, nil
 }

@@ -45,7 +45,7 @@ func (h *HelpHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 	fmt.Fprintln(deps.Out(), "  exit      Exit the interactive session") //nolint:errcheck
 	fmt.Fprintln(deps.Out(), "\nCapability boundaries (default entry):") //nolint:errcheck
 	for _, boundary := range []string{
-		"Memory: workspace-scoped automatic extraction and prompt context are enabled by default; memory.enabled: false disables both. /memory manages stored records.",
+		"Memory: workspace-scoped automatic extraction and prompt context are disabled by default; memory.enabled: true enables both. /memory manages stored records.",
 		"Goal, Task, and Todo: stored only in memory for this process; not kept across restarts.",
 		"Session storage: without session.store_path, /session is unsupported.",
 		"Durable sessions support saved-state inspection, clear, compact, retry, branch navigation, and exact physical resume; unknown actions remain fenced.",
@@ -927,6 +927,10 @@ func (h *RetryHandler) Handle(_ context.Context, _ []string, deps Dependencies) 
 	lastUserIdx := -1
 	for i := lastAssistantIdx - 1; i >= 0; i-- {
 		if msgs[i].Role == "user" {
+			source := msgs[i].Runtime.Source.Kind
+			if source == llm.SourceRunSummary || (source == llm.SourcePriorPublished && msgs[i].Runtime.CompactionMarker) {
+				continue
+			}
 			lastUserIdx = i
 			break
 		}

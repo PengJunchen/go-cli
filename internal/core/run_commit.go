@@ -2,10 +2,14 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
@@ -135,6 +139,28 @@ type RunCommitSink interface {
 	CommitTerminal(context.Context, RunTerminal) error
 }
 
+// RunCommitProcessSessionSink persists the exact process-session lease
+// lifecycle. A durable run refuses process-session dispatch without this
+// narrow host-lease capability.
+type RunCommitProcessSessionSink interface {
+	RecordProcessSessionLease(context.Context, tools.ProcessSessionLeaseSnapshot) error
+	CompleteProcessSessionAction(context.Context, tools.ProcessSessionLeaseSnapshot, tools.ProcessSessionActionRef, string) error
+	ResolveProcessSessionLease(context.Context, tools.ProcessSessionLeaseSnapshot, bool, bool, bool) error
+	ActiveProcessSessionLeases(context.Context, string) ([]tools.ProcessSessionLeaseSnapshot, error)
+}
+
+// ActiveProcessSessionRef is the small model-context reference to one live
+// process session. It carries no command, output, or process identity and is
+// validated against the current manager plus durable lease rows before use.
+type ActiveProcessSessionRef struct {
+	OwnerID         string `json:"owner_id"`
+	WorkspaceID     string `json:"workspace_id"`
+	RunID           string `json:"run_id"`
+	SessionID       string `json:"session_id"`
+	OwnerGeneration string `json:"owner_generation"`
+	StartActionID   string `json:"start_action_id"`
+}
+
 // CompactionSourceSnapshot is the exact immutable history view captured by a
 // run's sink. It ties runtime source metadata to the same branch revision the
 // sink will later use to validate compaction projections.
@@ -260,13 +286,14 @@ type RunCommitInput struct {
 // group. KnownReceipts are pre-dispatch denials with no ActionID. Each intent
 // must carry this batch's RunID and ActionBatchID.
 type RunIntentBatch struct {
-	RunID                      string           `json:"run_id"`
-	ActionBatchID              string           `json:"action_batch_id"`
-	AssistantTranscriptOrdinal uint64           `json:"assistant_transcript_ordinal"`
-	AssistantMessage           AgentMessage     `json:"assistant_message"`
-	Intents                    []ActionIntent   `json:"intents,omitempty"`
-	KnownReceipts              []RunToolReceipt `json:"known_receipts,omitempty"`
-	CanonicalWorkspaceRoot     string           `json:"-"`
+	RunID                      string                                   `json:"run_id"`
+	ActionBatchID              string                                   `json:"action_batch_id"`
+	AssistantTranscriptOrdinal uint64                                   `json:"assistant_transcript_ordinal"`
+	AssistantMessage           AgentMessage                             `json:"assistant_message"`
+	Intents                    []ActionIntent                           `json:"intents,omitempty"`
+	KnownReceipts              []RunToolReceipt                         `json:"known_receipts,omitempty"`
+	CanonicalWorkspaceRoot     string                                   `json:"-"`
+	ProcessSessionAdmission    *tools.ProcessSessionAdmissionCapability `json:"-"`
 }
 
 // ActionIntent reserves one registered invocation without storing its raw
@@ -299,15 +326,16 @@ type ActionIntent struct {
 // referenced by a later ExecutionResolution; it does not itself clear a
 // workspace marker.
 type ActionExecution struct {
-	RunID                      string                        `json:"run_id"`
-	AssistantTranscriptOrdinal uint64                        `json:"assistant_transcript_ordinal"`
-	ToolCallID                 string                        `json:"tool_call_id"`
-	ActionID                   string                        `json:"action_id"`
-	OwnerGeneration            string                        `json:"owner_generation"`
-	DispatchState              DispatchState                 `json:"dispatch_state"`
-	ResourceState              RunExecutionState             `json:"resource_state"`
-	ExecutionIdentity          *ExecutionIdentity            `json:"execution_identity,omitempty"`
-	CompletionProof            tools.PreparedCompletionProof `json:"completion_proof,omitempty"`
+	RunID                      string                             `json:"run_id"`
+	AssistantTranscriptOrdinal uint64                             `json:"assistant_transcript_ordinal"`
+	ToolCallID                 string                             `json:"tool_call_id"`
+	ActionID                   string                             `json:"action_id"`
+	OwnerGeneration            string                             `json:"owner_generation"`
+	DispatchState              DispatchState                      `json:"dispatch_state"`
+	ResourceState              RunExecutionState                  `json:"resource_state"`
+	ExecutionIdentity          *ExecutionIdentity                 `json:"execution_identity,omitempty"`
+	CompletionProof            tools.PreparedCompletionProof      `json:"completion_proof,omitempty"`
+	ProcessSessionLease        *tools.ProcessSessionLeaseSnapshot `json:"process_session_lease,omitempty"`
 }
 
 // RunToolReceipt is the canonical terminal result for one tool-call
@@ -333,9 +361,59 @@ type CompactionCursor struct {
 // CompactionProjection records the exact prompt-history prefix replaced by a
 // summary during a run.
 type CompactionProjection struct {
-	ExpectedHistoryRevision string           `json:"expected_history_revision"`
-	Through                 CompactionCursor `json:"through"`
-	Summary                 string           `json:"summary"`
+	ExpectedHistoryRevision string                    `json:"expected_history_revision"`
+	Through                 CompactionCursor          `json:"through"`
+	Summary                 string                    `json:"summary"`
+	RetainCurrentInput      bool                      `json:"retain_current_input,omitempty"`
+	RetainedInputDigest     string                    `json:"retained_input_digest,omitempty"`
+	ActiveProcessSessions   []ActiveProcessSessionRef `json:"active_process_sessions,omitempty"`
+}
+
+// RetainedInputDigest binds an anchored projection to an exact durable user
+// input. Inputs the current journal encoding cannot reproduce are rejected here,
+// without changing their admission as ordinary run inputs.
+func RetainedInputDigest(runID string, input AgentMessage) (string, error) {
+	if runID == "" || !utf8.ValidString(runID) || input.Role != "user" || input.ToolCalls != nil || input.ToolCallID != "" || input.ToolName != "" || input.ReceiptOutcome != "" || input.Usage != nil || (input.ContentBlocks != nil && len(input.ContentBlocks) == 0) {
+		return "", errors.New("core: current input cannot be bound losslessly")
+	}
+	if !utf8.ValidString(input.Content) || !utf8.ValidString(input.InputKind) || !utf8.ValidString(input.MaterializedArtifactDigest) {
+		return "", errors.New("core: current input contains invalid UTF-8")
+	}
+	for _, block := range input.ContentBlocks {
+		if !utf8.ValidString(block.Type) || !utf8.ValidString(block.Text) || (block.ImageURL != nil && (!utf8.ValidString(block.ImageURL.URL) || !utf8.ValidString(block.ImageURL.Detail))) {
+			return "", errors.New("core: current input block contains invalid UTF-8")
+		}
+	}
+	encoded := []byte("go-cli/retained-current-input/v1\x00")
+	addString := func(value string) {
+		encoded = binary.BigEndian.AppendUint64(encoded, uint64(len(value)))
+		encoded = append(encoded, value...)
+	}
+	addString(runID)
+	encoded = binary.BigEndian.AppendUint64(encoded, 0)
+	addString(input.Role)
+	addString(input.Content)
+	if input.ContentBlocks == nil {
+		encoded = append(encoded, 0)
+	} else {
+		encoded = append(encoded, 1)
+		encoded = binary.BigEndian.AppendUint64(encoded, uint64(len(input.ContentBlocks)))
+		for _, block := range input.ContentBlocks {
+			addString(block.Type)
+			addString(block.Text)
+			if block.ImageURL == nil {
+				encoded = append(encoded, 0)
+			} else {
+				encoded = append(encoded, 1)
+				addString(block.ImageURL.URL)
+				addString(block.ImageURL.Detail)
+			}
+		}
+	}
+	addString(input.InputKind)
+	addString(input.MaterializedArtifactDigest)
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 // TerminalCheckpointID is generated before terminal commit and retained
@@ -345,10 +423,11 @@ type TerminalCheckpointID string
 // RunTerminal is the final immutable per-run transcript and its durable
 // terminal checkpoint request.
 type RunTerminal struct {
-	Generation           *RunGenerationMetadata `json:"generation,omitempty"`
-	RunID                string                 `json:"run_id"`
-	Transcript           []TranscriptEntry      `json:"transcript"`
-	Projections          []CompactionProjection `json:"projections,omitempty"`
-	Outcome              RunOutcome             `json:"outcome"`
-	TerminalCheckpointID TerminalCheckpointID   `json:"terminal_checkpoint_id"`
+	Generation             *RunGenerationMetadata               `json:"generation,omitempty"`
+	RunID                  string                               `json:"run_id"`
+	Transcript             []TranscriptEntry                    `json:"transcript"`
+	Projections            []CompactionProjection               `json:"projections,omitempty"`
+	Outcome                RunOutcome                           `json:"outcome"`
+	TerminalCheckpointID   TerminalCheckpointID                 `json:"terminal_checkpoint_id"`
+	ProcessSessionDelivery *tools.ProcessSessionDeliveryBinding `json:"process_session_delivery,omitempty"`
 }

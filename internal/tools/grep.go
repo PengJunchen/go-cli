@@ -17,11 +17,11 @@ import (
 const (
 	// grepDefaultMaxMatches caps the number of matched lines returned in a
 	// single call so a broad pattern cannot flood the result.
-	grepDefaultMaxMatches = 1000
+	grepDefaultMaxMatches = 100
 
 	// grepDefaultMaxOutput caps the total number of bytes of matched output
 	// returned in a single call.
-	grepDefaultMaxOutput = 1 << 20 // 1 MiB
+	grepDefaultMaxOutput = 50 * 1024 // 50 KiB of formatted match records
 
 	// grepDefaultWorkdir is the base directory relative paths are resolved
 	// against when none is configured.
@@ -105,7 +105,8 @@ func (t *GrepTool) Name() string { return "grep" }
 
 // Description returns a brief description of the tool.
 func (t *GrepTool) Description() string {
-	return "grep: searches files under a directory for a regexp pattern. Args: pattern (string), glob (string, optional include filter), path (string, optional)."
+	return fmt.Sprintf("grep: searches files under a directory for a regexp pattern. Args: pattern (string), glob (string, optional include filter), path (string, optional). Returns up to %d matches and %d bytes of formatted match records, including path, line number and a newline per record. The truncation notice, metadata and JSON encoding are extra. If truncated, narrow path, glob or pattern, or use read for full file contents.",
+		max(0, t.MaxMatches), max(0, t.MaxOutput))
 }
 
 // Parameters returns the JSON Schema for grep's model-supplied arguments.
@@ -113,9 +114,9 @@ func (t *GrepTool) Parameters() any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"pattern": map[string]any{"type": "string"},
-			"glob":    map[string]any{"type": "string"},
-			"path":    map[string]any{"type": "string"},
+			"pattern": map[string]any{"type": "string", "description": "Regular expression; make it more specific to reduce matches."},
+			"glob":    map[string]any{"type": "string", "description": "Optional file inclusion filter; narrow it to relevant files."},
+			"path":    map[string]any{"type": "string", "description": "Optional search root; narrow it to a relevant file or directory."},
 		},
 		"required":             []any{"pattern"},
 		"additionalProperties": false,
@@ -180,7 +181,7 @@ func (t *GrepTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 
 	output := buildMatchOutput(ms)
 	if truncated {
-		output += "\n[results truncated]"
+		output += "\n[results truncated]\nNarrow path, glob, or pattern, or use read for full file contents."
 	}
 
 	span.SetAttributes(tracing.Attribute{Key: "success", Value: true})

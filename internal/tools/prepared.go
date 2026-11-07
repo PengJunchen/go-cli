@@ -699,48 +699,52 @@ type PreparedStreamingInvocation interface {
 }
 
 type preparedInvocationConfig struct {
-	fence                   *DispatchFence
-	generations             DispatchFenceSnapshot
-	identity                TrustedToolIdentity
-	effects                 TrustedEffectSet
-	projectTrustBinding     ProjectTrustBinding
-	dispatchLease           PreparedDispatchLease
-	canonicalWorkspaceRoot  string
-	workspaceReadWhitelist  []string
-	scopedReadProofEligible bool
-	managedDelegation       bool
-	schema                  ToolSchemaSnapshot
-	call                    FrozenToolCall
-	execute                 func(context.Context, ToolCall) (*ToolResult, error)
-	schedule                func(context.Context, *preparedInvocation) (*ToolResult, error)
-	completionProof         PreparedCompletionProof
-	streamingSink           *synchronousStreamSink
-	terminalObserver        PreparedTerminalObserver
+	fence                       *DispatchFence
+	generations                 DispatchFenceSnapshot
+	definition                  ToolDefinition
+	identity                    TrustedToolIdentity
+	effects                     TrustedEffectSet
+	projectTrustBinding         ProjectTrustBinding
+	dispatchLease               PreparedDispatchLease
+	canonicalWorkspaceRoot      string
+	workspaceReadWhitelist      []string
+	scopedReadProofEligible     bool
+	managedDelegation           bool
+	schema                      ToolSchemaSnapshot
+	call                        FrozenToolCall
+	execute                     func(context.Context, ToolCall) (*ToolResult, error)
+	schedule                    func(context.Context, *preparedInvocation) (*ToolResult, error)
+	completionProof             PreparedCompletionProof
+	toolSearchPromotionEligible bool
+	streamingSink               *synchronousStreamSink
+	terminalObserver            PreparedTerminalObserver
 }
 
 type preparedInvocation struct {
-	fence                   *DispatchFence
-	generations             DispatchFenceSnapshot
-	identity                TrustedToolIdentity
-	effects                 TrustedEffectSet
-	projectTrustBinding     ProjectTrustBinding
-	dispatchLease           PreparedDispatchLease
-	canonicalWorkspaceRoot  string
-	workspaceReadWhitelist  []string
-	scopedReadProofEligible bool
-	managedDelegation       bool
-	schema                  ToolSchemaSnapshot
-	call                    FrozenToolCall
-	execute                 func(context.Context, ToolCall) (*ToolResult, error)
-	schedule                func(context.Context, *preparedInvocation) (*ToolResult, error)
-	completionProof         PreparedCompletionProof
-	completion              *preparedCompletionState
-	terminalObserver        PreparedTerminalObserver
-	consumed                atomic.Bool
-	committed               atomic.Bool
-	terminalObserved        atomic.Bool
-	scopedReadProofIssued   atomic.Bool
-	delegationProofIssued   atomic.Bool
+	fence                       *DispatchFence
+	generations                 DispatchFenceSnapshot
+	definition                  ToolDefinition
+	identity                    TrustedToolIdentity
+	effects                     TrustedEffectSet
+	projectTrustBinding         ProjectTrustBinding
+	dispatchLease               PreparedDispatchLease
+	canonicalWorkspaceRoot      string
+	workspaceReadWhitelist      []string
+	scopedReadProofEligible     bool
+	managedDelegation           bool
+	schema                      ToolSchemaSnapshot
+	call                        FrozenToolCall
+	execute                     func(context.Context, ToolCall) (*ToolResult, error)
+	schedule                    func(context.Context, *preparedInvocation) (*ToolResult, error)
+	completionProof             PreparedCompletionProof
+	toolSearchPromotionEligible bool
+	completion                  *preparedCompletionState
+	terminalObserver            PreparedTerminalObserver
+	consumed                    atomic.Bool
+	committed                   atomic.Bool
+	terminalObserved            atomic.Bool
+	scopedReadProofIssued       atomic.Bool
+	delegationProofIssued       atomic.Bool
 }
 
 var _ PreparedInvocation = (*preparedInvocation)(nil)
@@ -749,23 +753,25 @@ func (*preparedInvocation) preparedInvocationCapability() {}
 
 func newPreparedInvocation(config preparedInvocationConfig) *preparedInvocation {
 	return &preparedInvocation{
-		fence:                   config.fence,
-		generations:             config.generations,
-		identity:                config.identity,
-		effects:                 newTrustedEffectSet(config.effects.Values()...),
-		projectTrustBinding:     config.projectTrustBinding,
-		dispatchLease:           config.dispatchLease,
-		canonicalWorkspaceRoot:  config.canonicalWorkspaceRoot,
-		workspaceReadWhitelist:  append([]string(nil), config.workspaceReadWhitelist...),
-		scopedReadProofEligible: config.scopedReadProofEligible,
-		managedDelegation:       config.managedDelegation,
-		schema:                  config.schema,
-		call:                    config.call,
-		execute:                 config.execute,
-		schedule:                config.schedule,
-		completionProof:         config.completionProof,
-		terminalObserver:        config.terminalObserver,
-		completion:              newPreparedCompletionState(),
+		fence:                       config.fence,
+		generations:                 config.generations,
+		definition:                  config.definition,
+		identity:                    config.identity,
+		effects:                     newTrustedEffectSet(config.effects.Values()...),
+		projectTrustBinding:         config.projectTrustBinding,
+		dispatchLease:               config.dispatchLease,
+		canonicalWorkspaceRoot:      config.canonicalWorkspaceRoot,
+		workspaceReadWhitelist:      append([]string(nil), config.workspaceReadWhitelist...),
+		scopedReadProofEligible:     config.scopedReadProofEligible,
+		managedDelegation:           config.managedDelegation,
+		schema:                      config.schema,
+		call:                        config.call,
+		execute:                     config.execute,
+		schedule:                    config.schedule,
+		completionProof:             config.completionProof,
+		toolSearchPromotionEligible: config.toolSearchPromotionEligible,
+		terminalObserver:            config.terminalObserver,
+		completion:                  newPreparedCompletionState(),
 	}
 }
 
@@ -828,10 +834,60 @@ func (p *preparedInvocation) Dispatch(ctx context.Context) (result *ToolResult, 
 	if err := validatePreparedContext(ctx); err != nil {
 		return nil, err
 	}
-	if p.schedule != nil {
-		return p.schedule(ctx, p)
+	observer := toolSearchPromotionObserverFromContext(ctx)
+	var capture *toolSearchResultCapture
+	if p.toolSearchPromotionEligible && observer != nil {
+		capture = &toolSearchResultCapture{callID: p.call.id}
+		ctx = withToolSearchResultCapture(ctx, capture)
 	}
-	return p.commitAndInvoke(ctx)
+	if p.schedule != nil {
+		result, err = p.schedule(ctx, p)
+	} else {
+		result, err = p.commitAndInvoke(ctx)
+	}
+	p.observeToolSearchPromotion(ctx, observer, capture, result, err)
+	return result, err
+}
+
+func (p *preparedInvocation) observeToolSearchPromotion(ctx context.Context, observer ToolSearchPromotionObserver, capture *toolSearchResultCapture, result *ToolResult, dispatchErr error) {
+	if observer == nil || capture == nil || !capture.recorded || dispatchErr != nil || result == nil || result.IsError || ctx == nil || ctx.Err() != nil {
+		return
+	}
+	if p.completionProof != CompletionInlinePipelineJoined {
+		return
+	}
+	signal := p.completion.signal()
+	done := signal.Done()
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	default:
+		return
+	}
+	if signal.Proof() != CompletionInlinePipelineJoined || ctx.Err() != nil {
+		return
+	}
+	defer func() {
+		if recover() != nil {
+			slog.Warn("tools.prepared_tool_search_promotion.observer_panicked")
+		}
+	}()
+	notice := observer(ToolSearchPromotion{
+		CallID:            p.call.id,
+		Identity:          p.identity.Snapshot(),
+		RegistryVersion:   capture.registryVersion,
+		RegistryVersioned: capture.registryVersioned,
+		Query:             capture.query,
+		MatchedNames:      append([]string(nil), capture.matchedNames...),
+	})
+	if notice != "" {
+		if result.Output != "" {
+			result.Output += "\n\n"
+		}
+		result.Output += notice
+	}
 }
 
 func (p *preparedInvocation) observeTerminal(result *ToolResult, dispatchErr error, panicked bool) {
@@ -993,6 +1049,8 @@ func (p *preparedInvocation) commitAndInvoke(ctx context.Context) (*ToolResult, 
 	}
 	executeCtx := p.withEffectStartGuard(ctx)
 	executeCtx = withPreparedBashInvocation(executeCtx, p)
+	executeCtx = withPreparedEditInvocation(executeCtx, p)
+	executeCtx = withPreparedReadInvocation(executeCtx, p)
 	if p.completionProof == CompletionOwnedProcessGroupJoined || p.completionProof == completionScopedSearchJoined || p.completionProof == completionLocalProcessOrPrestartNoProcessJoined {
 		executeCtx = withPreparedCompletionReporter(executeCtx, func(proof PreparedCompletionProof, done <-chan struct{}) {
 			p.completion.attach(proof, done)

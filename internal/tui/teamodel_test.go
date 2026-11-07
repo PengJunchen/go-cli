@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 // newTestModel builds a non-interactive teaModel wired to an event channel for
@@ -144,7 +145,7 @@ func TestTeaModel_TokenUsageStatusBar(t *testing.T) {
 		Type: "token_usage",
 		TokenUsage: &TokenUsageData{
 			InputTokens: 7000, OutputTokens: 1000, MaxTokens: 8000, Cost: 0.05,
-			UsageSource: core.TokenUsageSourceReported,
+			UsageSource: core.TokenUsageSourceReported, PrimaryCoverage: llm.UsageCoverageComplete,
 		},
 	}})
 	assert.Equal(t, 7000, m.tokenInput)

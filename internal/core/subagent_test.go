@@ -444,11 +444,14 @@ func TestSubAgentRunSpanAttrs(t *testing.T) {
 	_, werr := sub.Wait(spanCtx)
 	require.NoError(t, werr)
 
-	// subagent.run carries subagent_name and status.
+	// subagent.run carries subagent_name, purpose, and status.
 	run := waitForSpan(t, exp, "subagent.run")
 	name, ok := attrValue(run.Attributes, "subagent_name")
 	require.True(t, ok)
 	assert.Equal(t, "trace-worker", name)
+	purpose, ok := attrValue(run.Attributes, "purpose")
+	require.True(t, ok)
+	assert.Equal(t, "subagent", purpose)
 	status, ok := attrValue(run.Attributes, "status")
 	require.True(t, ok)
 	assert.Equal(t, "completed", status)

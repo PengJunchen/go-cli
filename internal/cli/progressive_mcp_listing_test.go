@@ -158,8 +158,10 @@ func TestDurableMCPListContinuesAcrossOwnedRunsWithoutConnecting(t *testing.T) {
 	cfg := newMCPListTestConfig(t, []config.MCPServerConfig{{Name: "catalog", URL: peer.server.URL}})
 	cfg.Runtime.Dynamic = true
 	provider, script := newDurablePromptServer(t,
+		`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"search-one","type":"function","function":{"name":"tool_search","arguments":"{\"query\":\"mcp_list\"}"}}]}}]}`,
 		`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"list-one","type":"function","function":{"name":"mcp_list","arguments":"{}"}}]}}]}`,
 		`{"choices":[{"message":{"role":"assistant","content":"first catalog completed"}}]}`,
+		`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"search-two","type":"function","function":{"name":"tool_search","arguments":"{\"query\":\"mcp_list\"}"}}]}}]}`,
 		`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"list-two","type":"function","function":{"name":"mcp_list","arguments":"{\"query\":\"cat\"}"}}]}}]}`,
 		`{"choices":[{"message":{"role":"assistant","content":"second catalog completed"}}]}`,
 	)
@@ -216,13 +218,18 @@ func TestDurableMCPListContinuesAcrossOwnedRunsWithoutConnecting(t *testing.T) {
 	require.Equal(t, map[string]int{"list-one": 1, "list-two": 1}, proofs)
 	require.Equal(t, map[string]int{"list-one": 1, "list-two": 1}, receipts)
 	require.Equal(t, 2, terminals)
-	require.Len(t, script.requestBodies(), 4)
-	for _, body := range script.requestBodies() {
-		require.Contains(t, body, "mcp_list", "actual provider catalog includes local MCP listing")
+	bodies := script.requestBodies()
+	require.Len(t, bodies, 6)
+	for _, body := range bodies {
 		require.NotContains(t, body, peer.server.URL)
 		require.NotContains(t, body, "PRIVATE_SCHEMA_BODY")
 	}
-	require.Contains(t, script.requestBodies()[1], "catalog")
+	for _, index := range []int{1, 4} {
+		require.Contains(t, bodies[index], "mcp_list", "promoted local listing is in the follow-up provider catalog")
+	}
+	for _, index := range []int{2, 5} {
+		require.Contains(t, bodies[index], "catalog", "mcp_list result is present in the next request")
+	}
 	require.Zero(t, peer.requests.Load())
 	require.Zero(t, peer.lists.Load())
 	require.Zero(t, peer.calls.Load())

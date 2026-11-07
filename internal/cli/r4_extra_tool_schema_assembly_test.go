@@ -132,6 +132,49 @@ type r4SchemaRecordingModel struct {
 	tools []llm.ToolDefinition
 }
 
+type r4CompactVisibilityCall struct {
+	messages []llm.Message
+	tools    []llm.ToolDefinition
+}
+
+type r4CompactVisibilityRecordingModel struct {
+	mu    sync.Mutex
+	calls []r4CompactVisibilityCall
+}
+
+func (m *r4CompactVisibilityRecordingModel) Generate(_ context.Context, messages []llm.Message, opts ...llm.Option) (*llm.Message, error) {
+	m.capture(messages, opts)
+	return &llm.Message{Role: llm.RoleAssistant, Content: "schemas captured", FinishReason: "stop"}, nil
+}
+
+func (m *r4CompactVisibilityRecordingModel) Stream(_ context.Context, messages []llm.Message, opts ...llm.Option) (<-chan llm.MessageChunk, error) {
+	m.capture(messages, opts)
+	chunks := make(chan llm.MessageChunk, 1)
+	chunks <- llm.MessageChunk{Role: llm.RoleAssistant, Content: "schemas captured", Final: true, FinishReason: "stop"}
+	close(chunks)
+	return chunks, nil
+}
+
+func (m *r4CompactVisibilityRecordingModel) capture(messages []llm.Message, opts []llm.Option) {
+	options := &llm.GenerationOptions{}
+	for _, option := range opts {
+		option(options)
+	}
+	call := r4CompactVisibilityCall{
+		messages: append([]llm.Message(nil), messages...),
+		tools:    append([]llm.ToolDefinition(nil), options.Tools...),
+	}
+	m.mu.Lock()
+	m.calls = append(m.calls, call)
+	m.mu.Unlock()
+}
+
+func (m *r4CompactVisibilityRecordingModel) snapshot() []r4CompactVisibilityCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]r4CompactVisibilityCall(nil), m.calls...)
+}
+
 func (m *r4SchemaRecordingModel) Generate(_ context.Context, _ []llm.Message, opts ...llm.Option) (*llm.Message, error) {
 	m.capture(opts)
 	return &llm.Message{Role: llm.RoleAssistant, Content: "schemas captured", FinishReason: "stop"}, nil
@@ -159,4 +202,64 @@ func (m *r4SchemaRecordingModel) capturedTools() []llm.ToolDefinition {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]llm.ToolDefinition(nil), m.tools...)
+}
+
+func TestRuntimeDynamicCompactsWireSchemasAndToolGuidelines(t *testing.T) {
+	ctx := context.Background()
+	run := func(dynamic bool) (r4CompactVisibilityCall, bool) {
+		cfg := newAssembleTestConfig(t)
+		cfg.Runtime.Dynamic = dynamic
+		assembly, err := AssembleAgent(ctx, cfg, "openai", "compact-schema-fixture", io.Discard, WithApproveMode(ApproveAuto))
+		require.NoError(t, err)
+		t.Cleanup(assembly.Cleanup)
+		allDefinitions, err := assembly.ToolRegistry.List(ctx)
+		require.NoError(t, err)
+		require.Greater(t, len(allDefinitions), compactToolVisibilityLimitForTest)
+		registered := make(map[string]bool, len(allDefinitions))
+		for _, definition := range allDefinitions {
+			registered[definition.Name()] = true
+		}
+		model := &r4CompactVisibilityRecordingModel{}
+		assembly.LoopAgent.SetModel(model)
+		_, err = assembly.LoopAgent.Run(ctx, core.Submission{Content: "perform generic work"})
+		require.NoError(t, err)
+		calls := model.snapshot()
+		require.Len(t, calls, 1)
+		return calls[0], registered["process_session"]
+	}
+	legacy, _ := run(false)
+	compact, processSessionRegistered := run(true)
+	compactRepeat, _ := run(true)
+	legacySchemaBytes := r4ToolSchemaBytes(t, legacy.tools)
+	compactSchemaBytes := r4ToolSchemaBytes(t, compact.tools)
+	legacyPromptBytes := len(legacy.messages[0].Content)
+	compactPromptBytes := len(compact.messages[0].Content)
+	t.Logf("dynamic=false schemas=%d schema_bytes=%d system_prompt_bytes=%d", len(legacy.tools), legacySchemaBytes, legacyPromptBytes)
+	t.Logf("dynamic=true schemas=%d schema_bytes=%d system_prompt_bytes=%d", len(compact.tools), compactSchemaBytes, compactPromptBytes)
+	require.Len(t, legacy.tools, 30, "Dynamic=false keeps the existing default threshold behavior")
+	require.Len(t, compact.tools, compactToolVisibilityLimitForTest)
+	require.Less(t, compactSchemaBytes, legacySchemaBytes)
+	require.Less(t, compactPromptBytes, legacyPromptBytes, "tool names and guidelines must follow the visible schema set")
+	assert.Equal(t, compact.tools, compactRepeat.tools, "the initial schema set is deterministic across identical runs")
+	assert.Equal(t, compact.messages[0].Content, compactRepeat.messages[0].Content, "the initial system prompt is a stable cacheable prefix")
+
+	visible := make(map[string]bool, len(compact.tools))
+	for _, definition := range compact.tools {
+		visible[definition.Name] = true
+	}
+	for _, required := range []string{"read", "write", "edit", "bash", "grep", "find", "ls", "tool_search", "dispatch_subagent"} {
+		require.Truef(t, visible[required], "%s must remain visible", required)
+	}
+	if processSessionRegistered {
+		require.True(t, visible["process_session"], "process_session must remain visible when registered")
+	}
+}
+
+const compactToolVisibilityLimitForTest = 12
+
+func r4ToolSchemaBytes(t *testing.T, definitions []llm.ToolDefinition) int {
+	t.Helper()
+	encoded, err := json.Marshal(definitions)
+	require.NoError(t, err)
+	return len(encoded)
 }
