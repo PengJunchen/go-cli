@@ -2052,7 +2052,7 @@ func (s *assembleState) assembleLoopAgent() {
 
 	// Wire dynamic system prompt builder with project context.
 	s.contextLoader = core.NewDefaultProjectContextLoader()
-	s.promptBuilder = core.NewDefaultSystemPromptBuilder()
+	s.promptBuilder = newCLIDefaultPromptBuilder(s.guardChain != nil)
 	s.promptBuilder = &memoryPromptBuilder{inner: s.promptBuilder, runtime: s.memoryRuntime}
 	if s.rc != nil && (s.rc.Runtime.Dynamic || progressiveSkillsEnabled(s.rc) || s.rc.MCP.Loading == "lazy") {
 		s.promptBuilder = &runtimePromptBuilder{inner: s.promptBuilder, maxBytes: s.rc.Runtime.MaxPromptBytes}
