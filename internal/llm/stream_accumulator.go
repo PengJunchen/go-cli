@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 )
 
@@ -14,6 +15,16 @@ import (
 // assistant placeholder early. It returns an error unless the stream reached
 // the required [DONE] marker with no parser or payload errors.
 func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent, ch chan<- MessageChunk) (toolCalls []ToolCall, finishReason string, usage *Usage, err error) {
+	return accumulateOpenAIStreamToolCallsWithProvider(ctx, events, ch, http.StatusOK, "openai")
+}
+
+func accumulateOpenAIStreamToolCallsWithProvider(
+	ctx context.Context,
+	events <-chan SSEEvent,
+	ch chan<- MessageChunk,
+	statusCode int,
+	provider string,
+) (toolCalls []ToolCall, finishReason string, usage *Usage, err error) {
 	var toolNameByIndex map[int]string
 	var toolIDByIndex map[int]string
 	var toolArgsBuf []*strings.Builder
@@ -90,6 +101,10 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 		var chunk openAIStreamChunk
 		if err := json.Unmarshal([]byte(event.Data), &chunk); err != nil {
 			streamErr = fmt.Errorf("llm: decode OpenAI stream event: %w", err)
+			continue
+		}
+		if chunk.Error != nil {
+			streamErr = newOpenAIStreamProviderError(statusCode, provider, event.Data, *chunk.Error)
 			continue
 		}
 		if len(chunk.Choices) == 0 && chunk.Usage == nil {

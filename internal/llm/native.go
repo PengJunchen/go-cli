@@ -239,13 +239,13 @@ func (m *nativeChatModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 }
 
 // streamRoundTrip builds the HTTP request, executes it, and verifies a 2xx
-// status. It returns the response body for SSE parsing. The caller is
-// responsible for closing the returned ReadCloser.
+// status. It returns the response body and actual HTTP status for SSE parsing.
+// The caller is responsible for closing the returned ReadCloser.
 //
 // For streaming, a shallow copy of the client is made with Timeout=0 so that
 // SSE streams are not cut off by the client-level timeout. The caller's
 // context provides cancellation instead (AC-2, AC-3).
-func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endpoint string) (io.ReadCloser, *ProviderAttempt, error) {
+func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endpoint string) (io.ReadCloser, int, *ProviderAttempt, error) {
 	// Copy the client and clear the Timeout so long-lived SSE streams are
 	// not terminated by the default 120s client timeout. Context
 	// cancellation still applies (AC-3).
@@ -257,7 +257,7 @@ func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endp
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: build request: %w", err))
+		return nil, 0, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: build request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
@@ -269,11 +269,11 @@ func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endp
 
 	attempt, err := (providerDispatchBinding{mode: m.buildMode, candidate: m.candidate}).begin(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, nil, err
 	}
 	resp, err := streamClient.Do(req)
 	if err != nil {
-		return nil, attempt, fmt.Errorf("llm: do request: %w", &providerTransportFailure{cause: err})
+		return nil, 0, attempt, fmt.Errorf("llm: do request: %w", &providerTransportFailure{cause: err})
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -281,13 +281,13 @@ func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endp
 		if readErr != nil {
 			providerErr := newProviderError(resp.StatusCode, m.provider, string(payload))
 			providerErr.BodyTruncated = truncated
-			return nil, attempt, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
+			return nil, resp.StatusCode, attempt, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
 		}
 		providerErr := newProviderError(resp.StatusCode, m.provider, string(payload))
 		providerErr.BodyTruncated = truncated
-		return nil, attempt, errors.Join(providerErr, closeErr)
+		return nil, resp.StatusCode, attempt, errors.Join(providerErr, closeErr)
 	}
-	return resp.Body, attempt, nil
+	return resp.Body, resp.StatusCode, attempt, nil
 }
 
 // withStreamFlag decodes the request body, injects "stream": true, and
@@ -416,7 +416,7 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		}
 	}
 
-	respBody, attempt, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
+	respBody, statusCode, attempt, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
 	if err != nil {
 		close(ch)
 		return ch, finishProviderAttempt(ctx, attempt, err, nil)
@@ -478,7 +478,7 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		parser := NewDefaultSSEParser()
 		events, _ := parser.Parse(ctx, reader) //nolint:errcheck
 
-		toolCalls, finishReason, usage, streamErr := accumulateOpenAIStreamToolCalls(ctx, events, ch)
+		toolCalls, finishReason, usage, streamErr := accumulateOpenAIStreamToolCallsWithProvider(ctx, events, ch, statusCode, m.provider)
 		if streamErr != nil {
 			sendStreamErrorWithUsage(ch, streamErr, usage)
 			return
@@ -588,7 +588,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 
-	respBody, attempt, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
+	respBody, _, attempt, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
 	if err != nil {
 		close(ch)
 		return ch, finishProviderAttempt(ctx, attempt, err, nil)
@@ -1000,7 +1000,7 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 	// Switch the endpoint to the streaming variant.
 	streamEndpoint := strings.Replace(m.endpoint, geminiGenerateAction, geminiStreamAction, 1)
 
-	respBody, attempt, err := m.streamRoundTrip(ctx, body, streamEndpoint)
+	respBody, _, attempt, err := m.streamRoundTrip(ctx, body, streamEndpoint)
 	if err != nil {
 		close(ch)
 		return ch, finishProviderAttempt(ctx, attempt, err, nil)

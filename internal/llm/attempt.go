@@ -908,8 +908,12 @@ func providerAttemptTerminal(ctx context.Context, err error, usage *Usage) Provi
 			failure = FailureOverflow
 		case ErrTypeInvalidRequest:
 			failure = FailureInvalidRequest
+		case ErrTypeProtocol:
+			failure = FailureProtocol
 		case ErrTypeRateLimit, ErrTypeServer, ErrTypeNetwork:
 			failure = FailureTransientProvider
+		case ErrTypeQuota:
+			failure = FailureOther
 		}
 		return ProviderAttemptTerminal{Outcome: AttemptProviderFailure, Failure: failure, Usage: evidence}
 	}

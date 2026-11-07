@@ -234,7 +234,7 @@ func (m *HTTPChatModel) generate(ctx context.Context, msgs []Message, opts ...Op
 		return nil, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 
-	respBody, attempt, err := m.roundTrip(ctx, body)
+	respBody, _, attempt, err := m.roundTrip(ctx, body)
 	if err != nil {
 		return nil, attempt, err
 	}
@@ -315,7 +315,7 @@ func (m *HTTPChatModel) stream(ctx context.Context, msgs []Message, opts ...Opti
 		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: marshal stream request: %w", err))
 	}
 
-	respBody, attempt, err := m.roundTrip(ctx, streamBody)
+	respBody, statusCode, attempt, err := m.roundTrip(ctx, streamBody)
 	if err != nil {
 		close(ch)
 		return ch, finishProviderAttempt(ctx, attempt, err, nil)
@@ -379,7 +379,7 @@ func (m *HTTPChatModel) stream(ctx context.Context, msgs []Message, opts ...Opti
 		parser := NewDefaultSSEParser()
 		events, _ := parser.Parse(ctx, reader) //nolint:errcheck
 
-		toolCalls, finishReason, usage, streamErr := accumulateOpenAIStreamToolCalls(ctx, events, ch)
+		toolCalls, finishReason, usage, streamErr := accumulateOpenAIStreamToolCallsWithProvider(ctx, events, ch, statusCode, m.provider.name)
 		if streamErr != nil {
 			sendStreamErrorWithUsage(ch, streamErr, usage)
 			return
@@ -399,6 +399,7 @@ func (m *HTTPChatModel) stream(ctx context.Context, msgs []Message, opts ...Opti
 
 // openAIStreamChunk is one SSE data payload of a streaming response.
 type openAIStreamChunk struct {
+	Error   *openAIErrorEnvelope `json:"error,omitempty"`
 	Choices []openAIStreamChoice `json:"choices"`
 	// Usage is populated only on the final chunk (empty choices) when
 	// stream_options.include_usage is true.
@@ -527,9 +528,9 @@ func (m *HTTPChatModel) buildBody(msgs []Message, opts ...Option) ([]byte, error
 }
 
 // roundTrip builds the HTTP request, executes it against the provider, and
-// verifies a 2xx status. It returns the response body for decoding and closes
-// it via the deferred call in the caller.
-func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadCloser, *ProviderAttempt, error) {
+// verifies a 2xx status. It returns the response body and actual HTTP status for
+// decoding; the caller closes the body after use.
+func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadCloser, int, *ProviderAttempt, error) {
 	baseURL := m.cfg.BaseURL
 	if baseURL == "" {
 		baseURL = m.provider.defaultBaseURL
@@ -538,7 +539,7 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: build request: %w", err))
+		return nil, 0, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: build request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -552,11 +553,11 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 
 	attempt, err := (providerDispatchBinding{mode: m.buildMode, candidate: m.candidate}).begin(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, nil, err
 	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return nil, attempt, fmt.Errorf("llm: do request: %w", &providerTransportFailure{cause: err})
+		return nil, 0, attempt, fmt.Errorf("llm: do request: %w", &providerTransportFailure{cause: err})
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -564,13 +565,13 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 		if readErr != nil {
 			providerErr := newProviderError(resp.StatusCode, m.provider.name, string(payload))
 			providerErr.BodyTruncated = truncated
-			return nil, attempt, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
+			return nil, resp.StatusCode, attempt, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
 		}
 		providerErr := newProviderError(resp.StatusCode, m.provider.name, string(payload))
 		providerErr.BodyTruncated = truncated
-		return nil, attempt, errors.Join(providerErr, closeErr)
+		return nil, resp.StatusCode, attempt, errors.Join(providerErr, closeErr)
 	}
-	return resp.Body, attempt, nil
+	return resp.Body, resp.StatusCode, attempt, nil
 }
 
 // openAIRequest is the OpenAI chat completions request body.
