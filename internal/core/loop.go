@@ -3229,7 +3229,8 @@ Rules:
 3. Keep iterating (call tools, observe results, adjust) until the user's request is fully satisfied. Before claiming completion, verify the requested deliverables and relevant checks. If a verified blocker prevents further authorized progress, state the blocker and unfinished work accurately instead of claiming success.
 4. Do not guess or fabricate information when a tool can provide the answer.
 5. If a skill tool is available and relevant, call it first to obtain expert instructions, then follow those instructions using other tools.
-6. Perform branch, commit, or publish steps only when explicitly requested or authorized by the task, and verify their completion before reporting them as done.`
+6. Perform branch, commit, or publish steps only when explicitly requested or authorized by the task, and verify their completion before reporting them as done.
+7. Before installing dependencies, use existing evidence or a focused check to establish what is missing. Batch independent, predictable read-only checks; keep dependent or mutating steps ordered. Start testing with the smallest case that distinguishes likely faults, then complete all required validation.`
 	if len(defs) == 0 {
 		return base
 	}
