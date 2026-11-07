@@ -94,7 +94,7 @@ func (t *ReadTool) Names() []string { return t.names }
 
 // Description returns a brief description of the tool.
 func (t *ReadTool) Description() string {
-	return "read: reads a text file or lists a directory. Optional offset (1-based line) and limit (line count) return a bounded source window. Args: path (string), offset (integer), limit (integer)."
+	return "read: reads a text file or PNG/JPEG image (up to 512 KiB; requires an image-capable model), or lists a directory. Optional offset (1-based line) and limit (line count) apply only to text files and return a bounded source window. Args: path (string), offset (integer), limit (integer)."
 }
 
 // Parameters returns the JSON Schema for the path this tool reads or lists.

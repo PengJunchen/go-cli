@@ -52,7 +52,7 @@ func (h *HelpHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 		"Use /session resume to list physical IDs; /session entry <entry-id> navigates current history. Legacy files use session inspect-legacy/import-legacy.",
 		"Legacy mutable mode supports /session tree, branches, resume, fork, clone, and switch with a wired mutable tree; resume listing needs a session store.",
 		"Session snapshot and schema migration are unavailable.",
-		"Image reading and Web Agent UI: unavailable. Web Search requires a configured provider.",
+		"Image reading via the default read tool supports PNG/JPEG images up to 512 KiB when using an image-capable model. Web Agent UI is unavailable. Web Search requires a configured provider.",
 		"Remote TUI is unavailable. Serve exposes only the private go-cli-acp-json/1 profile; official ACP and ask approvals are unavailable.",
 		"Serve requires --approve auto or --approve deny. Hard cost budgets are unsupported; usage and cost reports may be incomplete or estimated, and a displayed $0 is not proof of zero spend.",
 		"Plan Mode changes only through the user's /plan enter|exit commands; model calls cannot switch it.",
