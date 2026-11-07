@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -122,6 +124,82 @@ func TestClassifyNormalizedProviderErrorBeforeGenericHarnessCode(t *testing.T) {
 			require.Equal(t, tt.wantCode, normalized.Code, "normalization keeps the generic harness code")
 			require.Equal(t, tt.want, p.Classify(normalized))
 			require.Equal(t, tt.wantRetry, p.ShouldRetry(ctx, normalized, 0))
+		})
+	}
+}
+
+func TestClassifyQuotaProtocolAndUnknownProviderErrorsFailClosed(t *testing.T) {
+	ctx, _ := newRetryTestCtx(t)
+	policy := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3}).(*DefaultRetryPolicy) //nolint:errcheck
+	for _, errorType := range []llm.ErrorType{llm.ErrTypeQuota, llm.ErrTypeProtocol, "future_provider_error"} {
+		for _, statusCode := range []int{http.StatusOK, http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+			t.Run(fmt.Sprintf("%s_http_%d", errorType, statusCode), func(t *testing.T) {
+				providerErr := &llm.ProviderError{
+					ErrorType:  errorType,
+					StatusCode: statusCode,
+					Provider:   "fixture",
+					Message:    "429 too many requests",
+				}
+				wrapped := fmt.Errorf("provider response: %w", providerErr)
+				require.Equal(t, ErrorFatal, policy.Classify(wrapped))
+				require.False(t, policy.ShouldRetry(ctx, wrapped, 0))
+
+				normalized := core.NormalizeError(wrapped)
+				require.Equal(t, core.ErrCodeModelError, normalized.Code)
+				require.Equal(t, ErrorFatal, policy.Classify(normalized))
+				require.False(t, policy.ShouldRetry(ctx, normalized, 0))
+			})
+		}
+	}
+
+	// A recognized semantic rate limit remains retryable even when the HTTP
+	// status is 200, matching OpenAI-compatible SSE error envelopes.
+	rateLimit := &llm.ProviderError{ErrorType: llm.ErrTypeRateLimit, StatusCode: http.StatusOK, Provider: "fixture"}
+	require.Equal(t, ErrorRateLimit, policy.Classify(rateLimit))
+	require.True(t, policy.ShouldRetry(ctx, rateLimit, 0))
+	normalizedRateLimit := core.NormalizeError(rateLimit)
+	require.Equal(t, ErrorRateLimit, policy.Classify(normalizedRateLimit))
+	require.True(t, policy.ShouldRetry(ctx, normalizedRateLimit, 0))
+}
+
+type fixedErrorModel struct {
+	calls atomic.Int32
+	err   error
+}
+
+func (m *fixedErrorModel) Generate(context.Context, []llm.Message, ...llm.Option) (*llm.Message, error) {
+	m.calls.Add(1)
+	return nil, m.err
+}
+
+func (*fixedErrorModel) Stream(context.Context, []llm.Message, ...llm.Option) (<-chan llm.MessageChunk, error) {
+	return nil, errors.New("unused stream")
+}
+
+func TestProductionPolicyRetryMiddlewareDoesNotRedispatchTerminalProviderErrors(t *testing.T) {
+	ctx, _ := newRetryTestCtx(t)
+	for _, test := range []struct {
+		name       string
+		errorType  llm.ErrorType
+		statusCode int
+	}{
+		{name: "quota at http 429", errorType: llm.ErrTypeQuota, statusCode: http.StatusTooManyRequests},
+		{name: "protocol at http 200", errorType: llm.ErrTypeProtocol, statusCode: http.StatusOK},
+		{name: "unknown typed error at http 429", errorType: "future_provider_error", statusCode: http.StatusTooManyRequests},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := &fixedErrorModel{err: &llm.ProviderError{
+				ErrorType:  test.errorType,
+				StatusCode: test.statusCode,
+				Provider:   "fixture",
+				Message:    "429 too many requests",
+			}}
+			policy := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3, BaseDelay: time.Nanosecond, MaxDelay: time.Nanosecond})
+			wrapped := llm.NewRetryModelMiddleware(llm.WithRetryPolicy(policy)).WrapModel(model)
+
+			_, err := wrapped.Generate(ctx, nil)
+			require.Error(t, err)
+			require.EqualValues(t, 1, model.calls.Load(), "terminal typed provider errors must not dispatch again")
 		})
 	}
 }

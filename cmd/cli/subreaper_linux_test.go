@@ -130,6 +130,11 @@ func TestStandaloneSubreaperLinuxHelper(t *testing.T) {
 		os.Exit(100)
 	}
 	if strings.HasPrefix(mode, "deny-") {
+		// PR_SET_SECCOMP filters only the calling thread. Keep this helper on
+		// that thread through dispatch and process exit so Go cannot migrate
+		// the capability probe to an unfiltered thread. The outer's nested
+		// LockOSThread/UnlockOSThread pair must not release this fixture lock.
+		runtime.LockOSThread()
 		target := uint32(unix.SYS_PIDFD_OPEN)
 		if mode == "deny-prctl" {
 			target = uint32(unix.SYS_PRCTL)

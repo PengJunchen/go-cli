@@ -145,6 +145,8 @@ func analyzeDurableActionJournal(entries []SessionEntry, sessionID string) (*dur
 	batchKeys := make(map[string]durableActionBatchKey)
 	executionRows := make(map[string]*SessionEntry)
 	reconciliationRows := make(map[string]*SessionEntry)
+	processSessionLeaseRows := make(map[string]*SessionEntry)
+	terminalRows := make(map[string]*SessionEntry)
 	entriesByID := make(map[string]*SessionEntry, len(entries))
 
 	for i := range entries {
@@ -152,6 +154,15 @@ func analyzeDurableActionJournal(entries []SessionEntry, sessionID string) (*dur
 		entriesByID[entry.ID] = entry
 		if entry.RecordVersion != 1 {
 			continue
+		}
+		if entry.Type == EntryTypeCheckpoint && entry.CheckpointKind == CheckpointRunTerminal {
+			terminalRows[entry.ID] = entry
+		}
+		if entry.Type == EntryTypeCheckpoint && entry.CheckpointKind == CheckpointProcessSessionLease && entry.ProcessSessionLease != nil {
+			if err := validateProcessSessionLeaseRow(*entry); err != nil {
+				return nil, fmt.Errorf("session: invalid process-session lease checkpoint %q: %w", entry.ID, err)
+			}
+			processSessionLeaseRows[entry.ID] = entry
 		}
 		if entry.TranscriptIndex != nil && entry.Type != EntryTypeCompaction && entry.Type != EntryTypeCheckpoint && entry.ActionState == "" {
 			byIndex := transcriptIndexes[entry.RunID]
@@ -364,7 +375,7 @@ func analyzeDurableActionJournal(entries []SessionEntry, sessionID string) (*dur
 		if occurrence.resolution != nil {
 			return nil, fmt.Errorf("session: action %q has multiple execution-resolution checkpoints", entry.ActionID)
 		}
-		if err := validateExecutionResolutionEvidence(*entry.ExecutionResolution, entry.Seq, occurrence, executionRows, reconciliationRows, sessionID); err != nil {
+		if err := validateExecutionResolutionEvidence(*entry.ExecutionResolution, entry.Seq, occurrence, executionRows, reconciliationRows, processSessionLeaseRows, terminalRows, sessionID); err != nil {
 			return nil, fmt.Errorf("session: invalid resolution checkpoint %q: %w", entry.ID, err)
 		}
 		if !durableEntryIsAncestor(entriesByID, occurrence.receipt.ID, entry.ID) {
@@ -710,6 +721,8 @@ func validateExecutionResolutionEvidence(
 	occurrence *durableActionOccurrence,
 	executionRows map[string]*SessionEntry,
 	reconciliationRows map[string]*SessionEntry,
+	processSessionLeaseRows map[string]*SessionEntry,
+	terminalRows map[string]*SessionEntry,
 	sessionID string,
 ) error {
 	if resolution.RunID != occurrence.ref.RunID || resolution.ActionID != occurrence.ref.ActionID || resolution.EvidenceRef == "" {
@@ -721,6 +734,28 @@ func validateExecutionResolutionEvidence(
 			return errors.New("never-dispatched proof lacks its exact not-dispatched receipt")
 		}
 	case core.ResolutionLocalResourcesStopped:
+		if resolution.ProcessSessionClosureRef != "" {
+			closure, exists := processSessionLeaseRows[resolution.ProcessSessionClosureRef]
+			if occurrence.receipt == nil || occurrence.receipt.DispatchState != DispatchStateDispatched || resolution.EvidenceRef != resolution.ProcessSessionClosureRef ||
+				!exists || closure.Seq == 0 || closure.Seq >= resolutionSeq || !sameActionReference(occurrence.ref, refFromEntry(*closure, sessionID)) ||
+				closure.ProcessSessionLease == nil || closure.ProcessSessionLease.Phase != tools.ProcessSessionLeaseStopped ||
+				!closure.ProcessSessionLease.GroupAbsent || !closure.ProcessSessionLease.LeaderWaited || !closure.ProcessSessionLease.ReadersJoined {
+				return errors.New("process-session closure proof does not reference the exact prior stopped lease")
+			}
+			lease := closure.ProcessSessionLease
+			expectedAction, err := processSessionActionRefForIntent(*occurrence.intent, sessionID)
+			if err != nil || lease.Action != expectedAction || lease.RunID != occurrence.ref.RunID || lease.WorkspaceID != occurrence.ref.WorkspaceID || lease.OwnerGeneration != occurrence.intent.OwnerGeneration || lease.Identity == nil {
+				return errors.New("process-session closure proof differs from its exact start action")
+			}
+			terminal, hasTerminal, terminalErr := findTerminalCheckpoint(terminalRows, occurrence.ref.RunID)
+			if terminalErr != nil {
+				return terminalErr
+			}
+			if hasTerminal && terminal.Seq < closure.Seq && (terminal.ProcessSessionDelivery == nil || !processSessionDeliveryContains(*terminal.ProcessSessionDelivery, lease.OwnerID, lease.RunID, lease.WorkspaceID, lease.SessionID)) {
+				return errors.New("post-terminal process-session closure is absent from its delivered terminal binding")
+			}
+			break
+		}
 		proof, exists := executionRows[resolution.EvidenceRef]
 		if occurrence.receipt == nil || occurrence.receipt.DispatchState != DispatchStateDispatched {
 			return errors.New("local quiescence proof requires a dispatched terminal receipt")
@@ -740,5 +775,35 @@ func validateExecutionResolutionEvidence(
 	default:
 		return fmt.Errorf("unsupported execution-resolution evidence %q", resolution.Evidence)
 	}
+	if resolution.Evidence != core.ResolutionLocalResourcesStopped && resolution.ProcessSessionClosureRef != "" {
+		return errors.New("process-session closure reference is valid only for local stopped-process evidence")
+	}
 	return nil
+}
+
+func processSessionDeliveryContains(binding tools.ProcessSessionDeliveryBinding, ownerID, runID, workspaceID, sessionID string) bool {
+	if binding.OwnerID != ownerID || binding.RunID != runID || binding.WorkspaceID != workspaceID {
+		return false
+	}
+	for _, candidate := range binding.SessionIDs {
+		if candidate == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
+func findTerminalCheckpoint(entries map[string]*SessionEntry, runID string) (SessionEntry, bool, error) {
+	var terminal SessionEntry
+	found := false
+	for _, row := range entries {
+		if row.RecordVersion != 1 || row.Type != EntryTypeCheckpoint || row.CheckpointKind != CheckpointRunTerminal || row.RunID != runID {
+			continue
+		}
+		if found {
+			return SessionEntry{}, false, fmt.Errorf("session: run %q has multiple terminal checkpoints", runID)
+		}
+		terminal, found = *row, true
+	}
+	return terminal, found, nil
 }

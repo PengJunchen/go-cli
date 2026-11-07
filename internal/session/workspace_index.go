@@ -35,9 +35,10 @@ const maxWorkspaceIndexActions = 256
 type workspaceIndexRecordKind string
 
 const (
-	workspaceIndexInitialized   workspaceIndexRecordKind = "workspace_initialized"
-	workspaceIndexDispatchReady workspaceIndexRecordKind = "dispatch_ready"
-	workspaceIndexResolution    workspaceIndexRecordKind = "execution_resolution"
+	workspaceIndexInitialized    workspaceIndexRecordKind = "workspace_initialized"
+	workspaceIndexDispatchReady  workspaceIndexRecordKind = "dispatch_ready"
+	workspaceIndexResolution     workspaceIndexRecordKind = "execution_resolution"
+	workspaceIndexProcessSession workspaceIndexRecordKind = "process_session_lease"
 )
 
 // WorkspaceDispatchAction persists action identity and effect facts only. It
@@ -45,6 +46,7 @@ const (
 type WorkspaceDispatchAction struct {
 	// NonBlockingDelegation is a persisted fact minted from an exact prepared proof.
 	NonBlockingDelegation  bool                               `json:"non_blocking_delegation,omitempty"`
+	OwnerGeneration        string                             `json:"owner_generation,omitempty"`
 	ManagedDelegationProof *tools.ManagedDelegationProof      `json:"-"`
 	Action                 PendingActionRef                   `json:"action"`
 	ToolIdentity           *tools.TrustedToolIdentitySnapshot `json:"tool_identity,omitempty"`
@@ -56,12 +58,13 @@ type WorkspaceDispatchAction struct {
 // WorkspaceDispatchBatch is the complete session reservation batch whose
 // global marker must be synced before any contained executor starts.
 type WorkspaceDispatchBatch struct {
-	WorkspaceID            string                    `json:"workspace_id"`
-	SessionID              string                    `json:"session_id"`
-	RunID                  string                    `json:"run_id"`
-	ActionBatchID          string                    `json:"action_batch_id"`
-	Actions                []WorkspaceDispatchAction `json:"actions"`
-	CanonicalWorkspaceRoot string                    `json:"-"`
+	WorkspaceID             string                                   `json:"workspace_id"`
+	SessionID               string                                   `json:"session_id"`
+	RunID                   string                                   `json:"run_id"`
+	ActionBatchID           string                                   `json:"action_batch_id"`
+	Actions                 []WorkspaceDispatchAction                `json:"actions"`
+	CanonicalWorkspaceRoot  string                                   `json:"-"`
+	ProcessSessionAdmission *tools.ProcessSessionAdmissionCapability `json:"-"`
 }
 
 type WorkspaceDispatchResult uint8
@@ -95,19 +98,20 @@ type WorkspaceQuarantineIndex struct {
 }
 
 type workspaceIndexRecord struct {
-	Version       uint16                    `json:"version"`
-	Seq           uint64                    `json:"seq"`
-	RecordID      string                    `json:"record_id"`
-	Kind          workspaceIndexRecordKind  `json:"kind"`
-	WorkspaceID   string                    `json:"workspace_id"`
-	SessionID     string                    `json:"session_id,omitempty"`
-	RunID         string                    `json:"run_id,omitempty"`
-	ActionBatchID string                    `json:"action_batch_id,omitempty"`
-	Actions       []WorkspaceDispatchAction `json:"actions,omitempty"`
-	Action        *PendingActionRef         `json:"action,omitempty"`
-	CheckpointID  string                    `json:"checkpoint_entry_id,omitempty"`
-	CheckpointSeq uint64                    `json:"checkpoint_seq,omitempty"`
-	Resolution    *core.ExecutionResolution `json:"resolution,omitempty"`
+	Version             uint16                             `json:"version"`
+	Seq                 uint64                             `json:"seq"`
+	RecordID            string                             `json:"record_id"`
+	Kind                workspaceIndexRecordKind           `json:"kind"`
+	WorkspaceID         string                             `json:"workspace_id"`
+	SessionID           string                             `json:"session_id,omitempty"`
+	RunID               string                             `json:"run_id,omitempty"`
+	ActionBatchID       string                             `json:"action_batch_id,omitempty"`
+	Actions             []WorkspaceDispatchAction          `json:"actions,omitempty"`
+	Action              *PendingActionRef                  `json:"action,omitempty"`
+	CheckpointID        string                             `json:"checkpoint_entry_id,omitempty"`
+	CheckpointSeq       uint64                             `json:"checkpoint_seq,omitempty"`
+	Resolution          *core.ExecutionResolution          `json:"resolution,omitempty"`
+	ProcessSessionLease *tools.ProcessSessionLeaseSnapshot `json:"process_session_lease,omitempty"`
 }
 
 type workspaceBatchKey struct {
@@ -138,11 +142,12 @@ type workspaceIndexedAction struct {
 }
 
 type workspaceIndexState struct {
-	records       []workspaceIndexRecord
-	batches       map[workspaceBatchKey]*workspaceIndexRecord
-	actionsByKey  map[workspaceActionKey]*workspaceIndexedAction
-	actionsByCall map[workspaceOccurrenceKey]*workspaceIndexedAction
-	actionsByID   map[string]*workspaceIndexedAction
+	records         []workspaceIndexRecord
+	batches         map[workspaceBatchKey]*workspaceIndexRecord
+	actionsByKey    map[workspaceActionKey]*workspaceIndexedAction
+	actionsByCall   map[workspaceOccurrenceKey]*workspaceIndexedAction
+	actionsByID     map[string]*workspaceIndexedAction
+	processSessions map[string]tools.ProcessSessionLeaseSnapshot
 }
 
 type workspaceIndexHandle struct {
@@ -288,7 +293,7 @@ func (i *WorkspaceQuarantineIndex) beginDispatchBatch(ctx context.Context, batch
 			}
 		}
 		hasUnresolved := handle.state.hasUnresolvedMarker()
-		if hasUnresolved && !workspaceDispatchBatchHasScopedReadProofs(normalized, true) {
+		if hasUnresolved && !workspaceDispatchBatchHasScopedReadProofs(normalized, true) && !handle.state.allowsProcessSessionAdmission(normalized) {
 			deniedBeforeAppend = true
 			return ErrWorkspaceQuarantined
 		}
@@ -884,11 +889,12 @@ func validateWorkspaceIndexRecords(records []workspaceIndexRecord, workspaceID s
 		return nil, errors.New("workspace index has no initialization witness")
 	}
 	state := &workspaceIndexState{
-		records:       append([]workspaceIndexRecord(nil), records...),
-		batches:       make(map[workspaceBatchKey]*workspaceIndexRecord),
-		actionsByKey:  make(map[workspaceActionKey]*workspaceIndexedAction),
-		actionsByCall: make(map[workspaceOccurrenceKey]*workspaceIndexedAction),
-		actionsByID:   make(map[string]*workspaceIndexedAction),
+		records:         append([]workspaceIndexRecord(nil), records...),
+		batches:         make(map[workspaceBatchKey]*workspaceIndexRecord),
+		actionsByKey:    make(map[workspaceActionKey]*workspaceIndexedAction),
+		actionsByCall:   make(map[workspaceOccurrenceKey]*workspaceIndexedAction),
+		actionsByID:     make(map[string]*workspaceIndexedAction),
+		processSessions: make(map[string]tools.ProcessSessionLeaseSnapshot),
 	}
 	seenRecordIDs := make(map[string]struct{}, len(records))
 	for position := range state.records {
@@ -904,7 +910,7 @@ func validateWorkspaceIndexRecords(records []workspaceIndexRecord, workspaceID s
 		}
 		seenRecordIDs[record.RecordID] = struct{}{}
 		if position == 0 {
-			if record.Kind != workspaceIndexInitialized || record.RecordID != workspaceGenesisRecordID(workspaceID) || record.Seq != 1 || record.SessionID != "" || record.RunID != "" || record.ActionBatchID != "" || len(record.Actions) != 0 || record.Action != nil || record.Resolution != nil || record.CheckpointID != "" || record.CheckpointSeq != 0 {
+			if record.Kind != workspaceIndexInitialized || record.RecordID != workspaceGenesisRecordID(workspaceID) || record.Seq != 1 || record.SessionID != "" || record.RunID != "" || record.ActionBatchID != "" || len(record.Actions) != 0 || record.Action != nil || record.Resolution != nil || record.ProcessSessionLease != nil || record.CheckpointID != "" || record.CheckpointSeq != 0 {
 				return nil, errors.New("workspace index has an invalid initialization witness")
 			}
 			continue
@@ -921,6 +927,10 @@ func validateWorkspaceIndexRecords(records []workspaceIndexRecord, workspaceID s
 			if err := state.addResolutionRecord(record); err != nil {
 				return nil, fmt.Errorf("workspace resolution record %q: %w", record.RecordID, err)
 			}
+		case workspaceIndexProcessSession:
+			if err := state.addProcessSessionLeaseRecord(record); err != nil {
+				return nil, fmt.Errorf("workspace process-session record %q: %w", record.RecordID, err)
+			}
 		default:
 			return nil, fmt.Errorf("workspace index has unsupported record kind %q", record.Kind)
 		}
@@ -932,7 +942,7 @@ func (s *workspaceIndexState) addDispatchRecord(record *workspaceIndexRecord) er
 	if err := validateWorkspaceRecordIdentityParts(record.WorkspaceID, record.SessionID, record.RunID, record.ActionBatchID); err != nil {
 		return err
 	}
-	if record.SessionID == "" || record.RunID == "" || record.ActionBatchID == "" || record.RecordID != workspaceDispatchRecordID(WorkspaceDispatchBatch{WorkspaceID: record.WorkspaceID, SessionID: record.SessionID, RunID: record.RunID, ActionBatchID: record.ActionBatchID}) || len(record.Actions) == 0 || len(record.Actions) > maxWorkspaceIndexActions || record.Action != nil || record.Resolution != nil || record.CheckpointID != "" || record.CheckpointSeq != 0 {
+	if record.SessionID == "" || record.RunID == "" || record.ActionBatchID == "" || record.RecordID != workspaceDispatchRecordID(WorkspaceDispatchBatch{WorkspaceID: record.WorkspaceID, SessionID: record.SessionID, RunID: record.RunID, ActionBatchID: record.ActionBatchID}) || len(record.Actions) == 0 || len(record.Actions) > maxWorkspaceIndexActions || record.Action != nil || record.Resolution != nil || record.ProcessSessionLease != nil || record.CheckpointID != "" || record.CheckpointSeq != 0 {
 		return errors.New("incomplete or invalid dispatch-ready batch envelope")
 	}
 	key := workspaceBatchKey{sessionID: record.SessionID, runID: record.RunID, batchID: record.ActionBatchID}
@@ -963,7 +973,7 @@ func (s *workspaceIndexState) addDispatchRecord(record *workspaceIndexRecord) er
 }
 
 func (s *workspaceIndexState) addResolutionRecord(record *workspaceIndexRecord) error {
-	if record.SessionID != "" || record.RunID != "" || record.ActionBatchID != "" || len(record.Actions) != 0 || record.Action == nil || record.Resolution == nil || record.CheckpointID == "" || record.CheckpointSeq == 0 || record.RecordID != workspaceResolutionRecordID(*record.Action) {
+	if record.SessionID != "" || record.RunID != "" || record.ActionBatchID != "" || len(record.Actions) != 0 || record.Action == nil || record.Resolution == nil || record.ProcessSessionLease != nil || record.CheckpointID == "" || record.CheckpointSeq == 0 || record.RecordID != workspaceResolutionRecordID(*record.Action) {
 		return errors.New("incomplete or invalid execution-resolution envelope")
 	}
 	if err := validateWorkspaceResolution(*record.Action, record.CheckpointID, record.CheckpointSeq, *record.Resolution); err != nil {
@@ -994,7 +1004,8 @@ func normalizeWorkspaceDispatchBatch(batch WorkspaceDispatchBatch) (WorkspaceDis
 	normalized := WorkspaceDispatchBatch{
 		WorkspaceID: batch.WorkspaceID, SessionID: batch.SessionID, RunID: batch.RunID,
 		ActionBatchID: batch.ActionBatchID, Actions: make([]WorkspaceDispatchAction, len(batch.Actions)),
-		CanonicalWorkspaceRoot: batch.CanonicalWorkspaceRoot,
+		CanonicalWorkspaceRoot:  batch.CanonicalWorkspaceRoot,
+		ProcessSessionAdmission: batch.ProcessSessionAdmission,
 	}
 	seenCalls := make(map[string]struct{}, len(batch.Actions))
 	seenActionIDs := make(map[string]struct{}, len(batch.Actions))
@@ -1031,6 +1042,7 @@ func normalizeWorkspaceDispatchBatch(batch WorkspaceDispatchBatch) (WorkspaceDis
 
 func stripWorkspaceDispatchRuntime(batch WorkspaceDispatchBatch) WorkspaceDispatchBatch {
 	batch.CanonicalWorkspaceRoot = ""
+	batch.ProcessSessionAdmission = nil
 	batch.Actions = append([]WorkspaceDispatchAction(nil), batch.Actions...)
 	for index := range batch.Actions {
 		batch.Actions[index] = cloneWorkspaceDispatchAction(batch.Actions[index])

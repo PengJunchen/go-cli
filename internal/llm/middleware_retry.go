@@ -80,8 +80,9 @@ func (c errorCategory) retryable() bool {
 // classifyError determines if an error is retryable. It first attempts a
 // structured ProviderError type assertion (errors.As traverses the Unwrap
 // chain). For non-ProviderError errors (e.g. net.Error timeout) it falls back
-// to keyword matching for backward compatibility. Unknown errors default to
-// categoryTransient (retryable).
+// to keyword matching for backward compatibility. Unknown untyped errors
+// default to categoryTransient (retryable); unknown ProviderError categories
+// are fatal until explicitly classified.
 // When the production RetryPolicy is wired in via WithRetryPolicy, its
 // Classify method is used instead.
 func classifyError(err error) errorCategory {
@@ -97,10 +98,14 @@ func classifyError(err error) errorCategory {
 		switch pe.ErrorType {
 		case ErrTypeRateLimit:
 			return categoryRateLimit
-		case ErrTypeAuth, ErrTypeOverflow, ErrTypeInvalidRequest:
+		case ErrTypeAuth, ErrTypeOverflow, ErrTypeInvalidRequest, ErrTypeQuota, ErrTypeProtocol:
 			return categoryFatal
 		case ErrTypeServer, ErrTypeNetwork:
 			return categoryTransient
+		default:
+			// A structured provider failure with an unknown category is not
+			// safe to retry without an explicit provider classification.
+			return categoryFatal
 		}
 	}
 	// Fallback: keyword matching for non-ProviderError errors (e.g. net.Error
@@ -261,7 +266,7 @@ func (r *retryModel) Generate(ctx context.Context, msgs []Message, opts ...Optio
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		msg, err := r.next.Generate(ctx, msgs, opts...)
+		msg, err := r.next.Generate(withRequestAttempt(ctx, attempt), msgs, opts...)
 		if err == nil {
 			if attempt > 0 {
 				r.logger.Debug("middleware.retry",
@@ -321,7 +326,7 @@ func (r *retryModel) Stream(ctx context.Context, msgs []Message, opts ...Option)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		attemptCtx, cancel := context.WithCancelCause(ctx)
+		attemptCtx, cancel := context.WithCancelCause(withRequestAttempt(ctx, attempt))
 		ch, err := r.next.Stream(attemptCtx, msgs, opts...)
 		if err == nil && ch != nil {
 			if attempt > 0 {

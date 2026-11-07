@@ -27,6 +27,58 @@ func TestTaskTypeFromContext_EmptyString(t *testing.T) {
 	assert.Equal(t, TaskTypeChat, tt)
 }
 
+func TestRequestPurposeFromContext(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  context.Context
+		want RequestPurpose
+	}{
+		{name: "main default", ctx: context.Background(), want: RequestPurposeMain},
+		{name: "compaction", ctx: WithTaskType(context.Background(), TaskTypeSummary), want: RequestPurposeCompaction},
+		{name: "memory", ctx: WithTaskType(context.Background(), TaskTypeExtraction), want: RequestPurposeMemory},
+		{name: "title", ctx: WithTaskType(context.Background(), TaskTypeTitle), want: RequestPurposeTitle},
+		{name: "subagent overrides chat", ctx: WithRequestPurpose(context.Background(), RequestPurposeSubagent), want: RequestPurposeSubagent},
+		{name: "subagent on chat", ctx: WithTaskType(WithRequestPurpose(context.Background(), RequestPurposeSubagent), TaskTypeChat), want: RequestPurposeSubagent},
+		{name: "subagent does not override compaction", ctx: WithTaskType(WithRequestPurpose(context.Background(), RequestPurposeSubagent), TaskTypeSummary), want: RequestPurposeCompaction},
+		{name: "subagent does not override extraction", ctx: WithTaskType(WithRequestPurpose(context.Background(), RequestPurposeSubagent), TaskTypeExtraction), want: RequestPurposeMemory},
+		{name: "subagent does not override title", ctx: WithTaskType(WithRequestPurpose(context.Background(), RequestPurposeSubagent), TaskTypeTitle), want: RequestPurposeTitle},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, RequestPurposeFromContext(tt.ctx))
+		})
+	}
+}
+
+func TestRequestAttemptTraceAttributes(t *testing.T) {
+	tests := []struct {
+		name        string
+		ctx         context.Context
+		wantReason  string
+		wantIndex   any
+		indexExists bool
+	}{
+		{name: "initial", ctx: context.Background(), wantReason: "initial"},
+		{name: "middleware retry", ctx: withRequestAttempt(context.Background(), 2), wantReason: "retry", wantIndex: 2, indexExists: true},
+		{name: "operation retry", ctx: WithCandidateProposal(context.Background(), CandidateProposal{Reason: CandidateRetry}), wantReason: "retry"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			attrs := requestAttemptAttributes(tt.ctx)
+			values := make(map[string]any, len(attrs))
+			for _, attr := range attrs {
+				values[attr.Key] = attr.Value
+			}
+			assert.Equal(t, tt.wantReason, values["attempt_reason"])
+			if tt.indexExists {
+				assert.Equal(t, tt.wantIndex, values["attempt_index"])
+			} else {
+				assert.NotContains(t, values, "attempt_index")
+			}
+		})
+	}
+}
+
 // --- ModelSelector tests ---
 
 func TestDefaultModelSelector_ChatUsesPrimary(t *testing.T) {

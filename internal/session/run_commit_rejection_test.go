@@ -11,6 +11,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 type rejectedBatchWriter struct {
@@ -83,6 +84,9 @@ func TestRejectedBatchCacheBindsOwnerFullBatchAndOneShot(t *testing.T) {
 				assert.NoError(t, actual.CommitInput(ctx, core.RunCommitInput{RunID: runID, TranscriptIndex: 0, InputKind: core.InputKindUser, Message: core.AgentMessage{Role: "user", Content: "attempt"}}))
 				intent.RunID, intent.SessionID, intent.OwnerGeneration = runID, binding.SessionID, binding.OwnerGeneration
 				batch := core.RunIntentBatch{RunID: runID, ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: 0, AssistantMessage: core.AgentMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: intent.ToolCallID, Name: "read", Args: map[string]any{"path": "README.md"}}}}, Intents: []core.ActionIntent{intent}}
+				if failure == "" {
+					batch.ProcessSessionAdmission = &tools.ProcessSessionAdmissionCapability{}
+				}
 				assert.ErrorIs(t, actual.BeginIntentBatch(ctx, batch), ErrWorkspaceQuarantined)
 				if failure != "" {
 					if failure == "mirror" {
@@ -111,6 +115,13 @@ func TestRejectedBatchCacheBindsOwnerFullBatchAndOneShot(t *testing.T) {
 				assert.Error(t, err)
 				assert.False(t, closed)
 				assert.Error(t, sink.BeginIntentBatch(ctx, batch), "repeated Begin must not mint or overwrite the cached fact")
+				if batch.ProcessSessionAdmission != nil {
+					otherCapability := cloneRejectedBatch(batch)
+					otherCapability.ProcessSessionAdmission = &tools.ProcessSessionAdmissionCapability{}
+					_, closed, err := sink.TakeRejectedIntentBatch(ctx, otherCapability)
+					assert.Error(t, err, "a same-value but different admission capability cannot consume the cached denial")
+					assert.False(t, closed)
+				}
 				setRejectedBatchPath(t, &batch, "mutated after capture")
 				_, closed, err = sink.TakeRejectedIntentBatch(ctx, batch)
 				assert.Error(t, err)

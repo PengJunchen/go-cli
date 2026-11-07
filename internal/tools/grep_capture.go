@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -153,28 +155,31 @@ func (w *grepRipgrepJSONWriter) Write(p []byte) (int, error) {
 		w.frame = nil
 		return len(p), nil
 	}
-	for _, value := range p {
-		if w.err != nil || w.capture.Truncated() {
-			w.frame = nil
-			break
+	inputBytes := len(p)
+	for len(p) > 0 {
+		newline := bytes.IndexByte(p, '\n')
+		end := newline
+		if end < 0 {
+			end = len(p)
 		}
-		if value == '\n' {
-			w.consumeFrame()
-			if w.err != nil || w.capture.Truncated() {
-				w.frame = nil
-				break
-			}
-			w.frame = w.frame[:0]
-			continue
-		}
-		if len(w.frame) == grepMaxJSONFrameBytes {
+		if end > grepMaxJSONFrameBytes-len(w.frame) {
 			w.err = fmt.Errorf("%w: ripgrep event exceeds %d bytes", errGrepCaptureLimit, grepMaxJSONFrameBytes)
 			w.frame = nil
 			break
 		}
-		w.frame = append(w.frame, value)
+		w.frame = append(w.frame, p[:end]...)
+		if newline < 0 {
+			break
+		}
+		w.consumeFrame()
+		if w.err != nil || w.capture.Truncated() {
+			w.frame = nil
+			break
+		}
+		w.frame = w.frame[:0]
+		p = p[newline+1:]
 	}
-	return len(p), nil
+	return inputBytes, nil
 }
 
 func (w *grepRipgrepJSONWriter) Finish() error {
@@ -309,6 +314,9 @@ func grepPureGo(ctx context.Context, re *regexp.Regexp, searchPath, glob string,
 func grepPureGoWithOpen(ctx context.Context, re *regexp.Regexp, searchPath, glob string, whitelist PathWhitelist, capture *grepMatchCapture, openDir grepDirectoryOpenFunc) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
+	}
+	if _, err := path.Match(glob, ""); err != nil {
+		return false, fmt.Errorf("grep: invalid glob filter. Correct or remove the glob argument: %w", err)
 	}
 	rootInfo, err := os.Lstat(searchPath)
 	if ctxErr := ctx.Err(); ctxErr != nil {

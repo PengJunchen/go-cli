@@ -44,6 +44,7 @@ func (*RequestEnvelopeError) NoProviderDispatch() bool { return true }
 type preparedRequestBase struct {
 	requested                      llm.GenerationOptions
 	multimodalTokensPerItemReserve int
+	recoveryControl                *llm.Message
 }
 
 func newPreparedRequestBase(options []llm.Option) (preparedRequestBase, error) {
@@ -52,6 +53,16 @@ func newPreparedRequestBase(options []llm.Option) (preparedRequestBase, error) {
 		return preparedRequestBase{}, &RequestEnvelopeError{Reason: "generation options are not representable", Cause: err}
 	}
 	return preparedRequestBase{requested: requested}, nil
+}
+
+func (base preparedRequestBase) projectedMessages(messages []llm.Message) []llm.Message {
+	if base.recoveryControl == nil {
+		return messages
+	}
+	projected := make([]llm.Message, len(messages), len(messages)+1)
+	copy(projected, messages)
+	projected = append(projected, *base.recoveryControl)
+	return projected
 }
 
 func prepareRequestPlan(
@@ -87,14 +98,15 @@ func prepareRequestPlan(
 	if err != nil {
 		return nil, &RequestEnvelopeError{Reason: "generation options are not representable", Cause: err}
 	}
+	projectedMessages := requestBase.projectedMessages(messages)
 	estimate, err := estimateRequestEnvelope(
-		ctx, candidate, modelSpec, messages, options, estimator,
+		ctx, candidate, modelSpec, projectedMessages, options, estimator,
 		compactionCeiling, requestBase.multimodalTokensPerItemReserve,
 	)
 	if err != nil {
 		return nil, err
 	}
-	return llm.NewPreparedRequestPlan(proposal, modelSpec, messages, options, estimate)
+	return llm.NewPreparedRequestPlan(proposal, modelSpec, projectedMessages, options, estimate)
 }
 
 func prepareAdmittedRequestPlan(
@@ -495,7 +507,7 @@ func compactPreparedMessages(
 	if err := compaction.ValidateCompactionEligible(items); err != nil {
 		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "request contains non-compaction-safe content", Cause: err}
 	}
-	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), textBudget, estimator)
+	result, err := compaction.CompactPreservingImages(ctx, compactor, cloneCompactionTurnItems(items), textBudget, estimator)
 	if err != nil {
 		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "request compaction failed", Cause: err}
 	}

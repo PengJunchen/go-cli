@@ -36,6 +36,9 @@ const (
 	runCompletionTaskNoProof        runCompletionTaskState = "no_proof"
 	runCompletionTaskResourceOpen   runCompletionTaskState = "pending"
 	runCompletionTaskReady          runCompletionTaskState = "ready"
+	runCompletionTaskTransferred    runCompletionTaskState = "transferred_to_host"
+	runCompletionTaskHostClosed     runCompletionTaskState = "host_closed"
+	runCompletionTaskHostFailed     runCompletionTaskState = "host_closure_unconfirmed"
 )
 
 type runCompletionTask struct {
@@ -51,6 +54,8 @@ type runCompletionTask struct {
 	receiptDurable          bool
 	proofExecutionDurable   bool
 	resolutionDurable       bool
+	hostLeaseDone           <-chan struct{}
+	hostWatchDone           chan struct{}
 }
 
 type runCompletionTaskDetails struct {
@@ -270,6 +275,23 @@ func markRunCommitTerminalSynced(ctx context.Context) {
 	if owner, ok := ctx.Value(runOwnerContextKey{}).(*runOwner); ok && owner != nil {
 		owner.markRunCommitTerminalSynced()
 	}
+}
+
+func markRunCommitTerminalSyncedWithDelivery(ctx context.Context, delivery *tools.ProcessSessionDelivery) {
+	if ctx == nil {
+		return
+	}
+	if owner := runOwnerFromContext(ctx); owner != nil {
+		owner.markRunCommitTerminalSyncedWithDelivery(delivery)
+	}
+}
+
+func transferRunCompletionTaskToHost(ctx context.Context, taskID uint64, leaseDone, ownerClosed <-chan struct{}) bool {
+	if ctx == nil || taskID == 0 || leaseDone == nil || ownerClosed == nil {
+		return false
+	}
+	owner := runOwnerFromContext(ctx)
+	return owner != nil && owner.transferCompletionTaskToHost(taskID, leaseDone, ownerClosed)
 }
 
 func (o *runOwner) RegisterWorker(_, _ string) func() {
@@ -713,6 +735,98 @@ func (o *runOwner) markRunCommitTerminalSynced() {
 	o.mu.Unlock()
 }
 
+func (o *runOwner) markRunCommitTerminalSyncedWithDelivery(delivery *tools.ProcessSessionDelivery) {
+	o.mu.Lock()
+	o.status.ProcessSessionDelivery = tools.CloneProcessSessionDelivery(delivery)
+	o.terminalSyncSuccess = true
+	o.signalLocked()
+	o.mu.Unlock()
+}
+
+// transferCompletionTaskToHost transfers a completed process_session tool
+// invocation to the host-owned manager while keeping the still-live lease
+// distinct from local quiescence.
+func (o *runOwner) transferCompletionTaskToHost(id uint64, leaseDone, ownerClosed <-chan struct{}) bool {
+	o.mu.Lock()
+	task := o.completionTasks[id]
+	if task == nil || task.state != runCompletionTaskReady || task.pendingResourceUnproven || !validRunCompletionProof(task.proof) {
+		o.mu.Unlock()
+		return false
+	}
+	task.state = runCompletionTaskTransferred
+	task.hostLeaseDone = leaseDone
+	task.hostWatchDone = make(chan struct{})
+	watchDone := task.hostWatchDone
+	task.read = nil
+	o.signalLocked()
+	o.signalCompletionLocked()
+	o.mu.Unlock()
+	go func() {
+		defer close(watchDone)
+		select {
+		case <-leaseDone:
+			o.finishCompletionTaskHostClosure(id)
+		case <-ownerClosed:
+			// The owner completion channel is authoritative only for ending
+			// this watcher. Recheck the durable close acknowledgment before
+			// deciding whether the transferred resource actually closed.
+			select {
+			case <-leaseDone:
+				o.finishCompletionTaskHostClosure(id)
+			default:
+				o.finishCompletionTaskHostFailure(id)
+			}
+		}
+	}()
+	return true
+}
+
+func (o *runOwner) finishCompletionTaskHostClosure(id uint64) {
+	o.mu.Lock()
+	task := o.completionTasks[id]
+	if task == nil || task.state != runCompletionTaskTransferred {
+		o.mu.Unlock()
+		return
+	}
+	task.state = runCompletionTaskHostClosed
+	task.hostLeaseDone = nil
+	if o.released && o.status.ExecutionState == RunExecutionDeliveredLive && !o.hasTransferredHostLeaseLocked() && o.durableCommitSucceededLocked() {
+		o.status.ExecutionState = RunExecutionQuiescent
+	}
+	o.refreshPendingLocked()
+	o.signalLocked()
+	o.signalCompletionLocked()
+	o.mu.Unlock()
+}
+
+func (o *runOwner) finishCompletionTaskHostFailure(id uint64) {
+	o.mu.Lock()
+	task := o.completionTasks[id]
+	if task == nil || task.state != runCompletionTaskTransferred {
+		o.mu.Unlock()
+		return
+	}
+	task.state = runCompletionTaskHostFailed
+	task.hostLeaseDone = nil
+	o.unknown = true
+	o.status.Outcome = RunOutcomeUnknown
+	o.status.ExecutionState = RunExecutionQuarantined
+	o.runErr = errors.Join(o.runErr, ErrRunCommitProcessSessionClosureUnconfirmed)
+	o.refreshPendingLocked()
+	o.signalLocked()
+	o.signalCompletionLocked()
+	o.mu.Unlock()
+}
+
+func (o *runOwner) hasTransferredHostLeaseLocked() bool {
+	for _, task := range o.completionTasks {
+		if task != nil && task.state == runCompletionTaskTransferred {
+			return true
+		}
+	}
+	return false
+}
+
 func (o *runOwner) runCommitTerminalSynced() bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -735,7 +849,7 @@ func (o *runOwner) Snapshot() RunStatus {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.refreshPendingLocked()
-	return o.status
+	return cloneRunStatus(o.status)
 }
 
 // WaitForCompletion waits until this owner has closed done, which occurs only
@@ -753,16 +867,22 @@ func (o *runOwner) WaitForCompletion(ctx context.Context) (RunStatus, DurablePub
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		o.refreshPendingLocked()
-		return o.status, o.durablePublicationLocked()
+		return cloneRunStatus(o.status), o.durablePublicationLocked()
 	}
 	select {
 	case <-o.done:
 		status, publication := snapshot()
+		if status.ExecutionState == RunExecutionDeliveredLive {
+			return status, publication, ErrRunCommitProcessSessionActive
+		}
 		return status, publication, nil
 	case <-ctx.Done():
 		select {
 		case <-o.done:
 			status, publication := snapshot()
+			if status.ExecutionState == RunExecutionDeliveredLive {
+				return status, publication, ErrRunCommitProcessSessionActive
+			}
 			return status, publication, nil
 		default:
 			status, publication := snapshot()
@@ -1089,6 +1209,8 @@ func (o *runOwner) supervise() {
 		}
 		if lateCommitErr != nil || generationErr != nil || leasePanicked || releasePanicked || !o.durableCommitSucceededLocked() {
 			o.status.ExecutionState = RunExecutionQuarantined
+		} else if o.hasTransferredHostLeaseLocked() {
+			o.status.ExecutionState = RunExecutionDeliveredLive
 		} else {
 			o.status.ExecutionState = RunExecutionQuiescent
 		}
@@ -1253,6 +1375,11 @@ func (o *runOwner) returnSnapshot() (Result, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.resultSnapshotLocked(), o.runErr
+}
+
+func cloneRunStatus(status RunStatus) RunStatus {
+	status.ProcessSessionDelivery = tools.CloneProcessSessionDelivery(status.ProcessSessionDelivery)
+	return status
 }
 
 func (o *runOwner) resultSnapshotLocked() Result {

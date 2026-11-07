@@ -256,6 +256,7 @@ func TestInteractiveMemoryStoreIsManualOnlyWhenNoTurnsRun(t *testing.T) {
 	srv := newMemoryTestServer(t)
 	defer srv.Close()
 	cfg, homeDir := newMemoryTestConfig(t, srv.URL)
+	cfg.Memory.Enabled = nil // Manual commands remain available with automatic memory omitted.
 	var out bytes.Buffer
 	cmd := newInteractiveCmd(strings.NewReader("/memory add a hand-entered memory\n/memory list\nexit\n"), &out)
 	require.NoError(t, cmd.Run(t.Context(), cfg, nil))

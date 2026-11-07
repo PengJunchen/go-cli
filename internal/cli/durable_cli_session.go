@@ -10,6 +10,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/session"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 var (
@@ -211,6 +212,26 @@ func (cliSession *durableCLISession) syncRecordedResolutions(ctx context.Context
 	}
 	defer sink.CloseRunCommit()
 	return sink.SyncRecordedResolutions(ctx)
+}
+
+func (cliSession *durableCLISession) closeProcessSessionLease(ctx context.Context, snapshot tools.ProcessSessionLeaseSnapshot) error {
+	if cliSession == nil || cliSession.manager == nil || cliSession.index == nil {
+		return ErrNoDurableSessionSelected
+	}
+	lease, err := cliSession.manager.acquireReconciliationLease()
+	if err != nil {
+		return fmt.Errorf("cli: acquire process-session closure lease: %w", err)
+	}
+	sink, err := session.NewSessionRunCommitSink(lease.PreparedSession(), cliSession.index, lease.WorkspaceID(), lease.CloseRunCommit)
+	if err != nil {
+		lease.CloseRunCommit()
+		return fmt.Errorf("cli: prepare process-session closure: %w", err)
+	}
+	defer sink.CloseRunCommit()
+	if err := sink.CloseProcessSessionLease(ctx, snapshot); err != nil {
+		return fmt.Errorf("cli: persist process-session closure: %w", err)
+	}
+	return nil
 }
 
 // bindDurableSessionRun gives the actual session adapter ownership of a

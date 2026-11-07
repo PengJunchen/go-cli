@@ -179,10 +179,11 @@ func classifyProviderError(err error) (ErrorCategory, bool) {
 		return ErrorRateLimit, true
 	case llm.ErrTypeServer, llm.ErrTypeNetwork:
 		return ErrorTransient, true
-	case llm.ErrTypeAuth, llm.ErrTypeOverflow, llm.ErrTypeInvalidRequest:
-		return ErrorFatal, true
 	default:
-		return "", false
+		// Only explicitly classified transient provider errors are retryable.
+		// This keeps quota/protocol and future typed errors from falling back
+		// to message-based rate-limit matching.
+		return ErrorFatal, true
 	}
 }
 

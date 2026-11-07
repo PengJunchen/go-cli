@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,7 +45,7 @@ func (s *assembleState) assembleMemorySupport() {
 	if s.ac.parentPlanCtrl != nil || s.ac.parentRegistryCurrent != nil {
 		return
 	}
-	enabled := s.rc == nil || s.rc.Memory.AutomaticEnabled()
+	enabled := s.rc != nil && s.rc.Memory.AutomaticEnabled()
 	path := memoryStorePath(s.rc)
 	workspace := ""
 	if enabled {
@@ -96,16 +97,21 @@ func (s *assembleState) assembleMemorySupport() {
 		model = s.model
 	}
 	if model != nil {
+		legacyCycler := s.smallModel == nil && s.modelCycler != nil
 		outputLimit := 1024
 		if s.rc != nil {
 			settings := s.rc.ModelSampling()
+			selectedProvider := s.providerName
 			if s.smallModel != nil {
 				settings = s.rc.SmallModelSampling()
+				if provider := strings.TrimSpace(s.rc.SmallModel.Provider); provider != "" {
+					selectedProvider = provider
+				}
 			}
-			if !settings.MaxTokensSet {
+			if !settings.MaxTokensSet && (legacyCycler || providerIdentityMatches(resolveProviderName("", s.rc), selectedProvider)) {
 				settings = s.rc.ProviderSampling()
 			}
-			if settings.MaxTokensSet && settings.MaxTokens > 0 && settings.MaxTokens < outputLimit {
+			if settings.MaxTokensSet && settings.MaxTokens > 0 && (!legacyCycler || settings.MaxTokens < outputLimit) {
 				outputLimit = settings.MaxTokens
 			}
 		}

@@ -170,8 +170,25 @@ func TestR2CurrentAdvertisementContract(t *testing.T) {
 	}
 }
 
+func TestR2IntegerReadWindowBoundsAreValidated(t *testing.T) {
+	request := []byte(`{"tools":[{"type":"function","function":{"name":"read","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1,"maximum":2147483647}},"required":["path"],"additionalProperties":false}}}]}`)
+	if _, err := r2GuardAdvertisedCall(request, "read", []byte(`{"path":"x","offset":2147483647}`)); err != nil {
+		t.Fatalf("valid advertised integer bound rejected: %v", err)
+	}
+	for _, args := range []string{
+		`{"path":"x","offset":0}`,
+		`{"path":"x","offset":2147483648}`,
+		`{"path":"x","offset":1.5}`,
+		`{"path":"x","offset":"1"}`,
+	} {
+		if _, err := r2GuardAdvertisedCall(request, "read", []byte(args)); err == nil {
+			t.Fatalf("invalid advertised integer argument was accepted: %s", args)
+		}
+	}
+}
+
 func TestR2SchemaSubsetRejectsUnimplementedConstraints(t *testing.T) {
-	for _, scenario := range []string{"native-subset", "allOf", "oneOf", "minProperties", "required-string", "required-null", "required-number-member", "enum-string", "enum-number-member", "unused-property-constraint", "additionalProperties-object"} {
+	for _, scenario := range []string{"native-subset", "allOf", "oneOf", "minProperties", "required-string", "required-null", "required-number-member", "enum-string", "enum-number-member", "malformed-integer-bound", "negative-integer-minimum", "nonpositive-integer-maximum", "fractional-integer-maximum", "reversed-integer-bounds", "additionalProperties-object"} {
 		t.Run(scenario, func(t *testing.T) {
 			parameters := map[string]any{
 				"type": "object", "required": []any{"path"}, "additionalProperties": false,
@@ -193,8 +210,17 @@ func TestR2SchemaSubsetRejectsUnimplementedConstraints(t *testing.T) {
 				path["enum"] = "x"
 			case "enum-number-member":
 				path["enum"] = []any{"x", 3}
-			case "unused-property-constraint":
-				parameters["properties"].(map[string]any)["optional"].(map[string]any)["minimum"] = 1
+			case "malformed-integer-bound":
+				parameters["properties"].(map[string]any)["optional"].(map[string]any)["maximum"] = "large"
+			case "negative-integer-minimum":
+				parameters["properties"].(map[string]any)["optional"].(map[string]any)["minimum"] = -1
+			case "nonpositive-integer-maximum":
+				parameters["properties"].(map[string]any)["optional"].(map[string]any)["maximum"] = 0
+			case "fractional-integer-maximum":
+				parameters["properties"].(map[string]any)["optional"].(map[string]any)["maximum"] = 1.5
+			case "reversed-integer-bounds":
+				optional := parameters["properties"].(map[string]any)["optional"].(map[string]any)
+				optional["minimum"], optional["maximum"] = 3, 2
 			case "additionalProperties-object":
 				parameters["additionalProperties"] = map[string]any{"type": "string"}
 			}

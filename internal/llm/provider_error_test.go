@@ -1,8 +1,11 @@
 package llm
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,6 +23,183 @@ func TestProviderError_Error(t *testing.T) {
 	}
 	assert.Equal(t, "rate_limit error from openai (HTTP 429)", e.Error())
 	assert.NotContains(t, e.Error(), e.Message)
+}
+
+func TestOpenAIStreamErrorEnvelopeClassification(t *testing.T) {
+	cases := []struct {
+		name     string
+		envelope openAIErrorEnvelope
+		wantType ErrorType
+	}{
+		{
+			name:     "api error rate limit message with null code",
+			envelope: openAIErrorEnvelope{Message: "Rate limit exceeded for this window", Type: "api_error", Code: []byte("null")},
+			wantType: ErrTypeRateLimit,
+		},
+		{
+			name:     "api error rate limit message with whitespace around null code",
+			envelope: openAIErrorEnvelope{Message: "Rate limit exceeded for this window", Type: "api_error", Code: []byte(" null \n")},
+			wantType: ErrTypeRateLimit,
+		},
+		{
+			name:     "quota code wins over generic error type",
+			envelope: openAIErrorEnvelope{Message: "insufficient quota", Type: "api_error", Code: []byte(`"insufficient_quota"`)},
+			wantType: ErrTypeQuota,
+		},
+		{
+			name:     "auth code wins over invalid request type",
+			envelope: openAIErrorEnvelope{Message: "bad credential", Type: "invalid_request_error", Code: []byte(`"invalid_api_key"`)},
+			wantType: ErrTypeAuth,
+		},
+		{
+			name:     "authentication type overrides conflicting transient code",
+			envelope: openAIErrorEnvelope{Message: "authentication failed", Type: "authentication_error", Code: []byte(`"rate_limit_exceeded"`)},
+			wantType: ErrTypeAuth,
+		},
+		{
+			name:     "authentication code overrides conflicting transient type",
+			envelope: openAIErrorEnvelope{Message: "authentication failed", Type: "rate_limit_error", Code: []byte(`"invalid_api_key"`)},
+			wantType: ErrTypeAuth,
+		},
+		{
+			name:     "quota type overrides conflicting transient code",
+			envelope: openAIErrorEnvelope{Message: "quota exhausted", Type: "insufficient_quota", Code: []byte(`"rate_limit_exceeded"`)},
+			wantType: ErrTypeQuota,
+		},
+		{
+			name:     "quota code overrides conflicting transient type",
+			envelope: openAIErrorEnvelope{Message: "quota exhausted", Type: "rate_limit_error", Code: []byte(`"insufficient_quota"`)},
+			wantType: ErrTypeQuota,
+		},
+		{
+			name:     "invalid request type overrides conflicting transient code",
+			envelope: openAIErrorEnvelope{Message: "bad request", Type: "invalid_request_error", Code: []byte(`"rate_limit_exceeded"`)},
+			wantType: ErrTypeInvalidRequest,
+		},
+		{
+			name:     "invalid request code overrides conflicting transient type",
+			envelope: openAIErrorEnvelope{Message: "bad request", Type: "rate_limit_error", Code: []byte(`"invalid_request_error"`)},
+			wantType: ErrTypeInvalidRequest,
+		},
+		{
+			name:     "conflicting non-retryable categories fail closed",
+			envelope: openAIErrorEnvelope{Message: "provider rejected request", Type: "authentication_error", Code: []byte(`"insufficient_quota"`)},
+			wantType: ErrTypeProtocol,
+		},
+		{
+			name:     "invalid request type",
+			envelope: openAIErrorEnvelope{Message: "model not found", Type: "invalid_request_error", Code: []byte(`"model_not_found"`)},
+			wantType: ErrTypeInvalidRequest,
+		},
+		{
+			name:     "context overflow code",
+			envelope: openAIErrorEnvelope{Message: "request too large", Type: "invalid_request_error", Code: []byte(`"context_length_exceeded"`)},
+			wantType: ErrTypeOverflow,
+		},
+		{
+			name:     "specific model code conflicts with overflow type",
+			envelope: openAIErrorEnvelope{Message: "conflicting error metadata", Type: "context_length_exceeded", Code: []byte(`"model_not_found"`)},
+			wantType: ErrTypeProtocol,
+		},
+		{
+			name:     "specific model type conflicts with overflow code",
+			envelope: openAIErrorEnvelope{Message: "conflicting error metadata", Type: "model_not_found", Code: []byte(`"context_length_exceeded"`)},
+			wantType: ErrTypeProtocol,
+		},
+		{
+			name:     "server error code",
+			envelope: openAIErrorEnvelope{Message: "server unavailable", Type: "server_error", Code: []byte("null")},
+			wantType: ErrTypeServer,
+		},
+		{
+			name:     "unknown api error fails closed",
+			envelope: openAIErrorEnvelope{Message: "a response secret", Type: "api_error", Code: []byte("null")},
+			wantType: ErrTypeProtocol,
+		},
+		{
+			name:     "unknown quota message fails closed",
+			envelope: openAIErrorEnvelope{Message: "quota exceeded", Type: "future_error", Code: []byte(`"future_code"`)},
+			wantType: ErrTypeProtocol,
+		},
+		{
+			name:     "unknown overflow message fails closed",
+			envelope: openAIErrorEnvelope{Message: "context window exceeded", Type: "future_error", Code: []byte(`"future_code"`)},
+			wantType: ErrTypeProtocol,
+		},
+		{
+			name:     "non-string code object is malformed",
+			envelope: openAIErrorEnvelope{Message: "Rate limit exceeded", Type: "rate_limit_error", Code: []byte(`{}`)},
+			wantType: ErrTypeProtocol,
+		},
+		{
+			name:     "non-string code array is malformed",
+			envelope: openAIErrorEnvelope{Message: "Rate limit exceeded", Type: "rate_limit_error", Code: []byte(`[]`)},
+			wantType: ErrTypeProtocol,
+		},
+		{
+			name:     "non-string code boolean is malformed",
+			envelope: openAIErrorEnvelope{Message: "Rate limit exceeded", Type: "rate_limit_error", Code: []byte(`true`)},
+			wantType: ErrTypeProtocol,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			const payload = `{"error":{"message":"a response secret"}}`
+			providerErr := newOpenAIStreamProviderError(200, "fixture", payload, test.envelope)
+			assert.Equal(t, http.StatusOK, providerErr.StatusCode)
+			assert.Equal(t, test.wantType, providerErr.ErrorType)
+			assert.Equal(t, "fixture", providerErr.Provider)
+			assert.Equal(t, payload, providerErr.Message)
+			assert.NotContains(t, providerErr.Error(), "secret")
+		})
+	}
+}
+
+func TestUnknownOpenAIStreamErrorMessageDoesNotTriggerOverflow(t *testing.T) {
+	for _, message := range []string{"quota exceeded", "context window exceeded"} {
+		t.Run(message, func(t *testing.T) {
+			providerErr := newOpenAIStreamProviderError(200, "fixture", message, openAIErrorEnvelope{
+				Message: message,
+				Type:    "future_error",
+				Code:    []byte(`"future_code"`),
+			})
+			assert.Equal(t, ErrTypeProtocol, providerErr.ErrorType)
+			assert.False(t, isOverflowError(providerErr), "unrecognized SSE messages must not trigger overflow compaction")
+		})
+	}
+}
+
+func TestOpenAIStreamProviderErrorDiagnosticsAreBounded(t *testing.T) {
+	const canaryValue = "diagnostic-secret-canary"
+	message := strings.Repeat("x", maxProviderErrorBodyBytes) + canaryValue
+	payload := `{"error":{"message":"` + message + `","type":"api_error","code":null}}`
+	providerErr := newOpenAIStreamProviderError(200, "fixture", payload, openAIErrorEnvelope{Message: message, Type: "api_error", Code: []byte("null")})
+	assert.LessOrEqual(t, len(providerErr.Message), maxProviderErrorBodyBytes)
+	assert.True(t, providerErr.BodyTruncated)
+	assert.NotContains(t, providerErr.Error(), canaryValue)
+}
+
+func TestProviderErrorQuotaAndUnknownProtocolFailClosed(t *testing.T) {
+	policy := newDefaultRetryPolicy(RetryConfig{MaxAttempts: 3})
+	for _, test := range []struct {
+		name      string
+		errorType ErrorType
+		failure   FailureClass
+		retryable bool
+	}{
+		{name: "semantic rate limit at HTTP 200", errorType: ErrTypeRateLimit, failure: FailureTransientProvider, retryable: true},
+		{name: "quota", errorType: ErrTypeQuota, failure: FailureOther},
+		{name: "protocol", errorType: ErrTypeProtocol, failure: FailureProtocol},
+		{name: "future unknown provider category", errorType: ErrorType("future"), failure: FailureOther},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			providerErr := &ProviderError{StatusCode: 200, ErrorType: test.errorType, Provider: "fixture", Message: "unknown"}
+			assert.Equal(t, test.retryable, policy.ShouldRetry(context.Background(), providerErr, 0))
+			terminal := providerAttemptTerminal(context.Background(), providerErr, nil)
+			assert.Equal(t, AttemptProviderFailure, terminal.Outcome)
+			assert.Equal(t, test.failure, terminal.Failure)
+		})
+	}
 }
 
 // TestProviderError_Unwrap verifies Unwrap returns nil (leaf node).
@@ -56,6 +236,7 @@ func TestNewProviderError_StatusMapping(t *testing.T) {
 		wantType   ErrorType
 	}{
 		{"429 rate limit", 429, "slow down", ErrTypeRateLimit},
+		{"429 exhausted quota", 429, `{"error":{"message":"insufficient quota","type":"api_error","code":"insufficient_quota"}}`, ErrTypeQuota},
 		{"401 auth", 401, "unauthorized", ErrTypeAuth},
 		{"403 forbidden", 403, "forbidden", ErrTypeAuth},
 		{"400 overflow", 400, "context_length_exceeded: too long", ErrTypeOverflow},

@@ -91,7 +91,7 @@ func TestReadDirectoryReturnsSortedPrefixWithinEntryLimit(t *testing.T) {
 	for i := range want {
 		want[i] = fmt.Sprintf("entry-%04d", i)
 	}
-	assert.Equal(t, strings.Join(want, "\n"), result.Output)
+	assert.Equal(t, expectedDirectoryTruncationNotice+strings.Join(want, "\n"), result.Output)
 	assert.Equal(t, directoryCaptureMaxEntries, result.Metadata["entries"])
 	assert.Equal(t, true, result.Metadata["truncated"])
 }

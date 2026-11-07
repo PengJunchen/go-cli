@@ -403,7 +403,7 @@ func TestSummaryPromptBoundsItemsAndWholePrompt(t *testing.T) {
 	items := []TurnItem{{
 		Role:           RoleTool,
 		ToolName:       "shell",
-		ReceiptOutcome: "error",
+		ReceiptOutcome: "success",
 		ToolResult:     "HEAD-CANARY-" + strings.Repeat("x", 50000) + "-TAIL-CANARY",
 	}}
 	prompt, err := NewSummaryCompactor(nil).buildSummaryPrompt(items, runeCountEstimator{})
@@ -417,7 +417,7 @@ func TestSummaryPromptBoundsItemsAndWholePrompt(t *testing.T) {
 	assert.Contains(t, prompt, "TAIL-CANARY")
 }
 
-func TestSummaryPromptTotalBudgetTruncatesInHeadTailOrder(t *testing.T) {
+func TestSummaryPromptTotalBudgetPrefersRecentOrdinaryItems(t *testing.T) {
 	items := make([]TurnItem, 8)
 	for i := range items {
 		items[i] = TurnItem{
@@ -432,18 +432,18 @@ func TestSummaryPromptTotalBudgetTruncatesInHeadTailOrder(t *testing.T) {
 	tokens, err := NewHeuristicTokenEstimator().Estimate(prompt)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, tokens, 6000)
-	assert.Contains(t, prompt, "BEGIN-0")
+	assert.NotContains(t, prompt, "BEGIN-0")
 	assert.Contains(t, prompt, "-END-7")
 	assert.Contains(t, prompt, "[truncated]")
 }
 
 func TestSummaryPromptItemLimitUsesProvidedEstimator(t *testing.T) {
-	items := []TurnItem{{Role: RoleUser, Content: "HEAD-" + strings.Repeat("x", 200) + "-TAIL"}}
-	compactor := NewSummaryCompactor(nil, WithMaxSummaryItemTokens(32))
+	items := []TurnItem{{Role: RoleAssistant, Content: "HEAD-" + strings.Repeat("x", 200) + "-TAIL"}}
+	compactor := NewSummaryCompactor(nil, WithMaxSummaryItemTokens(50))
 	prompt, err := compactor.buildSummaryPrompt(items, runeCountEstimator{})
 	require.NoError(t, err)
 	itemText := strings.TrimPrefix(prompt, summaryPromptInstruction)
-	assert.LessOrEqual(t, utf8.RuneCountInString(itemText), 32)
+	assert.LessOrEqual(t, utf8.RuneCountInString(itemText), 50)
 	assert.Contains(t, itemText, "HEAD")
 	assert.Contains(t, itemText, "-TAIL")
 	assert.Contains(t, itemText, "[truncated]")

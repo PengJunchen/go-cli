@@ -67,7 +67,7 @@ func TestFindGoReturnsGloballySortedTopKAndReportsTruncation(t *testing.T) {
 	for i := range want {
 		want[i] = fmt.Sprintf("entry-%04d.txt", i)
 	}
-	assert.Equal(t, strings.Join(want, "\n"), result.Output)
+	assert.Equal(t, expectedDirectoryTruncationNotice+strings.Join(want, "\n"), result.Output)
 	assert.Equal(t, findMaxResults, result.Metadata["matches"])
 	assert.Equal(t, true, result.Metadata["truncated"])
 }
@@ -99,7 +99,7 @@ func TestFindManagedBackendsReturnSameSortedTopK(t *testing.T) {
 			for i := range want {
 				want[i] = fmt.Sprintf("entry-%04d.txt", i)
 			}
-			assert.Equal(t, strings.Join(want, "\n"), result.Output)
+			assert.Equal(t, expectedDirectoryTruncationNotice+strings.Join(want, "\n"), result.Output)
 			assert.Equal(t, findMaxResults, result.Metadata["matches"])
 			assert.Equal(t, true, result.Metadata["truncated"])
 
@@ -597,10 +597,16 @@ func TestFindOutputByteLimitKeepsWholeRecords(t *testing.T) {
 
 	result, err := NewFindTool(WithFindWorkdir(t.TempDir())).Execute(context.Background(), ToolCall{Args: map[string]any{}})
 	require.NoError(t, err)
-	expectedRecords := directoryCaptureMaxOutputBytes / (1097 + 1)
+	expectedRecords := (directoryCaptureMaxOutputBytes - len(expectedDirectoryTruncationNotice) + 1) / (1097 + 1)
 	assert.Equal(t, expectedRecords, result.Metadata["matches"])
 	assert.Equal(t, true, result.Metadata["truncated"])
-	assert.Equal(t, expectedRecords*(1097+1)-1, len(result.Output))
+	require.True(t, strings.HasPrefix(result.Output, expectedDirectoryTruncationNotice))
+	assert.LessOrEqual(t, len(result.Output), directoryCaptureMaxOutputBytes)
+	assert.Equal(t, len(expectedDirectoryTruncationNotice)+expectedRecords*(1097+1)-1, len(result.Output))
+	lines := strings.Split(strings.TrimPrefix(result.Output, expectedDirectoryTruncationNotice), "\n")
+	for i, line := range lines {
+		assert.Equal(t, fmt.Sprintf("%01097d", i), line)
+	}
 	assert.NotContains(t, result.Output, "\n\n", "the byte cap must preserve complete records")
 }
 
@@ -791,7 +797,7 @@ func TestLSTruncatesToStableSortedTopKForEverySortMode(t *testing.T) {
 			for i := range want {
 				want[i] = ordered[i].name
 			}
-			assert.Equal(t, strings.Join(want, "\n"), result.Output)
+			assert.Equal(t, expectedDirectoryTruncationNotice+strings.Join(want, "\n"), result.Output)
 			assert.Equal(t, directoryCaptureMaxEntries, result.Metadata["entries"])
 			assert.Equal(t, true, result.Metadata["truncated"])
 		})

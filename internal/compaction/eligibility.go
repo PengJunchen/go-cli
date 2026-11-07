@@ -36,6 +36,10 @@ func ValidateRunRequestIntegrity(items []TurnItem) error {
 	if !hasDurable {
 		return validateReceiptMetadata(normalized)
 	}
+	anchorIndex, err := retainedInputAnchorIndex(normalized)
+	if err != nil {
+		return err
+	}
 
 	var cursor llm.SourceThrough
 	var revision, branchID, runID string
@@ -78,6 +82,11 @@ func ValidateRunRequestIntegrity(items []TurnItem) error {
 			cursor.PriorHistoryCount++
 		case llm.SourceRunTranscript:
 			transcriptStarted = true
+			if index == anchorIndex {
+				// The immediately following anchored marker covers the complete
+				// prior prefix; the input is its sole retained exception.
+				cursor.PriorHistoryCount = source.PriorSourceCount
+			}
 			if runID == "" {
 				runID = source.RunID
 			} else if runID != source.RunID {
@@ -108,6 +117,9 @@ func ValidateRunRequestIntegrity(items []TurnItem) error {
 			if source.Through.TranscriptCount > 0 && priorCount != nil && source.Through.PriorHistoryCount != *priorCount {
 				return fmt.Errorf("%w: item %d summary cursor does not cover the full prior prefix", ErrInvalidRunRequestHistory, index)
 			}
+			if source.RetainCurrentInput && (index != anchorIndex+1 || cursor.TranscriptCount != 1) {
+				return fmt.Errorf("%w: anchored summary is not adjacent to its original input", ErrInvalidRunRequestHistory)
+			}
 			cursor = source.Through
 		}
 	}
@@ -115,6 +127,34 @@ func ValidateRunRequestIntegrity(items []TurnItem) error {
 		return fmt.Errorf("%w: transcript source does not preserve the full prior prefix", ErrInvalidRunRequestHistory)
 	}
 	return nil
+}
+
+// retainedInputAnchorIndex recognizes only the one supported overlap: the
+// original run input immediately before an anchored summary. The cursor in
+// that summary covers the input, but no other covered source may be retained.
+func retainedInputAnchorIndex(items []TurnItem) (int, error) {
+	anchorIndex := -1
+	for index, item := range items {
+		source := item.Runtime.Source
+		if source.Kind != llm.SourceRunSummary || !source.RetainCurrentInput {
+			continue
+		}
+		if anchorIndex >= 0 || index == 0 || !item.IsCompaction || item.Role != RoleUser {
+			return -1, fmt.Errorf("%w: invalid anchored summary", ErrInvalidRunRequestHistory)
+		}
+		anchor := items[index-1]
+		ref := anchor.Runtime.Source
+		if anchor.Role != RoleUser || anchor.IsCompaction || ref.Kind != llm.SourceRunTranscript || ref.TranscriptIndex != 0 || ref.RunID != source.RunID || ref.PriorSourceCount != source.Through.PriorHistoryCount || source.Through.TranscriptCount < 2 {
+			return -1, fmt.Errorf("%w: anchored summary has no matching original input", ErrInvalidRunRequestHistory)
+		}
+		for _, prior := range items[:index-1] {
+			if prior.Runtime.Source.Kind != llm.SourceEphemeral || prior.Role != RoleSystem || prior.IsCompaction {
+				return -1, fmt.Errorf("%w: anchored summary retains another covered source", ErrInvalidRunRequestHistory)
+			}
+		}
+		anchorIndex = index - 1
+	}
+	return anchorIndex, nil
 }
 
 // ValidateCompactionEligible adds the stricter no-unknown rule to request
@@ -210,6 +250,10 @@ func sourceThroughForPrefix(items []TurnItem) (llm.SourceThrough, bool, error) {
 	if err := ValidateRunRequestIntegrity(items); err != nil {
 		return llm.SourceThrough{}, false, err
 	}
+	anchorIndex, err := retainedInputAnchorIndex(items)
+	if err != nil {
+		return llm.SourceThrough{}, false, err
+	}
 	var cursor llm.SourceThrough
 	for index, item := range items {
 		source := item.Runtime.Source
@@ -222,6 +266,9 @@ func sourceThroughForPrefix(items []TurnItem) (llm.SourceThrough, bool, error) {
 			}
 			cursor.PriorHistoryCount++
 		case llm.SourceRunTranscript:
+			if index == anchorIndex {
+				cursor.PriorHistoryCount = source.PriorSourceCount
+			}
 			if source.PriorSourceCount != cursor.PriorHistoryCount || source.TranscriptIndex != cursor.TranscriptCount {
 				return llm.SourceThrough{}, false, fmt.Errorf("%w: cut has a transcript source gap at item %d", ErrInvalidRunRequestHistory, index)
 			}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -61,6 +62,14 @@ var (
 // every constraint violation, or nil when the config is valid.
 func (v *DefaultValidator) Validate(cfg Config) error {
 	var errs []string
+	if cfg.Agent.MultimodalTokensPerItemReserve < 0 {
+		errs = append(errs, "agent.multimodal_tokens_per_item_reserve must be non-negative")
+	}
+	if level := strings.TrimSpace(cfg.Agent.Thinking); level != "" {
+		if _, err := llm.ParseThinkingLevel(level); err != nil {
+			errs = append(errs, "invalid agent.thinking (supported: none, minimal, low, medium, high, max)")
+		}
+	}
 	if _, _, err := cfg.Tools.Bash.ExecutionTimeout(); err != nil {
 		errs = append(errs, err.Error())
 	}

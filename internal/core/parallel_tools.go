@@ -40,6 +40,8 @@ type ParallelToolResult struct {
 	Name string
 	// Output is the textual result produced by the tool.
 	Output string
+	// ContentBlocks carries typed tool data alongside the same receipt.
+	ContentBlocks []llm.ContentBlock
 	// Err is the execution error, if any.
 	Err error
 	// IsError marks the result as an error for structured detection. It is
@@ -92,13 +94,14 @@ func executeToolsParallel(ctx context.Context, tr tools.ToolRegistry, calls []ll
 				"call_id", call.ID,
 			)
 
-			output, isErr, err := executeSingleToolRegistered(ctx, tr, converted, es, done)
+			output, isErr, blocks, err := executeSingleToolRegisteredWithImages(ctx, tr, converted, es, done)
 			results[idx] = ParallelToolResult{
-				ID:      call.ID,
-				Name:    call.Name,
-				Output:  output,
-				Err:     err,
-				IsError: isErr || err != nil,
+				ID:            call.ID,
+				Name:          call.Name,
+				Output:        output,
+				ContentBlocks: blocks,
+				Err:           err,
+				IsError:       isErr || err != nil,
 			}
 		}(i, tc, toolCall, finishWorker)
 	}
@@ -149,14 +152,32 @@ func executeSingleTool(ctx context.Context, tr tools.ToolRegistry, call tools.To
 	return executeSingleToolRegistered(ctx, tr, call, es, registerRunWorker(ctx, call.ID, call.Name))
 }
 
-func executeSingleToolRegistered(ctx context.Context, tr tools.ToolRegistry, call tools.ToolCall, es EventStream, workerDone func()) (output string, isError bool, err error) {
+func executeSingleToolWithImages(ctx context.Context, tr tools.ToolRegistry, call tools.ToolCall, es EventStream) (string, bool, []llm.ContentBlock, error) {
+	return executeSingleToolRegisteredWithImages(ctx, tr, call, es, registerRunWorker(ctx, call.ID, call.Name))
+}
+
+func executeSingleToolRegistered(ctx context.Context, tr tools.ToolRegistry, call tools.ToolCall, es EventStream, workerDone func()) (string, bool, error) {
+	output, isError, blocks, err := executeSingleToolRegisteredWithImages(ctx, tr, call, es, workerDone)
+	if err == nil && len(blocks) > 0 {
+		return "", true, errors.New("core: this tool consumer does not support image results")
+	}
+	return output, isError, err
+}
+
+func executeSingleToolRegisteredWithImages(ctx context.Context, tr tools.ToolRegistry, call tools.ToolCall, es EventStream, workerDone func()) (output string, isError bool, blocks []llm.ContentBlock, err error) {
+	defer func() {
+		if err != nil || isError {
+			blocks = nil
+		}
+	}()
+
 	if workerDone == nil {
 		workerDone = func() {}
 	}
 	ctx, finishCapability, admissionErr := beginRunCapability(ctx, call.Name)
 	if admissionErr != nil {
 		workerDone()
-		return "", true, admissionErr
+		return "", true, nil, admissionErr
 	}
 	defer func() {
 		if fenceErr := finishCapability(); fenceErr != nil {
@@ -201,11 +222,11 @@ func executeSingleToolRegistered(ctx context.Context, tr tools.ToolRegistry, cal
 		workerDone()
 	}()
 	if tr == nil {
-		return "", false, errNoTools
+		return "", false, nil, errNoTools
 	}
 	def, err := tr.Get(ctx, call.Name)
 	if err != nil {
-		return "", false, err
+		return "", false, nil, err
 	}
 	// Check if the tool supports streaming output.
 	if st, ok := def.(tools.StreamingBashTool); ok && es != nil {
@@ -213,24 +234,32 @@ func executeSingleToolRegistered(ctx context.Context, tr tools.ToolRegistry, cal
 		dispatched = true
 		result, err := st.ExecuteStreaming(ctx, call, sink)
 		if err != nil {
-			return "", false, err
+			return "", false, nil, err
 		}
 		if result == nil {
-			return "", false, errToolMissingReceipt
+			return "", false, nil, errToolMissingReceipt
 		}
 		captureMaterializedArtifact(ctx, call, result)
-		return result.Output, result.IsError, nil
+		blocks, err = toolResultContentBlocks(result)
+		if err != nil {
+			return "", true, nil, err
+		}
+		return result.Output, result.IsError, blocks, nil
 	}
 	dispatched = true
 	result, err := def.Execute(ctx, call)
 	if err != nil {
-		return "", false, err
+		return "", false, nil, err
 	}
 	if result == nil {
-		return "", false, errToolMissingReceipt
+		return "", false, nil, errToolMissingReceipt
 	}
 	captureMaterializedArtifact(ctx, call, result)
-	return result.Output, result.IsError, nil
+	blocks, err = toolResultContentBlocks(result)
+	if err != nil {
+		return "", true, nil, err
+	}
+	return result.Output, result.IsError, blocks, nil
 }
 
 type toolDispatchPanicError struct{}

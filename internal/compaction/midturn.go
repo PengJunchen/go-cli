@@ -194,7 +194,7 @@ func compactWithReason(ctx context.Context, items []TurnItem, maxTokens int, est
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	span.SetAttributes(tracing.Attribute{Key: "reason", Value: reason.String()})
 
-	out, err := compactor.Compact(sctx, items, maxTokens, estimator)
+	out, err := CompactPreservingImages(sctx, compactor, items, maxTokens, estimator)
 	if err != nil {
 		logger.Warn("compaction.trigger.failed", "reason", reason.String(), "err", err)
 		return out, CompactResult{Triggered: true, Reason: reason}, err

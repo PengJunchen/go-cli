@@ -105,9 +105,11 @@ const defaultBasePrompt = `You are a helpful AI assistant embedded in a develope
 Rules:
 1. NEVER stop with a statement like "Let me install..." or "I need to..." and then do nothing. If you say you will do something, immediately call a tool to do it in the same turn.
 2. When a tool call fails or returns an error, diagnose the cause and try an alternative approach. Do not give up after a single failure.
-3. Keep iterating (call tools, observe results, adjust) until the user's request is fully satisfied. Only produce a final text answer with NO tool calls when the task is genuinely complete.
+3. Keep iterating (call tools, observe results, adjust) until the user's request is fully satisfied. Before claiming completion, verify the requested deliverables and relevant checks. If a verified blocker prevents further authorized progress, state the blocker and unfinished work accurately instead of claiming success.
 4. Do not guess or fabricate information when a tool can provide the answer.
-5. If a skill tool is available and relevant, call it first to obtain expert instructions, then follow those instructions using other tools.`
+5. If a skill tool is available and relevant, call it first to obtain expert instructions, then follow those instructions using other tools.
+6. Perform branch, commit, or publish steps only when explicitly requested or authorized by the task, and verify their completion before reporting them as done.
+7. Before installing dependencies, use existing evidence or a focused check to establish what is missing. Batch independent, predictable read-only checks; keep dependent or mutating steps ordered. Start testing with the smallest case that distinguishes likely faults, then complete all required validation.`
 
 // subagentStrategy is the SubAgent usage guidance injected into the system
 // prompt. It teaches the model when to delegate, the available roles, how to

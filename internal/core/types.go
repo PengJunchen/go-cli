@@ -114,8 +114,8 @@ type AgentEvent struct {
 	ReceiptOutcome string `json:"receipt_outcome,omitempty"`
 	// SourceTruncated reports a source truncation fact when structured metadata provides one.
 	SourceTruncated *bool `json:"source_truncated,omitempty"`
-	// ReceiptOutputTruncated is true only when the host observed clipping of
-	// failed-receipt text. It is independent of source capture truncation.
+	// ReceiptOutputTruncated is true when the host clips receipt text, whether
+	// the tool succeeded or failed. It is independent of source capture truncation.
 	ReceiptOutputTruncated bool `json:"receipt_output_truncated,omitempty"`
 	// PreToolCall carries a cancelable handle for "pre_tool_call" events.
 	// External interceptors call PreToolCall.Cancel() to prevent the
@@ -166,6 +166,22 @@ const (
 	TokenUsageSourceUnknown   TokenUsageSource = "unknown"
 )
 
+// TokenUsageScope identifies the evidence represented by token counts. It
+// does not promise coverage of hidden requests, retries, sessions or billing.
+type TokenUsageScope string
+
+const (
+	// TokenUsageScopeObservedAttempts covers rows observed by the current tracker.
+	TokenUsageScopeObservedAttempts TokenUsageScope = "observed_attempts"
+	// TokenUsageScopeLatestAssistantMessage covers the latest assistant message,
+	// including continuation responses merged into it.
+	TokenUsageScopeLatestAssistantMessage TokenUsageScope = "latest_assistant_message"
+	// TokenUsageScopeMessageHistoryEstimate is a local history estimate.
+	TokenUsageScopeMessageHistoryEstimate TokenUsageScope = "message_history_estimate"
+	// TokenUsageScopeUnknown means no token-count evidence is available.
+	TokenUsageScopeUnknown TokenUsageScope = "unknown"
+)
+
 // TokenUsageCostSource describes the evidence behind accumulated cost.
 type TokenUsageCostSource string
 
@@ -199,6 +215,20 @@ type TokenUsage struct {
 	InputTokens int `json:"input_tokens"`
 	// OutputTokens is the total completion tokens consumed so far.
 	OutputTokens int `json:"output_tokens"`
+	// CacheReadInputTokens and ReasoningOutputTokens are known subtotals, not
+	// additions to InputTokens or OutputTokens. Reported distinguishes a known
+	// zero from absent evidence; the attempt counts describe ledger coverage.
+	CacheReadInputTokens         int  `json:"cache_read_input_tokens,omitempty"`
+	CacheReadInputTokensReported bool `json:"cache_read_input_tokens_reported,omitempty"`
+	// CacheReadKnownInputTokens is the input-token subtotal for exactly those
+	// attempts that reported cache-read tokens, suitable as their denominator.
+	CacheReadKnownInputTokens     int  `json:"cache_read_known_input_tokens,omitempty"`
+	CacheReadKnownAttempts        int  `json:"cache_read_known_attempts,omitempty"`
+	CacheReadUnknownAttempts      int  `json:"cache_read_unknown_attempts,omitempty"`
+	ReasoningOutputTokens         int  `json:"reasoning_output_tokens,omitempty"`
+	ReasoningOutputTokensReported bool `json:"reasoning_output_tokens_reported,omitempty"`
+	ReasoningKnownAttempts        int  `json:"reasoning_known_attempts,omitempty"`
+	ReasoningUnknownAttempts      int  `json:"reasoning_unknown_attempts,omitempty"`
 	// MaxTokens is the token budget for the session.
 	MaxTokens int `json:"max_tokens,omitempty"`
 	// Cost is the accumulated monetary cost in USD.
@@ -209,6 +239,11 @@ type TokenUsage struct {
 	UnknownCostAttempts int `json:"unknown_cost_attempts,omitempty"`
 	// UsageSource identifies the evidence behind the displayed token counts.
 	UsageSource TokenUsageSource `json:"usage_source,omitempty"`
+	// PrimaryCoverage describes primary counts within UsageScope, independently
+	// of detail flags and provenance. Missing or unrecognized values are unknown.
+	PrimaryCoverage llm.PrimaryUsageCoverage `json:"primary_coverage,omitempty"`
+	// UsageScope identifies which observed evidence the counts describe.
+	UsageScope TokenUsageScope `json:"usage_scope,omitempty"`
 	// CostSources lists the distinct evidence classes contributing to Cost.
 	CostSources []TokenUsageCostSource `json:"cost_sources,omitempty"`
 	// PriceSources lists the distinct safe sources used to price provider attempts.

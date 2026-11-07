@@ -178,6 +178,9 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 				}
 				return u.finish(sctx, logger, span, originalItems, current, maxTokens, estimator, result, StrategySummary), nil
 			}
+			if isBuiltin && isLocalEssentialSummaryError(err) {
+				return CompactionResult{Items: originalItems}, err
+			}
 			// Do not traverse wrapped source errors or trust a foreign strategy's
 			// self-reported sentinel. Provider/authority/persistence failures keep
 			// their original error; only this built-in's local result may fall back.
@@ -216,7 +219,7 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		if err == nil {
 			return u.finish(sctx, logger, span, originalItems, current, maxTokens, estimator, result, StrategyMicro), nil
 		}
-		if errors.Is(err, errMalformedToolGroup) {
+		if errors.Is(err, errMalformedToolGroup) || errors.Is(err, ErrImageCompactionBlocked) {
 			return CompactionResult{}, err
 		}
 		logger.Debug("compaction.unified.escalate", "from", "micro", "err", err)
@@ -230,8 +233,11 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		if err == nil {
 			return u.finish(sctx, logger, span, originalItems, current, maxTokens, estimator, result, StrategySummary), nil
 		}
-		if errors.Is(err, errMalformedToolGroup) {
+		if errors.Is(err, errMalformedToolGroup) || errors.Is(err, ErrImageCompactionBlocked) {
 			return CompactionResult{}, err
+		}
+		if _, builtin := u.summary.(*SummaryCompactor); builtin && isLocalEssentialSummaryError(err) {
+			return CompactionResult{Items: originalItems}, err
 		}
 		logger.Debug("compaction.unified.escalate", "from", "summary", "err", err)
 	}

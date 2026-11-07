@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/session"
@@ -379,7 +380,7 @@ func (s *REPLSession) compactHistory(ctx context.Context, snapshot session.Prepa
 		_, err := s.assembly.CostTracker.RecordAttempt(result)
 		return err
 	}, nil)
-	result, err := s.assembly.Compactor.Compact(ctx, original, s.assembly.MaxTokens, s.assembly.Estimator)
+	result, err := compaction.CompactPreservingImages(ctx, s.assembly.Compactor, original, s.assembly.MaxTokens, s.assembly.Estimator)
 	if err != nil {
 		return fmt.Errorf("manual compaction: %w", err)
 	}
@@ -394,6 +395,9 @@ func (s *REPLSession) compactHistory(ctx context.Context, snapshot session.Prepa
 	if retained == 0 {
 		_, err := fmt.Fprintln(s.out, "Conversation already fits the compaction budget.")
 		return err
+	}
+	if err := compaction.ValidateImageGroupCut(original, retained); err != nil {
+		return fmt.Errorf("manual compaction actual cut: %w", err)
 	}
 	var summary strings.Builder
 	summary.WriteString("Earlier conversation compacted by explicit user request.\n")

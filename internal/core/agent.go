@@ -311,6 +311,10 @@ func (a *AgentImpl) SetHistory(messages []AgentMessage) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.history = cloneAgentMessages(messages)
+	for i := range a.history {
+		a.history[i].Runtime.Source = llm.SourceRef{}
+		a.history[i].Runtime.CompactionMarker = false
+	}
 	a.durableBound = false
 	a.priorSourceCount = 0
 	slog.Info("core.agent.history_set", "name", a.name, "messages", len(messages))
@@ -332,7 +336,8 @@ func (a *AgentImpl) SetHistoryFromSourceSnapshot(snapshot CompactionSourceSnapsh
 				Kind: llm.SourcePriorPublished, HistoryRevision: snapshot.Revision,
 				BranchID: snapshot.BranchID, SourceEntryID: snapshot.SourceEntryIDs[i], PriorOrdinal: uint64(i),
 			},
-			ReceiptOutcome: history[i].ReceiptOutcome,
+			ReceiptOutcome:   history[i].ReceiptOutcome,
+			CompactionMarker: history[i].Runtime.CompactionMarker && history[i].Role == "user" && history[i].InputKind == "",
 		}
 	}
 	a.mu.Lock()

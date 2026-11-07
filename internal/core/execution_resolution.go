@@ -16,8 +16,9 @@ const (
 // result digest; it must not contain raw arguments, credentials, or response
 // bodies.
 type ExecutionResolution struct {
-	RunID       string                      `json:"run_id"`
-	ActionID    string                      `json:"action_id"`
-	Evidence    ExecutionResolutionEvidence `json:"evidence"`
-	EvidenceRef string                      `json:"evidence_ref"`
+	RunID                    string                      `json:"run_id"`
+	ActionID                 string                      `json:"action_id"`
+	Evidence                 ExecutionResolutionEvidence `json:"evidence"`
+	EvidenceRef              string                      `json:"evidence_ref"`
+	ProcessSessionClosureRef string                      `json:"process_session_closure_ref,omitempty"`
 }

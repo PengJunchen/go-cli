@@ -35,6 +35,7 @@ type consumerTestSink struct {
 	terminal          *RunTerminal
 	beginErr          error
 	recordReceiptErr  error
+	resolveErr        error
 	cancelAfterBegin  context.CancelFunc
 	afterBegin        func()
 	recordReceiptHook func(RunToolReceipt)
@@ -176,9 +177,12 @@ func (s *consumerTestSink) ResolveExecution(ctx context.Context, resolution Exec
 	s.recordContext(ctx)
 	s.mu.Lock()
 	s.steps = append(s.steps, "resolution")
-	s.resolutions = append(s.resolutions, resolution)
+	err := s.resolveErr
+	if err == nil {
+		s.resolutions = append(s.resolutions, resolution)
+	}
 	s.mu.Unlock()
-	return nil
+	return err
 }
 
 func (s *consumerTestSink) CommitCompaction(ctx context.Context, _ CompactionProjection) error {

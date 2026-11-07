@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -243,6 +244,88 @@ func TestRunOwnerCompletionTaskHandoffKeepsPendingResourceOwned(t *testing.T) {
 	waitForOwnerState(t, result.StatusHandle, RunExecutionQuiescent)
 	assert.Zero(t, result.StatusHandle.Snapshot().PendingWorkers)
 	assert.Equal(t, 1, guard.releaseCount())
+}
+
+func TestRunOwnerTransferredHostLeaseFailsAndJoinsWatcherWhenOwnerClosesWithoutAck(t *testing.T) {
+	guard := newCountingRunSlotGuard()
+	owner := newRunOwner(context.Background(), guard, guard.claim, nil)
+	leaseDone := make(chan struct{})
+	ownerClosed := make(chan struct{})
+	watcherReady := make(chan (<-chan struct{}), 1)
+	var taskID uint64
+
+	result, err := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+		taskID = owner.RegisterCompletionTask(completionTestIntent(ctx, owner, "host-close-no-ack"), tools.PreparedCompletionSignal{})
+		require.NotZero(t, taskID)
+		joined := make(chan struct{})
+		close(joined)
+		owner.finishCompletionTaskHandoff(taskID, joined, true, tools.CompletionInlinePipelineJoined)
+		require.True(t, owner.transferCompletionTaskToHost(taskID, leaseDone, ownerClosed))
+		owner.mu.Lock()
+		watcherReady <- owner.completionTasks[taskID].hostWatchDone
+		owner.mu.Unlock()
+		return Result{}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, RunExecutionDeliveredLive, result.ExecutionState)
+	assert.Equal(t, RunExecutionDeliveredLive, owner.Snapshot().ExecutionState)
+
+	watcherDone := <-watcherReady
+	close(ownerClosed)
+	select {
+	case <-watcherDone:
+	case <-time.After(time.Second):
+		t.Fatal("transferred host watcher did not join after its owner closed")
+	}
+
+	status := owner.Snapshot()
+	assert.Equal(t, RunOutcomeUnknown, status.Outcome)
+	assert.Equal(t, RunExecutionQuarantined, status.ExecutionState)
+	owner.mu.Lock()
+	assert.ErrorIs(t, owner.runErr, ErrRunCommitProcessSessionClosureUnconfirmed)
+	assert.Equal(t, runCompletionTaskHostFailed, owner.completionTasks[taskID].state)
+	owner.mu.Unlock()
+}
+
+func TestRunOwnerTransferredHostLeaseCloseAckWinsOwnerCloseRace(t *testing.T) {
+	for iteration := 0; iteration < 64; iteration++ {
+		t.Run(strconv.Itoa(iteration), func(t *testing.T) {
+			guard := newCountingRunSlotGuard()
+			owner := newRunOwner(context.Background(), guard, guard.claim, nil)
+			leaseDone := make(chan struct{})
+			ownerClosed := make(chan struct{})
+			watcherReady := make(chan (<-chan struct{}), 1)
+			var taskID uint64
+
+			result, err := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+				taskID = owner.RegisterCompletionTask(completionTestIntent(ctx, owner, "host-close-ack"), tools.PreparedCompletionSignal{})
+				require.NotZero(t, taskID)
+				joined := make(chan struct{})
+				close(joined)
+				owner.finishCompletionTaskHandoff(taskID, joined, true, tools.CompletionInlinePipelineJoined)
+				close(leaseDone)
+				close(ownerClosed)
+				require.True(t, owner.transferCompletionTaskToHost(taskID, leaseDone, ownerClosed))
+				owner.mu.Lock()
+				watcherReady <- owner.completionTasks[taskID].hostWatchDone
+				owner.mu.Unlock()
+				return Result{}, nil
+			})
+			require.NoError(t, err)
+			watcherDone := <-watcherReady
+			select {
+			case <-watcherDone:
+			case <-time.After(time.Second):
+				t.Fatal("transferred host watcher did not join after closure acknowledgement")
+			}
+			assert.NotEqual(t, RunOutcomeUnknown, owner.Snapshot().Outcome)
+			assert.NotEqual(t, RunExecutionQuarantined, owner.Snapshot().ExecutionState)
+			owner.mu.Lock()
+			assert.Equal(t, runCompletionTaskHostClosed, owner.completionTasks[taskID].state)
+			owner.mu.Unlock()
+			assert.NotEqual(t, RunExecutionCleanupPending, result.ExecutionState)
+		})
+	}
 }
 
 func TestRunOwnerCompletionTaskDistinguishesNoProofFromEmptyProof(t *testing.T) {

@@ -59,6 +59,73 @@ type ToolSearchTool struct {
 	reg ToolRegistry // dependency held by interface.
 }
 
+const toolSearchPromotionMatchLimit = 12
+
+// ToolSearchPromotion contains structured matches from one successful,
+// prepared execution of the trusted built-in tool_search registration.
+type ToolSearchPromotion struct {
+	CallID            string
+	Identity          TrustedToolIdentitySnapshot
+	RegistryVersion   int
+	RegistryVersioned bool
+	Query             string
+	MatchedNames      []string
+}
+
+// ToolSearchPromotionObserver receives trusted search matches after prepared
+// dispatch proves the built-in search pipeline joined successfully.
+type ToolSearchPromotionObserver func(ToolSearchPromotion) string
+
+type toolSearchPromotionObserverKey struct{}
+type toolSearchResultCaptureKey struct{}
+
+type toolSearchResultCapture struct {
+	callID            string
+	registryVersion   int
+	registryVersioned bool
+	query             string
+	matchedNames      []string
+	recorded          bool
+}
+
+// WithToolSearchPromotionObserver attaches a run-local observer. It does not
+// grant execution authority or change the registered tool catalog.
+func WithToolSearchPromotionObserver(ctx context.Context, observer ToolSearchPromotionObserver) context.Context {
+	return context.WithValue(ctx, toolSearchPromotionObserverKey{}, observer)
+}
+
+func toolSearchPromotionObserverFromContext(ctx context.Context) ToolSearchPromotionObserver {
+	if ctx == nil {
+		return nil
+	}
+	observer, _ := ctx.Value(toolSearchPromotionObserverKey{}).(ToolSearchPromotionObserver)
+	return observer
+}
+
+func withToolSearchResultCapture(ctx context.Context, capture *toolSearchResultCapture) context.Context {
+	return context.WithValue(ctx, toolSearchResultCaptureKey{}, capture)
+}
+
+func recordToolSearchResults(ctx context.Context, callID string, registry ToolRegistry, query string, matchedNames []string) {
+	if ctx == nil {
+		return
+	}
+	capture, _ := ctx.Value(toolSearchResultCaptureKey{}).(*toolSearchResultCapture)
+	if capture == nil || capture.callID == "" || capture.callID != callID {
+		return
+	}
+	capture.query = query
+	if len(matchedNames) > toolSearchPromotionMatchLimit {
+		matchedNames = matchedNames[:toolSearchPromotionMatchLimit]
+	}
+	capture.matchedNames = append([]string(nil), matchedNames...)
+	if versioned, ok := registry.(interface{ Version() int }); ok {
+		capture.registryVersion = versioned.Version()
+		capture.registryVersioned = true
+	}
+	capture.recorded = true
+}
+
 var _ TopToolsProvider = (*ToolSearchTool)(nil)
 
 var _ ToolDefinition = (*ToolSearchTool)(nil)
@@ -187,6 +254,11 @@ func (t *ToolSearchTool) Execute(ctx context.Context, call ToolCall) (*ToolResul
 		"category", string(category),
 		"matches", len(results),
 		"duration_ms", time.Since(start).Milliseconds())
+	matchedNames := make([]string, len(results))
+	for index, result := range results {
+		matchedNames[index] = result.Name
+	}
+	recordToolSearchResults(ctx, call.ID, t.reg, query, matchedNames)
 
 	return &ToolResult{
 		Output:   strings.TrimSuffix(sb.String(), "\n"),

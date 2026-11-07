@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 func TestKindToContentType(t *testing.T) {
@@ -156,11 +157,17 @@ func TestBridgePreservesTokenUsageProvenance(t *testing.T) {
 		Kind: "token_usage",
 		TokenUsage: &core.TokenUsage{
 			InputTokens: 12, OutputTokens: 4, MaxTokens: 100,
+			CacheReadInputTokens: 3, CacheReadInputTokensReported: true,
+			CacheReadKnownInputTokens: 12, CacheReadKnownAttempts: 1, CacheReadUnknownAttempts: 2,
+			ReasoningOutputTokens: 2, ReasoningOutputTokensReported: true,
+			ReasoningKnownAttempts: 1, ReasoningUnknownAttempts: 2,
 			Cost: 0.0012, UnknownUsageAttempts: 1, UnknownCostAttempts: 2,
-			UsageSource:    core.TokenUsageSourceReported,
-			CostSources:    []core.TokenUsageCostSource{core.TokenUsageCostEstimated, core.TokenUsageCostUnknown},
-			PriceSources:   []core.TokenUsagePriceSource{core.TokenUsagePriceConfiguredTier},
-			ProviderModels: []core.TokenUsageProviderModel{{ProviderID: "openai", ModelID: "gpt-4o-mini"}},
+			UsageSource:     core.TokenUsageSourceReported,
+			PrimaryCoverage: llm.UsageCoveragePartial,
+			UsageScope:      core.TokenUsageScopeObservedAttempts,
+			CostSources:     []core.TokenUsageCostSource{core.TokenUsageCostEstimated, core.TokenUsageCostUnknown},
+			PriceSources:    []core.TokenUsagePriceSource{core.TokenUsagePriceConfiguredTier},
+			ProviderModels:  []core.TokenUsageProviderModel{{ProviderID: "openai", ModelID: "gpt-4o-mini"}},
 		},
 	}
 
@@ -173,6 +180,15 @@ func TestBridgePreservesTokenUsageProvenance(t *testing.T) {
 	}
 	if got.TokenUsage.UsageSource != core.TokenUsageSourceReported || len(got.TokenUsage.CostSources) != 2 || len(got.TokenUsage.PriceSources) != 1 {
 		t.Fatalf("token usage sources were not preserved: %+v", got.TokenUsage)
+	}
+	if got.TokenUsage.PrimaryCoverage != llm.UsageCoveragePartial || got.TokenUsage.UsageScope != core.TokenUsageScopeObservedAttempts {
+		t.Fatalf("primary coverage or scope was not preserved: %+v", got.TokenUsage)
+	}
+	if got.TokenUsage.CacheReadInputTokens != 3 || !got.TokenUsage.CacheReadInputTokensReported || got.TokenUsage.CacheReadKnownInputTokens != 12 || got.TokenUsage.CacheReadKnownAttempts != 1 || got.TokenUsage.CacheReadUnknownAttempts != 2 {
+		t.Fatalf("cache-read detail evidence was not preserved: %+v", got.TokenUsage)
+	}
+	if got.TokenUsage.ReasoningOutputTokens != 2 || !got.TokenUsage.ReasoningOutputTokensReported || got.TokenUsage.ReasoningKnownAttempts != 1 || got.TokenUsage.ReasoningUnknownAttempts != 2 {
+		t.Fatalf("reasoning detail evidence was not preserved: %+v", got.TokenUsage)
 	}
 	if len(got.TokenUsage.ProviderModels) != 1 || got.TokenUsage.ProviderModels[0].ProviderID != "openai" || got.TokenUsage.ProviderModels[0].ModelID != "gpt-4o-mini" {
 		t.Fatalf("provider/model evidence was not preserved: %+v", got.TokenUsage.ProviderModels)

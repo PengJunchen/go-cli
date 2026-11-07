@@ -164,6 +164,28 @@ func (o *boundedDirectoryOutput) String() string {
 	return strings.TrimSuffix(o.builder.String(), "\n")
 }
 
+// renderDirectoryOutput keeps the tool notice visible without exceeding the
+// shared output cap. Only complete trailing records may be displaced by it;
+// the returned count excludes the notice and describes the displayed records.
+func renderDirectoryOutput(output *boundedDirectoryOutput, truncated bool) (string, int) {
+	text, records := output.String(), output.Records()
+	if !truncated {
+		return text, records
+	}
+	const notice = "[listing truncated; not an entry]\nNarrow the path or filter to see omitted entries.\n"
+	maxDataBytes := directoryCaptureMaxOutputBytes - len(notice)
+	if len(text) > maxDataBytes {
+		end := strings.LastIndexByte(text[:maxDataBytes+1], '\n')
+		if end < 0 {
+			text, records = "", 0
+		} else {
+			text = text[:end]
+			records = strings.Count(text, "\n") + 1
+		}
+	}
+	return notice + text, records
+}
+
 func (o *boundedDirectoryOutput) Records() int { return o.records }
 
 func (o *boundedDirectoryOutput) Truncated() bool { return o.truncated }

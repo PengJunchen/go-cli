@@ -80,11 +80,6 @@ func TestDurableWorkerProcess(t *testing.T) {
 	os.Exit(0)
 }
 
-func durableWorkerConfig(t *testing.T, mode string) (*config.Config, string, string) {
-	t.Helper()
-	return durableWorkerConfigWithTimeout(t, mode, 2000)
-}
-
 func durableWorkerConfigWithTimeout(t *testing.T, mode string, timeoutMillis int) (*config.Config, string, string) {
 	t.Helper()
 	configureDurableCLISessionTest(t)
@@ -112,7 +107,7 @@ func durableWorkerConfigWithTimeout(t *testing.T, mode string, timeoutMillis int
 }
 
 func TestPromptDurableOwnedWorkerResultsAndProofSurviveResume(t *testing.T) {
-	cfg, calls, starts := durableWorkerConfig(t, "normal")
+	cfg, calls, starts := durableWorkerConfigWithTimeout(t, "normal", 0)
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 	server, _ := newDurablePromptServer(t,
@@ -163,59 +158,216 @@ func TestPromptDurableOwnedWorkerResultsAndProofSurviveResume(t *testing.T) {
 }
 
 func TestPromptDurableOwnedWorkerUnknownRetainsPendingWithoutReplay(t *testing.T) {
-	for _, mode := range []string{"null", "missing-output", "duplicate-output", "wrong-id", "disconnect", "timeout"} {
-		t.Run(mode, func(t *testing.T) {
-			cfg, calls, _ := durableWorkerConfig(t, mode)
+	for _, tc := range []struct {
+		mode  string
+		cause string
+	}{
+		{mode: "null", cause: "RPC value must be an object"},
+		{mode: "missing-output", cause: "RPC tool result requires string output"},
+		{mode: "duplicate-output", cause: "duplicate RPC object field"},
+		{mode: "wrong-id", cause: "unknown or duplicate RPC response id"},
+		{mode: "disconnect", cause: "EOF"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			cfg, calls, _ := durableWorkerConfigWithTimeout(t, tc.mode, 0)
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			server, script := newDurablePromptServer(t, durableApprovalToolResponse(t, "unknown-worker", "worker_echo", map[string]any{}))
 			defer server.Close()
 			cfg.Provider.BaseURL = server.URL
 			var output bytes.Buffer
-			require.Error(t, newPromptCmd(&output).Run(ctx, cfg, []string{"--approve", "auto", "one effect"}))
+			runErr := newPromptCmd(&output).Run(ctx, cfg, []string{"--approve", "auto", "one effect"})
+			require.Error(t, runErr)
+			require.NoError(t, ctx.Err(), "worker initialization and the protocol fault must precede the caller deadline")
+			var unknown *extension.RPCOutcomeUnknownError
+			require.ErrorAs(t, runErr, &unknown)
+			require.ErrorIs(t, runErr, core.ErrRunCommitQuiescenceUnproven)
+			require.NotErrorIs(t, runErr, context.DeadlineExceeded)
+			require.ErrorContains(t, runErr, tc.cause)
+			require.Len(t, script.requestBodies(), 1)
 			id := physicalSessionIDFromOutput(t, output.String())
-			resumed, err := newDurableCLISession(ctx, cfg.Session.StorePath, "unknown inspect", id, "")
-			require.NoError(t, err)
-			defer func() { require.NoError(t, resumed.requestClose(context.Background())) }()
-			snapshot, err := resumed.snapshotSelected()
-			require.NoError(t, err)
-			pending, err := session.InspectPendingActions(snapshot)
-			require.NoError(t, err)
-			require.Len(t, pending, 1)
-			intents, receipts := 0, 0
-			for _, row := range snapshot.DurableEntries {
-				if row.ToolCallID == "unknown-worker" {
-					require.Empty(t, row.CompletionProof)
-					require.NotEqual(t, session.CheckpointExecutionResolution, row.CheckpointKind)
-					switch {
-					case row.ActionState == session.ActionStateIntent:
-						intents++
-					case row.Type == session.EntryTypeTool && row.ActionState == "":
-						receipts++
-						require.Equal(t, core.ReceiptOutcomeUnknown, row.ReceiptOutcome)
-						require.Equal(t, core.DispatchStateDispatched, row.DispatchState)
-					}
-				}
-			}
-			require.Equal(t, 1, intents)
-			require.Equal(t, 1, receipts)
-			data, err := os.ReadFile(calls)
-			require.NoError(t, err)
-			require.Equal(t, "call\n", string(data))
-			if mode == "null" || mode == "timeout" {
-				require.NoError(t, resumed.requestClose(ctx))
-				runFreshWorkerResumeHost(ctx, t, cfg, id, true)
-				after, err := os.ReadFile(calls)
-				require.NoError(t, err)
-				require.Equal(t, data, after, "fresh host must never replay unknown worker requests")
-			}
+			assertUnknownWorkerPending(ctx, t, cfg, id, calls, tc.mode == "null")
 			require.Len(t, script.requestBodies(), 1)
 		})
 	}
 }
 
+func assertUnknownWorkerPending(ctx context.Context, t *testing.T, cfg *config.Config, id, calls string, checkFreshHost bool) {
+	t.Helper()
+	resumed, err := newDurableCLISession(ctx, cfg.Session.StorePath, "unknown inspect", id, "")
+	require.NoError(t, err)
+	closed := false
+	defer func() {
+		if !closed {
+			cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			require.NoError(t, resumed.requestClose(cleanup))
+		}
+	}()
+	snapshot, err := resumed.snapshotSelected()
+	require.NoError(t, err)
+	pending, err := session.InspectPendingActions(snapshot)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, id, pending[0].Action.SessionID)
+	require.Equal(t, resumed.workspaceID, pending[0].Action.WorkspaceID)
+	require.Equal(t, "unknown-worker", pending[0].Action.ToolCallID)
+	require.NotEmpty(t, pending[0].Action.ActionID)
+	require.Equal(t, "worker_echo", pending[0].ToolName)
+	require.Equal(t, core.DispatchStateDispatched, pending[0].DispatchState)
+	require.Equal(t, core.ReceiptOutcomeUnknown, pending[0].ReceiptOutcome)
+	decisions, err := resumed.index.InspectDispatchMarkers(ctx, []session.PendingActionRef{pending[0].Action})
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, pending[0].Action, decisions[0].Action)
+	require.Equal(t, session.DispatchMarkerPresent, decisions[0].MarkerState)
+	intents, receipts := 0, 0
+	for _, row := range snapshot.DurableEntries {
+		if row.ToolCallID != "unknown-worker" {
+			continue
+		}
+		require.Empty(t, row.CompletionProof)
+		require.NotEqual(t, session.CheckpointExecutionResolution, row.CheckpointKind)
+		switch {
+		case row.ActionState == session.ActionStateIntent:
+			intents++
+		case row.Type == session.EntryTypeTool && row.ActionState == "":
+			receipts++
+			require.Equal(t, core.ReceiptOutcomeUnknown, row.ReceiptOutcome)
+			require.Equal(t, core.DispatchStateDispatched, row.DispatchState)
+		}
+	}
+	require.Equal(t, 1, intents)
+	require.Equal(t, 1, receipts)
+	before, err := os.ReadFile(calls)
+	require.NoError(t, err)
+	require.Equal(t, "call\n", string(before))
+	if !checkFreshHost {
+		return
+	}
+	require.NoError(t, resumed.requestClose(ctx))
+	closed = true
+	runFreshWorkerResumeHost(ctx, t, cfg, id, true)
+	after, err := os.ReadFile(calls)
+	require.NoError(t, err)
+	require.Equal(t, before, after, "a fresh host must never replay an unknown worker request")
+	decisions, err = resumed.index.InspectDispatchMarkers(ctx, []session.PendingActionRef{pending[0].Action})
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, pending[0].Action, decisions[0].Action)
+	require.Equal(t, session.DispatchMarkerPresent, decisions[0].MarkerState)
+}
+
+// The caller deadline starts after the real worker has initialized, so this
+// test cannot mistake a slow startup for a dispatched request timing out.
+func TestDurableWorkerCallerDeadlineAfterInitialize(t *testing.T) {
+	cfg, calls, starts := durableWorkerConfigWithTimeout(t, "timeout", 0)
+	outer, cancelOuter := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancelOuter()
+	server, script := newDurablePromptServer(t, durableApprovalToolResponse(t, "unknown-worker", "worker_echo", map[string]any{}))
+	defer server.Close()
+	cfg.Provider.BaseURL = server.URL
+	durable, err := newDurableCLISession(outer, cfg.Session.StorePath, "prompt", "", "")
+	require.NoError(t, err)
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		require.NoError(t, durable.requestClose(cleanup))
+	}()
+	assembly, err := AssembleAgent(outer, cfg, "openai", "test-model", io.Discard, WithApproveMode(ApproveAuto), withDurableCLISession(durable))
+	require.NoError(t, err)
+	closed := false
+	defer func() {
+		if !closed {
+			cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			require.NoError(t, closeAssemblyForCommand(cleanup, assembly, "prompt"))
+		}
+	}()
+	id := assembly.PhysicalSessionID
+	require.NotEmpty(t, id)
+	started, err := os.ReadFile(starts)
+	require.NoError(t, err)
+	require.Equal(t, "start\n", string(started))
+
+	caller, cancelCaller := context.WithTimeout(outer, 5*time.Second)
+	defer cancelCaller()
+	runCtx, sink, err := durable.bindRun(caller)
+	require.NoError(t, err)
+	defer sink.CloseRunCommit()
+	require.NoError(t, hydrateDurableRunHistory(assembly.Agent, sink))
+	stream, err := assembly.Harness.Submit(runCtx, "one effect")
+	require.NoError(t, err)
+	statusSource, ok := stream.(core.RunStatusSource)
+	require.True(t, ok)
+	waiter, ok := statusSource.RunStatusHandle().(core.RunStatusWaiter)
+	require.True(t, ok)
+	done := make(chan error, 1)
+	go func() {
+		for range stream.Events() {
+		}
+		_, runErr := stream.Result()
+		done <- runErr
+	}()
+	joined := false
+	defer func() {
+		cancelCaller()
+		if !joined {
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("harness did not join after caller cancellation")
+			}
+		}
+	}()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		data, readErr := os.ReadFile(calls)
+		if readErr == nil && string(data) == "call\n" {
+			require.NoError(t, caller.Err(), "the call must be dispatched before its deadline")
+			break
+		}
+		select {
+		case earlyErr := <-done:
+			joined = true
+			t.Fatalf("harness returned before the worker call: %v", earlyErr)
+		case <-caller.Done():
+			t.Fatal("caller deadline expired before the worker call was observed")
+		case <-ticker.C:
+		}
+	}
+	var runErr error
+	select {
+	case runErr = <-done:
+		joined = true
+	case <-outer.Done():
+		t.Fatal("outer context expired before the harness joined")
+	}
+	require.ErrorIs(t, caller.Err(), context.DeadlineExceeded)
+	require.NoError(t, outer.Err())
+	require.ErrorIs(t, runErr, context.DeadlineExceeded)
+	require.Len(t, script.requestBodies(), 1)
+	inspect, cancelInspect := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancelInspect()
+	status, publication, err := waiter.WaitForCompletion(inspect)
+	require.NoError(t, err, "the same owner must join its callback and resources before inspection")
+	require.NotEqual(t, core.RunOutcomeSuccess, status.Outcome)
+	require.Zero(t, status.PendingWorkers)
+	require.Contains(t, []core.RunExecutionState{core.RunExecutionQuiescent, core.RunExecutionQuarantined}, status.ExecutionState)
+	require.Contains(t, []core.DurablePublicationState{core.DurablePublicationSynced, core.DurablePublicationFailed}, publication.State)
+	require.Equal(t, status.RunID, publication.RunID)
+	require.Equal(t, id, publication.SessionID)
+	cleanup, cancelCleanup := context.WithTimeout(context.Background(), 10*time.Second)
+	require.NoError(t, closeAssemblyForCommand(cleanup, assembly, "prompt"))
+	cancelCleanup()
+	closed = true
+	assertUnknownWorkerPending(inspect, t, cfg, id, calls, true)
+	require.Len(t, script.requestBodies(), 1)
+}
+
 func TestDurableOwnedWorkerKnownDeadlineRejectionHasJoinedProof(t *testing.T) {
-	cfg, calls, starts := durableWorkerConfig(t, "deadline-rejection")
+	cfg, calls, starts := durableWorkerConfigWithTimeout(t, "deadline-rejection", 0)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	assembly, err := AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard, WithApproveMode(ApproveAuto))
@@ -247,7 +399,7 @@ func TestDurableOwnedWorkerKnownDeadlineRejectionHasJoinedProof(t *testing.T) {
 func TestDurableOwnedWorkerDeniedSendsNoToolFrame(t *testing.T) {
 	for _, mode := range []string{"deny", "plan", "replacement"} {
 		t.Run(mode, func(t *testing.T) {
-			cfg, calls, _ := durableWorkerConfig(t, "normal")
+			cfg, calls, _ := durableWorkerConfigWithTimeout(t, "normal", 0)
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			server, _ := newDurablePromptServer(t, durableApprovalToolResponse(t, "denied-worker", "worker_echo", map[string]any{}), `{"choices":[{"message":{"role":"assistant","content":"denial observed"}}]}`)
@@ -287,7 +439,7 @@ func TestDurableOwnedWorkerDeniedSendsNoToolFrame(t *testing.T) {
 }
 
 func TestProjectOwnedWorkerCapturedDescriptorAndTrustFence(t *testing.T) {
-	base, calls, starts := durableWorkerConfig(t, "normal")
+	base, calls, starts := durableWorkerConfigWithTimeout(t, "normal", 0)
 	root := base.Git.WorkDir
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()

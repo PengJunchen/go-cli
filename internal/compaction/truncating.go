@@ -87,6 +87,9 @@ func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, max
 		result = append(result, normalized[group.start:group.end]...)
 	}
 
+	if err := ValidateImageGroupRetention(normalized, result); err != nil {
+		return CompactionResult{Items: items}, err
+	}
 	tokensAfter := estimateTokensCopy(result, estimator)
 	span.SetAttributes(
 		tracing.Attribute{Key: "items_out", Value: len(result)},

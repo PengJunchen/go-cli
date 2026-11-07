@@ -22,6 +22,6 @@ func commandProcessGroupAlive(_ int) (bool, error) {
 	return false, errProcessContainmentUnsupported
 }
 
-func startManagedLocalBashCommandWithIdentityObserver(_ context.Context, _ context.CancelFunc, _ *exec.Cmd, _ ProcessExecutionIdentityObserver) (*managedLocalCommand, error) {
+func startManagedLocalBashCommandWithIdentityObserver(_ context.Context, _ context.CancelFunc, _ *exec.Cmd, _ ProcessExecutionIdentityObserver, _ bashResourceSettings) (*managedLocalCommand, error) {
 	return nil, errProcessContainmentUnsupported
 }

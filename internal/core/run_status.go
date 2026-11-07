@@ -1,6 +1,10 @@
 package core
 
-import "context"
+import (
+	"context"
+
+	"github.com/pengjunchen/go-cli/internal/tools"
+)
 
 // RunOutcome describes the logical result of a run independently from
 // whether its workers and other owned resources have stopped.
@@ -22,17 +26,19 @@ const (
 	RunExecutionDraining        RunExecutionState = "draining"
 	RunExecutionCleanupPending  RunExecutionState = "cleanup_pending"
 	RunExecutionQuiescent       RunExecutionState = "quiescent"
+	RunExecutionDeliveredLive   RunExecutionState = "delivered_live"
 	RunExecutionQuarantined     RunExecutionState = "quarantined"
 )
 
 // RunStatus is an immutable snapshot of the logical result and owned
 // resources for one run.
 type RunStatus struct {
-	RunID          string
-	Outcome        RunOutcome
-	ExecutionState RunExecutionState
-	PendingWorkers int
-	EventGapCount  uint64
+	RunID                  string
+	Outcome                RunOutcome
+	ExecutionState         RunExecutionState
+	PendingWorkers         int
+	EventGapCount          uint64
+	ProcessSessionDelivery *tools.ProcessSessionDelivery `json:"-"`
 }
 
 // RunStatusHandle exposes fresh immutable snapshots as cleanup progresses.

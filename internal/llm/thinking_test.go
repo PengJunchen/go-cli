@@ -54,6 +54,29 @@ func TestParseThinkingLevel_InvalidReturnsError(t *testing.T) {
 	assert.Equal(t, ThinkingMedium, got, "invalid input should still return the default")
 }
 
+func TestThinkingRequestInjectorsRejectInvalidTypedLevels(t *testing.T) {
+	options := &GenerationOptions{Thinking: &ThinkingConfig{Level: ThinkingLevel(99)}}
+	for _, tc := range []struct {
+		name string
+		call func() ([]byte, error)
+	}{
+		{name: "openai", call: func() ([]byte, error) {
+			return injectThinking([]byte(`{"model":"fixture"}`), options, OpenAIThinkingAdapter{}, "")
+		}},
+		{name: "claude", call: func() ([]byte, error) {
+			return injectClaudeThinking([]byte(`{"model":"fixture"}`), options)
+		}},
+		{name: "gemini", call: func() ([]byte, error) {
+			return injectThinking([]byte(`{"generationConfig":{}}`), options, GeminiThinkingAdapter{}, "generationConfig")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.call()
+			require.ErrorContains(t, err, "invalid thinking level")
+		})
+	}
+}
+
 func TestThinkingConfigForLevel_BudgetMapping(t *testing.T) {
 	tests := []struct {
 		level  ThinkingLevel

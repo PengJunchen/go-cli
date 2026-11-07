@@ -255,6 +255,9 @@ func TestHTTPChatModel_EmitsRequestSpan(t *testing.T) {
 	out, found := findAttr(span, "tokens_output")
 	require.True(t, found)
 	assert.Equal(t, 6, out)
+	assert.Equal(t, string(TaskTypeChat), findAttrValue(t, span, "task_type"))
+	assert.Equal(t, string(RequestPurposeMain), findAttrValue(t, span, "purpose"))
+	assert.Equal(t, "known", findAttrValue(t, span, "usage_state"))
 }
 
 // TestHTTPChatModel_EmitsErrorRequestSpan verifies a failing generate marks the
@@ -313,6 +316,190 @@ func TestNativeChatModel_EmitsRequestSpan(t *testing.T) {
 	prov, found := findAttr(span, "provider")
 	require.True(t, found)
 	assert.Equal(t, "gemini", prov)
+	assert.Equal(t, "unknown", findAttrValue(t, span, "usage_state"))
+	assert.Equal(t, "chat", findAttrValue(t, span, "task_type"))
+	assert.Equal(t, "main", findAttrValue(t, span, "purpose"))
+}
+
+func findAttrValue(t *testing.T, span tracing.SpanData, key string) any {
+	t.Helper()
+	value, found := findAttr(span, key)
+	require.Truef(t, found, "span attribute %q is missing", key)
+	return value
+}
+
+func TestLLMStreamSpanCoversTerminalChunk(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	tests := []struct {
+		name  string
+		build func(string) (BaseChatModel, error)
+	}{
+		{
+			name: "HTTP",
+			build: func(endpoint string) (BaseChatModel, error) {
+				return &HTTPChatModel{
+					buildMode: UnboundLibraryBuild,
+					provider:  NewEinoProvider(WithBaseURL(endpoint)),
+					cfg:       ModelConfig{Model: "m"},
+					client:    http.DefaultClient,
+				}, nil
+			},
+		},
+		{
+			name: "native",
+			build: func(endpoint string) (BaseChatModel, error) {
+				provider := NewOpenAIProvider(WithNativeBaseURL(endpoint))
+				model, _, err := provider.Build(context.Background(), ModelConfig{Model: "m"})
+				return model, err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			started := make(chan struct{})
+			release := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				close(started)
+				select {
+				case <-release:
+				case <-r.Context().Done():
+					return
+				}
+				_, _ = io.WriteString(w, strings.Join([]string{
+					`data: {"choices":[{"delta":{"content":"ok"}}]}`,
+					"",
+					`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+					"",
+					`data: {"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2}}`,
+					"",
+					"data: [DONE]",
+					"",
+				}, "\n"))
+				w.(http.Flusher).Flush()
+			}))
+			defer server.Close()
+			defer func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			}()
+
+			ctx, exporter := newComposeTestCtx(t)
+			model, err := tt.build(server.URL)
+			require.NoError(t, err)
+			chunks, err := model.Stream(ctx, nil)
+			require.NoError(t, err)
+			<-started
+			_, emitted := exporter.spanByName("llm.request")
+			assert.False(t, emitted, "stream span must remain open until the terminal chunk")
+
+			close(release)
+			var final *MessageChunk
+			for chunk := range chunks {
+				if chunk.Final {
+					copy := chunk
+					final = &copy
+				}
+			}
+			require.NotNil(t, final)
+			require.NotNil(t, final.Usage)
+
+			span, emitted := exporter.spanByName("llm.request")
+			require.True(t, emitted)
+			assert.Equal(t, "known", findAttrValue(t, span, "usage_state"))
+			assert.Equal(t, 4, findAttrValue(t, span, "tokens_input"))
+			assert.Equal(t, 2, findAttrValue(t, span, "tokens_output"))
+			assert.Equal(t, "chat", findAttrValue(t, span, "task_type"))
+			assert.Equal(t, "main", findAttrValue(t, span, "purpose"))
+			assert.GreaterOrEqual(t, findAttrValue(t, span, "latency_ms"), int64(0))
+			assert.NotEmpty(t, span.EndTime)
+			assert.Equal(t, string(tracing.SpanStatusOK), string(span.Status))
+		})
+	}
+}
+
+func TestLLMStreamSpanEndsOnCancellation(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	baseCtx, exporter := newComposeTestCtx(t)
+	ctx, cancel := context.WithCancel(baseCtx)
+	provider := NewOpenAIProvider(WithNativeBaseURL(server.URL))
+	model, _, err := provider.Build(ctx, ModelConfig{Model: "m"})
+	require.NoError(t, err)
+	chunks, err := model.Stream(ctx, nil)
+	require.NoError(t, err)
+	<-started
+	cancel()
+	var streamErr error
+	for chunk := range chunks {
+		if chunk.Error != nil {
+			streamErr = errors.Join(streamErr, chunk.Error)
+		}
+	}
+
+	span, emitted := exporter.spanByName("llm.request")
+	require.True(t, emitted)
+	assert.ErrorIs(t, streamErr, context.Canceled)
+	assert.Equal(t, string(tracing.SpanStatusError), string(span.Status))
+	assert.Equal(t, "unknown", findAttrValue(t, span, "usage_state"))
+	assert.NotEmpty(t, span.EndTime)
+	count := 0
+	for _, item := range exporter.allSpans() {
+		if item.Name == "llm.request" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "one request must end its span exactly once")
+}
+
+func TestLLMStreamSpanPreservesTerminalErrorWhenCancellationRacesSend(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	baseCtx, exporter := newComposeTestCtx(t)
+	ctx, cancel := context.WithCancel(baseCtx)
+	defer cancel()
+	span, spanCtx, started := startLLMRequestSpan(ctx, "test", "m")
+	terminalErr := errors.New("terminal stream failure")
+	source := make(chan MessageChunk)
+	sourceSent := make(chan struct{})
+	go func() {
+		source <- MessageChunk{Role: RoleAssistant, Content: "partial"}
+		source <- MessageChunk{Error: terminalErr}
+		close(source)
+		close(sourceSent)
+	}()
+
+	chunks := traceLLMMessageStream(spanCtx, span, source, started)
+	<-sourceSent // The partial chunk fills the output buffer before the error arrives.
+	cancel()     // Cancellation wins while the terminal error is blocked on that buffer.
+
+	var streamErr error
+	streamErrors := 0
+	for chunk := range chunks {
+		if chunk.Error != nil {
+			streamErrors++
+			streamErr = chunk.Error
+		}
+	}
+	assert.ErrorIs(t, streamErr, terminalErr)
+	assert.Equal(t, 1, streamErrors, "the terminal stream error must be forwarded once")
+	spanData, emitted := exporter.spanByName("llm.request")
+	require.True(t, emitted)
+	assert.Equal(t, string(tracing.SpanStatusError), string(spanData.Status))
 }
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/session"
+	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -230,20 +231,32 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 		// --fork requires a session store to build the tree from.
 		assembleOpts = append(assembleOpts, WithSessionPersistence(true))
 	}
+	processWorkspaceID := ""
+	if durableSession != nil {
+		processWorkspaceID = durableSession.workspaceID
+	}
+	processHost, err := NewProcessSessionInvocationHost(ctx, processWorkspaceID)
+	if err != nil {
+		return newExecutionError("prompt: create process-session host", err)
+	}
+	var assembly *AgentAssembly
+	defer func() {
+		runErr = errors.Join(runErr, processHost.Close(context.Background()))
+		if assembly != nil {
+			runErr = errors.Join(runErr, closeAssemblyForCommand(context.Background(), assembly, "prompt"))
+		}
+	}()
+	assembleOpts = append(assembleOpts, WithProcessSessionInvocationHost(processHost))
 	if noSandbox {
 		assembleOpts = append(assembleOpts, WithNoSandbox())
 	}
-	assembly, err := AssembleAgent(dispatchCtx, rc, providerName, modelName, c.out,
+	assembly, err = AssembleAgent(dispatchCtx, rc, providerName, modelName, c.out,
 		assembleOpts...)
 	if err != nil {
 		dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
 		dispatchSpan.End()
 		return newExecutionError("prompt: assemble agent", err)
 	}
-	defer func() {
-		runErr = errors.Join(runErr, closeAssemblyForCommand(context.Background(), assembly, "prompt"))
-	}()
-
 	if assembly.PhysicalSessionID != "" {
 		slog.Info("cli_prompt_durable_session", "physical_session_id", assembly.PhysicalSessionID)
 		if outputMode == OutputText {
@@ -322,10 +335,13 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 		return errors.Join(runErrors...)
 	}
 	memoryResult := core.Result{Message: result.Content}
+	var processSessionDelivery *tools.ProcessSessionDelivery
 	if source, ok := stream.(core.RunStatusSource); ok {
 		memoryResult.StatusHandle = source.RunStatusHandle()
 		if memoryResult.StatusHandle != nil {
-			memoryResult.RunID = memoryResult.StatusHandle.Snapshot().RunID
+			status := memoryResult.StatusHandle.Snapshot()
+			memoryResult.RunID = status.RunID
+			processSessionDelivery = status.ProcessSessionDelivery
 		}
 	}
 	assembly.RecordCompletedMemory(dispatchCtx, memoryResult, initialMemorySnapshot, prompt)
@@ -336,7 +352,34 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 			"result_len", len(result.Content),
 		)
 	}
+	handoff, active, handoffErr := processHost.AcceptHandoff(assembly.ProcessSessionManager, memoryResult.RunID, processSessionDelivery)
+	if handoffErr != nil {
+		return newExecutionError("prompt: accept process-session handoff", handoffErr)
+	}
+	if active {
+		if err := writeProcessSessionHandoff(c.out, outputMode, handoff); err != nil {
+			return newExecutionError("prompt: write process-session handoff", err)
+		}
+		if err := processHost.WaitForRelease(ctx); err != nil {
+			return newExecutionError("prompt: wait for process-session host release", err)
+		}
+	}
 	return nil
+}
+
+func writeProcessSessionHandoff(out io.Writer, mode OutputMode, handoff tools.ProcessSessionHandoff) error {
+	switch mode {
+	case OutputJSON:
+		return json.NewEncoder(out).Encode(handoff)
+	case OutputStream:
+		return nil
+	default:
+		if _, err := fmt.Fprintln(out); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintln(out, "Background process sessions are still running; press Ctrl+C to stop them.")
+		return err
+	}
 }
 
 // consumeEvents reads events from the stream and writes them to out according

@@ -35,6 +35,7 @@ func TestDynamicProjectSkillHookProviderAndDurableCompletionRemainLive(t *testin
 	responses := []string{}
 	for _, suffix := range []string{"one", "two"} {
 		responses = append(responses,
+			toolResponse("search-"+suffix, "tool_search", map[string]any{"query": "skill_load"}),
 			toolResponse("skill-"+suffix, "skill_load", map[string]any{"name": "private"}),
 			toolResponse("read-"+suffix, "read", map[string]any{"path": input}),
 			`{"choices":[{"message":{"role":"assistant","content":"trusted durable run completed"}}]}`)
@@ -90,7 +91,7 @@ func TestDynamicProjectSkillHookProviderAndDurableCompletionRemainLive(t *testin
 	borrowed.Release()
 	plan.registry = assembly.ToolRegistry
 	hook := core.NewShellHookWithStartGuard("verified-project-hook", core.EventPreToolUse,
-		"cat >/dev/null; printf 'checked\\n' >> .go-cli/hook-allowed.log", time.Second, verified.CommitIfCurrent)
+		"cat >> .go-cli/hook-allowed.log; printf '\\n' >> .go-cli/hook-allowed.log", time.Second, verified.CommitIfCurrent)
 	hookManager := core.NewHookManager(hook)
 	plan.hooks = core.NewHookChain(hookManager)
 	plan.interceptor = hookManager.PreToolUseContextInterceptor()
@@ -119,8 +120,16 @@ func TestDynamicProjectSkillHookProviderAndDurableCompletionRemainLive(t *testin
 		}
 		require.Equal(t, physicalID, published.SessionID)
 	}
-	require.Len(t, script.requestBodies(), 6, "both complete runs must pass actual resolver dispatch and session publication")
+	require.Len(t, script.requestBodies(), 8, "both complete runs must discover hidden tools before resolver dispatch and session publication")
 	hookEvents, err := os.ReadFile(filepath.Join(root, ".go-cli", "hook-allowed.log"))
 	require.NoError(t, err)
-	require.Equal(t, 4, strings.Count(string(hookEvents), "checked"))
+	var hookTools []string
+	for _, line := range strings.Split(strings.TrimSpace(string(hookEvents)), "\n") {
+		var payload struct {
+			Tool string `json:"tool"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(line), &payload))
+		hookTools = append(hookTools, payload.Tool)
+	}
+	require.Equal(t, []string{"tool_search", "skill_load", "read", "tool_search", "skill_load", "read"}, hookTools)
 }

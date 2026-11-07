@@ -44,7 +44,7 @@ func TestProjectExtensionNativeTrustRegrantUsesStableModulePath(t *testing.T) {
 	}
 
 	buildPluginPath := filepath.Join(t.TempDir(), "r6-project-plugin.so")
-	buildArgs := []string{"build", "-buildmode=plugin"}
+	buildArgs := []string{"build", "-buildmode=plugin", "-ldflags=-w"}
 	if r6NativePluginRaceEnabled {
 		buildArgs = append(buildArgs, "-race")
 	}
@@ -58,6 +58,7 @@ func TestProjectExtensionNativeTrustRegrantUsesStableModulePath(t *testing.T) {
 	originalPluginBytes, err := os.ReadFile(buildPluginPath)
 	require.NoError(t, err)
 	require.Greater(t, len(originalPluginBytes), 1<<20, "the native module fixture must exercise the extension-specific capture limit")
+	require.LessOrEqual(t, len(originalPluginBytes), 16<<20, "the native module fixture must fit the project-source capture limit")
 
 	root := t.TempDir()
 	t.Chdir(root)
@@ -78,7 +79,7 @@ func TestProjectExtensionNativeTrustRegrantUsesStableModulePath(t *testing.T) {
 	uncurated, err := config.LoadTrustedWithManager(context.Background(), manager)
 	require.NoError(t, err)
 	snapshot := uncurated.CapturedProjectSourcesForGrant()
-	require.NotNil(t, snapshot)
+	require.NotNilf(t, snapshot, "project source capture unavailable: status=%s fixture_bytes=%d", uncurated.ProjectSourceTrustStatus, len(originalPluginBytes))
 	capturedPluginBytes, present := snapshot.SourceBytes("extensions/.go-cli/extensions/native.so")
 	require.True(t, present)
 	assert.Equal(t, originalPluginBytes, capturedPluginBytes)

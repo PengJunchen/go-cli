@@ -438,14 +438,14 @@ A tool timeout, cancellation, or broken transport can leave an external outcome 
 
 ## Project memory
 
-Automatic memory is **enabled by default**, independently of `session.store_path`. After a successfully completed root conversation turn, a background model request can extract explicitly stated project facts and preferences. Later root turns in the same canonical project, including in another process, receive a bounded snapshot of its scoped memories as reference context. Memories are not higher-priority instructions and do not authorize tool actions.
+Automatic memory is **off by default**, independently of `session.store_path`. Set `memory.enabled: true` to opt in. After a successfully completed root conversation turn, a background model request can extract explicitly stated project facts and preferences. Later root turns in the same canonical project, including in another process, receive a bounded snapshot of its scoped memories as reference context. Memories are not higher-priority instructions and do not authorize tool actions.
 
 ```yaml
 memory:
-  enabled: false
+  enabled: true
 ```
 
-This disables both automatic extraction and prompt injection; explicit `/memory` commands remain available. The setting loads at startup. With automatic memory enabled, the default file is `~/.go-cli/memories/<workspace-id>.jsonl`. `memory.store_path` can select a file; records in a shared explicit file still retain workspace attribution. Disabling automatic memory uses the manual store path (default `~/.go-cli/memories.jsonl`), so choose an explicit path if you want to inspect a particular existing store.
+Omitting the setting or setting it to `false` disables both automatic extraction and prompt injection; explicit `/memory` commands remain available. The setting loads at startup. With automatic memory enabled, the default file is `~/.go-cli/memories/<workspace-id>.jsonl`. `memory.store_path` can select a file; records in a shared explicit file still retain workspace attribution. When automatic memory is disabled, manual commands use `~/.go-cli/memories.jsonl` unless `memory.store_path` selects another file.
 
 ```text
 /memory list

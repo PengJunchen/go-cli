@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
@@ -209,14 +208,8 @@ var (
 // assistant's response as a llm.Message. It emits a "llm.request" span with the
 // provider, model, token counts, latency and status attributes.
 func (m *HTTPChatModel) Generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
-	span, spanCtx := tracing.SpanFromContext(ctx, spanNameLLMRequest, tracing.SpanKindClient)
-	start := time.Now()
+	span, spanCtx, start := startLLMRequestSpan(ctx, m.provider.name, m.cfg.Model)
 	logger := tracing.NewTraceLogger(span, slog.Default())
-	attrs := []tracing.Attribute{
-		{Key: "provider", Value: m.provider.name},
-		{Key: "model", Value: m.cfg.Model},
-	}
-	span.SetAttributes(attrs...)
 
 	msg, attempt, err := m.generate(spanCtx, msgs, opts...)
 	var usage *Usage
@@ -224,21 +217,7 @@ func (m *HTTPChatModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 		usage = msg.Usage
 	}
 	err = finishProviderAttempt(spanCtx, attempt, err, usage)
-	if err != nil {
-		setProviderErrorSpanAttributes(span, err)
-		span.SetStatus(tracing.SpanStatusError, err.Error())
-	} else {
-		span.SetStatus(tracing.SpanStatusOK, "")
-		if msg.Usage != nil {
-			span.SetAttributes(
-				tracing.Attribute{Key: "tokens_input", Value: msg.Usage.InputTokens},
-				tracing.Attribute{Key: "tokens_output", Value: msg.Usage.OutputTokens},
-			)
-		}
-	}
-	latency := time.Since(start)
-	span.SetAttributes(tracing.Attribute{Key: "latency_ms", Value: latency.Milliseconds()})
-	span.End()
+	finishLLMRequestSpan(span, start, err, usage)
 
 	logger.Info("llm_generate_complete",
 		"op", "llm.generate",
@@ -255,7 +234,7 @@ func (m *HTTPChatModel) generate(ctx context.Context, msgs []Message, opts ...Op
 		return nil, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 
-	respBody, attempt, err := m.roundTrip(ctx, body)
+	respBody, _, attempt, err := m.roundTrip(ctx, body)
 	if err != nil {
 		return nil, attempt, err
 	}
@@ -295,6 +274,16 @@ func (m *HTTPChatModel) generate(ctx context.Context, msgs []Message, opts ...Op
 // failure; a non-nil error is returned only for failures detected before the
 // connection is established.
 func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
+	span, spanCtx, start := startLLMRequestSpan(ctx, m.provider.name, m.cfg.Model)
+	stream, err := m.stream(spanCtx, msgs, opts...)
+	if err != nil {
+		finishLLMRequestSpan(span, start, err, nil)
+		return stream, err
+	}
+	return traceLLMMessageStream(spanCtx, span, stream, start), nil
+}
+
+func (m *HTTPChatModel) stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
 	ch := make(chan MessageChunk, 64)
 	slog.Info("llm_stream_start",
 		"op", "llm.stream",
@@ -326,7 +315,7 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: marshal stream request: %w", err))
 	}
 
-	respBody, attempt, err := m.roundTrip(ctx, streamBody)
+	respBody, statusCode, attempt, err := m.roundTrip(ctx, streamBody)
 	if err != nil {
 		close(ch)
 		return ch, finishProviderAttempt(ctx, attempt, err, nil)
@@ -390,9 +379,9 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 		parser := NewDefaultSSEParser()
 		events, _ := parser.Parse(ctx, reader) //nolint:errcheck
 
-		toolCalls, finishReason, usage, streamErr := accumulateOpenAIStreamToolCalls(ctx, events, ch)
+		toolCalls, finishReason, usage, streamErr := accumulateOpenAIStreamToolCallsWithProvider(ctx, events, ch, statusCode, m.provider.name)
 		if streamErr != nil {
-			sendStreamError(ctx, ch, streamErr)
+			sendStreamErrorWithUsage(ch, streamErr, usage)
 			return
 		}
 		final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
@@ -410,6 +399,7 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 
 // openAIStreamChunk is one SSE data payload of a streaming response.
 type openAIStreamChunk struct {
+	Error   *openAIErrorEnvelope `json:"error,omitempty"`
 	Choices []openAIStreamChoice `json:"choices"`
 	// Usage is populated only on the final chunk (empty choices) when
 	// stream_options.include_usage is true.
@@ -418,11 +408,46 @@ type openAIStreamChunk struct {
 
 // openAIStreamChoice carries the incremental delta of an OpenAI stream.
 type openAIStreamChoice struct {
-	Delta struct {
-		Content   string           `json:"content"`
-		ToolCalls []openAIToolCall `json:"tool_calls"`
-	} `json:"delta"`
-	FinishReason string `json:"finish_reason,omitempty"`
+	Delta        openAIStreamDelta `json:"delta"`
+	FinishReason string            `json:"finish_reason,omitempty"`
+}
+
+// openAIStreamDelta retains safe activity markers for fields that the adapter
+// does not render or execute, so usage freshness can distinguish output from
+// metadata without retaining the provider's raw content.
+type openAIStreamDelta struct {
+	Content          string           `json:"content"`
+	ToolCalls        []openAIToolCall `json:"tool_calls"`
+	Reasoning        json.RawMessage  `json:"reasoning"`
+	ReasoningContent json.RawMessage  `json:"reasoning_content"`
+	generated        bool
+	unknownActivity  bool
+}
+
+func (d *openAIStreamDelta) UnmarshalJSON(data []byte) error {
+	type plainDelta openAIStreamDelta
+	var decoded plainDelta
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*d = openAIStreamDelta(decoded)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for name, value := range fields {
+		if !streamJSONActivity(value) {
+			continue
+		}
+		switch name {
+		case "role", "index":
+		case "content", "tool_calls", "reasoning", "reasoning_content", "reasoning_details", "refusal", "audio", "function_call":
+			d.generated = true
+		default:
+			d.unknownActivity = true
+		}
+	}
+	return nil
 }
 
 // buildBody serializes the conversation and options into the OpenAI chat
@@ -432,6 +457,11 @@ func (m *HTTPChatModel) buildBody(msgs []Message, opts ...Option) ([]byte, error
 	for _, opt := range opts {
 		opt(genOpts)
 	}
+	projected, _, projectionErr := projectChatToolImages(msgs)
+	if projectionErr != nil {
+		return nil, projectionErr
+	}
+	msgs = projected
 
 	reqMsgs := make([]openAIMessage, 0, len(msgs))
 	for _, msg := range msgs {
@@ -498,9 +528,9 @@ func (m *HTTPChatModel) buildBody(msgs []Message, opts ...Option) ([]byte, error
 }
 
 // roundTrip builds the HTTP request, executes it against the provider, and
-// verifies a 2xx status. It returns the response body for decoding and closes
-// it via the deferred call in the caller.
-func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadCloser, *ProviderAttempt, error) {
+// verifies a 2xx status. It returns the response body and actual HTTP status for
+// decoding; the caller closes the body after use.
+func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadCloser, int, *ProviderAttempt, error) {
 	baseURL := m.cfg.BaseURL
 	if baseURL == "" {
 		baseURL = m.provider.defaultBaseURL
@@ -509,7 +539,7 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: build request: %w", err))
+		return nil, 0, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: build request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -523,11 +553,11 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 
 	attempt, err := (providerDispatchBinding{mode: m.buildMode, candidate: m.candidate}).begin(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, 0, nil, err
 	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return nil, attempt, fmt.Errorf("llm: do request: %w", &providerTransportFailure{cause: err})
+		return nil, 0, attempt, fmt.Errorf("llm: do request: %w", &providerTransportFailure{cause: err})
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -535,13 +565,13 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 		if readErr != nil {
 			providerErr := newProviderError(resp.StatusCode, m.provider.name, string(payload))
 			providerErr.BodyTruncated = truncated
-			return nil, attempt, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
+			return nil, resp.StatusCode, attempt, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
 		}
 		providerErr := newProviderError(resp.StatusCode, m.provider.name, string(payload))
 		providerErr.BodyTruncated = truncated
-		return nil, attempt, errors.Join(providerErr, closeErr)
+		return nil, resp.StatusCode, attempt, errors.Join(providerErr, closeErr)
 	}
-	return resp.Body, attempt, nil
+	return resp.Body, resp.StatusCode, attempt, nil
 }
 
 // openAIRequest is the OpenAI chat completions request body.
@@ -578,12 +608,22 @@ func samplingMaxTokens(cfg ModelConfig, override *int) *int {
 }
 
 func estimateOpenAICompatibleFraming(messages []Message, options GenerationOptions) (int, error) {
+	projected, imageTextReserve, err := projectChatToolImages(messages)
+	if err != nil {
+		return 0, err
+	}
+	messages = projected
+
 	if len(messages) > (int(^uint(0)>>1)-7)/4 {
 		return 0, errors.New("llm: request framing estimate overflow")
 	}
 	// The adapter's request has one outer message-list envelope, three framing
 	// tokens per message, and an extra tool-choice envelope when tools exist.
 	framing := 3 + len(messages)*4
+	if imageTextReserve > int(^uint(0)>>1)-framing {
+		return 0, errors.New("llm: image framing estimate overflow")
+	}
+	framing += imageTextReserve
 	if len(options.Tools) > 0 {
 		framing += 4
 	}
@@ -686,20 +726,47 @@ type openAIChoice struct {
 
 // openAIUsage reports token consumption.
 type openAIUsage struct {
-	PromptTokens     *int `json:"prompt_tokens,omitempty"`
-	CompletionTokens *int `json:"completion_tokens,omitempty"`
-	TotalTokens      *int `json:"total_tokens,omitempty"`
+	PromptTokens            *int            `json:"prompt_tokens,omitempty"`
+	CompletionTokens        *int            `json:"completion_tokens,omitempty"`
+	TotalTokens             *int            `json:"total_tokens,omitempty"`
+	PromptTokensDetails     json.RawMessage `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails json.RawMessage `json:"completion_tokens_details,omitempty"`
 }
 
 func (u *openAIUsage) toUsage() *Usage {
 	if u == nil || u.PromptTokens == nil || u.CompletionTokens == nil {
 		return nil
 	}
-	total := *u.PromptTokens + *u.CompletionTokens
+	total, representable := checkedUsageAdd(*u.PromptTokens, *u.CompletionTokens)
+	if !representable {
+		return nil
+	}
 	if u.TotalTokens != nil {
 		total = *u.TotalTokens
 	}
-	return &Usage{InputTokens: *u.PromptTokens, OutputTokens: *u.CompletionTokens, TotalTokens: total}
+	usage := &Usage{InputTokens: *u.PromptTokens, OutputTokens: *u.CompletionTokens, TotalTokens: total}
+	if usage.InputTokens >= 0 && usage.OutputTokens >= 0 {
+		usage.PrimaryCoverage = UsageCoverageComplete
+	}
+	usage.CacheReadInputTokens, usage.CacheReadInputTokensReported = openAIUsageDetail(u.PromptTokensDetails, "cached_tokens", usage.InputTokens)
+	usage.ReasoningOutputTokens, usage.ReasoningOutputTokensReported = openAIUsageDetail(u.CompletionTokensDetails, "reasoning_tokens", usage.OutputTokens)
+	return usage
+}
+
+func openAIUsageDetail(raw json.RawMessage, field string, total int) (int, bool) {
+	var details map[string]json.RawMessage
+	if json.Unmarshal(raw, &details) != nil || details == nil {
+		return 0, false
+	}
+	value, ok := details[field]
+	if !ok || string(value) == "null" {
+		return 0, false
+	}
+	var count int
+	if json.Unmarshal(value, &count) != nil || count < 0 || count > total {
+		return 0, false
+	}
+	return count, true
 }
 
 // openAIToolCall is an assistant tool invocation request. In streaming

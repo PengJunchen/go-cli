@@ -23,7 +23,7 @@ func TestAutomaticMemoryStartupLockCancellationAndFailOpen(t *testing.T) {
 			server := newMemoryTestServer(t)
 			defer server.Close()
 			cfg, home := newMemoryTestConfig(t, server.URL)
-			cfg.Memory.Enabled = nil
+			enableAutomaticMemoryForTest(cfg)
 			cfg.Memory.StorePath = filepath.Join(home, "locked.jsonl")
 			lock, err := os.OpenFile(cfg.Memory.StorePath+".lock", os.O_CREATE|os.O_RDWR, 0600)
 			require.NoError(t, err)
@@ -67,7 +67,7 @@ func TestAutomaticMemoryDiagnosticsKeepCommandOutputClean(t *testing.T) {
 				server := newMemoryTestServer(t)
 				defer server.Close()
 				cfg, home := newMemoryTestConfig(t, server.URL)
-				cfg.Memory.Enabled = nil
+				enableAutomaticMemoryForTest(cfg)
 				cfg.Memory.StorePath = filepath.Join(home, "memory.jsonl")
 				if failure == "busy" {
 					lock, err := os.OpenFile(cfg.Memory.StorePath+".lock", os.O_CREATE|os.O_RDWR, 0600)

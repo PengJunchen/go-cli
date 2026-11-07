@@ -261,20 +261,40 @@ func (s *REPLSession) parseFlags() error {
 		return newUsageError("interactive: %v", err)
 	}
 
-	thinkingLevel, err := llm.ParseThinkingLevel(thinkingFlag)
-	if err != nil {
-		return newUsageError("interactive: %v", err)
-	}
-
 	if v, ok := s.cfg.(*config.Config); ok {
 		s.rc = v
 	}
 	approveExplicit := false
+	maxTokensExplicit := false
+	thinkingExplicit := false
 	fs.Visit(func(option *flag.Flag) {
 		if option.Name == "approve" {
 			approveExplicit = true
 		}
+		if option.Name == "max-tokens" {
+			maxTokensExplicit = true
+		}
+		if option.Name == "thinking" {
+			thinkingExplicit = true
+		}
 	})
+	thinkingSetting := ""
+	if thinkingExplicit {
+		thinkingSetting = thinkingFlag
+	} else if s.rc != nil {
+		thinkingSetting = s.rc.Agent.Thinking
+	}
+	thinkingLevel, err := llm.ParseThinkingLevel(thinkingSetting)
+	if err != nil {
+		if thinkingExplicit {
+			return newUsageError("interactive: %v", err)
+		}
+		return newUsageError("interactive: invalid agent.thinking: %v", err)
+	}
+	thinkingFlag = strings.ToLower(strings.TrimSpace(thinkingSetting))
+	if thinkingFlag == "" {
+		thinkingFlag = "medium"
+	}
 	resolvedApproval, err := resolveApprovalMode(s.rc, approveMode, approveExplicit)
 	if err != nil {
 		return err
@@ -298,6 +318,9 @@ func (s *REPLSession) parseFlags() error {
 	s.modelName = resolveModelName(modelFlag, s.rc)
 	s.modelFlag = modelFlag
 	s.providerName = resolveProviderName(providerFlag, s.rc)
+	if !maxTokensExplicit && s.rc != nil && s.rc.Compaction.MaxTokens > 0 {
+		maxTokensFlag = s.rc.Compaction.MaxTokens
+	}
 	if maxTokensFlag <= 0 {
 		maxTokensFlag = defaultMaxTokens
 	}

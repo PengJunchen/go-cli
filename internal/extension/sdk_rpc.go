@@ -24,6 +24,8 @@ import (
 // ErrRPCOverloaded rejects work rather than growing an unbounded request queue.
 var ErrRPCOverloaded = errors.New("extension: RPC inflight budget exhausted")
 
+const rpcLeaderDrainTimeout = time.Second
+
 // RPCOutcomeUnknownError marks a disconnect/deadline after dispatch as non-replayable.
 type RPCOutcomeUnknownError struct {
 	Cause error
@@ -116,20 +118,52 @@ type rpcPending struct {
 }
 
 type rpcProcess struct {
-	mu       sync.Mutex
-	command  *exec.Cmd
-	input    io.WriteCloser
-	pending  map[uint64]*rpcPending
-	next     uint64
-	closed   bool
-	failure  error
-	permits  chan struct{}
-	writer   chan struct{}
-	timeout  time.Duration
-	done     chan struct{}
-	readDone chan struct{}
-	waitDone chan struct{}
-	leases   int
+	mu            sync.Mutex
+	command       *exec.Cmd
+	input         io.WriteCloser
+	pending       map[uint64]*rpcPending
+	next          uint64
+	closed        bool
+	failure       error
+	retired       bool
+	retirementErr error
+	permits       chan struct{}
+	writer        chan struct{}
+	timeout       time.Duration
+	done          chan struct{}
+	readDone      chan struct{}
+	waitDone      chan struct{}
+	leases        int
+}
+
+func (p *rpcProcess) unavailableCauseLocked() error {
+	if p.failure != nil {
+		return p.failure
+	}
+	if p.retirementErr != nil {
+		return p.retirementErr
+	}
+	return errors.New("extension: RPC worker generation is retired")
+}
+
+// retire excludes new work while leaving dispatched request outcomes to the reader.
+func (p *rpcProcess) retire(err error, terminate bool) {
+	p.mu.Lock()
+	p.retired = true
+	if p.retirementErr == nil {
+		p.retirementErr = err
+	} else if err != nil && !errors.Is(p.retirementErr, err) {
+		p.retirementErr = errors.Join(p.retirementErr, err)
+	}
+	closed := p.closed
+	p.mu.Unlock()
+	if closed {
+		return
+	}
+	_ = p.input.Close()
+	if terminate {
+		terminateRPCProcess(p.command)
+	}
 }
 
 func startRPCProcess(ctx context.Context, config RPCProcessConfig) (*rpcProcess, api.Manifest, error) {
@@ -208,40 +242,22 @@ func startRPCProcess(ctx context.Context, config RPCProcessConfig) (*rpcProcess,
 	if err != nil {
 		return nil, api.Manifest{}, fmt.Errorf("extension: RPC stdin: %w", err)
 	}
-	output, err := command.StdoutPipe()
+	output, outputWriter, err := os.Pipe()
 	if err != nil {
 		_ = input.Close()
 		return nil, api.Manifest{}, fmt.Errorf("extension: RPC stdout: %w", err)
 	}
+	command.Stdout = outputWriter
 	if err = command.Start(); err != nil {
 		_ = input.Close()
 		_ = output.Close()
+		_ = outputWriter.Close()
 		return nil, api.Manifest{}, fmt.Errorf("extension: start RPC worker: %w", err)
 	}
+	_ = outputWriter.Close()
 	artifactTransferred = true
 	process := &rpcProcess{command: command, input: input, pending: make(map[uint64]*rpcPending), permits: make(chan struct{}, config.MaxInflight), writer: make(chan struct{}, 1), timeout: time.Duration(config.TimeoutMillis) * time.Millisecond, done: make(chan struct{}), readDone: make(chan struct{}), waitDone: make(chan struct{})}
-	go process.read(output)
-	go func() {
-		err := command.Wait()
-		if err == nil {
-			err = io.EOF
-		}
-		process.fail(err)
-		close(process.waitDone)
-	}()
-	go func() {
-		<-process.waitDone
-		_ = output.Close()
-		<-process.readDone
-		// fail requested termination. Keep supervising the exact group until
-		// absence is positive; joining the leader alone is not owner completion.
-		for !rpcProcessGroupStopped(command) {
-			terminateRPCProcess(command)
-			time.Sleep(5 * time.Millisecond)
-		}
-		_ = os.RemoveAll(artifactDir)
-		close(process.done)
-	}()
+	process.monitor(output, artifactDir)
 	var manifest api.Manifest
 	if err = process.call(ctx, "initialize", struct {
 		Version string `json:"version"`
@@ -263,6 +279,45 @@ func startRPCProcess(ctx context.Context, config RPCProcessConfig) (*rpcProcess,
 		return nil, api.Manifest{}, err
 	}
 	return process, manifest, nil
+}
+
+func (p *rpcProcess) monitor(output io.ReadCloser, artifactDir string) {
+	go p.read(output)
+	go func() {
+		err := p.command.Wait()
+		if err == nil {
+			err = io.EOF
+		}
+		p.retire(err, false)
+		close(p.waitDone)
+		drainTimer := time.NewTimer(rpcLeaderDrainTimeout)
+		select {
+		case <-p.readDone:
+			if !drainTimer.Stop() {
+				select {
+				case <-drainTimer.C:
+				default:
+				}
+			}
+		case <-drainTimer.C:
+			p.mu.Lock()
+			cause := p.unavailableCauseLocked()
+			p.mu.Unlock()
+			p.fail(errors.Join(cause, errors.New("extension: RPC response drain exceeded after worker exit")))
+		}
+		_ = output.Close()
+		<-p.readDone
+		// Keep supervising the exact group until absence is positive; joining
+		// the leader alone is not owner completion.
+		for !rpcProcessGroupStopped(p.command) {
+			terminateRPCProcess(p.command)
+			time.Sleep(5 * time.Millisecond)
+		}
+		if artifactDir != "" {
+			_ = os.RemoveAll(artifactDir)
+		}
+		close(p.done)
+	}()
 }
 
 func (p *rpcProcess) read(output io.ReadCloser) {
@@ -307,6 +362,14 @@ func (p *rpcProcess) read(output io.ReadCloser) {
 	if err == nil {
 		err = io.EOF
 	}
+	if errors.Is(err, io.EOF) {
+		p.mu.Lock()
+		retirementErr := p.retirementErr
+		p.mu.Unlock()
+		if retirementErr != nil && !errors.Is(retirementErr, err) {
+			err = errors.Join(retirementErr, err)
+		}
+	}
 	p.fail(err)
 }
 
@@ -317,6 +380,10 @@ func (p *rpcProcess) fail(err error) {
 		return
 	}
 	p.closed, p.failure = true, err
+	p.retired = true
+	if p.retirementErr == nil {
+		p.retirementErr = err
+	}
 	pending := p.pending
 	p.pending = make(map[uint64]*rpcPending)
 	p.mu.Unlock()
@@ -363,8 +430,8 @@ func (p *rpcProcess) call(ctx context.Context, method string, params any, result
 		return fmt.Errorf("extension: encode RPC request: %w", err)
 	}
 	p.mu.Lock()
-	if p.closed {
-		failure := p.failure
+	if p.closed || p.retired {
+		failure := p.unavailableCauseLocked()
 		p.mu.Unlock()
 		return fmt.Errorf("extension: RPC worker unavailable: %w", failure)
 	}
@@ -389,8 +456,8 @@ func (p *rpcProcess) call(ctx context.Context, method string, params any, result
 		return callCtx.Err()
 	}
 	p.mu.Lock()
-	if p.closed || callCtx.Err() != nil {
-		failure := p.failure
+	if p.closed || p.retired || callCtx.Err() != nil {
+		failure := p.unavailableCauseLocked()
 		p.mu.Unlock()
 		<-p.writer
 		if callCtx.Err() != nil {
@@ -411,6 +478,16 @@ func (p *rpcProcess) call(ctx context.Context, method string, params any, result
 	// remote response waiting and decoding never hold that guard.
 	written := 0
 	write := func() error {
+		p.mu.Lock()
+		retired := p.closed || p.retired
+		var failure error
+		if retired {
+			failure = p.unavailableCauseLocked()
+		}
+		p.mu.Unlock()
+		if retired {
+			return fmt.Errorf("extension: RPC worker unavailable: %w", failure)
+		}
 		written, err = p.input.Write(frame)
 		return nil
 	}
@@ -418,16 +495,23 @@ func (p *rpcProcess) call(ctx context.Context, method string, params any, result
 	if !guarded {
 		startErr = write()
 	}
-	<-p.writer
 	if startErr != nil {
+		<-p.writer
 		return startErr // the final guard rejected before Write began
 	}
+	var writeErr error
 	if err != nil || written != len(frame) {
 		if err == nil {
 			err = io.ErrShortWrite
 		}
-		p.fail(err)
-		return p.unknown(err)
+		writeErr = err
+		p.retire(writeErr, true)
+	}
+	<-p.writer
+	if writeErr != nil {
+		if written == 0 {
+			return fmt.Errorf("extension: RPC worker unavailable before dispatch: %w", err)
+		}
 	}
 	var reply rpcReply
 	select {
@@ -439,6 +523,11 @@ func (p *rpcProcess) call(ctx context.Context, method string, params any, result
 		reply = <-waiting.reply
 	}
 	if reply.err != nil {
+		if writeErr != nil {
+			if !errors.Is(reply.err, writeErr) {
+				return p.unknown(errors.Join(writeErr, reply.err))
+			}
+		}
 		return p.unknown(reply.err)
 	}
 	if reply.response.Error != nil {
@@ -511,7 +600,7 @@ func (r *rpcArtifactReader) Read(buffer []byte) (int, error) {
 // retired/failed process cannot be reconnected or replaced behind its handle.
 func (p *rpcProcess) Acquire() (func(), error) {
 	p.mu.Lock()
-	if p.closed {
+	if p.closed || p.retired {
 		p.mu.Unlock()
 		return nil, errors.New("extension: RPC worker generation is retired")
 	}

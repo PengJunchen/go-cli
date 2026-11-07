@@ -27,7 +27,7 @@ func TestRegisteredDefaultToolsExposeAccurateParameterSchemas(t *testing.T) {
 
 	wants := map[string]defaultToolSchemaExpectation{
 		"read": {
-			propertyTypes: map[string]string{"path": "string"},
+			propertyTypes: map[string]string{"path": "string", "offset": "integer", "limit": "integer"},
 			required:      []string{"path"},
 			closed:        true,
 		},

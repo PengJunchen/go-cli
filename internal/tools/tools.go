@@ -23,6 +23,8 @@ type ToolCall struct {
 type ToolResult struct {
 	// Output is the human-readable result produced by the tool.
 	Output string `json:"output"`
+	// Images carries bounded, validated local image data with this same result.
+	Images []ToolImage `json:"images,omitempty"`
 	// Metadata holds structured extra data about the result.
 	Metadata map[string]any `json:"metadata,omitempty"`
 	// ToolCallID links the result back to the originating call.
@@ -31,6 +33,13 @@ type ToolResult struct {
 	// true, consumers (e.g. the TUI) can detect tool errors via this boolean
 	// instead of fragile string matching on the Output text.
 	IsError bool `json:"is_error,omitempty"`
+	// ProcessSessionLease is runtime-only ownership evidence for a prepared
+	// process_session invocation. It is never sent to the model as metadata.
+	ProcessSessionLease *ProcessSessionLeaseSnapshot `json:"-"`
+	// ProcessSessionAdmission is a live same-manager capability for the
+	// original run's workspace admission while its lease remains active.
+	ProcessSessionAdmission *ProcessSessionAdmissionCapability `json:"-"`
+	preparedReadEvidence    *PreparedReadEvidence
 }
 
 // ExecutionMode describes how a set of tool calls should be run.
