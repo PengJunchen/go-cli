@@ -202,7 +202,7 @@ func (t *anchoredEditTarget) revalidate() error {
 	}
 	after, err := file.Stat()
 	if err != nil {
-		return fmt.Errorf("edit: restat target: %w", err)
+		return fmt.Errorf("edit: stat target again: %w", err)
 	}
 	if after.Mode() != t.info.Mode() {
 		return t.conflict("mode", nil)
