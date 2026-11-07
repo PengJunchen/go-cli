@@ -19,6 +19,18 @@ import (
 // EntryType categorizes a single immutable session entry.
 type EntryType string
 
+// RetainedSourceEntry binds a retained message to its immutable journal row.
+type RetainedSourceEntry struct {
+	EntryID       string `json:"entry_id"`
+	PayloadDigest string `json:"payload_digest"`
+}
+
+// RetainedExchange identifies a complete retained source exchange and its rows.
+type RetainedExchange struct {
+	Range   llm.RetainedSourceRange `json:"range"`
+	Entries []RetainedSourceEntry   `json:"entries"`
+}
+
 func init() {
 	slog.Debug("session types initialized", "entry_types", []string{"user", "assistant", "tool", "compaction", "system", "checkpoint"})
 }
@@ -160,6 +172,10 @@ type SessionEntry struct {
 	RetainedInputEntryID       string `json:"retained_input_entry_id,omitempty"`
 	RetainedInputPayloadDigest string `json:"retained_input_payload_digest,omitempty"`
 	RetainedInputDigest        string `json:"retained_input_digest,omitempty"`
+	// RetainedExchanges bind retained source ranges to canonical journal rows.
+	RetainedExchanges       []RetainedExchange `json:"retained_exchanges,omitempty"`
+	RetainedHistoryRevision string             `json:"retained_history_revision,omitempty"`
+	RetainedHistoryBranchID string             `json:"retained_history_branch_id,omitempty"`
 	// ActiveProcessSessions carries only opaque IDs needed to resume control of
 	// exact, still-live process sessions after this compaction.
 	ActiveProcessSessions []core.ActiveProcessSessionRef `json:"active_process_sessions,omitempty"`
@@ -192,6 +208,13 @@ func (e *SessionEntry) clone() *SessionEntry {
 		return nil
 	}
 	cp := *e
+	if e.RetainedExchanges != nil {
+		cp.RetainedExchanges = make([]RetainedExchange, len(e.RetainedExchanges))
+		for i, exchange := range e.RetainedExchanges {
+			cp.RetainedExchanges[i] = exchange
+			cp.RetainedExchanges[i].Entries = append([]RetainedSourceEntry(nil), exchange.Entries...)
+		}
+	}
 	if e.Generation != nil {
 		metadata := *e.Generation
 		cp.Generation = &metadata

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -164,6 +165,28 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 	)
 
 	if durable && current > maxTokens {
+		// The built-in local planner can prove that every fitting prefix cuts
+		// through an image exchange. In that case a text summarizer cannot
+		// safely consume that prefix; use the verified omission or fail before
+		// invoking any auxiliary model.
+		if truncating, builtin := u.truncating.(*TruncatingCompactor); builtin {
+			hasProtectedImage := false
+			for _, item := range items {
+				if itemHasImage(item) && !(item.Runtime.Source.Kind == llm.SourceRunTranscript && item.Runtime.Source.TranscriptIndex == 0) {
+					hasProtectedImage = true
+					break
+				}
+			}
+			if hasProtectedImage {
+				local, localErr := truncating.Compact(sctx, items, maxTokens, estimator)
+				if localErr != nil && !errors.Is(localErr, ErrRequiresTruncating) {
+					return CompactionResult{Items: originalItems}, localErr
+				}
+				if localErr == nil && local.NewProjection != nil && len(local.NewProjection.RetainedSourceRanges) > 0 {
+					return u.finish(sctx, logger, span, originalItems, current, maxTokens, estimator, local, StrategyTruncating), nil
+				}
+			}
+		}
 		builtin, isBuiltin := u.summary.(*SummaryCompactor)
 		missing := u.summary == nil
 		if isBuiltin {

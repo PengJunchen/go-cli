@@ -33,6 +33,7 @@ func validateDurableRequestSource(items []compaction.TurnItem, snapshot *Compact
 		priorCount = uint64(len(snapshot.SourceEntryIDs))
 	}
 	seenPrior := make(map[uint64]struct{}, priorCount)
+	retainedPrior := make(map[uint64]struct{})
 	var summaryThrough llm.SourceThrough
 	var summarySeen bool
 	for index, item := range items {
@@ -63,11 +64,25 @@ func validateDurableRequestSource(items []compaction.TurnItem, snapshot *Compact
 			}
 			summarySeen = true
 			summaryThrough = source.Through
+			ranges, err := compaction.DecodeRetainedSourceRanges(source.RetainedSourceRanges)
+			if err != nil {
+				return fmt.Errorf("%w: invalid retained source ranges: %v", ErrDurableCompactionUnsupported, err)
+			}
+			for _, retained := range ranges {
+				if retained.Start.Kind == llm.SourcePriorPublished {
+					for ordinal := retained.Start.PriorOrdinal; ordinal <= retained.End.PriorOrdinal; ordinal++ {
+						retainedPrior[ordinal] = struct{}{}
+					}
+				}
+			}
 		}
 	}
 	for ordinal := uint64(0); ordinal < priorCount; ordinal++ {
 		if ordinal < summaryThrough.PriorHistoryCount && summarySeen {
 			if _, duplicate := seenPrior[ordinal]; duplicate {
+				if _, retained := retainedPrior[ordinal]; retained {
+					continue
+				}
 				return fmt.Errorf("%w: a retained PublishedView item overlaps the run summary cursor", ErrDurableCompactionUnsupported)
 			}
 			continue
@@ -105,6 +120,26 @@ func validateDurableCompactionResult(input []compaction.TurnItem, result compact
 	}
 	if err := compaction.ValidateRunRequestIntegrity(input); err != nil {
 		return unsupported(err.Error())
+	}
+	if len(result.NewProjection.RetainedSourceRanges) > 0 {
+		if result.Strategy != compaction.StrategyTruncating || !anchored {
+			return unsupported("retained ranges require an anchored truncating omission")
+		}
+		if err := validateDurableRequestSource(input, snapshot, runID); err != nil {
+			return unsupported(err.Error())
+		}
+		if err := compaction.ValidateRetainedOmission(input, result.Items, result.NewProjection); err != nil {
+			return unsupported(err.Error())
+		}
+		if err := validateDurableRequestSource(result.Items, snapshot, runID); err != nil {
+			return unsupported(err.Error())
+		}
+		return CompactionProjection{
+			ExpectedHistoryRevision: snapshot.Revision,
+			Through:                 CompactionCursor{PriorHistoryCount: through.PriorHistoryCount, TranscriptCount: through.TranscriptCount},
+			Summary:                 result.NewProjection.Summary, RetainCurrentInput: true,
+			RetainedSourceRanges: append([]llm.RetainedSourceRange(nil), result.NewProjection.RetainedSourceRanges...),
+		}, nil
 	}
 	boundary, err := exactSourceBoundary(input, through)
 	if err != nil {
@@ -294,7 +329,11 @@ func (consumer *runCommitConsumer) validateExistingAnchoredSummary(items []compa
 			if contextErr != nil {
 				return fmt.Errorf("%w: invalid committed process-session roster: %w", ErrDurableCompactionUnsupported, contextErr)
 			}
-			if projection.RetainCurrentInput && projection.ExpectedHistoryRevision == consumer.source.Revision && projection.RetainedInputDigest == digest && content == item.Content && projection.Through.PriorHistoryCount == source.Through.PriorHistoryCount && projection.Through.TranscriptCount == source.Through.TranscriptCount {
+			encodedRanges, encodeErr := compaction.EncodeRetainedSourceRanges(projection.RetainedSourceRanges)
+			if encodeErr != nil {
+				return fmt.Errorf("%w: invalid committed retained ranges: %v", ErrDurableCompactionUnsupported, encodeErr)
+			}
+			if projection.RetainCurrentInput && projection.ExpectedHistoryRevision == consumer.source.Revision && projection.RetainedInputDigest == digest && content == item.Content && projection.Through.PriorHistoryCount == source.Through.PriorHistoryCount && projection.Through.TranscriptCount == source.Through.TranscriptCount && encodedRanges == source.RetainedSourceRanges {
 				found = true
 				break
 			}

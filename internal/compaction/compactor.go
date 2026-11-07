@@ -95,9 +95,10 @@ const (
 // created summary or explicit omission marker. It is nil for unchanged history
 // and strategies without a durable projection.
 type NewProjection struct {
-	Summary            string
-	Through            llm.SourceThrough
-	RetainCurrentInput bool
+	Summary              string
+	Through              llm.SourceThrough
+	RetainCurrentInput   bool
+	RetainedSourceRanges []llm.RetainedSourceRange
 }
 
 // CompactionResult contains the exact output and winner of one strategy call.

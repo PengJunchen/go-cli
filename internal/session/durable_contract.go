@@ -262,6 +262,13 @@ func validateVersion1EntryCoordinates(entry SessionEntry) error {
 	if hasRetainedInput && (entry.Type != EntryTypeCompaction || entry.RetainedInputEntryID == "" || !isEntryPayloadDigest(entry.RetainedInputPayloadDigest) || !isHexDigest(entry.RetainedInputDigest)) {
 		return errors.New("session: retained input binding requires a complete compaction anchor")
 	}
+	if len(entry.RetainedExchanges) > 0 {
+		if !hasRetainedInput || entry.RetainedHistoryBranchID == "" {
+			return errors.New("session: retained exchanges require an anchored captured source")
+		}
+	} else if entry.RetainedHistoryRevision != "" || entry.RetainedHistoryBranchID != "" {
+		return errors.New("session: retained history identity has no exchanges")
+	}
 	if len(entry.ActiveProcessSessions) > 0 {
 		if entry.Type != EntryTypeCompaction {
 			return errors.New("session: active process-session references are valid only on compaction entries")

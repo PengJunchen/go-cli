@@ -11,6 +11,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
@@ -366,6 +367,7 @@ type CompactionProjection struct {
 	Summary                 string                    `json:"summary"`
 	RetainCurrentInput      bool                      `json:"retain_current_input,omitempty"`
 	RetainedInputDigest     string                    `json:"retained_input_digest,omitempty"`
+	RetainedSourceRanges    []llm.RetainedSourceRange `json:"retained_source_ranges,omitempty"`
 	ActiveProcessSessions   []ActiveProcessSessionRef `json:"active_process_sessions,omitempty"`
 }
 

@@ -32,6 +32,14 @@ type SourceThrough struct {
 	TranscriptCount   uint64
 }
 
+// RetainedSourceRange identifies one complete source-backed exchange retained
+// inside an omission projection. Both endpoints are inclusive.
+type RetainedSourceRange struct {
+	Start  SourceRef `json:"start"`
+	End    SourceRef `json:"end"`
+	Digest string    `json:"digest"`
+}
+
 // SourceRef identifies one source-backed item or a runtime-only ephemeral
 // item. Fields not selected by Kind must remain at their zero value.
 type SourceRef struct {
@@ -47,6 +55,9 @@ type SourceRef struct {
 	// RetainCurrentInput is valid only on an anchored run summary that covers
 	// the original input while preserving that input as its single exception.
 	RetainCurrentInput bool `json:",omitempty"`
+	// RetainedSourceRanges is canonical JSON for the complete exchanges that
+	// remain visible inside this anchored omission's covered source prefix.
+	RetainedSourceRanges string `json:",omitempty"`
 }
 
 var ErrInvalidSourceRef = errors.New("llm: invalid runtime source reference")
@@ -62,6 +73,9 @@ func (source SourceRef) Validate() error {
 	noThrough := source.Through == (SourceThrough{})
 	if source.RetainCurrentInput && (source.Kind != SourceRunSummary || source.Through.TranscriptCount < 2) {
 		return invalid("retained current input requires an anchored run summary")
+	}
+	if source.RetainedSourceRanges != "" && (source.Kind != SourceRunSummary || !source.RetainCurrentInput) {
+		return invalid("retained source ranges require an anchored omission")
 	}
 	switch source.Kind {
 	case SourceNone, SourceEphemeral:

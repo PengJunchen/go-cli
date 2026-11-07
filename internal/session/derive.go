@@ -734,6 +734,12 @@ func latestProcessSessionLeaseForAction(
 // one markers use their exact source boundary; legacy markers retain their
 // historical physical-position behavior.
 func projectSessionEntries(entries []SessionEntry) ([]SessionEntry, error) {
+	return projectSessionEntriesWithState(entries, make(map[string]bool))
+}
+
+// A shared validation cache avoids recursively revalidating every earlier
+// retained projection for each later projection in the same immutable branch.
+func projectSessionEntriesWithState(entries []SessionEntry, validated map[string]bool) ([]SessionEntry, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
@@ -829,8 +835,11 @@ func projectSessionEntries(entries []SessionEntry) ([]SessionEntry, error) {
 			if previous, exists := anchoredRunBoundaries[entry.RunID]; exists && boundaryIndex <= previous {
 				return nil, fmt.Errorf("session: anchored compaction entry %q does not advance", entry.ID)
 			}
-			if err := validateAnchoredCompaction(entries, entry, i, entry.SessionID, entry.BranchID); err != nil {
-				return nil, fmt.Errorf("session: invalid anchored compaction entry %q: %w", entry.ID, err)
+			if !validated[entry.ID] {
+				if err := validateAnchoredCompactionWithState(entries, entry, i, entry.SessionID, entry.BranchID, validated); err != nil {
+					return nil, fmt.Errorf("session: invalid anchored compaction entry %q: %w", entry.ID, err)
+				}
+				validated[entry.ID] = true
 			}
 			anchoredRunBoundaries[entry.RunID] = boundaryIndex
 		} else if _, err := validateActiveProcessSessionReferences(entries, entry, i, entry.SessionID); err != nil {
@@ -872,6 +881,15 @@ func projectSessionEntries(entries []SessionEntry) ([]SessionEntry, error) {
 		result = append(result, entries[anchorIndex])
 	}
 	result = append(result, compactionSummaryEntry(marker))
+	for _, exchange := range marker.RetainedExchanges {
+		for _, retained := range exchange.Entries {
+			index, exists := byID[retained.EntryID]
+			if !exists || index > boundaryIndex {
+				return nil, errors.New("session: retained exchange lost its source row")
+			}
+			result = append(result, entries[index])
+		}
+	}
 	for _, entry := range entries[boundaryIndex+1:] {
 		if entry.Type == EntryTypeCompaction || entry.Type == EntryTypeCheckpoint || !entry.SurfaceVisible() {
 			continue

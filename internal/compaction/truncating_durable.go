@@ -1,6 +1,7 @@
 package compaction
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/pengjunchen/go-cli/internal/llm"
@@ -65,6 +66,9 @@ func truncateDurablePrefix(items []TurnItem, groups []itemGroup, maxTokens int, 
 			continue
 		}
 		if err := ValidateImageGroupCut(items, cut); err != nil {
+			if errors.Is(err, ErrImageCompactionBlocked) {
+				return truncateRetainingImageExchanges(items, groups, currentIndex, runID, maxTokens, estimator)
+			}
 			return CompactionResult{Items: items}, err
 		}
 		old := items[:cut]
@@ -115,6 +119,9 @@ func truncateWithRetainedInput(items []TurnItem, groups []itemGroup, currentInde
 			continue
 		}
 		if err := ValidateImageGroupCut(items, cut); err != nil {
+			if errors.Is(err, ErrImageCompactionBlocked) {
+				return truncateRetainingImageExchanges(items, groups, currentIndex, runID, maxTokens, estimator)
+			}
 			return CompactionResult{Items: items}, err
 		}
 		through, _, err := sourceThroughForPrefix(items[:cut])
@@ -149,6 +156,13 @@ func truncateWithRetainedInput(items []TurnItem, groups []itemGroup, currentInde
 		return CompactionResult{Items: kept, Strategy: StrategyTruncating, NewProjection: &NewProjection{
 			Summary: DurableTruncationMarker, Through: through, RetainCurrentInput: true,
 		}}, nil
+	}
+	for _, group := range groups {
+		for _, item := range items[group.start:group.end] {
+			if itemHasImage(item) && group.start != currentIndex {
+				return truncateRetainingImageExchanges(items, groups, currentIndex, runID, maxTokens, estimator)
+			}
+		}
 	}
 	return CompactionResult{Items: items}, fmt.Errorf("%w: truncation cannot fit the omission marker, mandatory systems and protected current input within budget", ErrRequiresTruncating)
 }

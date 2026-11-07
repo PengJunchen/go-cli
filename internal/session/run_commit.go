@@ -974,6 +974,10 @@ func (s *SessionRunCommitSink) commitCompactionLocked(ctx context.Context, runID
 // validateAnchoredCompaction checks the original input and closure evidence
 // independently both before append and when deriving a persisted view.
 func validateAnchoredCompaction(entries []SessionEntry, marker SessionEntry, markerIndex int, sessionID, branchID string) error {
+	return validateAnchoredCompactionWithState(entries, marker, markerIndex, sessionID, branchID, make(map[string]bool))
+}
+
+func validateAnchoredCompactionWithState(entries []SessionEntry, marker SessionEntry, markerIndex int, sessionID, branchID string, validated map[string]bool) error {
 	if marker.RetainedInputEntryID == "" {
 		return errors.New("session: anchored compaction lacks retained input identity")
 	}
@@ -1043,6 +1047,11 @@ func validateAnchoredCompaction(entries []SessionEntry, marker SessionEntry, mar
 			}
 		}
 	}
+	if len(marker.RetainedExchanges) > 0 {
+		if err := validateRetainedExchangeProof(entries, marker, markerIndex, validated); err != nil {
+			return fmt.Errorf("session: retained exchange proof: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -1062,6 +1071,9 @@ func (s *SessionRunCommitSink) compactionEntryLocked(runID string, projection co
 		}
 	} else if projection.RetainedInputDigest != "" {
 		return SessionEntry{}, errors.New("session: unanchored compaction carries an input digest")
+	}
+	if len(projection.RetainedSourceRanges) > 0 && !projection.RetainCurrentInput {
+		return SessionEntry{}, errors.New("session: retained exchanges require an anchored omission")
 	}
 	var err error
 	priorCount := projection.Through.PriorHistoryCount
@@ -1132,11 +1144,31 @@ func (s *SessionRunCommitSink) compactionEntryLocked(runID string, projection co
 		row.RetainedInputEntryID = anchor.ID
 		row.RetainedInputPayloadDigest = anchor.PayloadDigest
 		row.RetainedInputDigest = projection.RetainedInputDigest
+		if len(projection.RetainedSourceRanges) > 0 {
+			row.RetainedHistoryRevision = projection.ExpectedHistoryRevision
+			row.RetainedHistoryBranchID = s.baseView.BranchID
+			row.RetainedExchanges = make([]RetainedExchange, len(projection.RetainedSourceRanges))
+			for i, retained := range projection.RetainedSourceRanges {
+				row.RetainedExchanges[i].Range = retained
+			}
+			row.RetainedExchanges, err = retainedExchangeProof(s.branchRows, row, evidenceIndex)
+			if err != nil {
+				return SessionEntry{}, fmt.Errorf("session: validate retained exchange sources: %w", err)
+			}
+		}
 		if err := validateAnchoredCompaction(s.branchRows, row, evidenceIndex, s.sessionID, s.branchID); err != nil {
 			return SessionEntry{}, err
 		}
 		var entryID string
-		if len(row.ActiveProcessSessions) == 0 {
+		if len(row.RetainedExchanges) > 0 {
+			entryID, err = stableRunCommitEntryID("compaction-retained-exchanges-v1", struct {
+				RunID, Revision, BranchID                                            string
+				PriorCount, Transcript                                               uint64
+				BoundaryID, SummaryHash, AnchorID, AnchorPayloadDigest, AnchorDigest string
+				RetainedExchanges                                                    []RetainedExchange
+				ActiveProcessSessions                                                []core.ActiveProcessSessionRef
+			}{runID, projection.ExpectedHistoryRevision, row.RetainedHistoryBranchID, priorCount, transcriptCount, boundaryID, hashText(projection.Summary), row.RetainedInputEntryID, row.RetainedInputPayloadDigest, row.RetainedInputDigest, row.RetainedExchanges, row.ActiveProcessSessions})
+		} else if len(row.ActiveProcessSessions) == 0 {
 			entryID, err = stableRunCommitEntryID("compaction-anchored-v1", struct {
 				RunID, Revision                             string
 				PriorCount, Transcript                      uint64
@@ -1275,6 +1307,7 @@ func sameCompactionRow(existing, candidate SessionEntry) bool {
 		existing.WorkspaceID == candidate.WorkspaceID && existing.Summary == candidate.Summary &&
 		existing.Content == candidate.Content && existing.CompactedThroughEntryID == candidate.CompactedThroughEntryID &&
 		existing.RetainedInputEntryID == candidate.RetainedInputEntryID && existing.RetainedInputPayloadDigest == candidate.RetainedInputPayloadDigest && existing.RetainedInputDigest == candidate.RetainedInputDigest &&
+		existing.RetainedHistoryRevision == candidate.RetainedHistoryRevision && existing.RetainedHistoryBranchID == candidate.RetainedHistoryBranchID && reflect.DeepEqual(existing.RetainedExchanges, candidate.RetainedExchanges) &&
 		reflect.DeepEqual(existing.ActiveProcessSessions, candidate.ActiveProcessSessions)
 }
 

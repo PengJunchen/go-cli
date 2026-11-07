@@ -22,6 +22,13 @@ func EstimateTokens(items []TurnItem, estimator TokenEstimator) int {
 // provenance. A complete unknown receipt is structurally valid and remains
 // usable as unchanged history for a fresh request.
 func ValidateRunRequestIntegrity(items []TurnItem) error {
+	reduced, err := retainedOmissionReduced(items)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRunRequestHistory, err)
+	}
+	if len(reduced) != len(items) {
+		return ValidateRunRequestIntegrity(reduced)
+	}
 	normalized, _, err := groupTurnItems(items)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRunRequestHistory, err)
@@ -250,6 +257,11 @@ func sourceThroughForPrefix(items []TurnItem) (llm.SourceThrough, bool, error) {
 	if err := ValidateRunRequestIntegrity(items); err != nil {
 		return llm.SourceThrough{}, false, err
 	}
+	reduced, err := retainedOmissionReduced(items)
+	if err != nil {
+		return llm.SourceThrough{}, false, err
+	}
+	items = reduced
 	anchorIndex, err := retainedInputAnchorIndex(items)
 	if err != nil {
 		return llm.SourceThrough{}, false, err

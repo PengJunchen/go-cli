@@ -1492,43 +1492,64 @@ func preflightDurableRequestAt(
 	maxTokens int,
 	currentSubmissionIndex int,
 ) ([]llm.Message, int, error) {
-	items := messagesToTurnItems(messages)
-	if err := consumer.validateDurableRequest(items); err != nil {
+	compacted, index, commit, err := stageDurableRequestAt(ctx, messages, consumer, compactor, estimator, maxTokens, currentSubmissionIndex)
+	if err != nil {
 		return nil, currentSubmissionIndex, err
 	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			return nil, currentSubmissionIndex, err
+		}
+	}
+	return compacted, index, nil
+}
+
+func stageDurableRequestAt(
+	ctx context.Context,
+	messages []llm.Message,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+	currentSubmissionIndex int,
+) ([]llm.Message, int, func() error, error) {
+	items := messagesToTurnItems(messages)
+	if err := consumer.validateDurableRequest(items); err != nil {
+		return nil, currentSubmissionIndex, nil, err
+	}
 	if currentSubmissionIndex < 0 || currentSubmissionIndex >= len(items) {
-		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "current submission cannot be preserved during compaction"}
+		return nil, currentSubmissionIndex, nil, &RequestEnvelopeError{Reason: "current submission cannot be preserved during compaction"}
 	}
 	currentID := items[currentSubmissionIndex].ID
 	if maxTokens <= 0 || estimator == nil {
-		return messages, currentSubmissionIndex, nil
+		return messages, currentSubmissionIndex, nil, nil
 	}
 	if err := compaction.ValidateCompactionEligible(items); err != nil {
-		return nil, currentSubmissionIndex, fmt.Errorf("%w: %v", ErrDurableCompactionUnsupported, err)
+		return nil, currentSubmissionIndex, nil, fmt.Errorf("%w: %v", ErrDurableCompactionUnsupported, err)
 	}
 	if consumer.source == nil || compactor == nil {
-		return nil, currentSubmissionIndex, ErrRunCommitCompactionProjectionUnavailable
+		return nil, currentSubmissionIndex, nil, ErrRunCommitCompactionProjectionUnavailable
 	}
 	currentInput, err := captureDurableCurrentInput(items, consumer.source, consumer.runID)
 	if err != nil {
-		return nil, currentSubmissionIndex, err
+		return nil, currentSubmissionIndex, nil, err
 	}
 	result, err := compaction.CompactPreservingImages(ctx, compactor, cloneCompactionTurnItems(items), maxTokens, estimator)
 	if err != nil {
 		if compaction.IsSummaryEssentialInputBudgetError(err) {
-			return nil, currentSubmissionIndex, fmt.Errorf("%w: %w", ErrDurableCompactionUnsupported, err)
+			return nil, currentSubmissionIndex, nil, fmt.Errorf("%w: %w", ErrDurableCompactionUnsupported, err)
 		}
-		return nil, currentSubmissionIndex, err
+		return nil, currentSubmissionIndex, nil, err
 	}
 	projection, err := validateDurableCompactionResult(items, result, consumer.source, consumer.runID)
 	if err != nil {
-		return nil, currentSubmissionIndex, err
+		return nil, currentSubmissionIndex, nil, err
 	}
 	if err := bindActiveProcessSessionSummary(consumer, &projection, &result, maxTokens, estimator); err != nil {
-		return nil, currentSubmissionIndex, err
+		return nil, currentSubmissionIndex, nil, err
 	}
 	if err := validateDurableCurrentInputPreserved(currentInput, result.Items); err != nil {
-		return nil, currentSubmissionIndex, err
+		return nil, currentSubmissionIndex, nil, err
 	}
 	compactedSubmissionIndex := -1
 	for index, item := range result.Items {
@@ -1536,18 +1557,21 @@ func preflightDurableRequestAt(
 			continue
 		}
 		if compactedSubmissionIndex >= 0 {
-			return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "compactor duplicated the current submission"}
+			return nil, currentSubmissionIndex, nil, &RequestEnvelopeError{Reason: "compactor duplicated the current submission"}
 		}
 		compactedSubmissionIndex = index
 	}
 	if compactedSubmissionIndex < 0 {
-		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "compactor removed the current submission"}
+		return nil, currentSubmissionIndex, nil, &RequestEnvelopeError{Reason: "compactor removed the current submission"}
 	}
-	if err := consumer.commitCompaction(projection, currentInput); err != nil {
-		markRunOutcomeUnknown(ctx)
-		return nil, currentSubmissionIndex, err
+	commit := func() error {
+		if err := consumer.commitCompaction(projection, currentInput); err != nil {
+			markRunOutcomeUnknown(ctx)
+			return err
+		}
+		return nil
 	}
-	return turnItemsToMessages(result.Items), compactedSubmissionIndex, nil
+	return turnItemsToMessages(result.Items), compactedSubmissionIndex, commit, nil
 }
 
 func preflightNonDurableRequest(

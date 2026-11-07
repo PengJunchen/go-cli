@@ -131,7 +131,7 @@ func prepareAdmittedRequestPlan(
 	if envelopeEstimateFits(plan.Estimate()) {
 		return plan, messages, currentSubmissionIndex, nil
 	}
-	compactedMessages, compactedSubmissionIndex, err := compactPreparedMessages(
+	compactedMessages, compactedSubmissionIndex, commit, err := compactPreparedMessagesForAdmission(
 		ctx, messages, consumer, midTurnCompactor, compactor, estimator,
 		plan.Estimate().MessageBudget, plan.Estimate().Multimodal.Tokens,
 		currentSubmissionIndex,
@@ -147,7 +147,12 @@ func prepareAdmittedRequestPlan(
 		return nil, compactedMessages, compactedSubmissionIndex, &RequestEnvelopeError{Reason: "multimodal request accounting is unknown"}
 	}
 	if !envelopeEstimateFits(plan.Estimate()) {
-		return nil, compactedMessages, compactedSubmissionIndex, &RequestEnvelopeError{Reason: "request still exceeds the message budget after compaction"}
+		return nil, messages, currentSubmissionIndex, &RequestEnvelopeError{Reason: "request still exceeds the message budget after compaction"}
+	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			return nil, messages, currentSubmissionIndex, err
+		}
 	}
 	return plan, compactedMessages, compactedSubmissionIndex, nil
 }
@@ -473,6 +478,26 @@ func preparedCompactionMessageBudget(messages []llm.Message, estimator compactio
 		return 0, &RequestEnvelopeError{Reason: "compaction message metadata estimate failed", Cause: err}
 	}
 	return messageBudget - multimodalTokens, nil
+}
+
+func compactPreparedMessagesForAdmission(
+	ctx context.Context,
+	messages []llm.Message,
+	consumer *runCommitConsumer,
+	midTurnCompactor *compaction.MidTurnCompact,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	messageBudget, multimodalTokens, currentSubmissionIndex int,
+) ([]llm.Message, int, func() error, error) {
+	if consumer == nil {
+		result, index, err := compactPreparedMessages(ctx, messages, nil, midTurnCompactor, compactor, estimator, messageBudget, multimodalTokens, currentSubmissionIndex)
+		return result, index, nil, err
+	}
+	textBudget, err := preparedCompactionMessageBudget(messages, estimator, messageBudget, multimodalTokens)
+	if err != nil {
+		return nil, currentSubmissionIndex, nil, err
+	}
+	return stageDurableRequestAt(ctx, messages, consumer, compactor, estimator, textBudget, currentSubmissionIndex)
 }
 
 func compactPreparedMessages(
