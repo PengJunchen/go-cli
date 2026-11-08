@@ -111,6 +111,28 @@ const (
 func (d *preparedToolDefinition) Name() string        { return d.pin.identity.ToolName() }
 func (d *preparedToolDefinition) Description() string { return d.description }
 
+func (d *preparedToolDefinition) preparedToolCore() *preparedToolDefinition { return d }
+
+// IsPreparedStockReadDefinition reports whether definition is a protected
+// registry view pinned to the concrete first-party ReadTool implementation.
+// It does not make the tool executable or grant dispatch authority.
+func IsPreparedStockReadDefinition(definition ToolDefinition) bool {
+	view, ok := definition.(interface {
+		preparedToolCore() *preparedToolDefinition
+	})
+	if !ok || view == nil {
+		return false
+	}
+	core := view.preparedToolCore()
+	if core == nil || core.registry == nil || core.pin.registryGeneration == 0 ||
+		core.pin.identity.RegistrationSource() != RegistrationSourceBuiltin ||
+		core.pin.identity.ToolName() != "read" {
+		return false
+	}
+	_, stock := core.def.(*ReadTool)
+	return stock
+}
+
 func (d *preparedToolDefinition) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
 	if call.Name != d.pin.identity.ToolName() {
 		return nil, ErrPreparedProxyNameMismatch

@@ -140,7 +140,11 @@ func (l *Loader) Load(ctx context.Context) (*Config, error) {
 	}
 
 	// Env layer.
-	envCfg := loadFromEnv(l.envPrefix)
+	envCfg, err := loadFromEnvChecked(l.envPrefix)
+	if err != nil {
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		return nil, err
+	}
 	cfg = mergeConfigs(cfg, envCfg)
 	applied = append(applied, SourceEnv.String())
 
@@ -259,6 +263,11 @@ func envKey(prefix, key string) string { return prefix + "_" + key }
 
 // loadFromEnv builds a partial Config from GO_CLI_* environment variables.
 func loadFromEnv(prefix string) *Config {
+	cfg, _ := loadFromEnvChecked(prefix)
+	return cfg
+}
+
+func loadFromEnvChecked(prefix string) (*Config, error) {
 	cfg := &Config{samplingPresenceKnown: true}
 	if value, present := os.LookupEnv(envKey(prefix, "TOOLS_BASH_TIMEOUT")); present {
 		cfg.Tools.Bash.Timeout = &value
@@ -320,8 +329,15 @@ func loadFromEnv(prefix string) *Config {
 	if v, ok := parseBoolEnv(envKey(prefix, "MEMORY_ENABLED")); ok {
 		cfg.Memory.Enabled = &v
 	}
+	if value, present := os.LookupEnv(envKey(prefix, "AGENT_MULTIMODAL_TOKENS_PER_ITEM_RESERVE")); present && value != "" {
+		reserve, err := strconv.Atoi(value)
+		if err != nil {
+			return nil, fmt.Errorf("config: %s must be an integer", envKey(prefix, "AGENT_MULTIMODAL_TOKENS_PER_ITEM_RESERVE"))
+		}
+		cfg.Agent.SetMultimodalTokensPerItemReserve(reserve)
+	}
 
-	return cfg
+	return cfg, nil
 }
 
 // parseCommandString splits a command string by whitespace into a command
@@ -366,7 +382,25 @@ func mergeConfigs(base, over *Config) *Config {
 		overlayValue(reflect.ValueOf(out).Elem(), reflect.ValueOf(over).Elem())
 	}
 	mergeSampling(out, base, over)
+	mergeAgentMultimodalReserve(out, base, over)
 	return out
+}
+
+func mergeAgentMultimodalReserve(out, base, over *Config) {
+	if out == nil || base == nil {
+		return
+	}
+	if over == nil {
+		over = &Config{}
+	}
+	overSet := over.Agent.multimodalTokensPerItemReserveSet || over.Agent.MultimodalTokensPerItemReserve != 0
+	if overSet {
+		out.Agent.MultimodalTokensPerItemReserve = over.Agent.MultimodalTokensPerItemReserve
+		out.Agent.multimodalTokensPerItemReserveSet = true
+		return
+	}
+	out.Agent.MultimodalTokensPerItemReserve = base.Agent.MultimodalTokensPerItemReserve
+	out.Agent.multimodalTokensPerItemReserveSet = base.Agent.multimodalTokensPerItemReserveSet || base.Agent.MultimodalTokensPerItemReserve != 0
 }
 
 func mergeSampling(out, base, over *Config) {

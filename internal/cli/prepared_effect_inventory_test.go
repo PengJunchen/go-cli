@@ -127,7 +127,7 @@ func TestAssemblePreparedToolEffectInventoryAndPlanGate(t *testing.T) {
 }
 
 func assembledToolEffectInventory() map[string]preparedEffectInventoryExpectation {
-	result := make(map[string]preparedEffectInventoryExpectation, 39)
+	result := make(map[string]preparedEffectInventoryExpectation, 40)
 	add := func(source string, effect tools.TrustedToolEffect, planAllowed bool, names ...string) {
 		for _, name := range names {
 			result[name] = preparedEffectInventoryExpectation{source: source, effect: effect, planAllowed: planAllowed}
@@ -144,6 +144,7 @@ func assembledToolEffectInventory() map[string]preparedEffectInventoryExpectatio
 		"todo_write", "task_create", "task_update", "goal_create", "goal_update",
 	)
 	add(tools.RegistrationSourceTrustedControl, tools.EffectControl, false, "dispatch_subagent")
+	add(tools.RegistrationSourceBuiltin, tools.EffectUnknown, false, "process_session")
 	add(tools.RegistrationSourceTrustedControl, tools.EffectControl, true,
 		"task_get", "task_list", "goal_list", "goal_get", "ask_user", "tool_search",
 	)
@@ -190,6 +191,8 @@ func preparedEffectInventoryCall(t *testing.T, definition tools.ToolDefinition, 
 		args["query"] = "inventory"
 	case "dispatch_subagent":
 		args["prompt"] = "inventory only; do not dispatch"
+	case "process_session":
+		args["command"] = "true"
 	}
 	return tools.ToolCall{Name: definition.Name(), Args: args}
 }

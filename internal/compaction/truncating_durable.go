@@ -1,6 +1,7 @@
 package compaction
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/pengjunchen/go-cli/internal/llm"
@@ -64,6 +65,12 @@ func truncateDurablePrefix(items []TurnItem, groups []itemGroup, maxTokens int, 
 		if !prefixHasSource || !prefixAdvances || saturatingTokenAdd(saturatingTokenAdd(prefixSystemTokens, markerTokens), suffixTokens[groupIndex+1]) > maxTokens {
 			continue
 		}
+		if err := ValidateImageGroupCut(items, cut); err != nil {
+			if errors.Is(err, ErrImageCompactionBlocked) {
+				return truncateRetainingImageExchanges(items, groups, currentIndex, runID, maxTokens, estimator)
+			}
+			return CompactionResult{Items: items}, err
+		}
 		old := items[:cut]
 		through, _, err := sourceThroughForPrefix(old)
 		if err != nil {
@@ -84,5 +91,78 @@ func truncateDurablePrefix(items []TurnItem, groups []itemGroup, maxTokens int, 
 		return CompactionResult{Items: kept, Strategy: StrategyTruncating, NewProjection: &NewProjection{Summary: DurableTruncationMarker, Through: through}}, nil
 	}
 
-	return CompactionResult{Items: items}, fmt.Errorf("%w: truncation cannot fit the omission marker, mandatory systems and complete current run within budget", ErrRequiresTruncating)
+	return truncateWithRetainedInput(items, groups, currentIndex, runID, maxTokens, estimator, suffixTokens, markerTokens)
+}
+
+func truncateWithRetainedInput(items []TurnItem, groups []itemGroup, currentIndex int, runID string, maxTokens int, estimator TokenEstimator, suffixTokens []int, markerTokens int) (CompactionResult, error) {
+	anchor := items[currentIndex]
+	if anchor.Role != RoleUser || anchor.IsCompaction || anchor.Runtime.Source.Kind != llm.SourceRunTranscript || anchor.Runtime.Source.TranscriptIndex != 0 {
+		return CompactionResult{Items: items}, fmt.Errorf("%w: truncation requires the original user input", ErrInvalidRunRequestHistory)
+	}
+	anchorTokens := estimateTokens(items[currentIndex:currentIndex+1], estimator)
+	var systemTokens int
+	var previous llm.SourceThrough
+	for _, item := range items {
+		if item.Runtime.Source.Kind == llm.SourceRunSummary {
+			previous = item.Runtime.Source.Through
+		}
+	}
+	for groupIndex, group := range groups {
+		if group.system {
+			if items[group.start].Runtime.Source.Kind != llm.SourceEphemeral {
+				return CompactionResult{Items: items}, fmt.Errorf("%w: truncation cannot cover source-backed system instructions", ErrRunHistoryNotCompactionEligible)
+			}
+			systemTokens = saturatingTokenAdd(systemTokens, estimateTokens(items[group.start:group.end], estimator))
+		}
+		cut := group.end
+		if cut <= currentIndex+1 || saturatingTokenAdd(saturatingTokenAdd(saturatingTokenAdd(systemTokens, anchorTokens), markerTokens), suffixTokens[groupIndex+1]) > maxTokens {
+			continue
+		}
+		if err := ValidateImageGroupCut(items, cut); err != nil {
+			if errors.Is(err, ErrImageCompactionBlocked) {
+				return truncateRetainingImageExchanges(items, groups, currentIndex, runID, maxTokens, estimator)
+			}
+			return CompactionResult{Items: items}, err
+		}
+		through, _, err := sourceThroughForPrefix(items[:cut])
+		if err != nil {
+			return CompactionResult{Items: items}, err
+		}
+		if through.TranscriptCount < 2 || through.PriorHistoryCount < previous.PriorHistoryCount || through.TranscriptCount < previous.TranscriptCount || through == previous {
+			continue
+		}
+		kept := make([]TurnItem, 0, len(items)-cut+3)
+		for _, item := range items[:cut] {
+			if item.Runtime.Source.Kind == llm.SourceEphemeral {
+				if item.Role != RoleSystem || item.IsCompaction {
+					return CompactionResult{Items: items}, fmt.Errorf("%w: truncation cannot omit ephemeral non-system input", ErrRunHistoryNotCompactionEligible)
+				}
+				kept = append(kept, item)
+			}
+		}
+		kept = append(kept, anchor, TurnItem{
+			Role: RoleUser, Content: DurableTruncationMarker, IsCompaction: true,
+			Runtime: llm.RuntimeMetadata{CompactionMarker: true, Source: llm.SourceRef{
+				Kind: llm.SourceRunSummary, RunID: runID, Through: through, RetainCurrentInput: true,
+			}},
+		})
+		kept = append(kept, items[cut:]...)
+		if err := ValidateRunRequestIntegrity(kept); err != nil {
+			return CompactionResult{Items: items}, err
+		}
+		if estimateTokens(kept, estimator) > maxTokens {
+			return CompactionResult{Items: items}, fmt.Errorf("%w: anchored truncation exceeds its estimated budget", ErrRequiresTruncating)
+		}
+		return CompactionResult{Items: kept, Strategy: StrategyTruncating, NewProjection: &NewProjection{
+			Summary: DurableTruncationMarker, Through: through, RetainCurrentInput: true,
+		}}, nil
+	}
+	for _, group := range groups {
+		for _, item := range items[group.start:group.end] {
+			if itemHasImage(item) && group.start != currentIndex {
+				return truncateRetainingImageExchanges(items, groups, currentIndex, runID, maxTokens, estimator)
+			}
+		}
+	}
+	return CompactionResult{Items: items}, fmt.Errorf("%w: truncation cannot fit the omission marker, mandatory systems and protected current input within budget", ErrRequiresTruncating)
 }

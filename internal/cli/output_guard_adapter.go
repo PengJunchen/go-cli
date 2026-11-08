@@ -100,7 +100,11 @@ func (m *outputGuardModel) CheckCandidate(ctx context.Context, text string) (*co
 	if err != nil {
 		return nil, err
 	}
-	return &core.CandidateOutputResult{Allowed: result.Allowed, Sanitized: result.Sanitized}, nil
+	rejectionCode := core.CandidateOutputRejectionUnknown
+	if result.IsBuiltinPIIDenial() {
+		rejectionCode = core.CandidateOutputRejectionPII
+	}
+	return &core.CandidateOutputResult{Allowed: result.Allowed, Sanitized: result.Sanitized, RejectionCode: rejectionCode}, nil
 }
 
 func (m *outputGuardModel) checkCandidate(ctx context.Context, text string) (*production.GuardResult, error) {

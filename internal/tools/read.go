@@ -94,7 +94,7 @@ func (t *ReadTool) Names() []string { return t.names }
 
 // Description returns a brief description of the tool.
 func (t *ReadTool) Description() string {
-	return "read: reads a file's contents or lists a directory. Args: path (string)."
+	return "read: reads a text file or PNG/JPEG image (up to 512 KiB; requires an image-capable model), or lists a directory. Optional offset (1-based line) and limit (line count) apply only to text files and return a bounded source window. Args: path (string), offset (integer), limit (integer)."
 }
 
 // Parameters returns the JSON Schema for the path this tool reads or lists.
@@ -102,7 +102,9 @@ func (t *ReadTool) Parameters() any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{"type": "string"},
+			"path":   map[string]any{"type": "string"},
+			"offset": map[string]any{"type": "integer", "minimum": 1, "maximum": maxReadWindowParameter, "description": "Optional 1-based first source line."},
+			"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": maxReadWindowParameter, "description": "Optional maximum number of source lines."},
 		},
 		"required":             []any{"path"},
 		"additionalProperties": false,
@@ -123,6 +125,20 @@ func (t *ReadTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("read.missing_path", "tool", "read")
 		return nil, errors.New("read: missing string argument 'path'")
+	}
+
+	window, err := parseReadWindow(call.Args)
+	if err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		return nil, err
+	}
+	if window.enabled {
+		if ctx == nil {
+			return nil, errors.New("read: window context is nil")
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("read: window: %w", err)
+		}
 	}
 
 	abspath, err := t.resolvePath(path)
@@ -166,6 +182,10 @@ func (t *ReadTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	}
 
 	if info.IsDir() {
+		if window.enabled {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			return nil, errors.New("read: line windows cannot be used on directories")
+		}
 		directory, openErr := os.Open(abspath)
 		if openErr != nil {
 			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
@@ -201,20 +221,21 @@ func (t *ReadTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 			}
 		}
 		truncated := entries.Truncated() || output.Truncated()
+		text, records := renderDirectoryOutput(output, truncated)
 		span.SetAttributes(
-			tracing.Attribute{Key: "entries", Value: output.Records()},
+			tracing.Attribute{Key: "entries", Value: records},
 			tracing.Attribute{Key: "truncated", Value: truncated},
 			tracing.Attribute{Key: "success", Value: true},
 		)
 		logger.Info("read.dir",
 			"path", abspath,
-			"entries", output.Records(),
+			"entries", records,
 			"truncated", truncated,
 			"duration_ms", time.Since(start).Milliseconds())
 
 		return &ToolResult{
-			Output:   output.String(),
-			Metadata: map[string]any{"path": abspath, "entries": output.Records(), "truncated": truncated},
+			Output:   text,
+			Metadata: map[string]any{"path": abspath, "entries": records, "truncated": truncated},
 		}, nil
 	}
 
@@ -241,21 +262,46 @@ func (t *ReadTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		return nil, fmt.Errorf("read: file %q is too large, exceeding the maximum of %d bytes", abspath, t.maxBytes)
 	}
 
+	if result, handled, imageErr := readImageResult(ctx, abspath, data, window.enabled); handled {
+		if imageErr != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			logger.Error("read.image_failed", "path", abspath, "err", imageErr)
+			return nil, imageErr
+		}
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: true})
+		logger.Info("read.image", "path", abspath, "bytes", len(data), "duration_ms", time.Since(start).Milliseconds())
+		return result, nil
+	}
+
+	result := &ToolResult{
+		Output:   string(data),
+		Metadata: map[string]any{"path": abspath, "bytes": len(data)},
+	}
+	if window.enabled {
+		result, err = projectReadWindow(ctx, abspath, data, window)
+		if err != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			logger.Error("read.window_failed", "path", abspath, "err", err)
+			return nil, err
+		}
+	}
+
 	span.SetAttributes(tracing.Attribute{Key: "success", Value: true})
 	logger.Info("read.file",
 		"path", abspath,
 		"bytes", len(data),
 		"duration_ms", time.Since(start).Milliseconds())
+	result.preparedReadEvidence = bindPreparedReadEvidence(ctx, abspath, data)
 
-	return &ToolResult{
-		Output:   string(data),
-		Metadata: map[string]any{"path": abspath, "bytes": len(data)},
-	}, nil
+	return result, nil
 }
 
 // PromptGuidelines returns usage hints for the read tool.
 func (t *ReadTool) PromptGuidelines() []string {
-	return []string{"Use read to examine files instead of cat or sed"}
+	return []string{
+		"Use read to examine files instead of cat or sed",
+		"Use grep to find relevant source, then read a bounded window with offset and limit when useful; omit both to read the complete file.",
+	}
 }
 
 // resolvePath resolves a possibly-relative path against the workdir, prevents

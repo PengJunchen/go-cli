@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/compaction"
@@ -22,6 +23,14 @@ import (
 // Complex multi-step tasks (install dependencies, write code, run, debug)
 // legitimately need many turns, so the default is generous.
 const defaultMaxIterations = 200
+
+const compactToolVisibilityLimit = 12
+const maxCompactToolPromotions = 3
+
+var compactToolEssentialNames = []string{
+	"read", "write", "edit", "bash", "grep", "find", "ls",
+	"tool_search", "dispatch_subagent", tools.ProcessSessionToolName,
+}
 
 const toolInterceptorCanceledOutput = "Tool call canceled by interceptor"
 
@@ -42,6 +51,7 @@ var ErrLoopDetected = errors.New("core: active loop detected")
 var errMaxIterations = errors.New("core: agent loop exceeded max iterations")
 
 var errCurrentSubmissionNotPreserved = errors.New("core: compaction did not preserve the current submission")
+var ErrEditRecoveryStaleRetry = errors.New("core: edit retry repeats the exact stale match after an unchanged read")
 
 // loopConfig holds the configurable dependencies of a LoopAgent. All
 // dependencies are interface types.
@@ -49,6 +59,7 @@ type loopConfig struct {
 	model                          llm.BaseChatModel
 	providerAttemptRecorder        func(llm.ProviderAttemptResult) error
 	providerRetryPolicy            llm.RetryPolicy
+	finalPIIGuardRepairGate        func(context.Context) bool
 	tools                          tools.ToolRegistry
 	maxIterations                  int
 	allowedToolNames               []string
@@ -72,6 +83,12 @@ type loopConfig struct {
 
 // LoopOption configures a LoopAgent at construction time.
 type LoopOption func(*loopConfig)
+
+// WithFinalPIIGuardRepairGate opts in to a single bounded final PII repair
+// when the predicate permits the current run. A nil gate leaves it disabled.
+func WithFinalPIIGuardRepairGate(gate func(context.Context) bool) LoopOption {
+	return func(c *loopConfig) { c.finalPIIGuardRepairGate = gate }
+}
 
 // WithProviderAttemptRecorder installs the run-scoped sink for immutable
 // provider results produced by resolver-built models.
@@ -204,6 +221,7 @@ type LoopAgent struct {
 	model                          llm.BaseChatModel
 	providerAttemptRecorder        func(llm.ProviderAttemptResult) error
 	providerRetryPolicy            llm.RetryPolicy
+	finalPIIGuardRepairGate        func(context.Context) bool
 	tools                          tools.ToolRegistry
 	maxIterations                  int
 	allowedToolNames               []string
@@ -228,8 +246,12 @@ type LoopAgent struct {
 	// dynamically scored and filtered by relevance to the current query.
 	// Zero means no filtering (all tools exposed).
 	toolSearchThreshold int
+	// compactToolVisibility enables the small deterministic base set and
+	// trusted run-local search promotions. The complete registry remains live.
+	compactToolVisibility bool
 	// mu protects runtime mutable fields (model, midTurnCompactor, compactor,
-	// estimator, maxTokens, multimodalTokensPerItemReserve, toolSearchThreshold) from data races between
+	// estimator, maxTokens, multimodalTokensPerItemReserve, toolSearchThreshold,
+	// compactToolVisibility) from data races between
 	// concurrent setter calls and Run.
 	mu      sync.RWMutex
 	pauseMu sync.Mutex
@@ -307,6 +329,7 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		model:                          cfg.model,
 		providerAttemptRecorder:        cfg.providerAttemptRecorder,
 		providerRetryPolicy:            cfg.providerRetryPolicy,
+		finalPIIGuardRepairGate:        cfg.finalPIIGuardRepairGate,
 		tools:                          cfg.tools,
 		maxIterations:                  cfg.maxIterations,
 		allowedToolNames:               append([]string(nil), cfg.allowedToolNames...),
@@ -362,6 +385,15 @@ func (l *LoopAgent) newPreToolCallEvent(ctx context.Context, toolName, toolCallI
 func (l *LoopAgent) WithToolSearchThreshold(n int) *LoopAgent {
 	l.mu.Lock()
 	l.toolSearchThreshold = n
+	l.mu.Unlock()
+	return l
+}
+
+// WithCompactToolVisibility enables deterministic essential schemas and
+// bounded trusted search promotions while retaining the complete registry.
+func (l *LoopAgent) WithCompactToolVisibility(enabled bool) *LoopAgent {
+	l.mu.Lock()
+	l.compactToolVisibility = enabled
 	l.mu.Unlock()
 	return l
 }
@@ -483,6 +515,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 	l.mu.RLock()
 	model := l.model
 	toolSearchThreshold := l.toolSearchThreshold
+	compactToolVisibility := l.compactToolVisibility
 	midTurnCompactor := l.midTurnCompactor
 	compactor := l.compactor
 	estimator := l.estimator
@@ -533,7 +566,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				provisional[i].Runtime.Source = consumer.transcriptMetadata(0, provisional[i].Runtime.ReceiptOutcome).Source
 			}
 		}
-		if commitErr = validateDurableRequestSource(provisional, consumer.source, consumer.runID); commitErr != nil {
+		if commitErr = consumer.validateDurableRequest(provisional); commitErr != nil {
 			span.SetStatus(tracing.SpanStatusError, commitErr.Error())
 			return CanonicalRunResult{Transcript: transcript}, commitErr
 		}
@@ -591,8 +624,10 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 	// instead of calling List again. buildToolDefinitions has its own
 	// version-based cache and is left untouched.
 	toolCatalogVersion := 0
+	toolCatalogVersioned := false
 	if versioned, ok := registry.(interface{ Version() int }); ok {
 		toolCatalogVersion = versioned.Version()
+		toolCatalogVersioned = true
 	}
 	var toolDefs []tools.ToolDefinition
 	var toolOpts []llm.Option
@@ -613,7 +648,8 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 
 			// Dynamic tool filtering: when the tool count exceeds the
 			// threshold, score and filter to reduce context bloat.
-			if toolSearchThreshold > 0 && len(llmTools) > toolSearchThreshold {
+			if (toolSearchThreshold > 0 && len(llmTools) > toolSearchThreshold) ||
+				(compactToolVisibility && len(llmTools) > compactToolVisibilityLimit) {
 				for _, d := range toolDefs {
 					if st, ok := d.(tools.TopToolsProvider); ok {
 						searchTool = st
@@ -670,6 +706,9 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		opts := l.promptOpts
 		if registry != nil {
 			opts.Tools = toolDefs
+			if compactToolVisibility && len(toolDefs) > compactToolVisibilityLimit {
+				opts.Tools = compactToolDefinitions(toolDefs, toolDefs, nil)
+			}
 		}
 		sysPrompt = l.promptBuilder.Build(spanCtx, opts)
 	} else {
@@ -740,6 +779,14 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		}
 	}
 
+	var toolSearchPromotions toolSearchPromotionState
+	toolInputGeneration := 0
+	var previousEdit *completedEditForRecovery
+	recoveryUsed := false
+	recoveryPending := false
+	recoveryInputGeneration := 0
+	var recoveryMismatch *tools.PreparedEditMismatchEvidence
+	var recoveryRead *tools.PreparedReadEvidence
 	for iter := 0; l.maxIterations < 0 || iter < l.maxIterations; iter++ {
 		if err := spanCtx.Err(); err != nil {
 			span.SetStatus(tracing.SpanStatusError, err.Error())
@@ -766,7 +813,12 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		// operation. Each steering message is injected as a user message
 		// so the model sees it on the next iteration.
 		if l.steerCh != nil {
-			for _, instruction := range drainSteerMessages(l.steerCh, &messages, logger) {
+			messageStart := len(messages)
+			steeringMessages := drainSteerMessages(l.steerCh, &messages, logger)
+			if len(steeringMessages) > 0 {
+				toolInputGeneration++
+			}
+			for index, instruction := range steeringMessages {
 				entry := TranscriptEntry{Message: AgentMessage{Role: string(llm.RoleUser), Content: instruction, InputKind: InputKindSteering}}
 				entry.Message.Runtime = consumer.transcriptMetadata(uint64(len(transcript)), "")
 				if consumer != nil {
@@ -776,7 +828,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 						return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
 					}
 				}
-				messages[len(messages)-1].Runtime = entry.Message.Runtime
+				messages[messageStart+index].Runtime = entry.Message.Runtime
 				transcript = append(transcript, entry)
 			}
 		}
@@ -785,7 +837,12 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		// Follow-ups are injected as user messages after steering so the
 		// model sees steering context first, then the follow-up.
 		if l.followUpCh != nil {
-			for _, content := range drainFollowUpMessages(l.followUpCh, &messages, logger) {
+			messageStart := len(messages)
+			followUpMessages := drainFollowUpMessages(l.followUpCh, &messages, logger)
+			if len(followUpMessages) > 0 {
+				toolInputGeneration++
+			}
+			for index, content := range followUpMessages {
 				entry := TranscriptEntry{Message: AgentMessage{Role: string(llm.RoleUser), Content: content, InputKind: InputKindFollowUp}}
 				entry.Message.Runtime = consumer.transcriptMetadata(uint64(len(transcript)), "")
 				if consumer != nil {
@@ -795,9 +852,13 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 						return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
 					}
 				}
-				messages[len(messages)-1].Runtime = entry.Message.Runtime
+				messages[messageStart+index].Runtime = entry.Message.Runtime
 				transcript = append(transcript, entry)
 			}
+		}
+		recoveryWindow := recoveryPending && recoveryInputGeneration == toolInputGeneration
+		if recoveryPending {
+			recoveryPending = false
 		}
 
 		// Progressive disclosure may only add capabilities from the pinned
@@ -812,8 +873,11 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			toolDefs = defs
 			toolOpts = buildToolOpts(defs, l.thinkingConfig)
 			toolCatalogVersion = version
+			toolCatalogVersioned = true
+			toolSearchPromotions.clear()
 			searchTool, needToolFiltering = nil, false
-			if toolSearchThreshold > 0 && len(defs) > toolSearchThreshold {
+			if (toolSearchThreshold > 0 && len(defs) > toolSearchThreshold) ||
+				(compactToolVisibility && len(defs) > compactToolVisibilityLimit) {
 				for _, definition := range defs {
 					if search, found := definition.(tools.TopToolsProvider); found {
 						searchTool, needToolFiltering = search, true
@@ -824,9 +888,16 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			if l.promptBuilder != nil {
 				opts := l.promptOpts
 				opts.Tools = defs
+				if compactToolVisibility && len(defs) > compactToolVisibilityLimit {
+					opts.Tools = compactToolDefinitions(defs, defs, nil)
+				}
 				sysPrompt = l.promptBuilder.Build(spanCtx, opts)
 			} else if l.systemPromptOverride == "" {
-				sysPrompt = systemPromptFromDefs(defs)
+				promptDefs := defs
+				if compactToolVisibility && len(defs) > compactToolVisibilityLimit {
+					promptDefs = compactToolDefinitions(defs, defs, nil)
+				}
+				sysPrompt = systemPromptFromDefs(promptDefs)
 			}
 			if len(messages) > 0 && messages[0].Role == llm.RoleSystem {
 				messages[0].Content = sysPrompt
@@ -869,21 +940,64 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		// rebuild tool options with only the tools relevant to the current
 		// query so the LLM context isn't bloated by irrelevant tool schemas.
 		iterOpts := toolOpts
-		if needToolFiltering && searchTool != nil {
-			query := lastUserQuery(messages)
-			if query != "" {
-				filtered, ferr := searchTool.TopTools(spanCtx, query, toolSearchThreshold)
+		searchQuery := lastUserQuery(messages)
+		var visibleToolDefs []tools.ToolDefinition
+		if compactToolVisibility && len(toolDefs) > compactToolVisibilityLimit {
+			toolSearchPromotions.beginRun(RunIDFromContext(spanCtx), toolCatalogVersion, toolInputGeneration, searchQuery)
+			ranked := toolDefs
+			if searchTool != nil {
+				filtered, ferr := searchTool.TopTools(spanCtx, searchQuery, compactToolVisibilityLimit)
+				if ferr == nil {
+					filtered = restrictToolSearchDefinitions(filtered, toolDefs)
+					ranked = filtered
+				} else {
+					logger.Warn("core.loop.tool_search_failed", "err", ferr)
+				}
+			}
+			visibleToolDefs = compactToolDefinitions(ranked, toolDefs, toolSearchPromotions.snapshot())
+			iterOpts = buildToolOpts(visibleToolDefs, l.thinkingConfig)
+			logger.Info("core.loop.tool_search_filter",
+				"query", searchQuery,
+				"filtered_tools", len(visibleToolDefs),
+				"threshold", compactToolVisibilityLimit,
+			)
+		} else if needToolFiltering && searchTool != nil {
+			if searchQuery != "" {
+				filtered, ferr := searchTool.TopTools(spanCtx, searchQuery, toolSearchThreshold)
 				if ferr == nil {
 					filtered = restrictToolSearchDefinitions(filtered, toolDefs)
 				}
 				if ferr == nil && len(filtered) > 0 {
 					iterOpts = buildToolOpts(filtered, l.thinkingConfig)
 					logger.Info("core.loop.tool_search_filter",
-						"query", query,
+						"query", searchQuery,
 						"filtered_tools", len(filtered),
 						"threshold", toolSearchThreshold,
 					)
 				}
+			}
+		}
+		if recoveryWindow {
+			readDefinitions := recoveryReadDefinitions(toolDefs)
+			if len(readDefinitions) == 0 {
+				err := errors.New("core: exact edit mismatch recovery requires a registered stock read tool")
+				span.SetStatus(tracing.SpanStatusError, err.Error())
+				sendEvent(errEvent(err))
+				return CanonicalRunResult{Events: events, Transcript: transcript}, err
+			}
+			visibleToolDefs = readDefinitions
+			iterOpts = buildToolOpts(readDefinitions, l.thinkingConfig)
+		}
+		if compactToolVisibility && visibleToolDefs != nil && (l.promptBuilder != nil || l.systemPromptOverride == "") {
+			if l.promptBuilder != nil {
+				opts := l.promptOpts
+				opts.Tools = visibleToolDefs
+				sysPrompt = l.promptBuilder.Build(spanCtx, opts)
+			} else {
+				sysPrompt = systemPromptFromDefs(visibleToolDefs)
+			}
+			if len(messages) > 0 && messages[0].Role == llm.RoleSystem {
+				messages[0].Content = sysPrompt
 			}
 		}
 
@@ -895,8 +1009,44 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		}
 		eventCoordinates = iterationCoordinates
 		iterationCtx := withAgentEventCoordinates(spanCtx, iterationCoordinates)
+		iterationCtx = tools.WithToolSearchPromotionObserver(iterationCtx, nil)
+		if compactToolVisibility && len(visibleToolDefs) > 0 {
+			iterationCtx = tools.WithToolSearchPromotionObserver(iterationCtx, func(event tools.ToolSearchPromotion) string {
+				if event.CallID == "" ||
+					event.Identity.RegistrationSource != tools.RegistrationSourceTrustedControl ||
+					event.Identity.ToolName != "tool_search" ||
+					event.Identity.RegistrationGeneration == 0 {
+					return ""
+				}
+				if event.Query == "" {
+					return "Use a non-empty tool_search query before promoting schemas."
+				}
+				if !toolCatalogVersioned || !event.RegistryVersioned || event.RegistryVersion != toolCatalogVersion {
+					toolSearchPromotions.clear()
+					return "The tool catalog changed; search again before using a newly found tool."
+				}
+				if current, ok := registry.(interface{ Version() int }); !ok || current.Version() != toolCatalogVersion {
+					toolSearchPromotions.clear()
+					return "The tool catalog changed; search again before using a newly found tool."
+				}
+				names := authoritativeToolSearchMatches(event.MatchedNames, toolDefs, compactToolVisibilityLimit)
+				notice := toolSearchPromotions.promote(names, visibleToolDefs, maxCompactToolPromotions)
+				return notice
+			})
+		}
 		if selectionSource != nil {
 			iterationCtx = llm.WithCandidateSelectionSource(iterationCtx, selectionSource)
+		}
+		if recoveryWindow {
+			control := llm.Message{
+				Role:    llm.RoleSystem,
+				Content: "The previous exact edit failed against a captured file version. This recovery turn is read-only: read the affected file, then continue with corrected evidence or stop. Do not retry the failed edit in this turn.",
+				Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{Kind: llm.SourceEphemeral}},
+			}
+			iterationCtx = context.WithValue(iterationCtx, editLoopRecoveryControlKey{}, control)
+		}
+		if recoveryMismatch != nil && recoveryRead != nil {
+			iterationCtx = tools.WithPreparedEditRecoveryGate(iterationCtx, recoveryMismatch, recoveryRead)
 		}
 		var resp *llm.Message
 		var err error
@@ -914,6 +1064,21 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			resp, err = l.generateWithContinuationAndCompaction(iterationCtx, model, messages, iterOpts, es, logger, consumer, compactor, estimator, maxTokens)
 		}
 		if err != nil {
+			repeated := soleRepeatedResponse(err)
+			rejection := &editLoopRejection{cause: err, repetition: repeated}
+			if repeated != nil && !recoveryUsed && resolverBacked && previousEdit != nil &&
+				previousEdit.inputGeneration == toolInputGeneration && previousEdit.catalogVersioned && toolCatalogVersioned &&
+				previousEdit.catalogVersion == toolCatalogVersion &&
+				(l.maxIterations < 0 || iter+1 < l.maxIterations) &&
+				canRecoverEditLoop(iterationCtx, consumer, previousEdit, rejection) &&
+				len(recoveryReadDefinitions(toolDefs)) == 1 {
+				recoveryUsed = true
+				recoveryPending = true
+				recoveryInputGeneration = toolInputGeneration
+				recoveryMismatch = previousEdit.mismatch
+				recoveryRead = nil
+				continue
+			}
 			var providerErr *llm.ProviderError
 			if errors.As(err, &providerErr) && providerErr != nil {
 				span.SetAttributes(
@@ -937,6 +1102,12 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			return CanonicalRunResult{Events: events, Transcript: transcript}, toolOutcomeUnknownError{cause: fenceErr}
 		}
 		if err := validateCompleteToolCalls(resp.ToolCalls); err != nil {
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			sendEvent(errEvent(err))
+			return CanonicalRunResult{Events: events, Transcript: transcript}, err
+		}
+		if recoveryWindow && len(resp.ToolCalls) > 0 && (len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "read") {
+			err := errors.New("core: edit recovery turn may only issue one read call")
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			sendEvent(errEvent(err))
 			return CanonicalRunResult{Events: events, Transcript: transcript}, err
@@ -1083,6 +1254,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 					outcome := toolReceiptOutcome(iterationCtx, res.Err, res.IsError)
 					sendToolResultEvent(res.Output, res.IsError, res.ID, outcome, nil)
 					appendToolReceipt(&messages, &transcript, tc, res.Output, outcome, consumer, spanCtx)
+					attachToolContentBlocks(&messages, &transcript, res.ContentBlocks)
 					if outcome == ReceiptOutcomeUnknown && unknownToolErr == nil {
 						unknownToolErr = markUnknownToolOutcome(res.Err)
 					}
@@ -1145,7 +1317,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 					result, commitErr := consumer.executeSequentialCall(iterationCtx, registry, assistantOrdinal, assistantEntry.Message, tc, es, &transcript, &messages)
 					sendToolResultEvent(result.output, result.isError, tc.ID, result.outcome, result.sourceTruncated, result.receiptOutputTruncated)
 					if commitErr != nil {
-						if !hasUnknownToolOutcome(commitErr) && callIndex+1 < len(resp.ToolCalls) && (errors.Is(commitErr, context.Canceled) || errors.Is(commitErr, context.DeadlineExceeded) || errors.Is(commitErr, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(commitErr, ErrRunCommitChildUnsupported) || errors.Is(commitErr, ErrRunCommitStreamingUnsupported)) {
+						if !hasUnknownToolOutcome(commitErr) && callIndex+1 < len(resp.ToolCalls) && (errors.Is(commitErr, context.Canceled) || errors.Is(commitErr, context.DeadlineExceeded) || errors.Is(commitErr, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(commitErr, ErrRunCommitChildUnsupported) || errors.Is(commitErr, ErrRunCommitStreamingUnsupported) || errors.Is(commitErr, ErrEditRecoveryStaleRetry)) {
 							for _, undispatched := range resp.ToolCalls[callIndex+1:] {
 								const skippedOutput = "Tool call not dispatched because a prior tool call stopped the group"
 								if suffixErr := consumer.commitKnownCall(assistantOrdinal, assistantEntry.Message, "batch-"+newClaimID(), undispatched, uint64(len(transcript)), skippedOutput, ReceiptOutcomeInterrupted, &transcript, &messages); suffixErr != nil {
@@ -1161,7 +1333,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 					}
 					continue
 				}
-				resultText, isErr, execErr := executeSingleTool(iterationCtx, registry, toToolsCall(tc), es)
+				resultText, isErr, imageBlocks, execErr := executeSingleToolWithImages(iterationCtx, registry, toToolsCall(tc), es)
 				isError := isErr
 				if execErr != nil {
 					logger.Warn("core.loop.tool_error", "tool", tc.Name, "err", execErr)
@@ -1171,6 +1343,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				outcome := toolReceiptOutcome(iterationCtx, execErr, isError)
 				sendToolResultEvent(resultText, isError, tc.ID, outcome, nil)
 				appendToolReceipt(&messages, &transcript, tc, resultText, outcome, consumer, spanCtx)
+				attachToolContentBlocks(&messages, &transcript, imageBlocks)
 				if outcome == ReceiptOutcomeUnknown {
 					for _, undispatched := range resp.ToolCalls[callIndex+1:] {
 						skippedOutput := "Tool call not dispatched because a prior tool outcome is unknown"
@@ -1210,6 +1383,38 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		}, &transcript, &messages); err != nil {
 			return CanonicalRunResult{Events: events, Transcript: transcript}, err
 		}
+		if recoveryWindow {
+			if consumer == nil || recoveryMismatch == nil || len(resp.ToolCalls) != 1 || len(transcript) != postToolSourceStart+1 {
+				err := errors.New("core: edit recovery did not produce one correlated read receipt")
+				span.SetStatus(tracing.SpanStatusError, err.Error())
+				sendEvent(errEvent(err))
+				return CanonicalRunResult{Events: events, Transcript: transcript}, err
+			}
+			call := resp.ToolCalls[0]
+			receipt := transcript[len(transcript)-1]
+			action, ok := consumer.completedTools[call.ID]
+			if !ok || !validRecoveryRead(consumer, call, action, receipt, assistantOrdinal, recoveryMismatch) {
+				err := errors.New("core: edit recovery read lacks a successful same-file stock read proof")
+				span.SetStatus(tracing.SpanStatusError, err.Error())
+				sendEvent(errEvent(err))
+				return CanonicalRunResult{Events: events, Transcript: transcript}, err
+			}
+			recoveryRead = action.readEvidence
+		}
+		previousEdit = nil
+		if consumer != nil && resp.Content == "" && len(resp.ToolCalls) == 1 && len(transcript) == postToolSourceStart+1 {
+			call := resp.ToolCalls[0]
+			receipt := transcript[len(transcript)-1].Message
+			action := consumer.completedTools[call.ID]
+			if call.Name == "edit" && receipt.Role == string(llm.RoleTool) && receipt.ToolCallID == call.ID &&
+				receipt.ReceiptOutcome == ReceiptOutcomeError && action.editMismatch != nil && action.ordinal == assistantOrdinal {
+				previousEdit = &completedEditForRecovery{
+					response: cloneLLMMessage(*resp), action: action, callID: call.ID, ordinal: assistantOrdinal,
+					inputGeneration: toolInputGeneration, catalogVersion: toolCatalogVersion,
+					catalogVersioned: toolCatalogVersioned, mismatch: action.editMismatch,
+				}
+			}
+		}
 	}
 
 	// Iteration budget exhausted.
@@ -1236,7 +1441,7 @@ func preflightDurableRequest(
 	currentSubmissionIndex int,
 ) ([]llm.Message, int, error) {
 	items := messagesToTurnItems(messages)
-	if err := validateDurableRequestSource(items, consumer.source, consumer.runID); err != nil {
+	if err := consumer.validateDurableRequest(items); err != nil {
 		return nil, currentSubmissionIndex, err
 	}
 	if maxTokens <= 0 || estimator == nil || compaction.EstimateTokens(items, estimator) <= maxTokens {
@@ -1252,12 +1457,18 @@ func preflightDurableRequest(
 	if err != nil {
 		return nil, currentSubmissionIndex, err
 	}
-	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), maxTokens, estimator)
+	result, err := compaction.CompactPreservingImages(ctx, compactor, cloneCompactionTurnItems(items), maxTokens, estimator)
 	if err != nil {
+		if compaction.IsSummaryEssentialInputBudgetError(err) {
+			return nil, currentSubmissionIndex, fmt.Errorf("%w: %w", ErrDurableCompactionUnsupported, err)
+		}
 		return nil, currentSubmissionIndex, err
 	}
 	projection, err := validateDurableCompactionResult(items, result, consumer.source, consumer.runID)
 	if err != nil {
+		return nil, currentSubmissionIndex, err
+	}
+	if err := bindActiveProcessSessionSummary(consumer, &projection, &result, maxTokens, estimator); err != nil {
 		return nil, currentSubmissionIndex, err
 	}
 	if err := validateDurableCurrentInputPreserved(currentInput, result.Items); err != nil {
@@ -1275,7 +1486,7 @@ func preflightDurableRequest(
 	if compactedSubmissionIndex < 0 {
 		return nil, currentSubmissionIndex, fmt.Errorf("%w: preserved current input has no position", ErrDurableCompactionUnsupported)
 	}
-	if err := consumer.commitCompaction(projection); err != nil {
+	if err := consumer.commitCompaction(projection, currentInput); err != nil {
 		markRunOutcomeUnknown(ctx)
 		return nil, currentSubmissionIndex, err
 	}
@@ -1291,37 +1502,64 @@ func preflightDurableRequestAt(
 	maxTokens int,
 	currentSubmissionIndex int,
 ) ([]llm.Message, int, error) {
-	items := messagesToTurnItems(messages)
-	if err := validateDurableRequestSource(items, consumer.source, consumer.runID); err != nil {
+	compacted, index, commit, err := stageDurableRequestAt(ctx, messages, consumer, compactor, estimator, maxTokens, currentSubmissionIndex)
+	if err != nil {
 		return nil, currentSubmissionIndex, err
 	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			return nil, currentSubmissionIndex, err
+		}
+	}
+	return compacted, index, nil
+}
+
+func stageDurableRequestAt(
+	ctx context.Context,
+	messages []llm.Message,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+	currentSubmissionIndex int,
+) ([]llm.Message, int, func() error, error) {
+	items := messagesToTurnItems(messages)
+	if err := consumer.validateDurableRequest(items); err != nil {
+		return nil, currentSubmissionIndex, nil, err
+	}
 	if currentSubmissionIndex < 0 || currentSubmissionIndex >= len(items) {
-		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "current submission cannot be preserved during compaction"}
+		return nil, currentSubmissionIndex, nil, &RequestEnvelopeError{Reason: "current submission cannot be preserved during compaction"}
 	}
 	currentID := items[currentSubmissionIndex].ID
 	if maxTokens <= 0 || estimator == nil {
-		return messages, currentSubmissionIndex, nil
+		return messages, currentSubmissionIndex, nil, nil
 	}
 	if err := compaction.ValidateCompactionEligible(items); err != nil {
-		return nil, currentSubmissionIndex, fmt.Errorf("%w: %v", ErrDurableCompactionUnsupported, err)
+		return nil, currentSubmissionIndex, nil, fmt.Errorf("%w: %v", ErrDurableCompactionUnsupported, err)
 	}
 	if consumer.source == nil || compactor == nil {
-		return nil, currentSubmissionIndex, ErrRunCommitCompactionProjectionUnavailable
+		return nil, currentSubmissionIndex, nil, ErrRunCommitCompactionProjectionUnavailable
 	}
 	currentInput, err := captureDurableCurrentInput(items, consumer.source, consumer.runID)
 	if err != nil {
-		return nil, currentSubmissionIndex, err
+		return nil, currentSubmissionIndex, nil, err
 	}
-	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), maxTokens, estimator)
+	result, err := compaction.CompactPreservingImages(ctx, compactor, cloneCompactionTurnItems(items), maxTokens, estimator)
 	if err != nil {
-		return nil, currentSubmissionIndex, err
+		if compaction.IsSummaryEssentialInputBudgetError(err) {
+			return nil, currentSubmissionIndex, nil, fmt.Errorf("%w: %w", ErrDurableCompactionUnsupported, err)
+		}
+		return nil, currentSubmissionIndex, nil, err
 	}
 	projection, err := validateDurableCompactionResult(items, result, consumer.source, consumer.runID)
 	if err != nil {
-		return nil, currentSubmissionIndex, err
+		return nil, currentSubmissionIndex, nil, err
+	}
+	if err := bindActiveProcessSessionSummary(consumer, &projection, &result, maxTokens, estimator); err != nil {
+		return nil, currentSubmissionIndex, nil, err
 	}
 	if err := validateDurableCurrentInputPreserved(currentInput, result.Items); err != nil {
-		return nil, currentSubmissionIndex, err
+		return nil, currentSubmissionIndex, nil, err
 	}
 	compactedSubmissionIndex := -1
 	for index, item := range result.Items {
@@ -1329,18 +1567,21 @@ func preflightDurableRequestAt(
 			continue
 		}
 		if compactedSubmissionIndex >= 0 {
-			return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "compactor duplicated the current submission"}
+			return nil, currentSubmissionIndex, nil, &RequestEnvelopeError{Reason: "compactor duplicated the current submission"}
 		}
 		compactedSubmissionIndex = index
 	}
 	if compactedSubmissionIndex < 0 {
-		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "compactor removed the current submission"}
+		return nil, currentSubmissionIndex, nil, &RequestEnvelopeError{Reason: "compactor removed the current submission"}
 	}
-	if err := consumer.commitCompaction(projection); err != nil {
-		markRunOutcomeUnknown(ctx)
-		return nil, currentSubmissionIndex, err
+	commit := func() error {
+		if err := consumer.commitCompaction(projection, currentInput); err != nil {
+			markRunOutcomeUnknown(ctx)
+			return err
+		}
+		return nil
 	}
-	return turnItemsToMessages(result.Items), compactedSubmissionIndex, nil
+	return turnItemsToMessages(result.Items), compactedSubmissionIndex, commit, nil
 }
 
 func preflightNonDurableRequest(
@@ -1777,6 +2018,12 @@ func (l *LoopAgent) streamGenerateWithBudget(ctx context.Context, model llm.Base
 			abortAndDrain(fenceErr)
 			return nil, toolOutcomeUnknownError{cause: fenceErr}
 		}
+		// Record text carried on the chunk before its error path returns. A
+		// rejected response is not a clean empty-content edit result even when
+		// the provider attaches partial assistant text to the error chunk.
+		if budget != nil && chunk.Content != "" {
+			budget.assistantText = true
+		}
 		if chunk.Error != nil {
 			abortAndDrain(chunk.Error)
 			return nil, chunk.Error
@@ -1908,7 +2155,10 @@ func (l *LoopAgent) generateWithContinuationAndCompaction(
 type preparedLoopRequestState struct {
 	messages               []llm.Message
 	currentSubmissionIndex int
+	completedCandidate     llm.ResolvedCandidateHandle
 }
+
+const finalPIIGuardRepairFeedback = "Your previous response was withheld by the output safety check. Produce a concise final status using safe artifact paths, aggregate results, checks actually performed, and unresolved issues. Omit personal values and secrets. Do not call tools or claim new actions."
 
 func (l *LoopAgent) generateWithPreparedContinuation(
 	ctx context.Context,
@@ -1927,6 +2177,16 @@ func (l *LoopAgent) generateWithPreparedContinuation(
 ) (*llm.Message, []llm.Message, int, error) {
 	state := &preparedLoopRequestState{messages: messages, currentSubmissionIndex: currentSubmissionIndex}
 	response, err := l.generateWithContinuationAndCompactionState(ctx, model, messages, currentSubmissionIndex, toolOpts, es, logger, consumer, midTurnCompactor, compactor, estimator, maxTokens, multimodalTokensPerItemReserve, state)
+	var denied *completeResponseDenied
+	if errors.As(err, &denied) && denied.code == CandidateOutputRejectionPII && denied.terminal && state.completedCandidate != nil && l.finalPIIGuardRepairGate != nil {
+		allowed := l.finalPIIGuardRepairGate(ctx)
+		if ctx.Err() != nil {
+			return nil, state.messages, state.currentSubmissionIndex, ctx.Err()
+		}
+		if allowed && ctx.Value(editLoopRecoveryControlKey{}) == nil {
+			response, err = l.repairFinalPIIGuardDenial(ctx, model, state, toolOpts, es, consumer, estimator, maxTokens, multimodalTokensPerItemReserve)
+		}
+	}
 	return response, state.messages, state.currentSubmissionIndex, err
 }
 
@@ -1946,6 +2206,11 @@ func (l *LoopAgent) generateWithContinuationAndCompactionState(
 	multimodalTokensPerItemReserve int,
 	state *preparedLoopRequestState,
 ) (*llm.Message, error) {
+	if consumer != nil {
+		if err := consumer.validateDurableRequest(messagesToTurnItems(messages)); err != nil {
+			return nil, err
+		}
+	}
 	guard, guarded := model.(CompleteResponseGuard)
 	if guarded {
 		if guard.MaxCandidateBytes() != guardedStreamMaxBytes {
@@ -1967,6 +2232,9 @@ func (l *LoopAgent) generateWithContinuationAndCompactionState(
 	if state != nil {
 		state.messages = messages
 		state.currentSubmissionIndex = currentSubmissionIndex
+		if err == nil && operationActive && guarded && l.finalPIIGuardRepairGate != nil {
+			state.completedCandidate = successfulResolvedCandidate(mainCtx)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -2048,15 +2316,7 @@ func (l *LoopAgent) generateWithContinuationAndCompactionState(
 		resp.Content += contResp.Content
 		resp.FinishReason = contResp.FinishReason
 		resp.ToolCalls = contResp.ToolCalls
-		if contResp.Usage != nil {
-			if resp.Usage == nil {
-				resp.Usage = contResp.Usage
-			} else {
-				resp.Usage.InputTokens += contResp.Usage.InputTokens
-				resp.Usage.OutputTokens += contResp.Usage.OutputTokens
-				resp.Usage.TotalTokens += contResp.Usage.TotalTokens
-			}
-		}
+		resp.Usage = llm.MergeContinuationUsage(resp.Usage, contResp.Usage)
 		candidateBytes, candidateErr := candidatePayloadBytes(resp)
 		if candidateErr != nil {
 			return nil, candidateErr
@@ -2095,7 +2355,10 @@ func (l *LoopAgent) generateWithContinuationAndCompactionState(
 		if checked.Sanitized != "" {
 			resp.Content = checked.Sanitized
 		} else if !checked.Allowed {
-			return nil, errors.New("core: complete-response guard denied candidate")
+			return nil, &completeResponseDenied{
+				code:     checked.RejectionCode,
+				terminal: llm.IsNormalFinishReason(resp.FinishReason) && len(resp.ToolCalls) == 0 && resp.Content != "" && attemptCount == 0 && budget != nil && !budget.visible,
+			}
 		}
 		if len(resp.Content) > guard.MaxCandidateBytes() {
 			return nil, fmt.Errorf("core: guarded response exceeds %d-byte candidate limit", guard.MaxCandidateBytes())
@@ -2124,6 +2387,167 @@ func sendAssistantGenerationLifecycleEvent(ctx context.Context, es EventStream, 
 	_ = es.Send(stampAgentEvent(agentEventCoordinatesFromContext(ctx), event)) //nolint:errcheck
 }
 
+// successfulResolvedCandidate reads only the operation owner's completed
+// attempt metadata; denied candidate payloads never enter the repair state.
+func successfulResolvedCandidate(ctx context.Context) llm.ResolvedCandidateHandle {
+	authority, ok := llm.OperationDispatchAuthorityFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	owner, ok := authority.(*providerOperationAuthority)
+	if !ok {
+		return nil
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	result, exists := owner.finished[owner.lastFinished]
+	if !exists || result.Outcome != llm.AttemptSuccess || result.Failure != llm.FailureNone {
+		return nil
+	}
+	candidate := owner.candidates[result.Identity.Candidate]
+	if candidate == nil || candidate.Identity() != result.Identity {
+		return nil
+	}
+	return candidate
+}
+
+func (l *LoopAgent) repairFinalPIIGuardDenial(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	state *preparedLoopRequestState,
+	toolOpts []llm.Option,
+	es EventStream,
+	consumer *runCommitConsumer,
+	estimator compaction.TokenEstimator,
+	maxTokens, multimodalTokensPerItemReserve int,
+) (response *llm.Message, repairErr error) {
+	span, spanCtx := tracing.SpanFromContext(ctx, "core.output_guard.repair", tracing.SpanKindInternal)
+	span.SetAttributes(tracing.Attribute{Key: "code", Value: "pii"}, tracing.Attribute{Key: "max_dispatches", Value: 1})
+	defer func() {
+		if repairErr != nil {
+			span.SetAttributes(tracing.Attribute{Key: "result", Value: "failed"})
+			span.SetStatus(tracing.SpanStatusError, "final PII repair failed")
+		} else {
+			span.SetAttributes(tracing.Attribute{Key: "result", Value: "accepted"})
+			span.SetStatus(tracing.SpanStatusOK, "")
+		}
+		span.End()
+	}()
+	ctx = spanCtx
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := CheckRunGeneration(ctx); err != nil {
+		return nil, err
+	}
+	guard, guarded := model.(CompleteResponseGuard)
+	if !guarded || state == nil || state.completedCandidate == nil {
+		return nil, errors.New("core: final PII repair requires a completed guarded provider attempt")
+	}
+	if consumer != nil {
+		if err := consumer.validateDurableRequest(messagesToTurnItems(state.messages)); err != nil {
+			return nil, err
+		}
+	}
+	factory, ok := llm.RunOperationFactoryFromContext(ctx)
+	if !ok {
+		return nil, llm.ErrOperationAuthorityRequired
+	}
+	ctx = llm.WithContinuationNoReplay(llm.WithLoopOwnedContinuation(ctx))
+	authority, err := factory.NewOperation(ctx, llm.OperationMainRequest, 1, llm.ProviderCandidatesFromModel(model))
+	if err != nil {
+		return nil, fmt.Errorf("core: create final PII repair operation: %w", err)
+	}
+	ctx = llm.WithOperationDispatchAuthority(ctx, authority)
+	proposal, err := initialMainCandidateProposal(ctx, model)
+	if err != nil {
+		return nil, err
+	}
+	if proposal.Candidate != state.completedCandidate {
+		return nil, &RequestEnvelopeError{Reason: "final PII repair candidate changed"}
+	}
+	requestBase, err := newPreparedRequestBase(toolOpts)
+	if err != nil {
+		return nil, err
+	}
+	requestBase.multimodalTokensPerItemReserve = multimodalTokensPerItemReserve
+	requestBase.recoveryControl = &llm.Message{Role: llm.RoleUser, Content: finalPIIGuardRepairFeedback, Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{Kind: llm.SourceEphemeral}}}
+	plan, err := prepareRequestPlan(ctx, proposal, state.messages, requestBase, estimator, maxTokens)
+	if err != nil {
+		return nil, err
+	}
+	if plan.Estimate().AccountedMessages.State != llm.EstimateKnown || !envelopeEstimateFits(plan.Estimate()) {
+		return nil, &RequestEnvelopeError{Reason: "final PII repair request exceeds the admitted envelope"}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := CheckRunGeneration(ctx); err != nil {
+		return nil, err
+	}
+	sendAssistantGenerationLifecycleEvent(ctx, es, EventKindAssistantGenerationStarted)
+	defer sendAssistantGenerationLifecycleEvent(ctx, es, EventKindAssistantGenerationFinished)
+	ctx = llm.WithPreparedRequestPlan(ctx, plan)
+	budget := &guardedStreamBudget{}
+	var called atomic.Bool
+	var callErr error
+	run := func(operationCtx context.Context, dispatchModel llm.BaseChatModel) error {
+		if !called.CompareAndSwap(false, true) {
+			return errors.New("core: final PII repair operation may dispatch only once")
+		}
+		response, callErr = l.streamGenerateWithPreparedBudget(operationCtx, dispatchModel, plan, es, budget, false)
+		return callErr
+	}
+	if runner, ok := model.(llm.ProviderOperationRunner); ok {
+		if err := runner.RunProviderOperation(ctx, run); err != nil {
+			return nil, err
+		}
+	} else if err := run(ctx, model); err != nil {
+		return nil, err
+	}
+	if !called.Load() || callErr != nil {
+		if callErr != nil {
+			return nil, callErr
+		}
+		return nil, errors.New("core: final PII repair did not dispatch")
+	}
+	if response == nil || !llm.IsNormalFinishReason(response.FinishReason) || len(response.ToolCalls) != 0 {
+		return nil, errors.New("core: final PII repair did not produce a complete text-only response")
+	}
+	checked, err := guard.CheckCandidate(ctx, response.Content)
+	if err != nil {
+		return nil, fmt.Errorf("core: check complete response: %w", err)
+	}
+	if checked == nil {
+		return nil, errors.New("core: complete-response guard returned nil result")
+	}
+	if checked.Sanitized != "" {
+		response.Content = checked.Sanitized
+	} else if !checked.Allowed {
+		return nil, &completeResponseDenied{code: checked.RejectionCode}
+	}
+	if len(response.Content) > guard.MaxCandidateBytes() {
+		return nil, fmt.Errorf("core: guarded response exceeds %d-byte candidate limit", guard.MaxCandidateBytes())
+	}
+	bytes, err := candidatePayloadBytes(response)
+	if err != nil {
+		return nil, err
+	}
+	if bytes > guard.MaxCandidateBytes() {
+		return nil, fmt.Errorf("core: guarded response payload exceeds %d-byte candidate limit", guard.MaxCandidateBytes())
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := CheckRunGeneration(ctx); err != nil {
+		return nil, err
+	}
+	if es != nil && response.Content != "" {
+		_ = es.Send(stampAgentEvent(agentEventCoordinatesFromContext(ctx), AgentEvent{Kind: "message", Content: response.Content, Timestamp: time.Now(), Incremental: true})) //nolint:errcheck
+	}
+	return response, nil
+}
+
 func (l *LoopAgent) runMainProviderOperation(
 	ctx context.Context,
 	model llm.BaseChatModel,
@@ -2143,6 +2567,7 @@ func (l *LoopAgent) runMainProviderOperation(
 	currentMessages := messages
 	var response *llm.Message
 	var successfulBudget *guardedStreamBudget
+	sawAssistantText := false
 	var requestBase preparedRequestBase
 	var requestPlan *llm.PreparedRequestPlan
 	var selectionSource llm.CandidateSelectionSource
@@ -2154,6 +2579,10 @@ func (l *LoopAgent) runMainProviderOperation(
 			return nil, currentMessages, currentSubmissionIndex, nil, err
 		}
 		requestBase.multimodalTokensPerItemReserve = multimodalTokensPerItemReserve
+		if recovery, ok := ctx.Value(editLoopRecoveryControlKey{}).(llm.Message); ok {
+			recoveryCopy := recovery
+			requestBase.recoveryControl = &recoveryCopy
+		}
 		proposal, proposalErr := initialMainCandidateProposal(ctx, model)
 		if proposalErr != nil {
 			return nil, currentMessages, currentSubmissionIndex, nil, proposalErr
@@ -2185,6 +2614,9 @@ func (l *LoopAgent) runMainProviderOperation(
 				response = candidate
 				successfulBudget = attemptBudget
 				return nil
+			}
+			if attemptBudget.assistantText {
+				sawAssistantText = true
 			}
 
 			var denied *llm.DispatchDeniedError
@@ -2284,6 +2716,9 @@ func (l *LoopAgent) runMainProviderOperation(
 		runErr = runSchedule(ctx, model)
 	}
 	if runErr != nil {
+		if sawAssistantText {
+			runErr = &streamedAssistantTextError{cause: runErr}
+		}
 		return nil, currentMessages, currentSubmissionIndex, nil, runErr
 	}
 	return response, currentMessages, currentSubmissionIndex, successfulBudget, nil
@@ -2484,7 +2919,7 @@ func compactOverflowRequest(
 		if consumer.source == nil {
 			return nil, ErrRunCommitCompactionProjectionUnavailable
 		}
-		if err := validateDurableRequestSource(items, consumer.source, consumer.runID); err != nil {
+		if err := consumer.validateDurableRequest(items); err != nil {
 			return nil, err
 		}
 	}
@@ -2499,7 +2934,7 @@ func compactOverflowRequest(
 			return nil, err
 		}
 	}
-	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), maxTokens, estimator)
+	result, err := compaction.CompactPreservingImages(ctx, compactor, cloneCompactionTurnItems(items), maxTokens, estimator)
 	if err != nil {
 		return nil, fmt.Errorf("core: compact overflow request: %w", err)
 	}
@@ -2511,10 +2946,13 @@ func compactOverflowRequest(
 		if err != nil {
 			return nil, err
 		}
+		if err := bindActiveProcessSessionSummary(consumer, &projection, &result, maxTokens, estimator); err != nil {
+			return nil, err
+		}
 		if err := validateDurableCurrentInputPreserved(currentInput, result.Items); err != nil {
 			return nil, err
 		}
-		if err := consumer.commitCompaction(projection); err != nil {
+		if err := consumer.commitCompaction(projection, currentInput); err != nil {
 			markRunOutcomeUnknown(ctx)
 			return nil, err
 		}
@@ -2592,7 +3030,7 @@ func compactPreparedOverflowRequest(
 		if consumer.source == nil {
 			return nil, currentSubmissionIndex, ErrRunCommitCompactionProjectionUnavailable
 		}
-		if err := validateDurableRequestSource(items, consumer.source, consumer.runID); err != nil {
+		if err := consumer.validateDurableRequest(items); err != nil {
 			return nil, currentSubmissionIndex, err
 		}
 	}
@@ -2607,7 +3045,7 @@ func compactPreparedOverflowRequest(
 			return nil, currentSubmissionIndex, err
 		}
 	}
-	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), textBudget, estimator)
+	result, err := compaction.CompactPreservingImages(ctx, compactor, cloneCompactionTurnItems(items), textBudget, estimator)
 	if err != nil {
 		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow request compaction failed", Cause: err}
 	}
@@ -2623,6 +3061,9 @@ func compactPreparedOverflowRequest(
 		result.Items = compactedItems
 		durableProjection, err = validateDurableCompactionResult(items, result, consumer.source, consumer.runID)
 		if err != nil {
+			return nil, currentSubmissionIndex, err
+		}
+		if err := bindActiveProcessSessionSummary(consumer, &durableProjection, &result, textBudget, estimator); err != nil {
 			return nil, currentSubmissionIndex, err
 		}
 		if err := validateDurableCurrentInputPreserved(durableCurrentInput, compactedItems); err != nil {
@@ -2647,7 +3088,7 @@ func compactPreparedOverflowRequest(
 		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow compactor changed the current submission"}
 	}
 	if consumer != nil {
-		if err := consumer.commitCompaction(durableProjection); err != nil {
+		if err := consumer.commitCompaction(durableProjection, durableCurrentInput); err != nil {
 			markRunOutcomeUnknown(ctx)
 			return nil, currentSubmissionIndex, err
 		}
@@ -2768,6 +3209,10 @@ func drainFollowUpMessages(ch chan string, msgs *[]llm.Message, logger *slog.Log
 func lastUserQuery(msgs []llm.Message) string {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Role == llm.RoleUser {
+			source := msgs[i].Runtime.Source.Kind
+			if source == llm.SourceRunSummary || (source == llm.SourcePriorPublished && msgs[i].Runtime.CompactionMarker) {
+				continue
+			}
 			return msgs[i].Content
 		}
 	}
@@ -2806,6 +3251,174 @@ func restrictToolSearchDefinitions(ranked, catalog []tools.ToolDefinition) []too
 	return filtered
 }
 
+type toolSearchPromotionState struct {
+	mu              sync.Mutex
+	runID           string
+	catalogVersion  int
+	inputGeneration int
+	query           string
+	initialized     bool
+	active          []string
+}
+
+func (s *toolSearchPromotionState) beginRun(runID string, catalogVersion, inputGeneration int, query string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.initialized || s.runID != runID || s.catalogVersion != catalogVersion || s.inputGeneration != inputGeneration || s.query != query {
+		s.active = nil
+	}
+	s.runID = runID
+	s.catalogVersion = catalogVersion
+	s.inputGeneration = inputGeneration
+	s.query = query
+	s.initialized = true
+}
+
+func (s *toolSearchPromotionState) clear() {
+	s.mu.Lock()
+	s.active = nil
+	s.initialized = false
+	s.mu.Unlock()
+}
+
+func (s *toolSearchPromotionState) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.active...)
+}
+
+func (s *toolSearchPromotionState) promote(matches []string, visible []tools.ToolDefinition, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	visibleNames := make(map[string]bool, len(visible))
+	for _, definition := range visible {
+		if definition != nil {
+			visibleNames[definition.Name()] = true
+		}
+	}
+	essentialNames := make(map[string]bool, len(compactToolEssentialNames))
+	seatLimit := compactToolVisibilityLimit
+	for _, name := range compactToolEssentialNames {
+		essentialNames[name] = true
+		if visibleNames[name] {
+			seatLimit--
+		}
+	}
+	if seatLimit > limit {
+		seatLimit = limit
+	}
+	if seatLimit <= 0 {
+		return ""
+	}
+	var promoted []string
+	seen := make(map[string]bool, len(matches))
+	for _, name := range matches {
+		if name == "" || essentialNames[name] || seen[name] {
+			continue
+		}
+		seen[name] = true
+		if index := indexOfString(s.active, name); index >= 0 {
+			s.active = append(s.active[:index], s.active[index+1:]...)
+			s.active = append(s.active, name)
+			promoted = append(promoted, name)
+			continue
+		}
+		if visibleNames[name] {
+			continue
+		}
+		s.active = append(s.active, name)
+		promoted = append(promoted, name)
+	}
+	if len(s.active) > seatLimit {
+		s.active = append([]string(nil), s.active[len(s.active)-seatLimit:]...)
+	}
+	exposed := promoted[:0]
+	for _, name := range promoted {
+		if indexOfString(s.active, name) >= 0 {
+			exposed = append(exposed, name)
+		}
+	}
+	if len(exposed) == 0 {
+		return ""
+	}
+	return "Tool schema(s) available in the next request: " + strings.Join(exposed, ", ") + "."
+}
+
+func indexOfString(values []string, value string) int {
+	for index, existing := range values {
+		if existing == value {
+			return index
+		}
+	}
+	return -1
+}
+
+// compactToolDefinitions returns only definitions from the pinned catalog.
+// Essential names are stable, recent search matches take priority next, and
+// ranked definitions fill any remaining slots. Search visibility never
+// changes the underlying registry or its dispatch policy.
+func compactToolDefinitions(ranked, catalog []tools.ToolDefinition, promoted []string) []tools.ToolDefinition {
+	authoritative := make(map[string]tools.ToolDefinition, len(catalog))
+	for _, definition := range catalog {
+		if definition != nil {
+			authoritative[definition.Name()] = definition
+		}
+	}
+	selected := make([]tools.ToolDefinition, 0, compactToolVisibilityLimit)
+	selectedNames := make(map[string]bool, compactToolVisibilityLimit)
+	appendName := func(name string) {
+		if len(selected) >= compactToolVisibilityLimit || selectedNames[name] {
+			return
+		}
+		definition, ok := authoritative[name]
+		if !ok {
+			return
+		}
+		selected = append(selected, definition)
+		selectedNames[name] = true
+	}
+	for _, name := range compactToolEssentialNames {
+		appendName(name)
+	}
+	for index := len(promoted) - 1; index >= 0; index-- {
+		appendName(promoted[index])
+	}
+	for _, definition := range ranked {
+		if definition != nil {
+			appendName(definition.Name())
+		}
+	}
+	return selected
+}
+
+func authoritativeToolSearchMatches(names []string, catalog []tools.ToolDefinition, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	authoritative := make(map[string]bool, len(catalog))
+	for _, definition := range catalog {
+		if definition != nil {
+			authoritative[definition.Name()] = true
+		}
+	}
+	matches := make([]string, 0, limit)
+	seen := make(map[string]bool, limit)
+	for _, name := range names {
+		if !authoritative[name] || seen[name] {
+			continue
+		}
+		seen[name] = true
+		matches = append(matches, name)
+		if len(matches) == limit {
+			break
+		}
+	}
+	return matches
+}
+
 // buildToolOpts builds LLM generation options from tool definitions and an
 // optional thinking config. Used to rebuild tool options per-iteration when
 // dynamic tool filtering is active.
@@ -2827,9 +3440,11 @@ func systemPromptFromDefs(defs []tools.ToolDefinition) string {
 Rules:
 1. NEVER stop with a statement like "Let me install..." or "I need to..." and then do nothing. If you say you will do something, immediately call a tool to do it in the same turn.
 2. When a tool call fails or returns an error, diagnose the cause and try an alternative approach. Do not give up after a single failure.
-3. Keep iterating (call tools, observe results, adjust) until the user's request is fully satisfied. Only produce a final text answer with NO tool calls when the task is genuinely complete.
+3. Keep iterating (call tools, observe results, adjust) until the user's request is fully satisfied. Before claiming completion, verify the requested deliverables and relevant checks. If a verified blocker prevents further authorized progress, state the blocker and unfinished work accurately instead of claiming success.
 4. Do not guess or fabricate information when a tool can provide the answer.
-5. If a skill tool is available and relevant, call it first to obtain expert instructions, then follow those instructions using other tools.`
+5. If a skill tool is available and relevant, call it first to obtain expert instructions, then follow those instructions using other tools.
+6. Perform branch, commit, or publish steps only when explicitly requested or authorized by the task, and verify their completion before reporting them as done.
+7. Before installing dependencies, use existing evidence or a focused check to establish what is missing. Batch independent, predictable read-only checks; keep dependent or mutating steps ordered. Start testing with the smallest case that distinguishes likely faults, then complete all required validation.`
 	if len(defs) == 0 {
 		return base
 	}

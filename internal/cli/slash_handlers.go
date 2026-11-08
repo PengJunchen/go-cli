@@ -45,14 +45,14 @@ func (h *HelpHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 	fmt.Fprintln(deps.Out(), "  exit      Exit the interactive session") //nolint:errcheck
 	fmt.Fprintln(deps.Out(), "\nCapability boundaries (default entry):") //nolint:errcheck
 	for _, boundary := range []string{
-		"Memory: workspace-scoped automatic extraction and prompt context are enabled by default; memory.enabled: false disables both. /memory manages stored records.",
+		"Memory: workspace-scoped automatic extraction and prompt context are disabled by default; memory.enabled: true enables both. /memory manages stored records.",
 		"Goal, Task, and Todo: stored only in memory for this process; not kept across restarts.",
 		"Session storage: without session.store_path, /session is unsupported.",
 		"Durable sessions support saved-state inspection, clear, compact, retry, branch navigation, and exact physical resume; unknown actions remain fenced.",
 		"Use /session resume to list physical IDs; /session entry <entry-id> navigates current history. Legacy files use session inspect-legacy/import-legacy.",
 		"Legacy mutable mode supports /session tree, branches, resume, fork, clone, and switch with a wired mutable tree; resume listing needs a session store.",
 		"Session snapshot and schema migration are unavailable.",
-		"Image reading and Web Agent UI: unavailable. Web Search requires a configured provider.",
+		"Image reading via the default read tool supports PNG/JPEG images up to 512 KiB when using an image-capable model. Web Agent UI is unavailable. Web Search requires a configured provider.",
 		"Remote TUI is unavailable. Serve exposes only the private go-cli-acp-json/1 profile; official ACP and ask approvals are unavailable.",
 		"Serve requires --approve auto or --approve deny. Hard cost budgets are unsupported; usage and cost reports may be incomplete or estimated, and a displayed $0 is not proof of zero spend.",
 		"Plan Mode changes only through the user's /plan enter|exit commands; model calls cannot switch it.",
@@ -927,6 +927,10 @@ func (h *RetryHandler) Handle(_ context.Context, _ []string, deps Dependencies) 
 	lastUserIdx := -1
 	for i := lastAssistantIdx - 1; i >= 0; i-- {
 		if msgs[i].Role == "user" {
+			source := msgs[i].Runtime.Source.Kind
+			if source == llm.SourceRunSummary || (source == llm.SourcePriorPublished && msgs[i].Runtime.CompactionMarker) {
+				continue
+			}
 			lastUserIdx = i
 			break
 		}

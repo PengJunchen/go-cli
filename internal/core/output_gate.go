@@ -13,12 +13,33 @@ const (
 	guardedStreamMaxToolCalls = llm.GuardedStreamMaxToolCalls
 )
 
+// CandidateOutputRejectionCode identifies a safe, non-content denial class.
+type CandidateOutputRejectionCode uint8
+
+const (
+	// CandidateOutputRejectionUnknown cannot authorize local regeneration.
+	CandidateOutputRejectionUnknown CandidateOutputRejectionCode = iota
+	// CandidateOutputRejectionPII identifies a built-in PII-only denial.
+	CandidateOutputRejectionPII
+)
+
 // CandidateOutputResult is the safe text decision for one complete logical
 // assistant response. Tool arguments remain structured and are reviewed by
 // the normal tool approval and schema paths.
 type CandidateOutputResult struct {
-	Allowed   bool
-	Sanitized string
+	Allowed       bool
+	Sanitized     string
+	RejectionCode CandidateOutputRejectionCode
+}
+
+// completeResponseDenied carries no candidate content or guard reason.
+type completeResponseDenied struct {
+	code     CandidateOutputRejectionCode
+	terminal bool
+}
+
+func (*completeResponseDenied) Error() string {
+	return "core: complete-response guard denied candidate"
 }
 
 // CompleteResponseGuard checks plain text only after all provider
@@ -29,9 +50,10 @@ type CompleteResponseGuard interface {
 }
 
 type guardedStreamBudget struct {
-	bytes   int
-	chunks  int
-	visible bool
+	bytes         int
+	chunks        int
+	visible       bool
+	assistantText bool
 }
 
 func (b *guardedStreamBudget) accountChunk(chunk llm.MessageChunk) error {

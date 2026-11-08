@@ -81,16 +81,17 @@ func TestSystemPromptRebuiltOnToolChange(t *testing.T) {
 	first := builder.Build(context.Background(), SystemPromptOptions{
 		Tools: []tools.ToolDefinition{toolA},
 	})
-	assert.Contains(t, first, "read")
+	assert.Contains(t, first, "You have access to these tools: read.")
 	assert.Contains(t, first, "Read files safely")
 	require.Equal(t, 1, toolA.guidelineCallCount())
 
 	second := builder.Build(context.Background(), SystemPromptOptions{
 		Tools: []tools.ToolDefinition{toolB},
 	})
-	assert.Contains(t, second, "write")
+	assert.Contains(t, second, "You have access to these tools: write.")
 	assert.Contains(t, second, "Write files carefully")
-	assert.NotContains(t, second, "read", "rebuilt prompt must reflect new tools")
+	assert.NotContains(t, second, "You have access to these tools: read.", "rebuilt prompt must reflect new tools")
+	assert.NotContains(t, second, "Read files safely", "rebuilt prompt must discard old tool guidance")
 	assert.NotEqual(t, first, second, "prompt must change when tools change")
 	require.Equal(t, 1, toolB.guidelineCallCount(), "buildInner should run for the new tool set")
 }

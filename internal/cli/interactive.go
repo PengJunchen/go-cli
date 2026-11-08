@@ -224,8 +224,14 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 
 	var inputTokens, outputTokens int
 	var unknownUsageAttempts, unknownCostAttempts int
+	var cacheReadInputTokens, reasoningOutputTokens int
+	var cacheReadKnownInputTokens int
+	var cacheReadReported, reasoningReported bool
+	var cacheReadKnownAttempts, cacheReadUnknownAttempts, reasoningKnownAttempts, reasoningUnknownAttempts int
 	var attemptUsageAvailable bool
 	usageSource := core.TokenUsageSourceUnknown
+	primaryCoverage := llm.UsageCoverageUnknown
+	usageScope := core.TokenUsageScopeUnknown
 	providerModels := make(map[core.TokenUsageProviderModel]struct{})
 	costSources := make(map[core.TokenUsageCostSource]struct{})
 	priceSources := make(map[core.TokenUsagePriceSource]struct{})
@@ -240,10 +246,26 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 			outputTokens = summary.KnownOutputTokens
 			unknownUsageAttempts = summary.UnknownUsageAttempts
 			unknownCostAttempts = summary.UnknownCostAttempts
-			if summary.UnknownUsageAttempts < summary.Attempts {
+			cacheReadInputTokens = summary.KnownCacheReadInputTokens
+			cacheReadKnownInputTokens = summary.CacheReadKnownInputTokens
+			reasoningOutputTokens = summary.KnownReasoningOutputTokens
+			cacheReadKnownAttempts = summary.CacheReadKnownAttempts
+			cacheReadUnknownAttempts = summary.CacheReadUnknownAttempts
+			reasoningKnownAttempts = summary.ReasoningKnownAttempts
+			reasoningUnknownAttempts = summary.ReasoningUnknownAttempts
+			cacheReadReported = cacheReadKnownAttempts > 0
+			reasoningReported = reasoningKnownAttempts > 0
+			if summary.KnownPrimarySubtotalAttempts > 0 {
 				usageSource = core.TokenUsageSourceReported
 			}
+			usageScope = core.TokenUsageScopeObservedAttempts
+			var observedUsage llm.ContinuationUsageAccumulator
 			for _, attempt := range attempts {
+				if attempt.Result.Usage.State == llm.UsageKnown {
+					observedUsage.Observe(attempt.Result.Usage.Usage)
+				} else {
+					observedUsage.Observe(nil)
+				}
 				providerModels[core.TokenUsageProviderModel{
 					ProviderID: attempt.Result.Identity.ProviderID,
 					ModelID:    attempt.Result.Identity.ModelID,
@@ -251,27 +273,46 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 				costSources[tokenUsageCostSource(attempt.Status)] = struct{}{}
 				priceSources[tokenUsagePriceSource(attempt.PriceSource)] = struct{}{}
 			}
+			if observed := observedUsage.Usage(); observed != nil {
+				primaryCoverage = observed.PrimaryCoverage.Normalized()
+			}
+			if summary.PrimarySubtotalIncomplete && summary.KnownPrimarySubtotalAttempts > 0 {
+				primaryCoverage = llm.UsageCoveragePartial
+			}
 		}
 		if summary.LegacyCalls > 0 {
 			unknownUsageAttempts += summary.LegacyCalls
+			cacheReadUnknownAttempts += summary.LegacyCalls
+			reasoningUnknownAttempts += summary.LegacyCalls
 			costSources[core.TokenUsageCostEstimated] = struct{}{}
 			priceSources[tokenUsagePriceSource(summary.LegacyPriceSource)] = struct{}{}
 		}
 	}
 
-	// Prefer API-reported usage from the last assistant message that has it.
-	// API usage reflects the actual token consumption for the full
-	// conversation (input = prompt tokens, output = completion tokens).
+	// Prefer API-reported usage from the latest assistant message. An earlier
+	// report does not describe a later response whose usage is missing.
 	if !attemptUsageAvailable {
 		if usage := lastAssistantAPIUsage(messages); usage != nil {
 			inputTokens = usage.InputTokens
 			outputTokens = usage.OutputTokens
+			cacheReadReported = usage.CacheReadInputTokensReported && usage.CacheReadInputTokens >= 0 && usage.CacheReadInputTokens <= usage.InputTokens
+			if cacheReadReported {
+				cacheReadInputTokens = usage.CacheReadInputTokens
+				cacheReadKnownInputTokens = usage.InputTokens
+			}
+			reasoningReported = usage.ReasoningOutputTokensReported && usage.ReasoningOutputTokens >= 0 && usage.ReasoningOutputTokens <= usage.OutputTokens
+			if reasoningReported {
+				reasoningOutputTokens = usage.ReasoningOutputTokens
+			}
 			usageSource = core.TokenUsageSourceReported
+			primaryCoverage = usage.PrimaryCoverage.Normalized()
+			usageScope = core.TokenUsageScopeLatestAssistantMessage
 		} else {
 			// Fall back to local estimation when neither the operation ledger nor
 			// the latest assistant response reported authoritative usage.
 			if assembly.Estimator != nil {
 				usageSource = core.TokenUsageSourceEstimated
+				usageScope = core.TokenUsageScopeMessageHistoryEstimate
 				for _, msg := range messages {
 					n, _ := assembly.Estimator.Estimate(msg.Content) //nolint:errcheck
 					if msg.Role == "assistant" {
@@ -308,16 +349,27 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 		Kind:      "token_usage",
 		Timestamp: time.Now(),
 		TokenUsage: &core.TokenUsage{
-			InputTokens:          inputTokens,
-			OutputTokens:         outputTokens,
-			MaxTokens:            contextWindow,
-			Cost:                 cost,
-			UnknownUsageAttempts: unknownUsageAttempts,
-			UnknownCostAttempts:  unknownCostAttempts,
-			UsageSource:          usageSource,
-			CostSources:          sortedTokenUsageCostSources(costSources),
-			PriceSources:         sortedTokenUsagePriceSources(priceSources),
-			ProviderModels:       providerModelList,
+			InputTokens:                   inputTokens,
+			OutputTokens:                  outputTokens,
+			CacheReadInputTokens:          cacheReadInputTokens,
+			CacheReadInputTokensReported:  cacheReadReported,
+			CacheReadKnownInputTokens:     cacheReadKnownInputTokens,
+			CacheReadKnownAttempts:        cacheReadKnownAttempts,
+			CacheReadUnknownAttempts:      cacheReadUnknownAttempts,
+			ReasoningOutputTokens:         reasoningOutputTokens,
+			ReasoningOutputTokensReported: reasoningReported,
+			ReasoningKnownAttempts:        reasoningKnownAttempts,
+			ReasoningUnknownAttempts:      reasoningUnknownAttempts,
+			MaxTokens:                     contextWindow,
+			Cost:                          cost,
+			UnknownUsageAttempts:          unknownUsageAttempts,
+			UnknownCostAttempts:           unknownCostAttempts,
+			UsageSource:                   usageSource,
+			PrimaryCoverage:               primaryCoverage,
+			UsageScope:                    usageScope,
+			CostSources:                   sortedTokenUsageCostSources(costSources),
+			PriceSources:                  sortedTokenUsagePriceSources(priceSources),
+			ProviderModels:                providerModelList,
 		},
 	})
 }
@@ -364,12 +416,11 @@ func sortedTokenUsagePriceSources(sources map[core.TokenUsagePriceSource]struct{
 	return result
 }
 
-// lastAssistantAPIUsage scans messages from the end and returns the Usage from
-// the last assistant message that carries non-nil API-reported usage, or nil
-// when none is found.
+// lastAssistantAPIUsage returns the latest assistant message's usage, which
+// may be nil. Older reports must not stand in for an unknown latest response.
 func lastAssistantAPIUsage(messages []core.AgentMessage) *llm.Usage {
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "assistant" && messages[i].Usage != nil {
+		if messages[i].Role == "assistant" {
 			return messages[i].Usage
 		}
 	}

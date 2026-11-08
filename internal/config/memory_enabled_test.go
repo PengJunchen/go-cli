@@ -6,11 +6,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMemoryAutomaticDefaultAndExplicitDisableMerge(t *testing.T) {
+func TestMemoryAutomaticDefaultAndExplicitEnableMerge(t *testing.T) {
 	for _, testCase := range []struct {
 		data string
 		want bool
-	}{{`{}`, true}, {`{"memory":{"enabled":false}}`, false}, {`{"memory":{"enabled":true}}`, true}} {
+	}{{`{}`, false}, {`{"memory":{"enabled":false}}`, false}, {`{"memory":{"enabled":true}}`, true}} {
 		cfg, err := NewLoader().WithEnvPrefix("CATALOG_MEMORY_FIXTURE").WithFileBytes("memory.json", []byte(testCase.data)).Load(t.Context())
 		require.NoError(t, err)
 		require.Equal(t, testCase.want, cfg.Memory.AutomaticEnabled())

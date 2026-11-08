@@ -30,6 +30,11 @@ const (
 	ThinkingMax ThinkingLevel = 5
 )
 
+// IsValid reports whether level is one of the defined thinking levels.
+func (level ThinkingLevel) IsValid() bool {
+	return level >= ThinkingNone && level <= ThinkingMax
+}
+
 // thinkingBudgets maps each ThinkingLevel to its token budget.
 var thinkingBudgets = map[ThinkingLevel]int{
 	ThinkingNone:    0,

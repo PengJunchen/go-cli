@@ -54,8 +54,8 @@ func commandProcessGroupAlive(pgid int) (bool, error) {
 	return true, err
 }
 
-func startManagedLocalBashCommandWithIdentityObserver(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd, observer ProcessExecutionIdentityObserver) (*managedLocalCommand, error) {
-	gate, err := installBashProcessStartGate(cmd)
+func startManagedLocalBashCommandWithIdentityObserver(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd, observer ProcessExecutionIdentityObserver, limits bashResourceSettings) (*managedLocalCommand, error) {
+	gate, err := installBashProcessStartGateWithLimits(cmd, limits)
 	if err != nil {
 		return nil, fmt.Errorf("tools: prepare Bash process start gate: %w", err)
 	}
@@ -63,6 +63,9 @@ func startManagedLocalBashCommandWithIdentityObserver(ctx context.Context, cance
 	defer gate.abort()
 
 	return startManagedLocalCommandWithStartHook(ctx, cancel, cmd, func(started *exec.Cmd) error {
+		// The child owns its duplicate once Start returns. Closing our copy
+		// reveals bootstrap failure before the environment release can block.
+		gate.closeReadEnd()
 		if started.Process == nil || started.Process.Pid <= 0 {
 			return errors.New("bash process start returned no child identity")
 		}
@@ -76,10 +79,11 @@ func startManagedLocalBashCommandWithIdentityObserver(ctx context.Context, cance
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("prepared Bash canceled before start-gate release: %w", err)
 		}
+		release := func() error { return gate.releaseWithContext(ctx) }
 		if input, supplied := bashRuntimeInputFromContext(ctx); supplied && input.guard != nil {
-			return input.guard(ctx, gate.release)
+			return input.guard(ctx, release)
 		}
-		return startPreparedEffect(ctx, gate.release)
+		return startPreparedEffect(ctx, release)
 	})
 }
 
@@ -91,6 +95,10 @@ type bashProcessStartGate struct {
 }
 
 func installBashProcessStartGate(cmd *exec.Cmd) (*bashProcessStartGate, error) {
+	return installBashProcessStartGateWithLimits(cmd, bashResourceSettings{})
+}
+
+func installBashProcessStartGateWithLimits(cmd *exec.Cmd, limits bashResourceSettings) (*bashProcessStartGate, error) {
 	if cmd == nil || cmd.Path == "" || cmd.Env == nil || len(cmd.Args) != 3 || cmd.Args[1] != "-c" || len(cmd.ExtraFiles) != 0 {
 		return nil, errors.New("managed Bash start gate requires the exact local bash -c invocation")
 	}
@@ -124,7 +132,7 @@ func installBashProcessStartGate(cmd *exec.Cmd) (*bashProcessStartGate, error) {
 		"--noprofile",
 		"--norc",
 		"-c",
-		managedBashGateScript(fd),
+		managedBashGateScript(fd, limits),
 		argv0,
 		command,
 		bashPath,
@@ -217,7 +225,7 @@ func requireRootOwnedPath(info os.FileInfo, path string) error {
 	return nil
 }
 
-func managedBashGateScript(fd int) string {
+func managedBashGateScript(fd int, limits bashResourceSettings) string {
 	// The helper receives opaque NUL-delimited environment entries over fd3.
 	// Bash read/export preserve newlines and shell metacharacters without eval.
 	// SHELLOPTS and BASHOPTS are reconstructed from validated option names;
@@ -225,7 +233,7 @@ func managedBashGateScript(fd int) string {
 	// them after startup would require evaluating their function definitions.
 	script := `builtin read -r -d '' gate_token <&__GATE_FD__ || builtin exit 125
 [[ $gate_token == go-cli-identity-release ]] || builtin exit 125
-while IFS= builtin read -r -d '' gate_entry <&__GATE_FD__; do
+` + bashResourceGateScript(limits) + `while IFS= builtin read -r -d '' gate_entry <&__GATE_FD__; do
 	gate_key=${gate_entry%%=*}
 	case $gate_key in
 	SHELLOPTS)
@@ -265,6 +273,40 @@ done
 exec __GATE_FD__<&-
 builtin exec -a "$0" "$2" -c "$1"`
 	return strings.ReplaceAll(script, "__GATE_FD__", strconv.Itoa(fd))
+}
+
+func bashResourceGateScript(limits bashResourceSettings) string {
+	if !limits.enabled() {
+		return ""
+	}
+	// Compare decimal strings by length and lexical order to avoid shell
+	// arithmetic overflow when an inherited finite limit exceeds int64.
+	script := `gate_apply_limit() {
+	local gate_flag=$1 gate_limit=$2 gate_current gate_kind
+	for gate_kind in -S -H; do
+		gate_current=$(builtin ulimit "$gate_kind" "$gate_flag") || return 1
+		case $gate_current in
+		unlimited) continue ;;
+		''|*[!0-9]*) return 1 ;;
+		esac
+		while [[ ${#gate_current} -gt 1 && ${gate_current:0:1} == 0 ]]; do
+			gate_current=${gate_current:1}
+		done
+		if [[ ${#gate_current} -lt ${#gate_limit} ]] || { [[ ${#gate_current} -eq ${#gate_limit} ]] && [[ $gate_current < $gate_limit ]]; }; then
+			gate_limit=$gate_current
+		fi
+	done
+	builtin ulimit -S "$gate_flag" "$gate_limit" || return 1
+	builtin ulimit -H "$gate_flag" "$gate_limit" || return 1
+}
+`
+	if limits.cpuSeconds != 0 {
+		script += fmt.Sprintf("gate_apply_limit -t %d || builtin exit 125\n", limits.cpuSeconds)
+	}
+	if limits.memoryKiB != 0 {
+		script += fmt.Sprintf("gate_apply_limit -v %d || builtin exit 125\n", limits.memoryKiB)
+	}
+	return script
 }
 
 func prepareBashRestoreEnvironment(env []string) ([]string, error) {
@@ -408,6 +450,16 @@ func (g *bashProcessStartGate) release() error {
 		return errors.Join(writeErr, closeErr)
 	}
 	return nil
+}
+
+func (g *bashProcessStartGate) releaseWithContext(ctx context.Context) error {
+	stopOnCancel := context.AfterFunc(ctx, func() { _ = g.closeWriteEnd() })
+	defer stopOnCancel()
+	err := g.release()
+	if err != nil && ctx.Err() != nil {
+		return errors.Join(err, ctx.Err())
+	}
+	return err
 }
 
 func (g *bashProcessStartGate) abort() {

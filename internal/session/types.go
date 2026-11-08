@@ -19,6 +19,18 @@ import (
 // EntryType categorizes a single immutable session entry.
 type EntryType string
 
+// RetainedSourceEntry binds a retained message to its immutable journal row.
+type RetainedSourceEntry struct {
+	EntryID       string `json:"entry_id"`
+	PayloadDigest string `json:"payload_digest"`
+}
+
+// RetainedExchange identifies a complete retained source exchange and its rows.
+type RetainedExchange struct {
+	Range   llm.RetainedSourceRange `json:"range"`
+	Entries []RetainedSourceEntry   `json:"entries"`
+}
+
 func init() {
 	slog.Debug("session types initialized", "entry_types", []string{"user", "assistant", "tool", "compaction", "system", "checkpoint"})
 }
@@ -151,6 +163,25 @@ type SessionEntry struct {
 	// validated against the complete action reference during recovery; identity
 	// fields remain diagnostic and are not themselves quiescence proof.
 	CompletionProof tools.PreparedCompletionProof `json:"completion_proof,omitempty"`
+	// ProcessSessionLease stores exact host-owned process facts. Its manager
+	// authority is runtime-only and is never restored from this row.
+	ProcessSessionLease  *tools.ProcessSessionLeaseSnapshot `json:"process_session_lease,omitempty"`
+	ProcessSessionAction *tools.ProcessSessionActionRecord  `json:"process_session_action,omitempty"`
+	// RetainedInputEntryID and RetainedInputDigest bind a compaction summary to
+	// the exact current user input retained immediately before it.
+	RetainedInputEntryID       string `json:"retained_input_entry_id,omitempty"`
+	RetainedInputPayloadDigest string `json:"retained_input_payload_digest,omitempty"`
+	RetainedInputDigest        string `json:"retained_input_digest,omitempty"`
+	// RetainedExchanges bind retained source ranges to canonical journal rows.
+	RetainedExchanges       []RetainedExchange `json:"retained_exchanges,omitempty"`
+	RetainedHistoryRevision string             `json:"retained_history_revision,omitempty"`
+	RetainedHistoryBranchID string             `json:"retained_history_branch_id,omitempty"`
+	// ActiveProcessSessions carries only opaque IDs needed to resume control of
+	// exact, still-live process sessions after this compaction.
+	ActiveProcessSessions []core.ActiveProcessSessionRef `json:"active_process_sessions,omitempty"`
+	// ProcessSessionDelivery binds a terminal checkpoint to the exact live
+	// sessions accepted by this invocation's host.
+	ProcessSessionDelivery *tools.ProcessSessionDeliveryBinding `json:"process_session_delivery,omitempty"`
 	// AssistantTranscriptOrdinal identifies the assistant tool-call message
 	// occurrence within its run.
 	AssistantTranscriptOrdinal *uint64 `json:"assistant_transcript_ordinal,omitempty"`
@@ -177,6 +208,13 @@ func (e *SessionEntry) clone() *SessionEntry {
 		return nil
 	}
 	cp := *e
+	if e.RetainedExchanges != nil {
+		cp.RetainedExchanges = make([]RetainedExchange, len(e.RetainedExchanges))
+		for i, exchange := range e.RetainedExchanges {
+			cp.RetainedExchanges[i] = exchange
+			cp.RetainedExchanges[i].Entries = append([]RetainedSourceEntry(nil), exchange.Entries...)
+		}
+	}
 	if e.Generation != nil {
 		metadata := *e.Generation
 		cp.Generation = &metadata
@@ -199,6 +237,22 @@ func (e *SessionEntry) clone() *SessionEntry {
 	if e.ExecutionIdentity != nil {
 		identity := *e.ExecutionIdentity
 		cp.ExecutionIdentity = &identity
+	}
+	if e.ProcessSessionLease != nil {
+		lease := tools.CloneProcessSessionLeaseSnapshot(*e.ProcessSessionLease)
+		cp.ProcessSessionLease = &lease
+	}
+	if e.ProcessSessionAction != nil {
+		action := *e.ProcessSessionAction
+		cp.ProcessSessionAction = &action
+	}
+	if e.ActiveProcessSessions != nil {
+		cp.ActiveProcessSessions = append([]core.ActiveProcessSessionRef(nil), e.ActiveProcessSessions...)
+	}
+	if e.ProcessSessionDelivery != nil {
+		binding := *e.ProcessSessionDelivery
+		binding.SessionIDs = append([]string(nil), e.ProcessSessionDelivery.SessionIDs...)
+		cp.ProcessSessionDelivery = &binding
 	}
 	if e.ToolIdentity != nil {
 		identity := *e.ToolIdentity
@@ -278,6 +332,10 @@ const (
 	CheckpointRunTerminal CheckpointKind = "run_terminal"
 	// CheckpointExecutionResolution marks validated action-resource evidence.
 	CheckpointExecutionResolution CheckpointKind = "execution_resolution"
+	// CheckpointProcessSessionLease records a typed host-owned process lease transition.
+	CheckpointProcessSessionLease CheckpointKind = "process_session_lease"
+	// CheckpointProcessSessionAction records a joined process-session control call.
+	CheckpointProcessSessionAction CheckpointKind = "process_session_action"
 	// CheckpointActiveLeaf marks a branch's durable active leaf.
 	CheckpointActiveLeaf CheckpointKind = "active_leaf"
 	// CheckpointBranch marks a branch fork over a shared immutable prefix.

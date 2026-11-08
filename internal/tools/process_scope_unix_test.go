@@ -30,8 +30,12 @@ func TestSSHPassEscapedChildHelper(t *testing.T) {
 	if _, err := syscall.Setsid(); err != nil {
 		t.Fatalf("detach fake ssh child from sshpass process group: %v", err)
 	}
-	if err := os.WriteFile(*sshpassEscapedChildMarker+".pid", []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+	pidPath := *sshpassEscapedChildMarker + ".pid"
+	if err := os.WriteFile(pidPath+".tmp", []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 		t.Fatalf("write escaped child pid: %v", err)
+	}
+	if err := os.Rename(pidPath+".tmp", pidPath); err != nil {
+		t.Fatalf("publish escaped child pid: %v", err)
 	}
 	time.Sleep(600 * time.Millisecond)
 	if err := os.WriteFile(*sshpassEscapedChildMarker, []byte("finished"), 0o600); err != nil {

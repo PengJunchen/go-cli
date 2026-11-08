@@ -19,7 +19,6 @@ import (
 
 const (
 	streamingBashTruncatedMarker = "\n[output truncated]"
-	streamingBashMaxLineBytes    = 1 << 20
 )
 
 // StreamSink is the interface for emitting real-time tool output. It is
@@ -101,6 +100,25 @@ func (c *streamingBashOutputCapture) markTruncated() bool {
 	}
 	c.truncated = true
 	return true
+}
+
+// sourceLine copies one complete line already retained in the shared capture.
+// Each pipe has one reader, so no other goroutine appends to the same stream.
+func (c *streamingBashOutputCapture) sourceLine(stream string, size int) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	source := c.stdout.Bytes()
+	if stream == "stderr" {
+		source = c.stderr.Bytes()
+	}
+	line := source[len(source)-size:]
+	if len(line) > 0 && line[len(line)-1] == '\n' {
+		line = line[:len(line)-1]
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+	}
+	return string(line)
 }
 
 func (c *streamingBashOutputCapture) output() (string, bool) {
@@ -195,8 +213,13 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 		return nil, fmt.Errorf("bash: canceled before start: %w", err)
 	}
 
-	// Wrap the command with resource limits.
-	command = wrapCommandWithLimits(command, t.ResourceLimits)
+	limits, err := effectiveBashResourceSettings(t.ResourceLimits, t.Sandbox)
+	if err != nil {
+		reportPreparedNoProcessCompletion(ctx)
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("streaming_bash.invalid_resource_limits", "tool", "bash", "err", err)
+		return nil, err
+	}
 
 	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = t.Workdir
@@ -205,7 +228,7 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 		cmd.Stdin = runtimeBashStdin(ctx)
 	}
 
-	managed, err := startManagedLocalBashCommand(execCtx, cancel, cmd)
+	managed, err := startManagedLocalBashCommand(execCtx, cancel, cmd, limits)
 	if err != nil {
 		return nil, fmt.Errorf("bash: start: %w", err)
 	}
@@ -314,61 +337,50 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 
 // readPipe reads source-framed lines from pipe and pushes each through the StreamSink.
 // Output is retained within the shared capture limit; after the limit or a
-// scanner error, the remaining bytes are drained so the child can finish.
+// reader error, the remaining bytes are drained so the child can finish.
 // The returned bool reports whether the pipe was drained to EOF.
 func readPipe(pipe io.Reader, stream string, sink StreamSink, toolCallID string, capture *streamingBashOutputCapture) (bool, error) {
-	scanner := bufio.NewScanner(pipe)
-	scanner.Buffer(make([]byte, 64*1024), streamingBashMaxLineBytes)
-	scanner.Split(scanStreamingBashSourceLines)
+	reader := bufio.NewReaderSize(pipe, 64*1024)
 	stopCapturing := false
-	for scanner.Scan() {
-		if stopCapturing {
-			continue
-		}
-		source := scanner.Bytes()
-		line := source
-		if len(line) > 0 && line[len(line)-1] == '\n' {
-			line = line[:len(line)-1]
-			if len(line) > 0 && line[len(line)-1] == '\r' {
-				line = line[:len(line)-1]
+	lineBytes := 0
+	for {
+		source, readErr := reader.ReadSlice('\n')
+		if !stopCapturing && len(source) > 0 {
+			captured, newlyTruncated := capture.addSourceBytes(stream, source)
+			if captured {
+				lineBytes += len(source)
+			} else {
+				stopCapturing = true
+				lineBytes = 0
+			}
+			if newlyTruncated {
+				sendTruncationMarker(sink, toolCallID, stream)
 			}
 		}
-		captured, newlyTruncated := capture.addSourceBytes(stream, source)
-		if !captured {
-			stopCapturing = true
+		if readErr != bufio.ErrBufferFull && !stopCapturing && lineBytes > 0 {
+			if sink != nil {
+				_ = sink.Send(capture.sourceLine(stream, lineBytes), toolCallID, stream) //nolint:errcheck // best-effort streaming
+			}
+			lineBytes = 0
 		}
-		if captured && sink != nil {
-			_ = sink.Send(string(line), toolCallID, stream) //nolint:errcheck // best-effort streaming
-		}
-		if newlyTruncated {
-			sendTruncationMarker(sink, toolCallID, stream)
+		switch readErr {
+		case nil, bufio.ErrBufferFull:
+			continue
+		case io.EOF:
+			return true, nil
+		default:
+			if capture.markTruncated() {
+				sendTruncationMarker(sink, toolCallID, stream)
+			}
+			_, drainErr := io.Copy(io.Discard, reader)
+			readerErr := fmt.Errorf("bash: %s output reader: %w", stream, readErr)
+			if drainErr != nil {
+				readerErr = errors.Join(readerErr, fmt.Errorf("bash: %s output drain: %w", stream, drainErr))
+				return false, readerErr
+			}
+			return true, readerErr
 		}
 	}
-
-	if scanErr := scanner.Err(); scanErr != nil {
-		if capture.markTruncated() {
-			sendTruncationMarker(sink, toolCallID, stream)
-		}
-		_, drainErr := io.Copy(io.Discard, pipe)
-		readerErr := fmt.Errorf("bash: %s output scanner: %w", stream, scanErr)
-		if drainErr != nil {
-			readerErr = errors.Join(readerErr, fmt.Errorf("bash: %s output drain: %w", stream, drainErr))
-			return false, readerErr
-		}
-		return true, readerErr
-	}
-
-	return true, nil
-}
-
-func scanStreamingBashSourceLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	if lineEnding := bytes.IndexByte(data, '\n'); lineEnding >= 0 {
-		return lineEnding + 1, data[:lineEnding+1], nil
-	}
-	if atEOF && len(data) > 0 {
-		return len(data), data, nil
-	}
-	return 0, nil, nil
 }
 
 func sendTruncationMarker(sink StreamSink, toolCallID, stream string) {

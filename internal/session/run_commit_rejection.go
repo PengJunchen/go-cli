@@ -7,12 +7,15 @@ import (
 	"reflect"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 type closedRejectedBatch struct {
-	batch    core.RunIntentBatch
-	receipts []core.RunToolReceipt
-	consumed bool
+	batch               core.RunIntentBatch
+	admissionCapability *tools.ProcessSessionAdmissionCapability
+	admissionBinding    tools.ProcessSessionAdmissionBinding
+	receipts            []core.RunToolReceipt
+	consumed            bool
 }
 
 var _ core.RunCommitRejectedBatchSource = (*SessionRunCommitSink)(nil)
@@ -45,11 +48,60 @@ func (s *SessionRunCommitSink) TakeRejectedIntentBatch(ctx context.Context, batc
 	if closed == nil || closed.consumed {
 		return nil, false, nil
 	}
-	if !reflect.DeepEqual(closed.batch, batch) {
+	if !sameRejectedIntentBatch(closed, batch) {
 		return nil, false, errors.New("session: rejected-batch lookup does not match its exact captured batch")
 	}
 	closed.consumed = true
 	return cloneRejectedReceipts(closed.receipts), true, nil
+}
+
+func sameRejectedIntentBatch(closed *closedRejectedBatch, candidate core.RunIntentBatch) bool {
+	if closed == nil {
+		return false
+	}
+	captured := closed.batch
+	if captured.RunID != candidate.RunID || captured.ActionBatchID != candidate.ActionBatchID ||
+		captured.AssistantTranscriptOrdinal != candidate.AssistantTranscriptOrdinal ||
+		captured.CanonicalWorkspaceRoot != candidate.CanonicalWorkspaceRoot ||
+		!reflect.DeepEqual(captured.AssistantMessage, candidate.AssistantMessage) ||
+		len(captured.Intents) != len(candidate.Intents) || len(captured.KnownReceipts) != len(candidate.KnownReceipts) {
+		return false
+	}
+	if captured.ProcessSessionAdmission != closed.admissionCapability ||
+		candidate.ProcessSessionAdmission != closed.admissionCapability {
+		return false
+	}
+	if closed.admissionCapability != nil && !candidate.ProcessSessionAdmission.MatchesBinding(closed.admissionBinding) {
+		return false
+	}
+	for index := range captured.Intents {
+		if !sameRejectedActionIntent(captured.Intents[index], candidate.Intents[index]) {
+			return false
+		}
+	}
+	for index := range captured.KnownReceipts {
+		if !sameRejectedToolReceipt(captured.KnownReceipts[index], candidate.KnownReceipts[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameRejectedActionIntent(left, right core.ActionIntent) bool {
+	return left.SessionID == right.SessionID && left.WorkspaceID == right.WorkspaceID && left.RunID == right.RunID &&
+		left.ActionBatchID == right.ActionBatchID && left.OwnerGeneration == right.OwnerGeneration &&
+		left.AssistantTranscriptOrdinal == right.AssistantTranscriptOrdinal && left.ToolCallID == right.ToolCallID &&
+		left.ActionID == right.ActionID && left.ToolIdentity.Snapshot() == right.ToolIdentity.Snapshot() &&
+		reflect.DeepEqual(left.EffectSet.Values(), right.EffectSet.Values()) && left.SchemaDigest == right.SchemaDigest &&
+		left.ArgumentDigest == right.ArgumentDigest && left.ScopedReadProof == right.ScopedReadProof &&
+		left.ManagedDelegationProof == right.ManagedDelegationProof
+}
+
+func sameRejectedToolReceipt(left, right core.RunToolReceipt) bool {
+	return left.RunID == right.RunID && left.AssistantTranscriptOrdinal == right.AssistantTranscriptOrdinal &&
+		left.ToolCallID == right.ToolCallID && left.ActionID == right.ActionID && left.TranscriptIndex == right.TranscriptIndex &&
+		left.DispatchState == right.DispatchState && left.ReceiptOutcome == right.ReceiptOutcome &&
+		reflect.DeepEqual(left.Message, right.Message)
 }
 
 func (s *SessionRunCommitSink) closeRejectedBatchLocked(ctx context.Context, batch core.RunIntentBatch) error {
@@ -147,6 +199,13 @@ func (s *SessionRunCommitSink) closeRejectedBatchLocked(ctx context.Context, bat
 	if len(closed) == 0 {
 		return errors.New("session: denied batch had no unreceipted calls")
 	}
-	s.rejectedBatch = &closedRejectedBatch{batch: cloneRejectedBatch(batch), receipts: cloneRejectedReceipts(closed)}
+	var admissionBinding tools.ProcessSessionAdmissionBinding
+	if batch.ProcessSessionAdmission != nil {
+		admissionBinding = batch.ProcessSessionAdmission.CaptureBinding()
+	}
+	s.rejectedBatch = &closedRejectedBatch{
+		batch: cloneRejectedBatch(batch), admissionCapability: batch.ProcessSessionAdmission,
+		admissionBinding: admissionBinding, receipts: cloneRejectedReceipts(closed),
+	}
 	return nil
 }

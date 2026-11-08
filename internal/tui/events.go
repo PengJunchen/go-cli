@@ -1,6 +1,9 @@
 package tui
 
-import "github.com/pengjunchen/go-cli/internal/core"
+import (
+	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
+)
 
 // Msg is the generic message type delivered to an App via Send. It corresponds
 // to tea.Msg in the bubbletea-based design: any value pushed through Send is
@@ -64,14 +67,25 @@ type ToolCallData struct {
 
 // TokenUsageData mirrors core.TokenUsage for the TUI layer.
 type TokenUsageData struct {
-	InputTokens          int
-	OutputTokens         int
-	MaxTokens            int
-	Cost                 float64
-	UnknownUsageAttempts int
-	UnknownCostAttempts  int
-	UsageSource          core.TokenUsageSource
-	CostSources          []core.TokenUsageCostSource
-	PriceSources         []core.TokenUsagePriceSource
-	ProviderModels       []core.TokenUsageProviderModel
+	InputTokens                   int
+	OutputTokens                  int
+	CacheReadInputTokens          int
+	CacheReadInputTokensReported  bool
+	CacheReadKnownInputTokens     int
+	CacheReadKnownAttempts        int
+	CacheReadUnknownAttempts      int
+	ReasoningOutputTokens         int
+	ReasoningOutputTokensReported bool
+	ReasoningKnownAttempts        int
+	ReasoningUnknownAttempts      int
+	MaxTokens                     int
+	Cost                          float64
+	UnknownUsageAttempts          int
+	UnknownCostAttempts           int
+	UsageSource                   core.TokenUsageSource
+	PrimaryCoverage               llm.PrimaryUsageCoverage
+	UsageScope                    core.TokenUsageScope
+	CostSources                   []core.TokenUsageCostSource
+	PriceSources                  []core.TokenUsagePriceSource
+	ProviderModels                []core.TokenUsageProviderModel
 }

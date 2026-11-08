@@ -145,7 +145,7 @@ func runR3AssemblyEnvelopeCase(t *testing.T, inputLimit, toolSearchThreshold int
 
 	cfg := newAssembleTestConfig(t)
 	cfg.Provider.BaseURL = provider.server.URL
-	cfg.Provider.Model = "assembly-39-envelope"
+	cfg.Provider.Model = "assembly-40-envelope"
 	cfg.Provider.MaxTokens = 512
 	cfg.Agent.SystemPrompt = "s"
 	assembly, err := AssembleAgent(ctx, cfg, "openai", cfg.Provider.Model, io.Discard, WithApproveMode(ApproveAuto))
@@ -155,11 +155,16 @@ func runR3AssemblyEnvelopeCase(t *testing.T, inputLimit, toolSearchThreshold int
 
 	definitions, err := assembly.ToolRegistry.List(ctx)
 	require.NoError(t, err)
-	require.Len(t, definitions, 38, "the stock Assembly registry baseline is stable for this acceptance fixture")
+	require.Len(t, definitions, 39, "the scoped process_session capability is part of the stock Assembly registry")
+	registeredNames := make([]string, 0, len(definitions))
+	for _, definition := range definitions {
+		registeredNames = append(registeredNames, definition.Name())
+	}
+	require.Contains(t, registeredNames, "process_session", "Assembly exposes process_session only with its owned run/workspace manager")
 	require.NoError(t, assembly.ToolRegistry.Register(ctx, r3EnvelopeFixtureTool{}))
 	definitions, err = assembly.ToolRegistry.List(ctx)
 	require.NoError(t, err)
-	require.Len(t, definitions, 39, "the request must use the complete assembled registry plus one explicit schema fixture")
+	require.Len(t, definitions, 40, "the request must use the complete assembled registry plus one explicit schema fixture")
 	if toolSearchThreshold > 0 {
 		assembly.LoopAgent.WithToolSearchThreshold(toolSearchThreshold)
 	}
@@ -198,12 +203,18 @@ func TestAssembledDefault30ToolRequestUsesLocalEnvelopeWhenProviderLimitIsUnknow
 	r3RequirePlanMatchesRequestBody(t, result.estimator, plan, body)
 }
 
-func TestAssembledFull39ToolRequestFitsKnownProviderLimitAfterEnvelopeTerms(t *testing.T) {
+func TestAssembledFull40ToolRequestFitsKnownProviderLimitAfterEnvelopeTerms(t *testing.T) {
 	result := runR3AssemblyEnvelopeCase(t, 12000, 1000)
-	require.NoError(t, result.err, "39 tool schemas must fit a known P=12000 provider envelope without inflating local C")
+	require.NoError(t, result.err, "40 tool schemas must fit a known P=12000 provider envelope without inflating local C")
 	require.EqualValues(t, 1, result.server.requests.Load())
 	plan, body := r3OnlyPreparedPlanAndBody(t, result)
-	require.Len(t, plan.Options().Tools, 39, "the acceptance request must exercise all assembled tool schemas")
+	options := plan.Options()
+	require.Len(t, options.Tools, 40, "the acceptance request must exercise all assembled tool schemas")
+	toolNames := make([]string, 0, len(options.Tools))
+	for _, tool := range options.Tools {
+		toolNames = append(toolNames, tool.Name)
+	}
+	require.Contains(t, toolNames, "process_session", "the full-registry request includes the manager-scoped process lifecycle capability")
 	require.Equal(t, 12000, plan.Estimate().RawInputLimit)
 	require.Equal(t, 9600, plan.Estimate().ProviderEnvelopeBudget)
 	require.LessOrEqual(t, plan.Estimate().AccountedMessages.Tokens, plan.Estimate().LocalMessageBudget)
@@ -211,10 +222,10 @@ func TestAssembledFull39ToolRequestFitsKnownProviderLimitAfterEnvelopeTerms(t *t
 	r3RequirePlanMatchesRequestBody(t, result.estimator, plan, body)
 }
 
-func TestAssembledFull39ToolRequestExceedsKnownProviderLimitBeforeDispatch(t *testing.T) {
+func TestAssembledFull40ToolRequestExceedsKnownProviderLimitBeforeDispatch(t *testing.T) {
 	result := runR3AssemblyEnvelopeCase(t, 8000, 1000)
 	require.ErrorIs(t, result.err, core.ErrRequestEnvelopeRejected)
-	require.Zero(t, result.server.requests.Load(), "P=8000 cannot admit the full 39-tool envelope under the frozen output reserve")
+	require.Zero(t, result.server.requests.Load(), "P=8000 cannot admit the full 40-tool envelope under the frozen output reserve")
 	require.Empty(t, result.recorder.planSnapshot(), "a rejected candidate must not start provider streaming")
 	select {
 	case body := <-result.server.bodies:

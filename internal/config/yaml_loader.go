@@ -77,10 +77,15 @@ func UnmarshalConfig(data []byte, format ConfigFormat, target any) error {
 		if err != nil {
 			return err
 		}
+		multimodalReservePresent, err := inspectJSONMultimodalReservePresence(target, values)
+		if err != nil {
+			return err
+		}
 		if err := json.Unmarshal(data, target); err != nil {
 			return err
 		}
 		applyJSONSamplingPresence(target, samplingPresence)
+		applyMultimodalReservePresence(target, multimodalReservePresent)
 		return nil
 	case ConfigFormatYAML:
 		tree, err := parseYAMLTree(data)
@@ -91,14 +96,96 @@ func UnmarshalConfig(data []byte, format ConfigFormat, target any) error {
 		if !ok {
 			return fmt.Errorf("yaml: top level must be a mapping")
 		}
+		multimodalReservePresent, err := inspectYAMLMultimodalReservePresence(target, m)
+		if err != nil {
+			return err
+		}
 		if err := assignFromMap(target, m); err != nil {
 			return err
 		}
 		recordSamplingPresence(target, m)
+		applyMultimodalReservePresence(target, multimodalReservePresent)
 		return nil
 	default:
 		return fmt.Errorf("config: unsupported format %s", format)
 	}
+}
+
+func inspectJSONMultimodalReservePresence(target any, values map[string]any) (bool, error) {
+	var fieldValue any
+	var present bool
+	var err error
+	switch target.(type) {
+	case *Config:
+		sectionValue, exists, lookupErr := lookupJSONKey(values, "agent", "agent")
+		if lookupErr != nil || !exists || sectionValue == nil {
+			return false, lookupErr
+		}
+		section, ok := sectionValue.(map[string]any)
+		if !ok {
+			return false, nil
+		}
+		fieldValue, present, err = lookupJSONKey(section, "agent.multimodal_tokens_per_item_reserve", "multimodal_tokens_per_item_reserve")
+	case *AgentConfig:
+		fieldValue, present, err = lookupJSONKey(values, "multimodal_tokens_per_item_reserve", "multimodal_tokens_per_item_reserve")
+	default:
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if present && fieldValue == nil {
+		return false, fmt.Errorf("config: agent.multimodal_tokens_per_item_reserve cannot be null")
+	}
+	return present, nil
+}
+
+func applyMultimodalReservePresence(target any, present bool) {
+	if !present {
+		return
+	}
+	switch cfg := target.(type) {
+	case *Config:
+		if cfg != nil {
+			cfg.Agent.multimodalTokensPerItemReserveSet = true
+		}
+	case *AgentConfig:
+		if cfg != nil {
+			cfg.multimodalTokensPerItemReserveSet = true
+		}
+	}
+}
+
+func inspectYAMLMultimodalReservePresence(target any, values map[string]any) (bool, error) {
+	var agentValues map[string]any
+	switch target.(type) {
+	case *Config:
+		agentValues = mapValue(values, "agent")
+	case *AgentConfig:
+		agentValues = values
+	default:
+		return false, nil
+	}
+	if agentValues == nil {
+		return false, nil
+	}
+	value, present := agentValues["multimodal_tokens_per_item_reserve"]
+	if !present {
+		return false, nil
+	}
+	var integer int64
+	switch typed := value.(type) {
+	case int64:
+		integer = typed
+	case int:
+		integer = int64(typed)
+	default:
+		return false, fmt.Errorf("yaml: agent.multimodal_tokens_per_item_reserve must be an integer")
+	}
+	if int64(int(integer)) != integer {
+		return false, fmt.Errorf("yaml: agent.multimodal_tokens_per_item_reserve is out of range")
+	}
+	return true, nil
 }
 
 type samplingPresenceMarks struct {

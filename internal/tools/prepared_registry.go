@@ -164,25 +164,35 @@ func (r *MiddlewareToolRegistry) prepareToolCallWithStreamSink(ctx context.Conte
 	if decision.Generations != snapshot.generations {
 		return nil, ErrDispatchFenceChanged
 	}
+	toolSearchPromotionEligible := false
+	if search, ok := snapshot.definition.(*ToolSearchTool); ok && search != nil {
+		toolSearchPromotionEligible =
+			snapshot.identity.RegistrationSource() == RegistrationSourceTrustedControl &&
+				snapshot.identity.ToolName() == "tool_search" &&
+				completionProof == CompletionInlinePipelineJoined &&
+				synchronousToolSearchRegistry(search.reg)
+	}
 
 	executor := preparedExecutor(snapshot.definition, snapshot.pipeline.stages.ExecutionWrappers, frozenCall)
 	config := preparedInvocationConfig{
-		fence:                   fence,
-		generations:             decision.Generations,
-		identity:                snapshot.identity,
-		effects:                 snapshot.effects,
-		projectTrustBinding:     snapshot.projectTrustBinding,
-		dispatchLease:           snapshot.dispatchLease,
-		canonicalWorkspaceRoot:  snapshot.canonicalWorkspaceRoot,
-		workspaceReadWhitelist:  append([]string(nil), snapshot.workspaceReadWhitelist...),
-		scopedReadProofEligible: snapshot.scopedReadProofEligible,
-		managedDelegation:       snapshot.managedDelegation,
-		schema:                  snapshot.schema,
-		call:                    frozenCall,
-		execute:                 executor,
-		completionProof:         completionProof,
-		streamingSink:           attestedSink,
-		terminalObserver:        decision.TerminalObserver,
+		fence:                       fence,
+		generations:                 decision.Generations,
+		definition:                  snapshot.definition,
+		identity:                    snapshot.identity,
+		effects:                     snapshot.effects,
+		projectTrustBinding:         snapshot.projectTrustBinding,
+		dispatchLease:               snapshot.dispatchLease,
+		canonicalWorkspaceRoot:      snapshot.canonicalWorkspaceRoot,
+		workspaceReadWhitelist:      append([]string(nil), snapshot.workspaceReadWhitelist...),
+		scopedReadProofEligible:     snapshot.scopedReadProofEligible,
+		managedDelegation:           snapshot.managedDelegation,
+		schema:                      snapshot.schema,
+		call:                        frozenCall,
+		execute:                     executor,
+		completionProof:             completionProof,
+		toolSearchPromotionEligible: toolSearchPromotionEligible,
+		streamingSink:               attestedSink,
+		terminalObserver:            decision.TerminalObserver,
 	}
 	if preparedQueue != nil {
 		config.schedule = preparedMutationScheduler(preparedQueue, frozenCall)
@@ -682,7 +692,10 @@ func preparedExecutor(def ToolDefinition, wrappers []ToolExecutorWrapper, frozen
 		if !matchesFrozenCall(call, frozen) {
 			return nil, ErrPreparedCallMutation
 		}
-		return def.Execute(ctx, canonical)
+		executionCtx := withPreparedEditExecution(ctx, def)
+		executionCtx = withPreparedEditRetryExecution(executionCtx, def)
+		executionCtx = withPreparedReadExecution(executionCtx, def)
+		return def.Execute(executionCtx, canonical)
 	}
 	for i := len(wrappers) - 1; i >= 0; i-- {
 		if wrappers[i] != nil {

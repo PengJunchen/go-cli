@@ -207,24 +207,25 @@ func (t *LSTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error
 		}
 	}
 	truncated = truncated || entries.Truncated() || output.Truncated()
+	text, records := renderDirectoryOutput(output, truncated)
 
 	span.SetAttributes(
 		tracing.Attribute{Key: "path", Value: listPath},
-		tracing.Attribute{Key: "entries", Value: output.Records()},
+		tracing.Attribute{Key: "entries", Value: records},
 		tracing.Attribute{Key: "truncated", Value: truncated},
 		tracing.Attribute{Key: "success", Value: true},
 	)
 	logger.Info("ls.done",
 		"tool", "ls",
 		"path", listPath,
-		"entries", output.Records(),
+		"entries", records,
 		"sort", sortBy,
 		"truncated", truncated,
 		"duration_ms", time.Since(start).Milliseconds())
 
 	return &ToolResult{
-		Output:   output.String(),
-		Metadata: map[string]any{"path": listPath, "entries": output.Records(), "sort": sortBy, "truncated": truncated},
+		Output:   text,
+		Metadata: map[string]any{"path": listPath, "entries": records, "sort": sortBy, "truncated": truncated},
 	}, nil
 }
 

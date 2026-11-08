@@ -27,6 +27,7 @@ import (
 	"github.com/muesli/termenv"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 // activeToolCallGroup contains only presentation-time associations for the
@@ -769,6 +770,8 @@ type teaModel struct {
 	tokenUnknownUsageAttempts int
 	tokenUnknownCostAttempts  int
 	tokenUsageSource          core.TokenUsageSource
+	tokenPrimaryCoverage      llm.PrimaryUsageCoverage
+	tokenUsageScope           core.TokenUsageScope
 	tokenCostSources          []core.TokenUsageCostSource
 	tokenPriceSources         []core.TokenUsagePriceSource
 	tokenProviderModels       []core.TokenUsageProviderModel
@@ -1457,21 +1460,53 @@ func (m *teaModel) renderStatusBarLocked() string {
 		}
 		return statusBarLineStyle.Render(line1)
 	}
-	total := m.tokenInput + m.tokenOutput
+	validCounts := m.tokenInput >= 0 && m.tokenOutput >= 0
+	var total uint64
+	if validCounts {
+		total = uint64(m.tokenInput) + uint64(m.tokenOutput)
+	}
 	maxT := m.tokenMax
-	pct := 0
-	if maxT > 0 {
-		pct = total * 100 / maxT
+	maxInt := uint64(^uint(0) >> 1)
+	pct, pctRepresentable := 0, total <= maxInt/100
+	if maxT > 0 && pctRepresentable {
+		pct = int(total) * 100 / maxT
 	}
 	usageSource := tokenUsageSourceLabel(m.tokenUsageSource)
+	scopedUsage := m.tokenUsageScope == core.TokenUsageScopeLatestAssistantMessage || m.tokenUsageScope == core.TokenUsageScopeObservedAttempts
 	usageDetails := "Tokens: unknown"
 	switch {
-	case usageSource == string(core.TokenUsageSourceEstimated):
+	case usageSource == string(core.TokenUsageSourceEstimated) && validCounts:
 		usageDetails = fmt.Sprintf("Estimated tokens: %d/%d", total, maxT)
-	case usageSource == string(core.TokenUsageSourceReported) && m.tokenUnknownUsageAttempts > 0:
-		usageDetails = fmt.Sprintf("Known tokens: %d/%d", total, maxT)
-	case usageSource == string(core.TokenUsageSourceReported):
-		usageDetails = fmt.Sprintf("Tokens: %d/%d (%d%%)", total, maxT, pct)
+	case usageSource == string(core.TokenUsageSourceReported) && validCounts:
+		prefix := "Tokens"
+		switch m.tokenUsageScope {
+		case core.TokenUsageScopeLatestAssistantMessage:
+			prefix = "Message tokens"
+		case core.TokenUsageScopeObservedAttempts:
+			prefix = "Observed tokens"
+		}
+		coverage := m.tokenPrimaryCoverage.Normalized()
+		legacyAttemptUnknown := !scopedUsage && m.tokenUnknownUsageAttempts > 0
+		switch {
+		case legacyAttemptUnknown || coverage == llm.UsageCoveragePartial:
+			switch m.tokenUsageScope {
+			case core.TokenUsageScopeLatestAssistantMessage:
+				prefix = "Message subtotal"
+			case core.TokenUsageScopeObservedAttempts:
+				prefix = "Observed subtotal"
+			default:
+				prefix = "Known tokens"
+			}
+		case coverage == llm.UsageCoverageUnknown:
+			prefix += " (coverage unknown)"
+		}
+		if scopedUsage {
+			usageDetails = fmt.Sprintf("%s: in=%d out=%d", prefix, m.tokenInput, m.tokenOutput)
+		} else if coverage == llm.UsageCoverageComplete && !legacyAttemptUnknown && pctRepresentable {
+			usageDetails = fmt.Sprintf("%s: %d/%d (%d%%)", prefix, total, maxT, pct)
+		} else {
+			usageDetails = fmt.Sprintf("%s: %d/%d", prefix, total, maxT)
+		}
 	}
 
 	costSources := tokenUsageCostSourceLabels(m.tokenCostSources)
@@ -1488,7 +1523,7 @@ func (m *teaModel) renderStatusBarLocked() string {
 		costDetails = fmt.Sprintf("Cost: $%.4f", m.tokenCost)
 	}
 	line2 := truncateStatusBarText(fmt.Sprintf("%s | %s", usageDetails, costDetails), statusWidth)
-	usageComplete := m.tokenUnknownUsageAttempts == 0 && usageSource == string(core.TokenUsageSourceReported)
+	usageComplete := !scopedUsage && validCounts && pctRepresentable && m.tokenUnknownUsageAttempts == 0 && usageSource == string(core.TokenUsageSourceReported) && m.tokenPrimaryCoverage.Normalized() == llm.UsageCoverageComplete
 	if usageComplete && pct > 80 {
 		line2 = statusBarWarnStyle.Render(line2)
 	}
@@ -1571,7 +1606,8 @@ func truncateStatusBarText(value string, width int) string {
 
 func (m *teaModel) hasTokenUsageStatus() bool {
 	return m.tokenMax != 0 || m.tokenCost != 0 || m.tokenInput != 0 || m.tokenOutput != 0 ||
-		m.tokenUsageSource != "" || len(m.tokenCostSources) > 0 || len(m.tokenPriceSources) > 0 ||
+		m.tokenUsageSource != "" || m.tokenPrimaryCoverage != "" || m.tokenUsageScope != "" ||
+		len(m.tokenCostSources) > 0 || len(m.tokenPriceSources) > 0 ||
 		len(m.tokenProviderModels) > 0 || m.tokenUnknownUsageAttempts > 0 || m.tokenUnknownCostAttempts > 0
 }
 
@@ -1795,6 +1831,8 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		m.tokenUnknownUsageAttempts = ev.TokenUsage.UnknownUsageAttempts
 		m.tokenUnknownCostAttempts = ev.TokenUsage.UnknownCostAttempts
 		m.tokenUsageSource = ev.TokenUsage.UsageSource
+		m.tokenPrimaryCoverage = ev.TokenUsage.PrimaryCoverage.Normalized()
+		m.tokenUsageScope = ev.TokenUsage.UsageScope
 		m.tokenCostSources = append([]core.TokenUsageCostSource(nil), ev.TokenUsage.CostSources...)
 		m.tokenPriceSources = append([]core.TokenUsagePriceSource(nil), ev.TokenUsage.PriceSources...)
 		m.tokenProviderModels = append([]core.TokenUsageProviderModel(nil), ev.TokenUsage.ProviderModels...)

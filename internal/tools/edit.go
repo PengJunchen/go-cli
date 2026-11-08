@@ -2,10 +2,10 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"time"
 
@@ -14,6 +14,40 @@ import (
 
 // EditFileToolOption configures an EditFileTool.
 type EditFileToolOption func(*EditFileTool)
+
+// EditMatchError reports that an edit did not find exactly one target match.
+// The matching attempt does not modify the file.
+type EditMatchError struct {
+	path         string
+	count        int
+	sourceDigest [32]byte
+}
+
+// MatchFailureKind identifies a zero-match or multiple-match failure.
+func (e *EditMatchError) MatchFailureKind() string {
+	if e == nil || e.path == "" {
+		return ""
+	}
+	if e.count == 0 {
+		return "no_match"
+	}
+	if e.count > 1 {
+		return "multiple_match"
+	}
+	return ""
+}
+
+func (e *EditMatchError) Error() string {
+	const recovery = "the file was not changed by this edit. Read the latest relevant file content and use an exact contiguous old_string, preserving whitespace and newlines; do not retry the same arguments"
+	switch e.MatchFailureKind() {
+	case "no_match":
+		return fmt.Sprintf("edit: old_string not found in %s; %s", e.path, recovery)
+	case "multiple_match":
+		return fmt.Sprintf("edit: old_string matches %d times in %s, expected exactly once; %s. Include enough surrounding context to make the match unique", e.count, e.path, recovery)
+	default:
+		return "edit: invalid match failure"
+	}
+}
 
 // WithEditPathWhitelist sets the allowed base paths for edit operations.
 // When configured, both the resolved real path (after symlink resolution) and
@@ -94,6 +128,9 @@ func (t *EditFileTool) PromptGuidelines() []string {
 // exactly once; zero or multiple occurrences produce an error. An empty
 // new_string removes the matched block.
 func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	span, _ := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 
@@ -126,39 +163,43 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		logger.Error("edit.path_traversal", "path", path, "err", err)
 		return nil, err
 	}
-
-	info, statErr := os.Stat(abspath)
-	if statErr != nil {
+	if err := rejectUnchangedPreparedEditRetry(ctx, abspath, oldString); err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		logger.Error("edit.stat_failed", "path", abspath, "err", statErr)
-		return nil, fmt.Errorf("edit: %w", statErr)
-	}
-	if info.IsDir() {
-		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		logger.Error("edit.is_dir", "path", abspath)
-		return nil, fmt.Errorf("edit: %q is a directory", abspath)
+		logger.Error("edit.recovery_retry_blocked", "path", abspath)
+		return nil, err
 	}
 
-	content, readErr := os.ReadFile(abspath)
-	if readErr != nil {
+	reportTargetError := func(event string, targetErr error) {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		logger.Error("edit.read_failed", "path", abspath, "err", readErr)
-		return nil, fmt.Errorf("edit: %w", readErr)
+		var conflict *EditConflictError
+		if errors.As(targetErr, &conflict) {
+			logger.Error("edit.conflict", "path", abspath, "reason", conflict.Reason, "success", false)
+		} else {
+			logger.Error(event, "path", abspath, "err", targetErr)
+		}
 	}
+
+	target, err := captureEditTarget(abspath, t.whitelist)
+	if err != nil {
+		reportTargetError("edit.read_failed", err)
+		return nil, fmt.Errorf("edit: %w", err)
+	}
+	defer func() { _ = target.close() }()
+	content, mode := target.snapshot()
 
 	data := string(content)
 	count := strings.Count(data, oldString)
 	switch count {
 	case 0:
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		logger.Error("edit.no_match", "path", abspath, "old_string", oldString)
-		return nil, fmt.Errorf("edit: old_string not found in %s", abspath)
+		logger.Error("edit.no_match", "path", abspath)
+		return nil, bindPreparedEditMatch(ctx, &EditMatchError{path: abspath, count: count, sourceDigest: sha256.Sum256(content)})
 	case 1:
 		// OK: exactly one occurrence.
 	default:
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		logger.Error("edit.multiple_match", "path", abspath, "old_string", oldString, "count", count)
-		return nil, fmt.Errorf("edit: old_string matches %d times in %s, expected exactly once", count, abspath)
+		logger.Error("edit.multiple_match", "path", abspath, "count", count)
+		return nil, bindPreparedEditMatch(ctx, &EditMatchError{path: abspath, count: count, sourceDigest: sha256.Sum256(content)})
 	}
 
 	updated := strings.Replace(data, oldString, newString, 1)
@@ -177,20 +218,26 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		reportTargetError("edit.canceled", err)
+		return nil, fmt.Errorf("edit: %w", err)
+	}
+	if err := target.revalidate(); err != nil {
+		reportTargetError("edit.revalidate_failed", err)
+		return nil, fmt.Errorf("edit: %w", err)
+	}
+
 	// When a file tracker is configured, create a backup checkpoint before
 	// applying the edit. Errors are logged but never block the edit.
 	if t.fileTracker != nil {
-		if _, berr := t.fileTracker.Backup(abspath); berr != nil {
+		if _, berr := t.fileTracker.backupExistingSnapshot(abspath, content, mode); berr != nil {
 			logger.Warn("edit.backup_failed", "path", abspath, "err", berr)
 		}
 	}
 
-	// Write the updated content atomically (temp file + rename) so a crash or
-	// write error never leaves the file truncated with partial content. The
-	// original permission bits are preserved by writeAtomic.
-	if _, werr := writeAtomicContext(ctx, abspath, []byte(updated)); werr != nil {
-		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		logger.Error("edit.write_failed", "path", abspath, "err", werr)
+	// Create and commit the replacement relative to the captured parent handle.
+	if werr := target.write(ctx, []byte(updated)); werr != nil {
+		reportTargetError("edit.write_failed", werr)
 		return nil, fmt.Errorf("edit: %w", werr)
 	}
 

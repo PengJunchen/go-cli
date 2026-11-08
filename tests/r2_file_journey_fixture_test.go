@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -248,21 +249,37 @@ func r2GuardAdvertisedCall(request []byte, name string, arguments []byte) (strin
 	}
 	for key, value := range args {
 		property, exists := properties[key].(map[string]any)
-		if !exists || property["type"] != "string" {
+		if !exists {
 			return "", fmt.Errorf("unknown or unsupported argument %s.%s", name, key)
 		}
-		text, isString := value.(string)
-		if !isString {
-			return "", fmt.Errorf("non-string fixture argument %s.%s", name, key)
-		}
-		if choices, hasEnum := property["enum"].([]any); hasEnum {
-			matched := false
-			for _, choice := range choices {
-				matched = matched || choice == text
+		switch property["type"] {
+		case "string":
+			text, isString := value.(string)
+			if !isString {
+				return "", fmt.Errorf("non-string fixture argument %s.%s", name, key)
 			}
-			if !matched {
-				return "", fmt.Errorf("invalid enum for %s.%s", name, key)
+			if choices, hasEnum := property["enum"].([]any); hasEnum {
+				matched := false
+				for _, choice := range choices {
+					matched = matched || choice == text
+				}
+				if !matched {
+					return "", fmt.Errorf("invalid enum for %s.%s", name, key)
+				}
 			}
+		case "integer":
+			number, ok := value.(float64)
+			if !ok || math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number {
+				return "", fmt.Errorf("non-integer fixture argument %s.%s", name, key)
+			}
+			if minimum, exists := property["minimum"]; exists && number < minimum.(float64) {
+				return "", fmt.Errorf("argument below minimum %s.%s", name, key)
+			}
+			if maximum, exists := property["maximum"]; exists && number > maximum.(float64) {
+				return "", fmt.Errorf("argument above maximum %s.%s", name, key)
+			}
+		default:
+			return "", fmt.Errorf("unknown or unsupported argument %s.%s", name, key)
 		}
 	}
 	for _, key := range required {
@@ -331,8 +348,21 @@ func r2SimpleFileSchema(schema map[string]any) (map[string]any, []string, error)
 						return nil, nil, fmt.Errorf("non-string enum member for %s", name)
 					}
 				}
+			case "minimum", "maximum":
+				bound, ok := value.(float64)
+				if kind != "integer" || !ok || math.IsNaN(bound) || math.IsInf(bound, 0) || math.Trunc(bound) != bound {
+					return nil, nil, fmt.Errorf("malformed integer %s for %s", keyword, name)
+				}
+				if (keyword == "minimum" && bound < 0) || (keyword == "maximum" && bound <= 0) {
+					return nil, nil, fmt.Errorf("invalid integer %s for %s", keyword, name)
+				}
 			default:
 				return nil, nil, fmt.Errorf("unsupported property keyword %s.%s", name, keyword)
+			}
+		}
+		if minimum, hasMinimum := property["minimum"].(float64); hasMinimum {
+			if maximum, hasMaximum := property["maximum"].(float64); hasMaximum && minimum > maximum {
+				return nil, nil, fmt.Errorf("minimum exceeds maximum for %s", name)
 			}
 		}
 	}

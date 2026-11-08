@@ -23,24 +23,50 @@ import (
 	"github.com/pengjunchen/go-cli/internal/memory"
 )
 
-func TestAutomaticMemoryDefaultOnThroughInteractiveCommand(t *testing.T) {
+func TestAutomaticMemoryDefaultOffThroughInteractiveCommand(t *testing.T) {
+	disabled := false
+	for _, testCase := range []struct {
+		name    string
+		enabled *bool
+	}{{name: "omitted"}, {name: "explicit false", enabled: &disabled}} {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := newMemoryTestServer(t)
+			defer server.Close()
+			cfg, home := newMemoryTestConfig(t, server.URL)
+			cfg.Memory.Enabled = testCase.enabled
+			var output bytes.Buffer
+			require.NoError(t, newInteractiveCmd(strings.NewReader("Please remember focused tests\nexit\n"), &output).Run(t.Context(), cfg, nil))
+			require.Zero(t, server.extractionRequests.Load())
+			require.Len(t, server.requestBodies(), 1, "automatic-memory-off turn makes only its main model request")
+			require.Empty(t, readStoredMemories(t, filepath.Join(home, ".go-cli", "memories.jsonl")))
+		})
+	}
+}
+
+func enableAutomaticMemoryForTest(cfg *config.Config) {
+	enabled := true
+	cfg.Memory.Enabled = &enabled
+}
+
+func TestAutomaticMemoryExplicitOptInThroughInteractiveCommand(t *testing.T) {
 	server := newMemoryTestServer(t)
 	defer server.Close()
 	cfg, _ := newMemoryTestConfig(t, server.URL)
-	cfg.Memory.Enabled = nil
+	enabled := true
+	cfg.Memory.Enabled = &enabled
 	var output bytes.Buffer
 	require.NoError(t, newInteractiveCmd(strings.NewReader("Please remember focused tests\nexit\n"), &output).Run(t.Context(), cfg, nil))
 	require.Equal(t, int32(1), server.extractionRequests.Load())
 }
 
-func TestAutomaticMemoryHelpDescribesDefaultAndDisable(t *testing.T) {
+func TestAutomaticMemoryHelpDescribesOptIn(t *testing.T) {
 	server := newMemoryTestServer(t)
 	defer server.Close()
 	cfg, _ := newMemoryTestConfig(t, server.URL)
 	var output bytes.Buffer
 	require.NoError(t, newInteractiveCmd(strings.NewReader("/help\nexit\n"), &output).Run(t.Context(), cfg, nil))
-	require.Contains(t, output.String(), "enabled by default")
-	require.Contains(t, output.String(), "memory.enabled: false")
+	require.Contains(t, output.String(), "disabled by default")
+	require.Contains(t, output.String(), "memory.enabled: true")
 	require.NotContains(t, output.String(), "no automatic extraction or prompt injection")
 	require.Empty(t, server.requestBodies())
 }
@@ -88,7 +114,7 @@ func TestAutomaticMemoryPersistsInjectsAndHonorsDisabledAndWorkspaceScopeAcrossP
 	server := newMemoryTestServer(t)
 	defer server.Close()
 	cfg, home := newMemoryTestConfig(t, server.URL)
-	cfg.Memory.Enabled = nil
+	enableAutomaticMemoryForTest(cfg)
 	var output bytes.Buffer
 	require.NoError(t, newInteractiveCmd(strings.NewReader("remember testing preference\nexit\n"), &output).Run(t.Context(), cfg, nil))
 	require.Equal(t, int32(1), server.extractionRequests.Load())
@@ -109,18 +135,18 @@ func TestAutomaticMemoryPersistsInjectsAndHonorsDisabledAndWorkspaceScopeAcrossP
 	require.Len(t, main, 3)
 	require.NotContains(t, string(main[2]), "automatically extracted canary")
 
-	cfg.Memory.Enabled = nil // Explicitly sharing a file still cannot share workspace facts.
+	enableAutomaticMemoryForTest(cfg) // Explicitly sharing a file still cannot share workspace facts.
 	runMemoryPromptProcess(t, cfg, t.TempDir())
 	main = mainMemoryRequestBodies(server)
 	require.Len(t, main, 4)
 	require.NotContains(t, string(main[3]), "automatically extracted canary")
 }
 
-func TestAutomaticMemoryDefaultOnThroughEphemeralInteractive(t *testing.T) {
+func TestAutomaticMemoryExplicitOptInThroughEphemeralInteractive(t *testing.T) {
 	server := newMemoryTestServer(t)
 	defer server.Close()
 	cfg, _ := newMemoryTestConfig(t, server.URL)
-	cfg.Memory.Enabled = nil
+	enableAutomaticMemoryForTest(cfg)
 	cfg.Session.StorePath = ""
 	var output bytes.Buffer
 	require.NoError(t, newInteractiveCmd(strings.NewReader("remember ephemeral success\nexit\n"), &output).Run(t.Context(), cfg, nil))
@@ -140,7 +166,7 @@ func TestAutomaticMemoryManagedChildrenDoNotExtractOrInjectForEitherContextMode(
 			)
 			defer server.Close()
 			cfg := durablePromptConfig(t, server.URL, filepath.Join(t.TempDir(), "sessions"))
-			cfg.Memory.Enabled = nil
+			enableAutomaticMemoryForTest(cfg)
 			cfg.Memory.StorePath = filepath.Join(t.TempDir(), "memory.jsonl")
 			_, workspaceID, err := resolveWorkspaceIdentity(os.Getwd)
 			require.NoError(t, err)
@@ -165,7 +191,7 @@ func TestAutomaticMemorySmallModelHasIndependentTrackedOperation(t *testing.T) {
 	server := newMemoryTestServer(t)
 	defer server.Close()
 	cfg, _ := newMemoryTestConfig(t, server.URL)
-	cfg.Memory.Enabled = nil
+	enableAutomaticMemoryForTest(cfg)
 	cfg.Session.StorePath = ""
 	cfg.SmallModel.Model = "memory-small"
 	cfg.SmallModel.SetMaxTokens(128)
@@ -218,7 +244,7 @@ func TestAutomaticMemoryPlanEpochAndDisableRevokeHeldHTTPExtraction(t *testing.T
 			}))
 			defer server.Close()
 			cfg, _ := newMemoryTestConfig(t, server.URL)
-			cfg.Memory.Enabled = nil
+			enableAutomaticMemoryForTest(cfg)
 			cfg.Session.StorePath = ""
 			assembly, err := AssembleAgent(t.Context(), cfg, "test", "test-model", io.Discard)
 			require.NoError(t, err)
@@ -253,7 +279,7 @@ func TestAutomaticLegacyMemoryDoesNotBlockCurrentWorkspaceRelearning(t *testing.
 	server := newMemoryTestServer(t)
 	defer server.Close()
 	cfg, home := newMemoryTestConfig(t, server.URL)
-	cfg.Memory.Enabled = nil
+	enableAutomaticMemoryForTest(cfg)
 	cfg.Memory.StorePath = filepath.Join(home, "shared-legacy.jsonl")
 	addStoredMemory(t, cfg.Memory.StorePath, memory.Memory{ID: "legacy-original", Content: "automatically extracted canary", Category: "preference", Source: "manual"})
 	var out bytes.Buffer
@@ -309,7 +335,7 @@ func TestAutomaticMemoryDeltaExcludesNewCompactionSummary(t *testing.T) {
 	}))
 	defer server.Close()
 	cfg, _ := newMemoryTestConfig(t, server.URL)
-	cfg.Memory.Enabled = nil
+	enableAutomaticMemoryForTest(cfg)
 	cfg.Compaction.Strategy = "summary"
 	cfg.SmallModel.Model = "small-model"
 	var out bytes.Buffer
@@ -344,7 +370,7 @@ func TestAutomaticMemoryGracefulPromptWaitsForSlowHTTPExtraction(t *testing.T) {
 	}))
 	defer server.Close()
 	cfg, home := newMemoryTestConfig(t, server.URL)
-	cfg.Memory.Enabled = nil
+	enableAutomaticMemoryForTest(cfg)
 	cfg.Memory.StorePath = filepath.Join(home, "slow.jsonl")
 	require.NoError(t, newPromptCmd(io.Discard).Run(t.Context(), cfg, []string{"remember slow success"}))
 	require.Len(t, readStoredMemories(t, cfg.Memory.StorePath), 1, "normal exit must permit extraction slower than two seconds")
@@ -365,7 +391,7 @@ func TestAutomaticMemoryCanceledGracefulDrainStopsHTTPExtraction(t *testing.T) {
 	}))
 	defer server.Close()
 	cfg, home := newMemoryTestConfig(t, server.URL)
-	cfg.Memory.Enabled = nil
+	enableAutomaticMemoryForTest(cfg)
 	cfg.Memory.StorePath = filepath.Join(home, "canceled.jsonl")
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

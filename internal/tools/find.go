@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -160,11 +161,12 @@ func (t *FindTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		}
 	}
 	truncated := captured.truncated || output.Truncated()
+	text, records := renderDirectoryOutput(output, truncated)
 
 	span.SetAttributes(
 		tracing.Attribute{Key: "path", Value: searchPath},
 		tracing.Attribute{Key: "pattern", Value: pattern},
-		tracing.Attribute{Key: "matches", Value: output.Records()},
+		tracing.Attribute{Key: "matches", Value: records},
 		tracing.Attribute{Key: "truncated", Value: truncated},
 		tracing.Attribute{Key: "success", Value: true},
 	)
@@ -172,13 +174,13 @@ func (t *FindTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		"tool", "find",
 		"path", searchPath,
 		"pattern", pattern,
-		"matches", output.Records(),
+		"matches", records,
 		"truncated", truncated,
 		"duration_ms", time.Since(start).Milliseconds())
 
 	return &ToolResult{
-		Output:   output.String(),
-		Metadata: map[string]any{"path": searchPath, "pattern": pattern, "matches": output.Records(), "truncated": truncated},
+		Output:   text,
+		Metadata: map[string]any{"path": searchPath, "pattern": pattern, "matches": records, "truncated": truncated},
 	}, nil
 }
 
@@ -363,6 +365,9 @@ func normalizeFindDirectoryPath(searchPath, candidate string) (string, bool, err
 func findPureGo(ctx context.Context, searchPath, pattern, kind string, maxDepth int) (result findCaptureResult, err error) {
 	if err := ctx.Err(); err != nil {
 		return findCaptureResult{}, err
+	}
+	if _, err := path.Match(pattern, ""); err != nil {
+		return findCaptureResult{}, fmt.Errorf("find: invalid name glob. Correct or remove the pattern argument: %w", err)
 	}
 	info, err := os.Stat(searchPath)
 	if err != nil {

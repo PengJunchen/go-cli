@@ -35,6 +35,13 @@ const (
 	GuardCritical GuardSeverity = "critical"
 )
 
+type guardRejectionCode uint8
+
+const (
+	guardRejectionUnknown guardRejectionCode = iota
+	guardRejectionBuiltinPII
+)
+
 // GuardResult is the outcome of running an OutputGuard against a text output.
 type GuardResult struct {
 	// Allowed reports whether the output may propagate. A false value (e.g.
@@ -46,7 +53,15 @@ type GuardResult struct {
 	// output. It equals the input when Allowed is true.
 	Sanitized string
 	// Severity indicates how serious the finding is.
-	Severity GuardSeverity
+	Severity      GuardSeverity
+	rejectionCode guardRejectionCode
+}
+
+// IsBuiltinPIIDenial reports the sole typed denial eligible for the guarded
+// CLI's local final-response recovery. The code is intentionally private so
+// custom guards cannot claim built-in PII provenance.
+func (r *GuardResult) IsBuiltinPIIDenial() bool {
+	return r != nil && !r.Allowed && r.Sanitized == "" && r.rejectionCode == guardRejectionBuiltinPII
 }
 
 // OutputGuard inspects a plain-text model output and decides whether it may
@@ -239,10 +254,11 @@ func (g *PIIOutputGuard) Check(ctx context.Context, text string) (*GuardResult, 
 	}
 	res := &GuardResult{Allowed: true, Sanitized: text, Severity: GuardHigh}
 	logger := slog.Default()
-	if p, ok := g.findPII(text); ok {
+	if p, code, ok := g.findPII(text); ok {
 		res.Allowed = false
 		res.Sanitized = ""
 		res.Reason = "output contains PII matching " + p.Name
+		res.rejectionCode = code
 	}
 	emitGuardResult(ctx, logger, g.Name(), res)
 	return res, nil
@@ -250,8 +266,8 @@ func (g *PIIOutputGuard) Check(ctx context.Context, text string) (*GuardResult, 
 
 // findPII returns the first built-in or custom pattern that matches text.
 // Credit card patterns require Luhn validation to confirm a real card number.
-func (g *PIIOutputGuard) findPII(text string) (PIIPattern, bool) {
-	for _, group := range [2][]PIIPattern{g.patterns, g.customPatterns} {
+func (g *PIIOutputGuard) findPII(text string) (PIIPattern, guardRejectionCode, bool) {
+	for index, group := range [2][]PIIPattern{g.patterns, g.customPatterns} {
 		for _, p := range group {
 			if !p.Pattern.MatchString(text) {
 				continue
@@ -259,10 +275,13 @@ func (g *PIIOutputGuard) findPII(text string) (PIIPattern, bool) {
 			if p.Name == creditCardPIIName && !luhnMatched(p.Pattern, text) {
 				continue
 			}
-			return p, true
+			if index == 0 {
+				return p, guardRejectionBuiltinPII, true
+			}
+			return p, guardRejectionUnknown, true
 		}
 	}
-	return PIIPattern{}, false
+	return PIIPattern{}, guardRejectionUnknown, false
 }
 
 // luhnMatched reports whether any match of re in text passes the Luhn checksum.
@@ -449,6 +468,7 @@ func (c *OutputGuardChain) Check(ctx context.Context, text string) (*GuardResult
 	defer span.End()
 
 	topSeverity := GuardSeverity("")
+	denialCount := 0
 	for _, g := range c.guards {
 		if err := checkContext(ctx); err != nil {
 			return nil, err
@@ -459,6 +479,12 @@ func (c *OutputGuardChain) Check(ctx context.Context, text string) (*GuardResult
 		}
 		combined.Sanitized = res.Sanitized
 		if !res.Allowed {
+			denialCount++
+			if denialCount == 1 {
+				combined.rejectionCode = res.rejectionCode
+			} else {
+				combined.rejectionCode = guardRejectionUnknown
+			}
 			combined.Allowed = false
 			if topSeverity == "" || severityRank(res.Severity) > severityRank(topSeverity) {
 				topSeverity = res.Severity

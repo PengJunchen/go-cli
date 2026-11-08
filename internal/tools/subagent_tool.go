@@ -96,9 +96,10 @@ func (t *SubagentTool) Description() string {
 	return "dispatch_subagent: delegates a task to a focused sub-agent and returns its final answer.\n" +
 		"\n" +
 		"Use this tool to delegate a task to a focused sub-agent when the work is self-contained (e.g. research, implementation, review, or testing).\n" +
+		"For independent investigations, include the objective, observed reproduction or failure evidence, expected versus actual behavior, locations already checked, constraints and prohibitions, and questions to answer. Mark missing details unknown; do not invent facts.\n" +
 		"\n" +
 		"Args:\n" +
-		"- prompt (string, required): a clear, specific task description. Write it so the sub-agent can execute without extra context.\n" +
+		"- prompt (string, required for a single task): a clear, specific task description. Write it so the sub-agent can execute without extra context.\n" +
 		"- id (string, optional): a unique task identifier; generated when omitted.\n" +
 		"- system_prompt (string, optional): an explicit system prompt for the sub-agent. Takes precedence over role.\n" +
 		"- role (string, optional): one of researcher, implementer, reviewer, tester. Selects a built-in role template when system_prompt is empty.\n" +
@@ -106,6 +107,8 @@ func (t *SubagentTool) Description() string {
 		"- model (string, optional): model name to override the sub-agent's LLM. When omitted, the sub-agent inherits the parent model.\n" +
 		"- max_turns (int, optional): bound on the sub-agent turn loop.\n" +
 		"- context_mode (string, optional): independent (default) or inherit parent conversation as reference data.\n" +
+		"- execution_mode (string, optional): parallel or sequential for a tasks array.\n" +
+		"Choose sequential for shared-workspace writes or dependent stages. Later sub-agents can read shared files but do not automatically receive earlier answers.\n" +
 		"\n" +
 		"The sub-agent will return its result as content. When present, Child physical session ID (physical_session_id) is the child's physical session ID and can be restored with --resume-session <physical_session_id>."
 }
@@ -143,34 +146,39 @@ func (t *SubagentTool) Parameters() any {
 				"type":        "boolean",
 				"description": "When true, dispatch the tasks array concurrently instead of a single prompt.",
 			},
+			"execution_mode": map[string]any{
+				"type":        "string",
+				"enum":        []string{"parallel", "sequential"},
+				"description": "Select sequential for dependent tasks or shared-workspace writes; later tasks do not automatically receive earlier answers.",
+			},
 			"tasks": map[string]any{
 				"type":        "array",
-				"description": "Array of tasks for parallel mode. Each task has prompt, role, tools, model, and max_turns fields.",
+				"description": "Array of tasks for parallel or sequential mode. Each task has prompt, role, tools, model, and max_turns fields.",
 				"items": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"context_mode": subagentContextModeSchema(),
 						"prompt": map[string]any{
 							"type":        "string",
-							"description": "Task description for this parallel sub-task.",
+							"description": "Task description for this sub-task.",
 						},
 						"role": map[string]any{
 							"type":        "string",
 							"enum":        []string{"researcher", "implementer", "reviewer", "tester"},
-							"description": "Role for this parallel sub-task.",
+							"description": "Role for this sub-task.",
 						},
 						"tools": map[string]any{
 							"type":        "array",
 							"items":       map[string]any{"type": "string"},
-							"description": "Tools for this parallel sub-task.",
+							"description": "Tools for this sub-task.",
 						},
 						"model": map[string]any{
 							"type":        "string",
-							"description": "Model override for this parallel sub-task.",
+							"description": "Model override for this sub-task.",
 						},
 						"max_turns": map[string]any{
 							"type":        "integer",
-							"description": "Turn limit for this parallel sub-task.",
+							"description": "Turn limit for this sub-task.",
 						},
 					},
 				},
@@ -194,18 +202,38 @@ func (t *SubagentTool) PromptGuidelines() []string {
 	return []string{
 		"Use dispatch_subagent to delegate self-contained tasks to a focused sub-agent (roles: researcher, implementer, reviewer, tester)",
 		"Set parallel=true with a tasks array to run independent sub-tasks concurrently and aggregate their results",
+		"Set execution_mode=sequential for sub-agent tasks with shared-workspace writes or stage dependencies; later tasks use shared files rather than automatically receiving earlier answers",
 		"Use the returned Child physical session ID (physical_session_id) with --resume-session <physical_session_id> to restore that sub-agent's physical session",
 		"Avoid dispatching trivial tasks that a single direct tool call can handle",
 	}
 }
 
 // Execute parses a sub-agent task from call.Args, dispatches it via the
-// dispatcher, and returns the sub-agent's final answer. When the parallel
-// parameter is true or a tasks array is provided, it dispatches all tasks
-// concurrently via ParallelDispatch and returns a structured summary.
+// dispatcher, and returns the sub-agent's final answer. A tasks array uses
+// parallel execution by default, unless execution_mode is sequential; in that
+// mode each child finishes before the next starts.
 func (t *SubagentTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
 	if err := validateSubagentContextMode(call.Args); err != nil {
 		return nil, err
+	}
+	if value, present := call.Args["execution_mode"]; present {
+		mode, ok := value.(string)
+		if !ok || (mode != "parallel" && mode != "sequential") {
+			return nil, errors.New("dispatch_subagent: execution_mode must be parallel or sequential")
+		}
+		if value, present := call.Args["parallel"]; present {
+			parallel, ok := value.(bool)
+			if !ok {
+				return nil, errors.New("dispatch_subagent: parallel must be a boolean when execution_mode is set")
+			}
+			if mode == "sequential" && parallel {
+				return nil, errors.New("dispatch_subagent: sequential execution conflicts with parallel=true")
+			}
+		}
+		if mode == "sequential" {
+			return t.executeSequential(ctx, call)
+		}
+		return t.executeParallel(ctx, call, call.Args["tasks"])
 	}
 	parallel, _ := call.Args["parallel"].(bool) //nolint:errcheck
 	tasksRaw := call.Args["tasks"]
@@ -269,6 +297,175 @@ func (t *SubagentTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 	return &ToolResult{Output: subagentContentWithSession(res), Metadata: metadata}, nil
 }
 
+// sequentialTasks validates the entire new-mode batch before any task starts.
+// Legacy parallel parsing intentionally keeps its existing permissive behavior.
+func sequentialTasks(call ToolCall) ([]map[string]any, []int, error) {
+	raw, ok := toAnySlice(call.Args["tasks"])
+	if !ok || len(raw) == 0 {
+		return nil, nil, errors.New("dispatch_subagent: sequential mode requires a non-empty tasks array")
+	}
+	tasks := make([]map[string]any, 0, len(raw))
+	turns := make([]int, 0, len(raw))
+	for i, value := range raw {
+		task, ok := value.(map[string]any)
+		if !ok || task == nil {
+			return nil, nil, fmt.Errorf("dispatch_subagent: task %d must be an object", i+1)
+		}
+		prompt, ok := task["prompt"].(string)
+		if !ok || strings.TrimSpace(prompt) == "" {
+			return nil, nil, fmt.Errorf("dispatch_subagent: task %d requires a non-empty prompt", i+1)
+		}
+		for _, key := range []string{"id", "system_prompt", "model"} {
+			if value, present := task[key]; present {
+				if _, ok := value.(string); !ok {
+					return nil, nil, fmt.Errorf("dispatch_subagent: task %d %s must be a string", i+1, key)
+				}
+			}
+		}
+		if value, present := task["role"]; present {
+			role, ok := value.(string)
+			if !ok || (role != "researcher" && role != "implementer" && role != "reviewer" && role != "tester") {
+				return nil, nil, fmt.Errorf("dispatch_subagent: task %d role is invalid", i+1)
+			}
+		}
+		if err := validateSubagentContextMode(task); err != nil {
+			return nil, nil, fmt.Errorf("dispatch_subagent: task %d: %w", i+1, err)
+		}
+		if value, present := task["tools"]; present {
+			switch values := value.(type) {
+			case []string:
+			case []any:
+				for _, item := range values {
+					if _, ok := item.(string); !ok {
+						return nil, nil, fmt.Errorf("dispatch_subagent: task %d tools must contain strings", i+1)
+					}
+				}
+			default:
+				return nil, nil, fmt.Errorf("dispatch_subagent: task %d tools must be an array", i+1)
+			}
+		}
+		maxTurns := 0
+		if value, present := task["max_turns"]; present {
+			number, ok := schemaRational(value)
+			if !ok || !number.IsInt() || !number.Num().IsInt64() {
+				return nil, nil, fmt.Errorf("dispatch_subagent: task %d max_turns must be a representable integer", i+1)
+			}
+			int64Value := number.Num().Int64()
+			maxTurns = int(int64Value)
+			if int64(maxTurns) != int64Value {
+				return nil, nil, fmt.Errorf("dispatch_subagent: task %d max_turns is out of range", i+1)
+			}
+		}
+		tasks = append(tasks, task)
+		turns = append(turns, maxTurns)
+	}
+	return tasks, turns, nil
+}
+
+// sequentialUnknownOutcome preserves partial batch details when cancellation
+// leaves the surrounding tool outcome unknown to the caller.
+type sequentialUnknownOutcome struct{ cause error }
+
+func (e sequentialUnknownOutcome) Error() string      { return e.cause.Error() }
+func (e sequentialUnknownOutcome) Unwrap() error      { return e.cause }
+func (sequentialUnknownOutcome) OutcomeUnknown() bool { return true }
+
+func (t *SubagentTool) executeSequential(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	taskMaps, turns, err := sequentialTasks(call)
+	if err != nil {
+		return nil, err
+	}
+	slog.Debug("tools.subagent.execute_sequential", "task_count", len(taskMaps))
+	states := make([]map[string]any, len(taskMaps))
+	for i := range states {
+		states[i] = map[string]any{"state": "not_started"}
+	}
+	ids := make([]string, 0, len(taskMaps))
+	var failure error
+	for i, item := range taskMaps {
+		if err := ctx.Err(); err != nil {
+			failure = err
+			break
+		}
+		id := getString(item, "id")
+		if id == "" {
+			id = nextRequestID(fmt.Sprintf("task-%d", i+1))
+		}
+		mode := getString(item, "context_mode")
+		if mode == "" {
+			mode = getString(call.Args, "context_mode")
+		}
+		task := SubagentTask{
+			ID:           id,
+			Prompt:       getString(item, "prompt"),
+			SystemPrompt: getString(item, "system_prompt"),
+			Role:         getString(item, "role"),
+			Tools:        toStringSlice(item["tools"]),
+			Model:        getString(item, "model"),
+			MaxTurns:     turns[i],
+			ContextMode:  mode,
+		}
+		result, dispatchErr := t.dispatcher.Dispatch(ctx, task)
+		if result.Error != nil {
+			if dispatchErr == nil {
+				dispatchErr = result.Error
+			} else if !errors.Is(dispatchErr, result.Error) {
+				dispatchErr = errors.Join(dispatchErr, result.Error)
+			}
+		}
+		state := map[string]any{"state": "completed", "task_id": task.ID, "content": result.Content}
+		if result.PhysicalSessionID != "" {
+			state["physical_session_id"] = result.PhysicalSessionID
+			ids = append(ids, result.PhysicalSessionID)
+		}
+		if dispatchErr != nil {
+			state["state"] = "failed"
+			state["error"] = dispatchErr.Error()
+			failure = dispatchErr
+		}
+		states[i] = state
+		if failure != nil {
+			break
+		}
+	}
+	if failure == nil {
+		failure = ctx.Err()
+	}
+	var output strings.Builder
+	for i, state := range states {
+		fmt.Fprintf(&output, "Task %d (%s)", i+1, state["state"]) //nolint:errcheck
+		if content, ok := state["content"].(string); ok && content != "" {
+			fmt.Fprintf(&output, ": %s", content) //nolint:errcheck
+		}
+		if id, ok := state["physical_session_id"].(string); ok {
+			output.WriteString(subagentSessionLine(id))
+		}
+		if message, ok := state["error"].(string); ok {
+			fmt.Fprintf(&output, "\nError: %s", message) //nolint:errcheck
+		}
+		output.WriteByte('\n')
+	}
+	result := &ToolResult{Output: strings.TrimRight(output.String(), "\n"), Metadata: map[string]any{"execution_mode": "sequential", "tasks": states, "physical_session_ids": ids}}
+	if failure != nil {
+		// Put recovery details first because tool failure receipts can be bounded.
+		var recovery strings.Builder
+		recovery.WriteString("Sequential recovery:")
+		for i, state := range states {
+			fmt.Fprintf(&recovery, " %d:%s", i+1, state["state"]) //nolint:errcheck
+			if id, ok := state["physical_session_id"].(string); ok {
+				fmt.Fprintf(&recovery, "(physical_session_id=%q)", id) //nolint:errcheck
+			}
+		}
+		wrapped := fmt.Errorf("%s\ndispatch_subagent: sequential dispatch: %w\nPartial results:\n%s", recovery.String(), failure, result.Output)
+		var outcome interface{ OutcomeUnknown() bool }
+		if (errors.Is(failure, context.Canceled) || errors.Is(failure, context.DeadlineExceeded)) && !errors.As(failure, &outcome) {
+			return result, sequentialUnknownOutcome{cause: wrapped}
+		}
+		return result, wrapped
+	}
+	return result, nil
+}
+
 // executeParallel builds tasks from the tasks array (or a single prompt in
 // parallel mode), dispatches them concurrently, and returns a structured
 // summary of the results.
@@ -304,7 +501,22 @@ func (t *SubagentTool) executeParallel(ctx context.Context, call ToolCall, tasks
 	results, err := t.dispatcher.ParallelDispatch(ctx, tasks)
 	if err != nil {
 		sessions := parallelSubagentSessionLines(results)
-		return &ToolResult{Output: sessions, Metadata: map[string]any{"physical_session_ids": subagentResultSessionIDs(results)}}, fmt.Errorf("dispatch_subagent: parallel dispatch: %w%s", err, sessions)
+		taskIDs := make(map[string]int, len(tasks))
+		resultIDs := make(map[string]int, len(results))
+		for _, task := range tasks {
+			taskIDs[task.ID]++
+		}
+		for _, result := range results {
+			resultIDs[result.TaskID]++
+		}
+		var completed strings.Builder
+		for i, result := range results {
+			if i >= len(tasks) || result.TaskID == "" || result.TaskID != tasks[i].ID || taskIDs[result.TaskID] != 1 || resultIDs[result.TaskID] != 1 || result.Error != nil || strings.TrimSpace(result.Content) == "" {
+				continue
+			}
+			fmt.Fprintf(&completed, "\nCompleted task %d: %s", i+1, result.Content) //nolint:errcheck
+		}
+		return &ToolResult{Output: sessions, Metadata: map[string]any{"physical_session_ids": subagentResultSessionIDs(results)}}, fmt.Errorf("dispatch_subagent: parallel dispatch: %w%s%s", err, sessions, completed.String())
 	}
 
 	// Format results as structured text.

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 // keyMsg is a tiny helper that builds a tea.KeyMsg from a key type and optional
@@ -287,6 +288,7 @@ func TestStatusBarRendering(t *testing.T) {
 	m.tokenMax = 8000
 	m.tokenCost = 0.025
 	m.tokenUsageSource = core.TokenUsageSourceReported
+	m.tokenPrimaryCoverage = llm.UsageCoverageComplete
 	m.tokenCostSources = []core.TokenUsageCostSource{core.TokenUsageCostEstimated}
 	m.tokenPriceSources = []core.TokenUsagePriceSource{core.TokenUsagePriceDefaultTier}
 	m.tokenProviderModels = []core.TokenUsageProviderModel{{ProviderID: "openai", ModelID: "gpt-4o-mini"}}
@@ -302,6 +304,7 @@ func TestStatusBarRendering(t *testing.T) {
 	m.tokenInput = 7000
 	m.tokenOutput = 1000
 	m.tokenMax = 8000
+	m.tokenPrimaryCoverage = llm.UsageCoverageComplete
 	bar = m.renderStatusBarLocked()
 	m.mu.Unlock()
 
@@ -374,6 +377,7 @@ func TestStatusBar_TokenWarning(t *testing.T) {
 	m.tokenMax = 10000
 	m.tokenCost = 0.02
 	m.tokenUsageSource = core.TokenUsageSourceReported
+	m.tokenPrimaryCoverage = llm.UsageCoverageComplete
 	bar := m.renderStatusBarLocked()
 	m.mu.Unlock()
 

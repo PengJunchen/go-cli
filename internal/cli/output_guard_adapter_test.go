@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/production"
 )
@@ -53,6 +54,25 @@ func TestOutputGuardModel_DeniesPIIWithoutSanitizedCandidate(t *testing.T) {
 	resp, err := m.Generate(context.Background(), nil)
 	require.ErrorContains(t, err, "candidate denied")
 	assert.Nil(t, resp)
+}
+
+func TestOutputGuardModelMapsOnlyBuiltinPIIDenials(t *testing.T) {
+	ctx := context.Background()
+	text := "Contact me at john@example.com"
+
+	single := &outputGuardModel{inner: &stubModel{}, guard: production.NewPIIOutputGuard()}
+	result, err := single.CheckCandidate(ctx, text)
+	require.NoError(t, err)
+	assert.Equal(t, core.CandidateOutputRejectionPII, result.RejectionCode)
+
+	mixed := production.NewOutputGuardChain([]production.OutputGuard{
+		production.NewPIIOutputGuard(),
+		production.NewRegexOutputGuard([]string{``}),
+	})
+	combined := &outputGuardModel{inner: &stubModel{}, guard: mixed}
+	result, err = combined.CheckCandidate(ctx, text)
+	require.NoError(t, err)
+	assert.Equal(t, core.CandidateOutputRejectionUnknown, result.RejectionCode)
 }
 
 func TestOutputGuardModel_PassthroughSafe(t *testing.T) {

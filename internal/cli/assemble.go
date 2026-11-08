@@ -234,6 +234,9 @@ type ToolingSupport struct {
 	// LSPWorkspaceRoot is the workspace root used to initialize the LSP
 	// server. Used by the LSPCompleter to construct file URIs.
 	LSPWorkspaceRoot string
+	// ProcessSessionManager owns host-controlled background processes registered
+	// for this assembly.
+	ProcessSessionManager *tools.LocalProcessSessionManager
 }
 
 // AgentAssembly holds the fully wired agent runtime components produced by
@@ -326,7 +329,8 @@ type assembleConfig struct {
 	pluginLoader            extension.PluginLoader
 	// noSandbox disables bash sandbox enforcement, replacing the default
 	// sandbox with an AllowAllSandbox that permits every command.
-	noSandbox bool
+	noSandbox          bool
+	processSessionHost *ProcessSessionInvocationHost
 	// approvalCh, when non-nil, enables TUI-based approval via TeaApprovalCallback.
 	approvalCh chan approval.InteractiveRequest
 	// approveMode is resolved before resource construction; only Ask uses the
@@ -392,6 +396,13 @@ func WithThinkingLevel(level llm.ThinkingLevel) AssembleOption {
 // sandbox derived from configuration.
 func WithNoSandbox() AssembleOption {
 	return func(c *assembleConfig) { c.noSandbox = true }
+}
+
+// WithProcessSessionInvocationHost injects the longer-lived owner for
+// background process sessions. Without a host, sessions are owned by the
+// Assembly and stop when it closes.
+func WithProcessSessionInvocationHost(host *ProcessSessionInvocationHost) AssembleOption {
+	return func(c *assembleConfig) { c.processSessionHost = host }
 }
 
 // AssembleAgent wires all production components (model wrapping, tool
@@ -582,17 +593,18 @@ func AssembleAgent(
 			HITLEmitter:     s.hitlEmitter,
 		},
 		ToolingSupport: ToolingSupport{
-			FileTracker:        s.fileTracker,
-			DiffGenerator:      s.diffGen,
-			PlanCtrl:           s.planCtrl,
-			ModeResolver:       s.modeResolver,
-			PromptBuilder:      s.promptBuilder,
-			ContextLoader:      s.contextLoader,
-			ReminderManager:    s.reminderMgr,
-			HookChain:          s.hookChain,
-			FailureSynthesizer: s.failureSynthesizer,
-			LSPClient:          s.lspClientField,
-			LSPWorkspaceRoot:   s.lspWorkspaceRoot,
+			FileTracker:           s.fileTracker,
+			DiffGenerator:         s.diffGen,
+			PlanCtrl:              s.planCtrl,
+			ModeResolver:          s.modeResolver,
+			PromptBuilder:         s.promptBuilder,
+			ContextLoader:         s.contextLoader,
+			ReminderManager:       s.reminderMgr,
+			HookChain:             s.hookChain,
+			FailureSynthesizer:    s.failureSynthesizer,
+			LSPClient:             s.lspClientField,
+			LSPWorkspaceRoot:      s.lspWorkspaceRoot,
+			ProcessSessionManager: s.processSessionManager,
 		},
 		Registry:       s.reg,
 		Cleanup:        func() { _ = s.runCleanup() },
@@ -806,9 +818,10 @@ type assembleState struct {
 	midTurn   *compaction.MidTurnCompact
 
 	// Session section
-	sessionStore    *session.JSONLSessionStore
-	durableSession  *durableCLISession
-	initialSnapshot session.PreparedSessionSnapshot
+	sessionStore          *session.JSONLSessionStore
+	durableSession        *durableCLISession
+	initialSnapshot       session.PreparedSessionSnapshot
+	processSessionManager *tools.LocalProcessSessionManager
 
 	// Cleanup
 	cleanupList []func(context.Context) error
@@ -1038,6 +1051,65 @@ func (s *assembleState) assembleTools() error {
 		bashSandbox = tools.NewDefaultBashSandbox(sandboxOpts...)
 	}
 
+	ownerID, workspaceID := "", ""
+	processOwnerCtx := s.lifetimeCtx
+	if host := s.ac.processSessionHost; host != nil {
+		ownerID, workspaceID = host.OwnerID(), host.WorkspaceID()
+		processOwnerCtx = host.Context()
+		if s.durableSession != nil && workspaceID != s.durableSession.workspaceID {
+			return errors.New("assemble: process-session host workspace does not match the durable workspace")
+		}
+	} else {
+		var idErr error
+		ownerID, idErr = newProcessSessionOpaqueID()
+		if idErr != nil {
+			return fmt.Errorf("assemble: create process-session owner ID: %w", idErr)
+		}
+		if s.durableSession != nil {
+			workspaceID = s.durableSession.workspaceID
+		} else {
+			workspaceID, idErr = newProcessSessionOpaqueID()
+			if idErr != nil {
+				return fmt.Errorf("assemble: create process-session workspace ID: %w", idErr)
+			}
+		}
+	}
+	processSessionManager, managerErr := tools.NewLocalProcessSessionManager(processOwnerCtx, tools.ProcessSessionManagerConfig{
+		OwnerID:                     ownerID,
+		WorkspaceID:                 workspaceID,
+		Sandbox:                     bashSandbox,
+		ResourceLimits:              resourceLimits,
+		RequireDeliveryConfirmation: s.durableSession != nil,
+		ClosureObserver: func(ctx context.Context, snapshot tools.ProcessSessionLeaseSnapshot) error {
+			if s.durableSession == nil {
+				return nil
+			}
+			return s.durableSession.closeProcessSessionLease(ctx, snapshot)
+		},
+		ScopeResolver: func(callCtx context.Context) (tools.ProcessSessionScope, error) {
+			runID := core.RunIDFromContext(callCtx)
+			if runID == "" {
+				return tools.ProcessSessionScope{}, errors.New("process-session tool call has no owned agent run")
+			}
+			if _, binding, ok := core.RunCommitFromContext(callCtx); ok && binding.WorkspaceID != workspaceID {
+				return tools.ProcessSessionScope{}, tools.ErrProcessSessionScopeDenied
+			}
+			return tools.ProcessSessionScope{OwnerID: ownerID, RunID: runID, WorkspaceID: workspaceID}, nil
+		},
+	})
+	if managerErr != nil {
+		return fmt.Errorf("assemble: create process-session manager: %w", managerErr)
+	}
+	s.processSessionManager = processSessionManager
+	s.cleanupList = append(s.cleanupList, func(ctx context.Context) error {
+		return processSessionManager.Close(ctx)
+	})
+	if s.ac.processSessionHost != nil {
+		if err := s.ac.processSessionHost.RegisterManager(processSessionManager); err != nil {
+			return fmt.Errorf("assemble: register process-session manager with host: %w", err)
+		}
+	}
+
 	s.htmlConverter = tools.NewDefaultHTMLConverter()
 
 	// Resolve the working directory for git tools.
@@ -1109,6 +1181,7 @@ func (s *assembleState) assembleTools() error {
 		tools.WithRegisteredBashSandbox(bashSandbox),
 		tools.WithRegisteredResourceLimits(resourceLimits),
 		tools.WithRegisteredGitTool(s.gitTool),
+		tools.WithRegisteredProcessSessionManager(processSessionManager),
 	}
 	if s.bashExecutionTimeoutSet {
 		regOpts = append(regOpts, tools.WithRegisteredBashTimeout(s.bashExecutionTimeout))
@@ -1905,7 +1978,12 @@ func (s *assembleState) assembleExtraTools() error {
 		core.NewAskUserQuestionTool(s.hitlEmitter, 30*time.Second),
 		tools.NewToolSearchTool(s.tr),
 	}
-	trustedNetworkReads := []tools.ToolDefinition{webFetchTool}
+	var trustedNetworkReads []tools.ToolDefinition
+	if s.durableSession == nil {
+		// Durable runs need an action-scoped completion receipt, which the
+		// ordinary HTTP fetch tool cannot provide.
+		trustedNetworkReads = append(trustedNetworkReads, webFetchTool)
+	}
 	if webSearchTool != nil {
 		trustedNetworkReads = append(trustedNetworkReads, webSearchTool)
 	}
@@ -1947,6 +2025,16 @@ func (s *assembleState) assembleLoopAgent() {
 		core.WithFollowUpChannel(s.followUpCh),
 		core.WithThinkingConfig(llm.ThinkingConfigForLevel(s.thinkingLevel)),
 	}
+	if s.guardChain != nil {
+		requiresSnapshot := dynamicRuntimeEnabled(s.rc)
+		staticCustomPrompt := ""
+		if s.rc != nil {
+			staticCustomPrompt = s.rc.Agent.SystemPrompt
+		}
+		loopOpts = append(loopOpts, core.WithFinalPIIGuardRepairGate(func(ctx context.Context) bool {
+			return finalPIIGuardRepairEligible(ctx, true, requiresSnapshot, staticCustomPrompt)
+		}))
+	}
 	if s.providerRetryPolicy != nil {
 		loopOpts = append(loopOpts, core.WithProviderRetryPolicy(s.providerRetryPolicy))
 	}
@@ -1963,6 +2051,9 @@ func (s *assembleState) assembleLoopAgent() {
 	if s.rc != nil && s.rc.Agent.MaxIterations != 0 {
 		loopOpts = append(loopOpts, core.WithMaxIterations(s.rc.Agent.MaxIterations))
 	}
+	if s.rc != nil {
+		loopOpts = append(loopOpts, core.WithMultimodalTokenReserve(s.rc.Agent.MultimodalTokensPerItemReserve))
+	}
 	if s.rc != nil && s.rc.Tools.Parallel != nil && !*s.rc.Tools.Parallel {
 		loopOpts = append(loopOpts, core.WithExecutionMode(core.ExecutionModeSequential))
 	}
@@ -1971,7 +2062,7 @@ func (s *assembleState) assembleLoopAgent() {
 
 	// Wire dynamic system prompt builder with project context.
 	s.contextLoader = core.NewDefaultProjectContextLoader()
-	s.promptBuilder = core.NewDefaultSystemPromptBuilder()
+	s.promptBuilder = newCLIDefaultPromptBuilder(s.guardChain != nil)
 	s.promptBuilder = &memoryPromptBuilder{inner: s.promptBuilder, runtime: s.memoryRuntime}
 	if s.rc != nil && (s.rc.Runtime.Dynamic || progressiveSkillsEnabled(s.rc) || s.rc.MCP.Loading == "lazy") {
 		s.promptBuilder = &runtimePromptBuilder{inner: s.promptBuilder, maxBytes: s.rc.Runtime.MaxPromptBytes}
@@ -2007,7 +2098,9 @@ func (s *assembleState) assembleLoopAgent() {
 	s.loop = core.NewLoopAgent(loopOpts...)
 	if la, ok := s.loop.(*core.LoopAgent); ok {
 		s.loopAgent = la
-		if !progressiveSkillsEnabled(s.rc) && (s.rc == nil || s.rc.MCP.Loading != "lazy") {
+		if s.rc != nil && s.rc.Runtime.Dynamic {
+			s.loopAgent.WithCompactToolVisibility(true).WithToolSearchThreshold(12)
+		} else if !progressiveSkillsEnabled(s.rc) && (s.rc == nil || s.rc.MCP.Loading != "lazy") {
 			s.loopAgent.WithToolSearchThreshold(30)
 		}
 	}

@@ -123,7 +123,7 @@ func (a *compactorAdapter) Compact(ctx context.Context, messages []core.AgentMes
 		return core.CloneAgentMessages(messages), nil
 	}
 	items := messagesToTurnItems(messages)
-	compacted, err := a.inner.Compact(ctx, items, maxTokens, a.estimator)
+	compacted, err := compaction.CompactPreservingImages(ctx, a.inner, items, maxTokens, a.estimator)
 	if err != nil {
 		return nil, fmt.Errorf("registry compactor adapter: %w", err)
 	}

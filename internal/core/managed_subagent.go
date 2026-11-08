@@ -70,6 +70,7 @@ func (r *managedSubAgentRunner) Run(ctx context.Context, prompt string, inbox <-
 		return AgentMessage{}, ctx.Err()
 	}
 	child = tracing.CopyTraceContext(child, ctx)
+	child = llm.WithRequestPurpose(child, llm.RequestPurposeSubagent)
 	child = context.WithValue(child, subagentDepthKey{}, depth+1)
 	if seal, ok := ctx.Value(subagentInputSealKey{}).(func() []string); ok {
 		child = context.WithValue(child, subagentInputSealKey{}, seal)

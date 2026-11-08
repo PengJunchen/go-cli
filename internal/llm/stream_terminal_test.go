@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -110,6 +111,67 @@ func TestStreamMalformedEventIsNotComplete(t *testing.T) {
 	ch, err := model.Stream(context.Background(), []Message{{Role: RoleUser, Content: "go"}})
 	require.NoError(t, err)
 	assertStreamFailedWithoutSuccess(t, collectStreamChunks(t, ch))
+}
+
+func TestOpenAIStreamErrorEnvelopeIsTypedTerminalAndPreservesUsage(t *testing.T) {
+	for _, provider := range []string{"native", "compatible"} {
+		t.Run(provider, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				writeSSE(w, `{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":0,"total_tokens":7}}`)
+				writeSSE(w, `{"choices":[{"delta":{"role":"assistant"}}]}`)
+				writeSSE(w, `{"error":{"message":"Rate limit reached; diagnostic-secret-canary","type":"api_error","code":null}}`)
+				writeSSE(w, `{"choices":[{"delta":{"content":"must be ignored"}}]}`)
+				writeSSE(w, `{"choices":[],"usage":{"prompt_tokens":99,"completion_tokens":99,"total_tokens":198}}`)
+				writeSSE(w, `{"choices":[{"delta":{},"finish_reason":"stop"}]}`)
+				writeSSE(w, "[DONE]")
+			}))
+			defer server.Close()
+
+			ctx, exporter := newComposeTestCtx(t)
+			model := detailTestModel(t, provider, server)
+			authority := &attemptTestAuthority{id: "sse-error-envelope"}
+			stream, err := model.Stream(WithOperationDispatchAuthority(ctx, authority), []Message{{Role: RoleUser, Content: "request"}})
+			require.NoError(t, err)
+			chunks := collectStreamChunks(t, stream)
+
+			var streamErr error
+			for _, chunk := range chunks {
+				if chunk.Error != nil {
+					streamErr = chunk.Error
+				}
+				assert.False(t, chunk.Final && chunk.Error == nil, "an SSE API error must prevent a later success frame")
+				assert.NotContains(t, chunk.Content, "must be ignored")
+			}
+			require.Error(t, streamErr)
+			var providerErr *ProviderError
+			require.ErrorAs(t, streamErr, &providerErr)
+			assert.Equal(t, http.StatusOK, providerErr.StatusCode)
+			assert.Equal(t, ErrTypeRateLimit, providerErr.ErrorType)
+			assert.NotContains(t, streamErr.Error(), "diagnostic-secret-canary")
+			require.Eventually(t, func() bool {
+				_, ok := exporter.spanByName("llm.request")
+				return ok
+			}, 2*time.Second, 5*time.Millisecond)
+			span, ok := exporter.spanByName("llm.request")
+			require.True(t, ok)
+			assert.Equal(t, string(ErrTypeRateLimit), findAttrValue(t, span, "error_type"))
+			assert.Equal(t, http.StatusOK, findAttrValue(t, span, "http_status_code"))
+			traceJSON, marshalErr := json.Marshal(span)
+			require.NoError(t, marshalErr)
+			assert.NotContains(t, string(traceJSON), "diagnostic-secret-canary")
+
+			require.Len(t, authority.attempts, 1)
+			attempt := authority.attempts[0]
+			require.True(t, attempt.finished)
+			assert.Equal(t, FailureTransientProvider, attempt.result.Failure)
+			require.Equal(t, UsageKnown, attempt.result.Usage.State)
+			require.NotNil(t, attempt.result.Usage.Usage)
+			assert.Equal(t, 7, attempt.result.Usage.Usage.InputTokens)
+			assert.Equal(t, 0, attempt.result.Usage.Usage.OutputTokens)
+			assert.Equal(t, UsageCoverageUnknown, attempt.result.Usage.Usage.PrimaryCoverage)
+		})
+	}
 }
 
 func TestStreamTimeoutIsNotComplete(t *testing.T) {

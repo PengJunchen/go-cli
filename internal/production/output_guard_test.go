@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"regexp"
 	"testing"
 	"time"
 
@@ -30,6 +31,22 @@ func (g *passThroughGuard) Check(ctx context.Context, text string) (*GuardResult
 		return nil, err
 	}
 	return &GuardResult{Allowed: true, Sanitized: text}, nil
+}
+
+type denyWithoutRecoveryCodeGuard struct{}
+
+func (denyWithoutRecoveryCodeGuard) Name() string { return "unknown-deny" }
+
+func (denyWithoutRecoveryCodeGuard) Check(context.Context, string) (*GuardResult, error) {
+	return &GuardResult{Allowed: false, Sanitized: "", Reason: "blocked"}, nil
+}
+
+type restoreSanitizedGuard struct{}
+
+func (restoreSanitizedGuard) Name() string { return "restore-sanitized" }
+
+func (restoreSanitizedGuard) Check(context.Context, string) (*GuardResult, error) {
+	return &GuardResult{Allowed: true, Sanitized: "rewritten"}, nil
 }
 
 // errGuard is a test-local OutputGuard that always surfaces the context error,
@@ -330,6 +347,54 @@ func TestOutputGuardChainBlocksClearSanitized(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, res.Allowed, "PII guard should block")
 	assert.Empty(t, res.Sanitized, "chain must clear Sanitized when guard blocks with empty Sanitized")
+}
+
+func TestOutputGuardChainPreservesOnlyAnUnambiguousBuiltinPIIDenial(t *testing.T) {
+	ctx := context.Background()
+	text := "contact me at joe@example.com please"
+
+	direct, err := NewPIIOutputGuard().Check(ctx, text)
+	require.NoError(t, err)
+	assert.True(t, direct.IsBuiltinPIIDenial())
+
+	chain := NewOutputGuardChain([]OutputGuard{NewPIIOutputGuard(), &passThroughGuard{name: "after-pii"}})
+	result, err := chain.Check(ctx, text)
+	require.NoError(t, err)
+	assert.True(t, result.IsBuiltinPIIDenial(), "a single built-in PII denial should survive allowed guards")
+
+	mixed := NewOutputGuardChain([]OutputGuard{NewPIIOutputGuard(), denyWithoutRecoveryCodeGuard{}})
+	result, err = mixed.Check(ctx, text)
+	require.NoError(t, err)
+	assert.False(t, result.IsBuiltinPIIDenial(), "mixed guard denials must not authorize repair")
+
+	rewritten := NewOutputGuardChain([]OutputGuard{NewPIIOutputGuard(), restoreSanitizedGuard{}})
+	result, err = rewritten.Check(ctx, text)
+	require.NoError(t, err)
+	assert.False(t, result.IsBuiltinPIIDenial(), "a non-empty final sanitizer result must not authorize repair")
+
+	unknown := NewOutputGuardChain([]OutputGuard{denyWithoutRecoveryCodeGuard{}})
+	result, err = unknown.Check(ctx, "safe")
+	require.NoError(t, err)
+	assert.False(t, result.IsBuiltinPIIDenial(), "an untyped denial must remain ineligible")
+}
+
+func TestPIIOutputGuardRepairCodeRequiresBuiltinPattern(t *testing.T) {
+	ctx := context.Background()
+	custom := PIIPattern{Pattern: regexp.MustCompile(`INTERNAL-TKT-\d{6}`), Name: "Internal Ticket"}
+	guard := NewPIIOutputGuard(WithCustomPIIPatterns(custom))
+
+	customResult, err := guard.Check(ctx, "see INTERNAL-TKT-123456 for details")
+	require.NoError(t, err)
+	assert.False(t, customResult.Allowed)
+	assert.Empty(t, customResult.Sanitized)
+	assert.Equal(t, GuardHigh, customResult.Severity)
+	assert.Contains(t, customResult.Reason, "Internal Ticket")
+	assert.False(t, customResult.IsBuiltinPIIDenial(), "custom-only PII remains denied but cannot authorize repair")
+
+	builtinResult, err := guard.Check(ctx, "email me at joe@example.com")
+	require.NoError(t, err)
+	assert.False(t, builtinResult.Allowed)
+	assert.True(t, builtinResult.IsBuiltinPIIDenial(), "built-in PII remains repair-eligible when custom patterns are configured")
 }
 
 func TestOutputGuardMiddlewareChainBlocksDoesNotLeak(t *testing.T) {

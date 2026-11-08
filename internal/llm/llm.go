@@ -32,6 +32,14 @@ type SourceThrough struct {
 	TranscriptCount   uint64
 }
 
+// RetainedSourceRange identifies one complete source-backed exchange retained
+// inside an omission projection. Both endpoints are inclusive.
+type RetainedSourceRange struct {
+	Start  SourceRef `json:"start"`
+	End    SourceRef `json:"end"`
+	Digest string    `json:"digest"`
+}
+
 // SourceRef identifies one source-backed item or a runtime-only ephemeral
 // item. Fields not selected by Kind must remain at their zero value.
 type SourceRef struct {
@@ -44,6 +52,12 @@ type SourceRef struct {
 	PriorSourceCount uint64
 	TranscriptIndex  uint64
 	Through          SourceThrough
+	// RetainCurrentInput is valid only on an anchored run summary that covers
+	// the original input while preserving that input as its single exception.
+	RetainCurrentInput bool `json:",omitempty"`
+	// RetainedSourceRanges is canonical JSON for the complete exchanges that
+	// remain visible inside this anchored omission's covered source prefix.
+	RetainedSourceRanges string `json:",omitempty"`
 }
 
 var ErrInvalidSourceRef = errors.New("llm: invalid runtime source reference")
@@ -57,6 +71,12 @@ func (source SourceRef) Validate() error {
 	noPrior := source.HistoryRevision == "" && source.BranchID == "" && source.SourceEntryID == "" && source.PriorOrdinal == 0
 	noRunCount := source.PriorSourceCount == 0 && source.TranscriptIndex == 0
 	noThrough := source.Through == (SourceThrough{})
+	if source.RetainCurrentInput && (source.Kind != SourceRunSummary || source.Through.TranscriptCount < 2) {
+		return invalid("retained current input requires an anchored run summary")
+	}
+	if source.RetainedSourceRanges != "" && (source.Kind != SourceRunSummary || !source.RetainCurrentInput) {
+		return invalid("retained source ranges require an anchored omission")
+	}
 	switch source.Kind {
 	case SourceNone, SourceEphemeral:
 		if source.RunID != "" || !noPrior || !noRunCount || !noThrough {
@@ -90,6 +110,8 @@ func (source SourceRef) Validate() error {
 type RuntimeMetadata struct {
 	Source         SourceRef
 	ReceiptOutcome string
+	// CompactionMarker is a runtime projection hint, not an execution authority.
+	CompactionMarker bool `json:",omitempty"`
 }
 
 // LocalStreamAbortCause marks cancellation initiated by a stream consumer
@@ -222,11 +244,180 @@ type ToolCall struct {
 	Args any `json:"args,omitempty"`
 }
 
+// PrimaryUsageCoverage describes coverage of input and output counts for one
+// response or a merged continuation message, not retries, sessions or billing.
+// The zero value and unrecognized values mean coverage is unknown.
+type PrimaryUsageCoverage string
+
+const (
+	// UsageCoverageComplete means every observed response had primary counts.
+	UsageCoverageComplete PrimaryUsageCoverage = "complete"
+	// UsageCoveragePartial means some observed primary counts are missing.
+	UsageCoveragePartial PrimaryUsageCoverage = "partial"
+	// UsageCoverageUnknown means the completeness cannot be established.
+	UsageCoverageUnknown PrimaryUsageCoverage = "unknown"
+)
+
+// Normalized maps absent and unrecognized coverage to unknown.
+func (c PrimaryUsageCoverage) Normalized() PrimaryUsageCoverage {
+	switch c {
+	case UsageCoverageComplete, UsageCoveragePartial:
+		return c
+	default:
+		return UsageCoverageUnknown
+	}
+}
+
 // Usage reports token consumption for a model response.
 type Usage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
 	TotalTokens  int `json:"total_tokens"`
+	// PrimaryCoverage applies only to this response or continuation message.
+	// An absent value in historical data or a Go literal means unknown.
+	PrimaryCoverage PrimaryUsageCoverage `json:"primary_coverage,omitempty"`
+	// CacheReadInputTokens is a subset of InputTokens when reported by the provider.
+	CacheReadInputTokens int `json:"cache_read_input_tokens,omitempty"`
+	// CacheReadInputTokensReported distinguishes an explicit zero from missing data.
+	CacheReadInputTokensReported bool `json:"cache_read_input_tokens_reported,omitempty"`
+	// ReasoningOutputTokens is a subset of OutputTokens when reported by the provider.
+	ReasoningOutputTokens int `json:"reasoning_output_tokens,omitempty"`
+	// ReasoningOutputTokensReported distinguishes an explicit zero from missing data.
+	ReasoningOutputTokensReported bool `json:"reasoning_output_tokens_reported,omitempty"`
+}
+
+// ContinuationUsageAccumulator observes actual responses in a continuation.
+// Its zero value has observed no responses; Observe(nil) records a response
+// whose primary counts were absent. Use one accumulator for the whole sequence.
+type ContinuationUsageAccumulator struct {
+	usage    *Usage
+	observed bool
+	missing  bool
+	unknown  bool
+}
+
+// Observe adds one actual response, preserving missing and unknown evidence.
+func (a *ContinuationUsageAccumulator) Observe(usage *Usage) {
+	if usage != nil {
+		_, representable := checkedUsageAdd(usage.InputTokens, usage.OutputTokens)
+		if !representable || usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.TotalTokens < 0 {
+			usage = nil
+		}
+	}
+	if usage == nil {
+		a.missing = true
+	} else {
+		switch usage.PrimaryCoverage.Normalized() {
+		case UsageCoveragePartial:
+			a.missing = true
+		case UsageCoverageUnknown:
+			a.unknown = true
+		}
+	}
+	if !a.observed {
+		if usage != nil {
+			clone := *usage
+			a.usage = &clone
+		}
+	} else {
+		var ok bool
+		a.usage, ok = mergeContinuationCounts(a.usage, usage)
+		if !ok {
+			a.missing = true
+		}
+	}
+	a.observed = true
+}
+
+// Usage returns a copy of the known subtotal, or nil if none was observed.
+func (a *ContinuationUsageAccumulator) Usage() *Usage {
+	if a.usage == nil {
+		return nil
+	}
+	usage := *a.usage
+	switch {
+	case a.missing:
+		usage.PrimaryCoverage = UsageCoveragePartial
+	case a.unknown:
+		usage.PrimaryCoverage = UsageCoverageUnknown
+	default:
+		usage.PrimaryCoverage = UsageCoverageComplete
+	}
+	return &usage
+}
+
+// MergeContinuationUsage combines two observed responses. For a longer
+// sequence, use ContinuationUsageAccumulator so an all-missing prefix is not
+// mistaken for an empty accumulator. Detail flags remain independent of primary
+// coverage, and the primary values retain their existing known-subtotal behavior.
+func MergeContinuationUsage(previous, current *Usage) *Usage {
+	var accumulator ContinuationUsageAccumulator
+	accumulator.Observe(previous)
+	accumulator.Observe(current)
+	return accumulator.Usage()
+}
+
+func checkedUsageAdd(a, b int) (int, bool) {
+	max := int(^uint(0) >> 1)
+	min := -max - 1
+	if (b > 0 && a > max-b) || (b < 0 && a < min-b) {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func mergeContinuationCounts(previous, current *Usage) (*Usage, bool) {
+	if previous == nil && current == nil {
+		return nil, true
+	}
+	var merged Usage
+	if previous != nil {
+		merged = *previous
+	}
+	if current != nil {
+		input, inputOK := checkedUsageAdd(merged.InputTokens, current.InputTokens)
+		output, outputOK := checkedUsageAdd(merged.OutputTokens, current.OutputTokens)
+		total, totalOK := checkedUsageAdd(merged.TotalTokens, current.TotalTokens)
+		_, combinedOK := checkedUsageAdd(input, output)
+		if !inputOK || !outputOK || !totalOK || !combinedOK {
+			if previous == nil {
+				return nil, false
+			}
+			merged.CacheReadInputTokens, merged.ReasoningOutputTokens = 0, 0
+			merged.CacheReadInputTokensReported, merged.ReasoningOutputTokensReported = false, false
+			return &merged, false
+		}
+		merged.InputTokens, merged.OutputTokens, merged.TotalTokens = input, output, total
+	}
+	merged.CacheReadInputTokensReported = previous != nil && current != nil &&
+		validUsageDetail(previous.CacheReadInputTokens, previous.InputTokens, previous.CacheReadInputTokensReported) &&
+		validUsageDetail(current.CacheReadInputTokens, current.InputTokens, current.CacheReadInputTokensReported)
+	if merged.CacheReadInputTokensReported {
+		var ok bool
+		merged.CacheReadInputTokens, ok = checkedUsageAdd(merged.CacheReadInputTokens, current.CacheReadInputTokens)
+		if !ok {
+			merged.CacheReadInputTokens, merged.CacheReadInputTokensReported = 0, false
+		}
+	} else {
+		merged.CacheReadInputTokens = 0
+	}
+	merged.ReasoningOutputTokensReported = previous != nil && current != nil &&
+		validUsageDetail(previous.ReasoningOutputTokens, previous.OutputTokens, previous.ReasoningOutputTokensReported) &&
+		validUsageDetail(current.ReasoningOutputTokens, current.OutputTokens, current.ReasoningOutputTokensReported)
+	if merged.ReasoningOutputTokensReported {
+		var ok bool
+		merged.ReasoningOutputTokens, ok = checkedUsageAdd(merged.ReasoningOutputTokens, current.ReasoningOutputTokens)
+		if !ok {
+			merged.ReasoningOutputTokens, merged.ReasoningOutputTokensReported = 0, false
+		}
+	} else {
+		merged.ReasoningOutputTokens = 0
+	}
+	return &merged, true
+}
+
+func validUsageDetail(count, total int, reported bool) bool {
+	return reported && count >= 0 && count <= total
 }
 
 // Message is a single message in a conversation.
@@ -311,6 +502,30 @@ func sendStreamError(_ context.Context, ch chan MessageChunk, err error) {
 		}
 		select {
 		case ch <- MessageChunk{Error: err}:
+		default:
+		}
+	}
+}
+
+// sendStreamErrorWithUsage preserves a provider's last usage snapshot when the
+// stream terminates with an error. The consumer still receives the error as a
+// terminal signal, while callers can retain partial accounting evidence.
+func sendStreamErrorWithUsage(ch chan MessageChunk, err error, usage *Usage) {
+	if err == nil {
+		return
+	}
+	chunk := MessageChunk{Error: err, Usage: usage}
+	select {
+	case ch <- chunk:
+	default:
+		// Preserve the terminal failure and its usage snapshot over queued
+		// candidate deltas, matching sendStreamError's delivery guarantee.
+		select {
+		case <-ch:
+		default:
+		}
+		select {
+		case ch <- chunk:
 		default:
 		}
 	}

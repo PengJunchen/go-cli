@@ -411,6 +411,8 @@ func (m *overflowRecoveryModel) continueGeneration(ctx context.Context, msgs []M
 	if result == nil {
 		return nil, errors.New("overflow: cannot continue a nil response")
 	}
+	var continuationUsage ContinuationUsageAccumulator
+	continuationUsage.Observe(result.Usage)
 	for attempt := 0; attempt < maxContinuations && result.FinishReason == finishReasonLength; attempt++ {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("overflow: continuation canceled: %w", ctx.Err())
@@ -453,16 +455,8 @@ func (m *overflowRecoveryModel) continueGeneration(ctx context.Context, msgs []M
 		result.Content += contResp.Content
 		result.FinishReason = contResp.FinishReason
 		result.ToolCalls = contResp.ToolCalls
-		if contResp.Usage != nil {
-			if result.Usage == nil {
-				usage := *contResp.Usage
-				result.Usage = &usage
-			} else {
-				result.Usage.InputTokens += contResp.Usage.InputTokens
-				result.Usage.OutputTokens += contResp.Usage.OutputTokens
-				result.Usage.TotalTokens += contResp.Usage.TotalTokens
-			}
-		}
+		continuationUsage.Observe(contResp.Usage)
+		result.Usage = continuationUsage.Usage()
 		encoded, marshalErr := json.Marshal(result)
 		if marshalErr != nil {
 			return nil, fmt.Errorf("overflow: encode complete continuation: %w", marshalErr)

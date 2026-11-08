@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
@@ -249,10 +250,32 @@ func validDispatchMarkerState(state DispatchMarkerState) bool {
 
 func validateVersion1EntryCoordinates(entry SessionEntry) error {
 	if entry.RecordVersion == 0 {
+		if len(entry.ActiveProcessSessions) > 0 {
+			return errors.New("session: legacy rows cannot carry active process-session references")
+		}
 		return nil
 	}
 	if entry.RecordVersion != 1 {
 		return fmt.Errorf("session: unsupported record version %d", entry.RecordVersion)
+	}
+	hasRetainedInput := entry.RetainedInputEntryID != "" || entry.RetainedInputPayloadDigest != "" || entry.RetainedInputDigest != ""
+	if hasRetainedInput && (entry.Type != EntryTypeCompaction || entry.RetainedInputEntryID == "" || !isEntryPayloadDigest(entry.RetainedInputPayloadDigest) || !isHexDigest(entry.RetainedInputDigest)) {
+		return errors.New("session: retained input binding requires a complete compaction anchor")
+	}
+	if len(entry.RetainedExchanges) > 0 {
+		if !hasRetainedInput || entry.RetainedHistoryBranchID == "" {
+			return errors.New("session: retained exchanges require an anchored captured source")
+		}
+	} else if entry.RetainedHistoryRevision != "" || entry.RetainedHistoryBranchID != "" {
+		return errors.New("session: retained history identity has no exchanges")
+	}
+	if len(entry.ActiveProcessSessions) > 0 {
+		if entry.Type != EntryTypeCompaction {
+			return errors.New("session: active process-session references are valid only on compaction entries")
+		}
+		if err := core.ValidateActiveProcessSessionRefs(entry.ActiveProcessSessions, entry.RunID, entry.WorkspaceID); err != nil {
+			return fmt.Errorf("session: invalid active process-session references: %w", err)
+		}
 	}
 	if entry.CompletionProof != "" && (entry.Type != EntryTypeTool || entry.ActionState != ActionStateExecution) {
 		return errors.New("session: completion proof is only valid on a version 1 execution row")
@@ -394,6 +417,10 @@ func isHexDigest(value string) bool {
 	return true
 }
 
+func isEntryPayloadDigest(value string) bool {
+	return strings.HasPrefix(value, "sha256:") && isHexDigest(strings.TrimPrefix(value, "sha256:"))
+}
+
 func validCompletionProof(proof tools.PreparedCompletionProof) bool {
 	return proof == "" || tools.IsPositiveCompletionProof(proof)
 }
@@ -401,7 +428,8 @@ func validCompletionProof(proof tools.PreparedCompletionProof) bool {
 func validRunExecutionState(state core.RunExecutionState) bool {
 	switch state {
 	case "", core.RunExecutionRunning, core.RunExecutionCancelRequested, core.RunExecutionDraining,
-		core.RunExecutionCleanupPending, core.RunExecutionQuiescent, core.RunExecutionQuarantined:
+		core.RunExecutionCleanupPending, core.RunExecutionQuiescent, core.RunExecutionQuarantined,
+		core.RunExecutionDeliveredLive:
 		return true
 	default:
 		return false
