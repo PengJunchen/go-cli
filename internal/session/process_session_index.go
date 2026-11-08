@@ -34,7 +34,11 @@ func (i *WorkspaceQuarantineIndex) ApplyProcessSessionLease(ctx context.Context,
 			if existing.RecordID != row.ID {
 				continue
 			}
-			if !reflect.DeepEqual(existing, candidate) {
+			existingForComparison := existing
+			candidateForComparison := candidate
+			existingForComparison.Seq = 0
+			candidateForComparison.Seq = 0
+			if !reflect.DeepEqual(existingForComparison, candidateForComparison) {
 				return errors.New("session: process-session workspace record ID conflicts with its durable row")
 			}
 			return handle.index.syncFile(handle.file)

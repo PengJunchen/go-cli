@@ -83,6 +83,54 @@ func TestProcessSessionAdmissionDoesNotClearUnrelatedActionIDCollision(t *testin
 	require.False(t, state.allowsProcessSessionAdmission(batch), "a same-ActionID marker from another run/session must remain blocking")
 }
 
+func TestApplyProcessSessionLeaseReplayAfterReopenIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	index := newWorkspaceQuarantineIndex(root, workspaceIndexIO{})
+	row := processSessionLeaseIndexTestRow()
+	require.NoError(t, index.EnsureWorkspace(ctx, row.WorkspaceID))
+	require.NoError(t, index.ApplyProcessSessionLease(ctx, row))
+
+	reopened := newWorkspaceQuarantineIndex(root, workspaceIndexIO{})
+	require.NoError(t, reopened.EnsureWorkspace(ctx, row.WorkspaceID))
+	require.NoError(t, reopened.ApplyProcessSessionLease(ctx, row))
+}
+
+func TestApplyProcessSessionLeaseReplayRejectsChangedPayload(t *testing.T) {
+	ctx := context.Background()
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	row := processSessionLeaseIndexTestRow()
+	require.NoError(t, index.EnsureWorkspace(ctx, row.WorkspaceID))
+	require.NoError(t, index.ApplyProcessSessionLease(ctx, row))
+
+	conflicting := row.clone()
+	conflicting.ProcessSessionLease.OutputBytes++
+	require.ErrorContains(t, index.ApplyProcessSessionLease(ctx, *conflicting), "process-session workspace record ID conflicts with its durable row")
+}
+
+func processSessionLeaseIndexTestRow() SessionEntry {
+	action := tools.ProcessSessionActionRef{
+		SessionID: "physical-session", WorkspaceID: "workspace-a", RunID: "run-a", ActionBatchID: "batch-a",
+		ActionID: "start-action", OwnerGeneration: "generation-a", AssistantTranscriptOrdinal: 1,
+		ToolCallID: "start-call", SchemaDigest: [32]byte{1}, ArgumentDigest: [32]byte{2},
+	}
+	lease := tools.ProcessSessionLeaseSnapshot{
+		SessionID: "opaque-process-session", OwnerID: "owner-a", WorkspaceID: action.WorkspaceID, RunID: action.RunID,
+		OwnerGeneration: action.OwnerGeneration, Action: action, Phase: tools.ProcessSessionLeaseGated,
+		Identity: &tools.ProcessExecutionIdentity{
+			Platform: "darwin", HostGeneration: "host-a", LeaderPID: 1234,
+			ProcessStartToken: "birth-a", ProcessGroupID: 1234,
+		},
+	}
+	return SessionEntry{
+		ID: "lease-gated", RecordVersion: 1, Seq: 27, Type: EntryTypeCheckpoint,
+		SessionID: action.SessionID, RunID: action.RunID, WorkspaceID: action.WorkspaceID,
+		ActionBatchID: action.ActionBatchID, ActionID: action.ActionID, OwnerGeneration: action.OwnerGeneration,
+		ToolCallID: action.ToolCallID, ToolName: tools.ProcessSessionToolName,
+		CheckpointKind: CheckpointProcessSessionLease, ProcessSessionLease: &lease,
+	}
+}
+
 func pendingRefFromProcessSessionAction(action tools.ProcessSessionActionRef) PendingActionRef {
 	return PendingActionRef{
 		SessionID: action.SessionID, WorkspaceID: action.WorkspaceID, RunID: action.RunID,
