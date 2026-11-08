@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/config"
@@ -44,6 +45,30 @@ func TestCLIDefaultPromptPolicyPreservesCustomAndAppendSemantics(t *testing.T) {
 	unguarded := newCLIDefaultPromptBuilder(false)
 	require.Equal(t, coreBuilder.Build(ctx, options), unguarded.Build(ctx, options))
 	require.Equal(t, coreBuilder.Build(ctx, options), core.NewDefaultSystemPromptBuilder().Build(ctx, options))
+}
+
+func TestFinalPIIRepairEligibilityUsesCurrentEffectivePrompt(t *testing.T) {
+	ctx := context.Background()
+	assert.True(t, finalPIIGuardRepairEligible(ctx, true, false, ""))
+	assert.False(t, finalPIIGuardRepairEligible(ctx, true, false, "CUSTOM_STATIC_PROMPT"))
+	assert.False(t, finalPIIGuardRepairEligible(ctx, false, false, ""), "unguarded CLI must not opt in")
+
+	defaultPlan := &runtimePlan{promptOptions: core.SystemPromptOptions{CustomPrompt: ""}}
+	dynamicDefault := context.WithValue(ctx, runtimePlanKey{}, defaultPlan)
+	assert.True(t, finalPIIGuardRepairEligible(dynamicDefault, true, true, ""))
+
+	customPlan := &runtimePlan{promptOptions: core.SystemPromptOptions{CustomPrompt: "CUSTOM_DYNAMIC_PROMPT"}}
+	dynamicCustom := context.WithValue(ctx, runtimePlanKey{}, customPlan)
+	assert.False(t, finalPIIGuardRepairEligible(dynamicCustom, true, true, ""), "dynamic default-to-custom must turn repair off for this run")
+	assert.False(t, finalPIIGuardRepairEligible(ctx, true, true, ""), "a missing dynamic runtime plan must fail closed")
+
+	implicitRuntime := newAssembleTestConfig(t)
+	implicitRuntime.Skill.Progressive = true
+	require.False(t, implicitRuntime.Runtime.Dynamic)
+	requiresSnapshot := dynamicRuntimeEnabled(implicitRuntime)
+	require.True(t, requiresSnapshot)
+	assert.True(t, finalPIIGuardRepairEligible(dynamicDefault, true, requiresSnapshot, ""))
+	assert.False(t, finalPIIGuardRepairEligible(dynamicCustom, true, requiresSnapshot, ""), "an implicit runtime mode must follow its current custom prompt too")
 }
 
 func TestDynamicCLIPromptPolicyTracksReloadAndRuntimeBudget(t *testing.T) {

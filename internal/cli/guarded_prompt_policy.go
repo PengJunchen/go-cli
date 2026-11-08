@@ -31,3 +31,17 @@ func newCLIDefaultPromptBuilder(guarded bool) core.SystemPromptBuilder {
 	}
 	return builder
 }
+
+func finalPIIGuardRepairEligible(ctx context.Context, guarded, dynamic bool, staticCustomPrompt string) bool {
+	if !guarded {
+		return false
+	}
+	if dynamic {
+		if ctx == nil {
+			return false
+		}
+		plan, ok := ctx.Value(runtimePlanKey{}).(*runtimePlan)
+		return ok && plan != nil && plan.promptOptions.CustomPrompt == ""
+	}
+	return staticCustomPrompt == ""
+}

@@ -2025,6 +2025,16 @@ func (s *assembleState) assembleLoopAgent() {
 		core.WithFollowUpChannel(s.followUpCh),
 		core.WithThinkingConfig(llm.ThinkingConfigForLevel(s.thinkingLevel)),
 	}
+	if s.guardChain != nil {
+		requiresSnapshot := dynamicRuntimeEnabled(s.rc)
+		staticCustomPrompt := ""
+		if s.rc != nil {
+			staticCustomPrompt = s.rc.Agent.SystemPrompt
+		}
+		loopOpts = append(loopOpts, core.WithFinalPIIGuardRepairGate(func(ctx context.Context) bool {
+			return finalPIIGuardRepairEligible(ctx, true, requiresSnapshot, staticCustomPrompt)
+		}))
+	}
 	if s.providerRetryPolicy != nil {
 		loopOpts = append(loopOpts, core.WithProviderRetryPolicy(s.providerRetryPolicy))
 	}

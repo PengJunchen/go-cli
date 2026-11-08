@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/compaction"
@@ -58,6 +59,7 @@ type loopConfig struct {
 	model                          llm.BaseChatModel
 	providerAttemptRecorder        func(llm.ProviderAttemptResult) error
 	providerRetryPolicy            llm.RetryPolicy
+	finalPIIGuardRepairGate        func(context.Context) bool
 	tools                          tools.ToolRegistry
 	maxIterations                  int
 	allowedToolNames               []string
@@ -81,6 +83,12 @@ type loopConfig struct {
 
 // LoopOption configures a LoopAgent at construction time.
 type LoopOption func(*loopConfig)
+
+// WithFinalPIIGuardRepairGate opts in to a single bounded final PII repair
+// when the predicate permits the current run. A nil gate leaves it disabled.
+func WithFinalPIIGuardRepairGate(gate func(context.Context) bool) LoopOption {
+	return func(c *loopConfig) { c.finalPIIGuardRepairGate = gate }
+}
 
 // WithProviderAttemptRecorder installs the run-scoped sink for immutable
 // provider results produced by resolver-built models.
@@ -213,6 +221,7 @@ type LoopAgent struct {
 	model                          llm.BaseChatModel
 	providerAttemptRecorder        func(llm.ProviderAttemptResult) error
 	providerRetryPolicy            llm.RetryPolicy
+	finalPIIGuardRepairGate        func(context.Context) bool
 	tools                          tools.ToolRegistry
 	maxIterations                  int
 	allowedToolNames               []string
@@ -320,6 +329,7 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		model:                          cfg.model,
 		providerAttemptRecorder:        cfg.providerAttemptRecorder,
 		providerRetryPolicy:            cfg.providerRetryPolicy,
+		finalPIIGuardRepairGate:        cfg.finalPIIGuardRepairGate,
 		tools:                          cfg.tools,
 		maxIterations:                  cfg.maxIterations,
 		allowedToolNames:               append([]string(nil), cfg.allowedToolNames...),
@@ -2145,7 +2155,10 @@ func (l *LoopAgent) generateWithContinuationAndCompaction(
 type preparedLoopRequestState struct {
 	messages               []llm.Message
 	currentSubmissionIndex int
+	completedCandidate     llm.ResolvedCandidateHandle
 }
+
+const finalPIIGuardRepairFeedback = "Your previous response was withheld by the output safety check. Produce a concise final status using safe artifact paths, aggregate results, checks actually performed, and unresolved issues. Omit personal values and secrets. Do not call tools or claim new actions."
 
 func (l *LoopAgent) generateWithPreparedContinuation(
 	ctx context.Context,
@@ -2164,6 +2177,16 @@ func (l *LoopAgent) generateWithPreparedContinuation(
 ) (*llm.Message, []llm.Message, int, error) {
 	state := &preparedLoopRequestState{messages: messages, currentSubmissionIndex: currentSubmissionIndex}
 	response, err := l.generateWithContinuationAndCompactionState(ctx, model, messages, currentSubmissionIndex, toolOpts, es, logger, consumer, midTurnCompactor, compactor, estimator, maxTokens, multimodalTokensPerItemReserve, state)
+	var denied *completeResponseDenied
+	if errors.As(err, &denied) && denied.code == CandidateOutputRejectionPII && denied.terminal && state.completedCandidate != nil && l.finalPIIGuardRepairGate != nil {
+		allowed := l.finalPIIGuardRepairGate(ctx)
+		if ctx.Err() != nil {
+			return nil, state.messages, state.currentSubmissionIndex, ctx.Err()
+		}
+		if allowed && ctx.Value(editLoopRecoveryControlKey{}) == nil {
+			response, err = l.repairFinalPIIGuardDenial(ctx, model, state, toolOpts, es, consumer, estimator, maxTokens, multimodalTokensPerItemReserve)
+		}
+	}
 	return response, state.messages, state.currentSubmissionIndex, err
 }
 
@@ -2209,6 +2232,9 @@ func (l *LoopAgent) generateWithContinuationAndCompactionState(
 	if state != nil {
 		state.messages = messages
 		state.currentSubmissionIndex = currentSubmissionIndex
+		if err == nil && operationActive && guarded && l.finalPIIGuardRepairGate != nil {
+			state.completedCandidate = successfulResolvedCandidate(mainCtx)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -2329,7 +2355,10 @@ func (l *LoopAgent) generateWithContinuationAndCompactionState(
 		if checked.Sanitized != "" {
 			resp.Content = checked.Sanitized
 		} else if !checked.Allowed {
-			return nil, errors.New("core: complete-response guard denied candidate")
+			return nil, &completeResponseDenied{
+				code:     checked.RejectionCode,
+				terminal: llm.IsNormalFinishReason(resp.FinishReason) && len(resp.ToolCalls) == 0 && resp.Content != "" && attemptCount == 0 && budget != nil && !budget.visible,
+			}
 		}
 		if len(resp.Content) > guard.MaxCandidateBytes() {
 			return nil, fmt.Errorf("core: guarded response exceeds %d-byte candidate limit", guard.MaxCandidateBytes())
@@ -2356,6 +2385,167 @@ func sendAssistantGenerationLifecycleEvent(ctx context.Context, es EventStream, 
 	}
 	event := AgentEvent{Kind: kind, Timestamp: time.Now()}
 	_ = es.Send(stampAgentEvent(agentEventCoordinatesFromContext(ctx), event)) //nolint:errcheck
+}
+
+// successfulResolvedCandidate reads only the operation owner's completed
+// attempt metadata; denied candidate payloads never enter the repair state.
+func successfulResolvedCandidate(ctx context.Context) llm.ResolvedCandidateHandle {
+	authority, ok := llm.OperationDispatchAuthorityFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	owner, ok := authority.(*providerOperationAuthority)
+	if !ok {
+		return nil
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	result, exists := owner.finished[owner.lastFinished]
+	if !exists || result.Outcome != llm.AttemptSuccess || result.Failure != llm.FailureNone {
+		return nil
+	}
+	candidate := owner.candidates[result.Identity.Candidate]
+	if candidate == nil || candidate.Identity() != result.Identity {
+		return nil
+	}
+	return candidate
+}
+
+func (l *LoopAgent) repairFinalPIIGuardDenial(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	state *preparedLoopRequestState,
+	toolOpts []llm.Option,
+	es EventStream,
+	consumer *runCommitConsumer,
+	estimator compaction.TokenEstimator,
+	maxTokens, multimodalTokensPerItemReserve int,
+) (response *llm.Message, repairErr error) {
+	span, spanCtx := tracing.SpanFromContext(ctx, "core.output_guard.repair", tracing.SpanKindInternal)
+	span.SetAttributes(tracing.Attribute{Key: "code", Value: "pii"}, tracing.Attribute{Key: "max_dispatches", Value: 1})
+	defer func() {
+		if repairErr != nil {
+			span.SetAttributes(tracing.Attribute{Key: "result", Value: "failed"})
+			span.SetStatus(tracing.SpanStatusError, "final PII repair failed")
+		} else {
+			span.SetAttributes(tracing.Attribute{Key: "result", Value: "accepted"})
+			span.SetStatus(tracing.SpanStatusOK, "")
+		}
+		span.End()
+	}()
+	ctx = spanCtx
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := CheckRunGeneration(ctx); err != nil {
+		return nil, err
+	}
+	guard, guarded := model.(CompleteResponseGuard)
+	if !guarded || state == nil || state.completedCandidate == nil {
+		return nil, errors.New("core: final PII repair requires a completed guarded provider attempt")
+	}
+	if consumer != nil {
+		if err := consumer.validateDurableRequest(messagesToTurnItems(state.messages)); err != nil {
+			return nil, err
+		}
+	}
+	factory, ok := llm.RunOperationFactoryFromContext(ctx)
+	if !ok {
+		return nil, llm.ErrOperationAuthorityRequired
+	}
+	ctx = llm.WithContinuationNoReplay(llm.WithLoopOwnedContinuation(ctx))
+	authority, err := factory.NewOperation(ctx, llm.OperationMainRequest, 1, llm.ProviderCandidatesFromModel(model))
+	if err != nil {
+		return nil, fmt.Errorf("core: create final PII repair operation: %w", err)
+	}
+	ctx = llm.WithOperationDispatchAuthority(ctx, authority)
+	proposal, err := initialMainCandidateProposal(ctx, model)
+	if err != nil {
+		return nil, err
+	}
+	if proposal.Candidate != state.completedCandidate {
+		return nil, &RequestEnvelopeError{Reason: "final PII repair candidate changed"}
+	}
+	requestBase, err := newPreparedRequestBase(toolOpts)
+	if err != nil {
+		return nil, err
+	}
+	requestBase.multimodalTokensPerItemReserve = multimodalTokensPerItemReserve
+	requestBase.recoveryControl = &llm.Message{Role: llm.RoleUser, Content: finalPIIGuardRepairFeedback, Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{Kind: llm.SourceEphemeral}}}
+	plan, err := prepareRequestPlan(ctx, proposal, state.messages, requestBase, estimator, maxTokens)
+	if err != nil {
+		return nil, err
+	}
+	if plan.Estimate().AccountedMessages.State != llm.EstimateKnown || !envelopeEstimateFits(plan.Estimate()) {
+		return nil, &RequestEnvelopeError{Reason: "final PII repair request exceeds the admitted envelope"}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := CheckRunGeneration(ctx); err != nil {
+		return nil, err
+	}
+	sendAssistantGenerationLifecycleEvent(ctx, es, EventKindAssistantGenerationStarted)
+	defer sendAssistantGenerationLifecycleEvent(ctx, es, EventKindAssistantGenerationFinished)
+	ctx = llm.WithPreparedRequestPlan(ctx, plan)
+	budget := &guardedStreamBudget{}
+	var called atomic.Bool
+	var callErr error
+	run := func(operationCtx context.Context, dispatchModel llm.BaseChatModel) error {
+		if !called.CompareAndSwap(false, true) {
+			return errors.New("core: final PII repair operation may dispatch only once")
+		}
+		response, callErr = l.streamGenerateWithPreparedBudget(operationCtx, dispatchModel, plan, es, budget, false)
+		return callErr
+	}
+	if runner, ok := model.(llm.ProviderOperationRunner); ok {
+		if err := runner.RunProviderOperation(ctx, run); err != nil {
+			return nil, err
+		}
+	} else if err := run(ctx, model); err != nil {
+		return nil, err
+	}
+	if !called.Load() || callErr != nil {
+		if callErr != nil {
+			return nil, callErr
+		}
+		return nil, errors.New("core: final PII repair did not dispatch")
+	}
+	if response == nil || !llm.IsNormalFinishReason(response.FinishReason) || len(response.ToolCalls) != 0 {
+		return nil, errors.New("core: final PII repair did not produce a complete text-only response")
+	}
+	checked, err := guard.CheckCandidate(ctx, response.Content)
+	if err != nil {
+		return nil, fmt.Errorf("core: check complete response: %w", err)
+	}
+	if checked == nil {
+		return nil, errors.New("core: complete-response guard returned nil result")
+	}
+	if checked.Sanitized != "" {
+		response.Content = checked.Sanitized
+	} else if !checked.Allowed {
+		return nil, &completeResponseDenied{code: checked.RejectionCode}
+	}
+	if len(response.Content) > guard.MaxCandidateBytes() {
+		return nil, fmt.Errorf("core: guarded response exceeds %d-byte candidate limit", guard.MaxCandidateBytes())
+	}
+	bytes, err := candidatePayloadBytes(response)
+	if err != nil {
+		return nil, err
+	}
+	if bytes > guard.MaxCandidateBytes() {
+		return nil, fmt.Errorf("core: guarded response payload exceeds %d-byte candidate limit", guard.MaxCandidateBytes())
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := CheckRunGeneration(ctx); err != nil {
+		return nil, err
+	}
+	if es != nil && response.Content != "" {
+		_ = es.Send(stampAgentEvent(agentEventCoordinatesFromContext(ctx), AgentEvent{Kind: "message", Content: response.Content, Timestamp: time.Now(), Incremental: true})) //nolint:errcheck
+	}
+	return response, nil
 }
 
 func (l *LoopAgent) runMainProviderOperation(
